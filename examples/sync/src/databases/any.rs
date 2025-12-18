@@ -8,20 +8,20 @@ use commonware_storage::{
     qmdb::{
         self,
         any::{
+            db::{Durable, Merkleized},
             unordered::{
                 fixed::{Db, Operation as FixedOperation},
                 Update,
             },
             FixedConfig as Config,
         },
-        store::CleanStore,
     },
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
 
-/// Database type alias.
-pub type Database<E> = Db<E, Key, Value, Hasher, Translator>;
+/// Database type alias for the clean (merkleized, durable) state.
+pub type Database<E> = Db<E, Key, Value, Hasher, Translator, Merkleized<Hasher>, Durable>;
 
 /// Operation type alias.
 pub type Operation = FixedOperation<Key, Value>;
@@ -77,32 +77,37 @@ where
     }
 
     async fn add_operations(
-        database: &mut Self,
+        self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::qmdb::Error> {
-        for operation in operations {
+    ) -> Result<Self, commonware_storage::qmdb::Error> {
+        let mut db = self.into_mutable();
+        let num_ops = operations.len();
+
+        for (i, operation) in operations.into_iter().enumerate() {
             match operation {
                 Operation::Update(Update(key, value)) => {
-                    database.update(key, value).await?;
+                    db.update(key, value).await?;
                 }
                 Operation::Delete(key) => {
-                    database.delete(key).await?;
+                    db.delete(key).await?;
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    database.commit(metadata).await?;
+                    let (durable_db, _) = db.commit(metadata).await?;
+                    if i == num_ops - 1 {
+                        // Last operation - return the clean database
+                        return Ok(durable_db.into_provable());
+                    }
+                    // Not the last operation - continue in mutable state
+                    db = durable_db.into_mutable();
                 }
             }
         }
-        Ok(())
-    }
 
-    async fn commit(&mut self) -> Result<(), commonware_storage::qmdb::Error> {
-        self.commit(None).await?;
-        Ok(())
+        panic!("operations must end with a commit");
     }
 
     fn root(&self) -> Key {
-        CleanStore::root(self)
+        self.root()
     }
 
     fn op_count(&self) -> Location {
@@ -119,7 +124,7 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
-        CleanStore::historical_proof(self, op_count, start_loc, max_ops)
+        self.historical_proof(op_count, start_loc, max_ops)
     }
 
     fn name() -> &'static str {

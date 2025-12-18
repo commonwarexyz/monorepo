@@ -11,7 +11,7 @@ use commonware_runtime::{
 use commonware_storage::qmdb::sync;
 use commonware_sync::{
     any, crate_version,
-    databases::{DatabaseType, Syncable},
+    databases::DatabaseType,
     immutable,
     net::Resolver,
     Digest, Error, Key,

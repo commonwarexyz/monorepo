@@ -4,8 +4,8 @@
 use crate::fixed::{
     any_cfg, current_cfg, gen_random_kv, get_any_ordered_fixed, get_any_ordered_variable,
     get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
-    get_current_unordered_fixed, get_store, store_cfg, variable_any_cfg, OCurrentDb, OFixedDb,
-    OVAnyDb, StoreDb, UCurrentDb, UFixedDb, UVAnyDb, Variant, THREADS, VARIANTS,
+    get_current_unordered_fixed, variable_any_cfg, Digest, OCurrentDb, OFixedClean, OVAnyClean,
+    UCurrentDb, UFixedClean, UVAnyClean, Variant, THREADS, VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -13,8 +13,8 @@ use commonware_runtime::{
     Runner as _,
 };
 use commonware_storage::qmdb::{
-    any::AnyExt,
-    store::{LogStore, LogStorePrunable},
+    any::{MerkleizedDurableAny, UnmerkleizedDurableAny, UnmerkleizedNonDurableAny},
+    store::LogStore,
 };
 use criterion::{criterion_group, Criterion};
 use std::time::Instant;
@@ -33,77 +33,60 @@ cfg_if::cfg_if! {
     }
 }
 
+/// Helper function to setup a database with random data, prune, and close it.
+async fn setup_db<C>(db: C, elements: u64, operations: u64)
+where
+    C: MerkleizedDurableAny<Key = Digest>,
+    C::Mutable: UnmerkleizedNonDurableAny<Key = Digest> + LogStore<Value = Digest>,
+    <C::Mutable as UnmerkleizedNonDurableAny>::Durable:
+        UnmerkleizedDurableAny<Mutable = C::Mutable, Provable = C>,
+{
+    let mutable = db.into_mutable();
+    let durable = gen_random_kv(mutable, elements, operations, Some(COMMIT_FREQUENCY)).await;
+    let mut clean = durable.into_provable().await.unwrap();
+    clean.prune(clean.inactivity_floor_loc()).await.unwrap();
+    clean.close().await.unwrap();
+}
+
 /// Benchmark the initialization of a large randomly generated any db.
 fn bench_fixed_init(c: &mut Criterion) {
     let cfg = Config::default();
     for elements in ELEMENTS {
         for operations in OPERATIONS {
             for variant in VARIANTS {
+                // Setup phase: create and populate the database
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
                     match variant {
-                        Variant::Store => {
-                            let db = get_store(ctx.clone()).await;
-                            let mut db =
-                                gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
-                                    .await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
-                        }
                         Variant::AnyUnorderedFixed => {
                             let db = get_any_unordered_fixed(ctx.clone()).await;
-                            let mut db =
-                                gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
-                                    .await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
+                            setup_db(db, elements, operations).await;
                         }
                         Variant::AnyOrderedFixed => {
                             let db = get_any_ordered_fixed(ctx.clone()).await;
-                            let mut db =
-                                gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
-                                    .await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
+                            setup_db(db, elements, operations).await;
                         }
                         Variant::CurrentUnorderedFixed => {
                             let db = get_current_unordered_fixed(ctx.clone()).await;
-                            let db = AnyExt::new(db);
-                            let mut db =
-                                gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
-                                    .await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
+                            setup_db(db, elements, operations).await;
                         }
                         Variant::CurrentOrderedFixed => {
                             let db = get_current_ordered_fixed(ctx.clone()).await;
-                            let db = AnyExt::new(db);
-                            let mut db =
-                                gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
-                                    .await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
+                            setup_db(db, elements, operations).await;
                         }
                         Variant::AnyUnorderedVariable => {
                             let db = get_any_unordered_variable(ctx.clone()).await;
-                            let mut db =
-                                gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
-                                    .await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
+                            setup_db(db, elements, operations).await;
                         }
                         Variant::AnyOrderedVariable => {
                             let db = get_any_ordered_variable(ctx.clone()).await;
-                            let mut db =
-                                gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
-                                    .await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
+                            setup_db(db, elements, operations).await;
                         }
                     }
                 });
-                let runner = tokio::Runner::new(cfg.clone());
 
+                // Benchmark phase: measure initialization time
+                let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(
                     &format!(
                         "{}/variant={}, elements={} operations={}",
@@ -120,26 +103,18 @@ fn bench_fixed_init(c: &mut Criterion) {
                             let any_cfg = any_cfg(pool.clone());
                             let current_cfg = current_cfg(pool.clone());
                             let variable_any_cfg = variable_any_cfg(pool);
-                            let store_cfg = store_cfg();
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {
-                                    Variant::Store => {
-                                        let db = StoreDb::init(ctx.clone(), store_cfg.clone())
-                                            .await
-                                            .unwrap();
-                                        assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
-                                    }
                                     Variant::AnyUnorderedFixed => {
-                                        let db = UFixedDb::init(ctx.clone(), any_cfg.clone())
+                                        let db = UFixedClean::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
                                     Variant::AnyOrderedFixed => {
-                                        let db = OFixedDb::init(ctx.clone(), any_cfg.clone())
+                                        let db = OFixedClean::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
@@ -161,7 +136,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                                     }
                                     Variant::AnyUnorderedVariable => {
                                         let db =
-                                            UVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
+                                            UVAnyClean::init(ctx.clone(), variable_any_cfg.clone())
                                                 .await
                                                 .unwrap();
                                         assert_ne!(db.op_count(), 0);
@@ -169,7 +144,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                                     }
                                     Variant::AnyOrderedVariable => {
                                         let db =
-                                            OVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
+                                            OVAnyClean::init(ctx.clone(), variable_any_cfg.clone())
                                                 .await
                                                 .unwrap();
                                         assert_ne!(db.op_count(), 0);
@@ -182,14 +157,10 @@ fn bench_fixed_init(c: &mut Criterion) {
                     },
                 );
 
+                // Cleanup phase: destroy the database
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
-                    // Clean up the database after the benchmark.
                     match variant {
-                        Variant::Store => {
-                            let db = get_store(ctx.clone()).await;
-                            db.destroy().await.unwrap();
-                        }
                         Variant::AnyUnorderedFixed => {
                             let db = get_any_unordered_fixed(ctx.clone()).await;
                             db.destroy().await.unwrap();

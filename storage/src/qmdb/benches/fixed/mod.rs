@@ -9,18 +9,18 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     qmdb::{
         any::{
+            db::{Durable, Merkleized},
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
-            FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
+            FixedConfig as AConfig, UnmerkleizedDurableAny, UnmerkleizedNonDurableAny,
+            VariableConfig as VariableAnyConfig,
         },
         current::{
             ordered::fixed::Db as OCurrent, unordered::fixed::Db as UCurrent,
             FixedConfig as CConfig,
         },
-        store::{Batchable, Config as SConfig, Store},
-        Error,
+        store::LogStore,
     },
-    store::{StoreDeletable, StorePersistable},
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -30,9 +30,10 @@ use std::num::{NonZeroU64, NonZeroUsize};
 pub mod generate;
 pub mod init;
 
+pub type Digest = <Sha256 as Hasher>::Digest;
+
 #[derive(Debug, Clone, Copy)]
 enum Variant {
-    Store,
     AnyUnorderedFixed,
     AnyOrderedFixed,
     AnyUnorderedVariable,
@@ -44,7 +45,6 @@ enum Variant {
 impl Variant {
     pub const fn name(&self) -> &'static str {
         match self {
-            Self::Store => "store",
             Self::AnyUnorderedFixed => "any::unordered::fixed",
             Self::AnyOrderedFixed => "any::ordered::fixed",
             Self::AnyUnorderedVariable => "any::unordered::variable",
@@ -55,8 +55,7 @@ impl Variant {
     }
 }
 
-const VARIANTS: [Variant; 7] = [
-    Variant::Store,
+const VARIANTS: [Variant; 6] = [
     Variant::AnyUnorderedFixed,
     Variant::AnyOrderedFixed,
     Variant::AnyUnorderedVariable,
@@ -88,31 +87,18 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-type UFixedDb =
-    UFixed<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
-type OFixedDb =
-    OFixed<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
-type UCurrentDb = UCurrent<
-    Context,
-    <Sha256 as Hasher>::Digest,
-    <Sha256 as Hasher>::Digest,
-    Sha256,
-    EightCap,
-    CHUNK_SIZE,
->;
-type OCurrentDb = OCurrent<
-    Context,
-    <Sha256 as Hasher>::Digest,
-    <Sha256 as Hasher>::Digest,
-    Sha256,
-    EightCap,
-    CHUNK_SIZE,
->;
-type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
-type UVAnyDb =
-    UVariable<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
-type OVAnyDb =
-    OVariable<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+/// Clean (Merkleized, Durable) type aliases for Any databases.
+type UFixedClean =
+    UFixed<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
+type OFixedClean =
+    OFixed<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
+type UVAnyClean =
+    UVariable<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
+type OVAnyClean =
+    OVariable<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
+
+type UCurrentDb = UCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+type OCurrentDb = OCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 
 /// Configuration for any QMDB.
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
@@ -147,18 +133,6 @@ fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
     }
 }
 
-fn store_cfg() -> SConfig<EightCap, ()> {
-    SConfig::<EightCap, ()> {
-        log_partition: format!("journal_{PARTITION_SUFFIX}"),
-        log_write_buffer: WRITE_BUFFER_SIZE,
-        log_compression: None,
-        log_codec_config: (),
-        log_items_per_section: ITEMS_PER_BLOB,
-        translator: EightCap,
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-    }
-}
-
 fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
     VariableAnyConfig::<EightCap, ()> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -176,22 +150,32 @@ fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
     }
 }
 
-/// Get an unordered any QMDB instance.
-async fn get_any_unordered_fixed(ctx: Context) -> UFixedDb {
+/// Get an unordered fixed Any QMDB instance in clean state.
+async fn get_any_unordered_fixed(ctx: Context) -> UFixedClean {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
-    UFixed::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
-        .await
-        .unwrap()
+    UFixedClean::init(ctx, any_cfg).await.unwrap()
 }
 
-/// Get an ordered any QMDB instance.
-async fn get_any_ordered_fixed(ctx: Context) -> OFixedDb {
+/// Get an ordered fixed Any QMDB instance in clean state.
+async fn get_any_ordered_fixed(ctx: Context) -> OFixedClean {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
-    OFixed::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
-        .await
-        .unwrap()
+    OFixedClean::init(ctx, any_cfg).await.unwrap()
+}
+
+/// Get an unordered variable Any QMDB instance in clean state.
+async fn get_any_unordered_variable(ctx: Context) -> UVAnyClean {
+    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let variable_any_cfg = variable_any_cfg(pool);
+    UVAnyClean::init(ctx, variable_any_cfg).await.unwrap()
+}
+
+/// Get an ordered variable Any QMDB instance in clean state.
+async fn get_any_ordered_variable(ctx: Context) -> OVAnyClean {
+    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let variable_any_cfg = variable_any_cfg(pool);
+    OVAnyClean::init(ctx, variable_any_cfg).await.unwrap()
 }
 
 /// Get an unordered current QMDB instance.
@@ -212,40 +196,22 @@ async fn get_current_ordered_fixed(ctx: Context) -> OCurrentDb {
         .unwrap()
 }
 
-async fn get_store(ctx: Context) -> StoreDb {
-    let store_cfg = store_cfg();
-    Store::init(ctx, store_cfg).await.unwrap()
-}
-
-async fn get_any_unordered_variable(ctx: Context) -> UVAnyDb {
-    let pool = create_pool(ctx.clone(), THREADS).unwrap();
-    let variable_any_cfg = variable_any_cfg(pool);
-    UVariable::init(ctx, variable_any_cfg).await.unwrap()
-}
-
-async fn get_any_ordered_variable(ctx: Context) -> OVAnyDb {
-    let pool = create_pool(ctx.clone(), THREADS).unwrap();
-    let variable_any_cfg = variable_any_cfg(pool);
-    OVariable::init(ctx, variable_any_cfg).await.unwrap()
-}
-
 /// Generate a large db with random data. The function seeds the db with exactly `num_elements`
 /// elements by inserting them in order, each with a new random value. Then, it performs
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// database is committed after every `commit_frequency` operations (if Some), or at the end (if
 /// None).
-async fn gen_random_kv<A>(
-    mut db: A,
+///
+/// Takes a mutable database and returns it in durable state after final commit.
+async fn gen_random_kv<M>(
+    mut db: M,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: Option<u32>,
-) -> A
+) -> M::Durable
 where
-    A: StorePersistable<
-            Key = <Sha256 as Hasher>::Digest,
-            Value = <Sha256 as Hasher>::Digest,
-            Error = Error,
-        > + StoreDeletable,
+    M: UnmerkleizedNonDurableAny<Key = Digest> + LogStore<Value = Digest>,
+    M::Durable: UnmerkleizedDurableAny<Mutable = M>,
 {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
@@ -266,24 +232,25 @@ where
         db.update(rand_key, v).await.unwrap();
         if let Some(freq) = commit_frequency {
             if rng.next_u32() % freq == 0 {
-                db.commit().await.unwrap();
+                let (durable, _) = db.commit(None).await.unwrap();
+                db = durable.into_mutable();
             }
         }
     }
 
-    db.commit().await.unwrap();
-    db
+    let (durable, _) = db.commit(None).await.unwrap();
+    durable
 }
 
-async fn gen_random_kv_batched<A>(
-    mut db: A,
+async fn gen_random_kv_batched<M>(
+    mut db: M,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: Option<u32>,
-) -> A
+) -> M::Durable
 where
-    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
-        + Batchable,
+    M: UnmerkleizedNonDurableAny<Key = Digest> + LogStore<Value = Digest>,
+    M::Durable: UnmerkleizedDurableAny<Mutable = M>,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
@@ -291,32 +258,33 @@ where
     for i in 0u64..num_elements {
         let k = Sha256::hash(&i.to_be_bytes());
         let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        batch.update(k, v).await.unwrap();
+        assert!(batch.update(k, v).await.is_ok());
     }
     let iter = batch.into_iter();
-    db.write_batch(iter).await.unwrap();
+    assert!(db.write_batch(iter).await.is_ok());
     batch = db.start_batch();
 
     for _ in 0u64..num_operations {
         let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
-            batch.delete(rand_key).await.unwrap();
+            assert!(batch.delete(rand_key).await.is_ok());
             continue;
         }
         let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        batch.update(rand_key, v).await.unwrap();
+        assert!(batch.update(rand_key, v).await.is_ok());
         if let Some(freq) = commit_frequency {
             if rng.next_u32() % freq == 0 {
                 let iter = batch.into_iter();
-                db.write_batch(iter).await.unwrap();
-                db.commit().await.unwrap();
+                assert!(db.write_batch(iter).await.is_ok());
+                let (durable, _) = db.commit(None).await.unwrap();
+                db = durable.into_mutable();
                 batch = db.start_batch();
             }
         }
     }
 
     let iter = batch.into_iter();
-    db.write_batch(iter).await.unwrap();
-    db.commit().await.unwrap();
-    db
+    assert!(db.write_batch(iter).await.is_ok());
+    let (durable, _) = db.commit(None).await.unwrap();
+    durable
 }

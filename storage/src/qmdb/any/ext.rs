@@ -4,6 +4,8 @@
 //! databases, automatically handling Clean/Dirty state transitions. This eliminates the need for
 //! manual state management while maintaining the performance benefits of deferred merkleization.
 
+/*
+
 use super::{CleanAny, DirtyAny};
 use crate::{
     mmr::Location,
@@ -11,7 +13,8 @@ use crate::{
         store::{Batchable, CleanStore, DirtyStore, LogStore, LogStorePrunable},
         Error,
     },
-    store::{Store as StoreTrait, StoreDeletable, StoreMut, StorePersistable},
+    store::{Store as StoreTrait, StoreDeletable, StoreMut},
+    Persistable,
 };
 
 /// An extension wrapper for [CleanAny] databases that provides a traditional mutable key-value
@@ -53,12 +56,15 @@ impl<A: CleanAny> AnyExt<A> {
         });
     }
 
-    /// Merkleize if in dirty state, ensuring we're in clean state.
+    /// Append a commit operation and merkleize if in dirty state, ensuring we're in clean state.
     async fn ensure_clean(&mut self) -> Result<(), Error> {
         let state = self.inner.take().expect("wrapper should never be empty");
         self.inner = Some(match state {
             State::Clean(clean) => State::Clean(clean),
-            State::Dirty(dirty) => State::Clean(dirty.merkleize().await?),
+            State::Dirty(dirty) => {
+                let (_, clean) = dirty.commit_clean(None).await?;
+                State::Clean(clean)
+            }
         });
         Ok(())
     }
@@ -106,17 +112,24 @@ where
     }
 }
 
-impl<A> StorePersistable for AnyExt<A>
+impl<A> Persistable for AnyExt<A>
 where
     A: CleanAny,
 {
-    async fn commit(&mut self) -> Result<(), Self::Error> {
-        // Merkleize before commit
+    type Error = Error;
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
         self.ensure_clean().await?;
         match self.inner.as_mut().expect("wrapper should never be empty") {
-            State::Clean(clean) => clean.commit(None).await.map(|_| ()),
+            State::Clean(clean) => clean.sync().await,
             _ => unreachable!("ensure_clean guarantees Clean state"),
         }
+    }
+
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        self.ensure_clean().await?;
+
+        Ok(())
     }
 
     async fn destroy(mut self) -> Result<(), Self::Error> {
@@ -126,6 +139,10 @@ where
             State::Clean(clean) => clean.destroy().await,
             _ => unreachable!("ensure_clean guarantees Clean state"),
         }
+    }
+
+    async fn close(self) -> Result<(), Self::Error> {
+        self.close().await
     }
 }
 
@@ -194,3 +211,4 @@ where
         }
     }
 }
+*/

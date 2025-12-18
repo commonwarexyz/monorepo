@@ -7,29 +7,31 @@
 //! See [Db] for the main database type.
 
 use crate::{
-    bitmap::{CleanBitMap, DirtyBitMap},
+    bitmap::CleanBitMap,
     mmr::{
-        mem::{Clean, Dirty, State},
+        mem::{Clean, State},
         Location, Proof, StandardHasher,
     },
     qmdb::{
         any::{
+            db::{Durable, Merkleized, NonDurable, Unmerkleized},
             unordered::{
                 fixed::{Db as AnyDb, Operation},
                 Update,
             },
-            CleanAny, DirtyAny, FixedValue,
+            FixedValue, MerkleizedDurableAny, MerkleizedNonDurableAny, UnmerkleizedDurableAny,
+            UnmerkleizedNonDurableAny,
         },
         current::{
             merkleize_grafted_bitmap,
             proof::{OperationProof, RangeProof},
             root, FixedConfig as Config,
         },
-        store::{Batchable, CleanStore, DirtyStore, LogStore},
+        store::{AuthenticatedStore, Batchable, CleanStore, DirtyStore, LogStore, PrunableStore},
         Error,
     },
     translator::Translator,
-    AuthenticatedBitMap as BitMap,
+    AuthenticatedBitMap as BitMap, Persistable,
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::{DigestOf, Hasher};
@@ -55,10 +57,11 @@ pub struct Db<
     T: Translator,
     const N: usize,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
+    D: crate::qmdb::store::State = Durable,
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    any: AnyDb<E, K, V, H, T, S>,
+    any: AnyDb<E, K, V, H, T, S, D>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
@@ -72,6 +75,7 @@ pub struct Db<
     cached_root: Option<H::Digest>,
 }
 
+// Functionality shared across all DB states, such as most non-mutating operations.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -80,7 +84,8 @@ impl<
         T: Translator,
         const N: usize,
         S: State<DigestOf<H>>,
-    > Db<E, K, V, H, T, N, S>
+        D: crate::qmdb::store::State,
+    > Db<E, K, V, H, T, N, S, D>
 {
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
@@ -142,6 +147,7 @@ impl<
     }
 }
 
+// Functionality for the (Merkleized,Durable) state.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -149,7 +155,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, H, T, N>
+    > Db<E, K, V, H, T, N, Merkleized<H>, Durable>
 {
     /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -265,74 +271,6 @@ impl<
         OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await
     }
 
-    #[cfg(test)]
-    /// Simulate a crash that prevents any data from being written to disk, which involves simply
-    /// consuming the db before it can be cleanly closed.
-    fn simulate_commit_failure_before_any_writes(self) {
-        // Don't successfully complete any of the commit operations.
-    }
-
-    #[cfg(test)]
-    /// Simulate a crash that happens during commit and prevents the any db from being pruned of
-    /// inactive operations, and bitmap state from being written/pruned.
-    async fn simulate_commit_failure_after_any_db_commit(mut self) -> Result<(), Error> {
-        // Only successfully complete the log write part of the commit process.
-        let _ = self.commit_to_log(None).await?;
-        Ok(())
-    }
-
-    /// Helper that performs the commit operations up to and including writing to the log,
-    /// but does not merkleize the bitmap or prune. Used for simulating partial commit failures
-    /// in tests, and as the first phase of the full commit operation.
-    ///
-    /// Returns the dirty bitmap that needs to be merkleized and pruned.
-    async fn commit_to_log(
-        &mut self,
-        metadata: Option<V>,
-    ) -> Result<DirtyBitMap<H::Digest, N>, Error> {
-        let empty_status = CleanBitMap::<H::Digest, N>::new(&mut self.any.log.hasher, None);
-        let mut status = std::mem::replace(&mut self.status, empty_status).into_dirty();
-
-        // Inactivate the current commit operation.
-        status.set_bit(*self.any.last_commit_loc, false);
-
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let inactivity_floor_loc = self.any.raise_floor_with_bitmap(&mut status).await?;
-
-        // Append the commit operation with the new floor and tag it as active in the bitmap.
-        status.push(true);
-        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
-
-        self.any.apply_commit_op(commit_op).await?;
-
-        Ok(status)
-    }
-
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Returns the
-    /// `(start_loc, end_loc]` location range of committed operations.
-    pub async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
-        let start_loc = self.any.last_commit_loc + 1;
-
-        // Phase 1: Commit to log (recovery is ensured after this returns)
-        let status = self.commit_to_log(metadata).await?;
-
-        // Phase 2: Merkleize the new bitmap entries.
-        let mmr = &self.any.log.mmr;
-        let height = Self::grafting_height();
-        self.status =
-            merkleize_grafted_bitmap(&mut self.any.log.hasher, status, mmr, height).await?;
-
-        // Phase 3: Prune bits that are no longer needed because they precede the inactivity floor.
-        self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
-
-        // Phase 4: Refresh cached root after commit
-        self.cached_root = Some(root(&mut self.any.log.hasher, height, &self.status, mmr).await?);
-
-        Ok(start_loc..self.op_count())
-    }
-
     /// Sync all database state to disk.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.any.sync().await?;
@@ -346,22 +284,6 @@ impl<
             )
             .await
             .map_err(Into::into)
-    }
-
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
-    /// or current snapshot.
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
-        // failure during pruning. If we don't do this, we may not be able to recover the bitmap
-        // because it may require replaying of pruned operations.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await?;
-
-        self.any.prune(prune_loc).await
     }
 
     /// Close the db. Operations that have not been committed will be lost or rolled back on
@@ -380,9 +302,9 @@ impl<
     }
 
     /// Convert this clean database into its dirty counterpart for performing mutations.
-    pub fn into_dirty(self) -> Db<E, K, V, H, T, N, Dirty> {
+    pub fn into_dirty(self) -> Db<E, K, V, H, T, N, Unmerkleized, NonDurable> {
         Db {
-            any: self.any.into_dirty(),
+            any: self.any.into_mutable(),
             status: self.status.into_dirty(),
             context: self.context,
             bitmap_metadata_partition: self.bitmap_metadata_partition,
@@ -391,6 +313,7 @@ impl<
     }
 }
 
+// Functionality for any Merkleized state (both Durable and NonDurable).
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -398,7 +321,35 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, H, T, N, Dirty>
+        D: crate::qmdb::store::State,
+    > Db<E, K, V, H, T, N, Merkleized<H>, D>
+{
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
+    /// or current snapshot.
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
+        // failure during pruning. If we don't do this, we may not be able to recover the bitmap
+        // because it may require replaying of pruned operations.
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await?;
+
+        self.any.prune(prune_loc).await
+    }
+}
+
+// Functionality for the (Unmerkleized,NonDurable) (aka "Mutable") state.
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
 {
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
@@ -437,24 +388,90 @@ impl<
         Ok(true)
     }
 
-    /// Merkleize the bitmap and convert this dirty database into its clean counterpart.
-    /// This computes the Merkle tree over any new bitmap entries but does NOT persist
-    /// changes to storage. Use `commit()` for durable state transitions.
-    pub async fn merkleize(self) -> Result<Db<E, K, V, H, T, N, Clean<DigestOf<H>>>, Error> {
-        // First merkleize the any to get a Clean MMR
-        let clean_any = self.any.merkleize();
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule. Returns the
+    /// `[start_loc, end_loc)` location range of committed operations.
+    async fn apply_commit_op(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
+        let start_loc = self.any.last_commit_loc + 1;
 
-        // Now use the clean MMR for bitmap merkleization
+        // Inactivate the current commit operation.
+        self.status.set_bit(*self.any.last_commit_loc, false);
+
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        let inactivity_floor_loc = self.any.raise_floor_with_bitmap(&mut self.status).await?;
+
+        // Append the commit operation with the new floor and tag it as active in the bitmap.
+        self.status.push(true);
+        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
+
+        self.any.apply_commit_op(commit_op).await?;
+
+        Ok(start_loc..self.op_count())
+    }
+
+    /// Commit any pending operations to the database, ensuring their durability upon return.
+    /// This transitions to the Durable state without merkleizing. Returns the committed database
+    /// and the `[start_loc, end_loc)` range of committed operations.
+    pub async fn commit(
+        mut self,
+        metadata: Option<V>,
+    ) -> Result<(Db<E, K, V, H, T, N, Unmerkleized, Durable>, Range<Location>), Error> {
+        let range = self.apply_commit_op(metadata).await?;
+
+        // Transition to Durable state without merkleizing
+        let any = AnyDb {
+            log: self.any.log,
+            inactivity_floor_loc: self.any.inactivity_floor_loc,
+            last_commit_loc: self.any.last_commit_loc,
+            snapshot: self.any.snapshot,
+            durable_state: crate::qmdb::store::Clean,
+            active_keys: self.any.active_keys,
+            _update: core::marker::PhantomData,
+        };
+
+        Ok((
+            Db {
+                any,
+                status: self.status,
+                context: self.context,
+                bitmap_metadata_partition: self.bitmap_metadata_partition,
+                cached_root: None, // Not merkleized yet
+            },
+            range,
+        ))
+    }
+
+    /// Merkleize the database and transition to the provable state without committing.
+    /// This enables proof generation while keeping the database in the non-durable state.
+    pub async fn into_provable(
+        self,
+    ) -> Result<Db<E, K, V, H, T, N, Merkleized<H>, NonDurable>, Error> {
+        // Merkleize the any db's log
+        let any = AnyDb {
+            log: self.any.log.merkleize(),
+            inactivity_floor_loc: self.any.inactivity_floor_loc,
+            last_commit_loc: self.any.last_commit_loc,
+            snapshot: self.any.snapshot,
+            durable_state: self.any.durable_state,
+            active_keys: self.any.active_keys,
+            _update: core::marker::PhantomData,
+        };
+
+        // Merkleize the bitmap using the clean MMR
         let mut hasher = StandardHasher::<H>::new();
-        let height = Self::grafting_height();
-        let status =
-            merkleize_grafted_bitmap(&mut hasher, self.status, &clean_any.log.mmr, height).await?;
+        let height = Db::<E, K, V, H, T, N, Merkleized<H>, NonDurable>::grafting_height();
+        let mut status =
+            merkleize_grafted_bitmap(&mut hasher, self.status, &any.log.mmr, height).await?;
+
+        // Prune the bitmap of no-longer-necessary bits.
+        status.prune_to_bit(*any.inactivity_floor_loc)?;
 
         // Compute and cache the root
-        let cached_root = Some(root(&mut hasher, height, &status, &clean_any.log.mmr).await?);
+        let cached_root = Some(root(&mut hasher, height, &status, &any.log.mmr).await?);
 
         Ok(Db {
-            any: clean_any,
+            any,
             status,
             context: self.context,
             bitmap_metadata_partition: self.bitmap_metadata_partition,
@@ -463,6 +480,7 @@ impl<
     }
 }
 
+// Functionality for (Merkleized, NonDurable) state.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -470,13 +488,37 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::qmdb::store::LogStorePrunable for Db<E, K, V, H, T, N>
+    > Db<E, K, V, H, T, N, Merkleized<H>, NonDurable>
 {
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
+    /// Convert to mutable (Unmerkleized, NonDurable) state.
+    pub fn into_mutable(self) -> Db<E, K, V, H, T, N, Unmerkleized, NonDurable> {
+        Db {
+            any: self.any.into_mutable(),
+            status: self.status.into_dirty(),
+            context: self.context,
+            bitmap_metadata_partition: self.bitmap_metadata_partition,
+            cached_root: None,
+        }
+    }
+
+    /// Commit any pending operations to the database, ensuring their durability upon return.
+    /// Returns the committed database and the range of committed operations.
+    pub async fn commit(
+        self,
+        metadata: Option<V>,
+    ) -> Result<
+        (
+            Db<E, K, V, H, T, N, Merkleized<H>, Durable>,
+            Range<Location>,
+        ),
+        Error,
+    > {
+        let (durable, range) = self.into_mutable().commit(metadata).await?;
+        Ok((durable.into_provable().await?, range))
     }
 }
 
+// LogStore implementation for all states
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -485,7 +527,8 @@ impl<
         T: Translator,
         const N: usize,
         S: State<DigestOf<H>>,
-    > LogStore for Db<E, K, V, H, T, N, S>
+        D: crate::qmdb::store::State,
+    > LogStore for Db<E, K, V, H, T, N, S, D>
 {
     type Value = V;
 
@@ -506,6 +549,7 @@ impl<
     }
 }
 
+// Store implementation for all states
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -514,7 +558,8 @@ impl<
         T: Translator,
         const N: usize,
         S: State<DigestOf<H>>,
-    > crate::store::Store for Db<E, K, V, H, T, N, S>
+        D: crate::qmdb::store::State,
+    > crate::store::Store for Db<E, K, V, H, T, N, S, D>
 {
     type Key = K;
     type Value = V;
@@ -525,6 +570,7 @@ impl<
     }
 }
 
+// StoreMut for (Unmerkleized,NonDurable) (aka mutable) state
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -532,13 +578,14 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreMut for Db<E, K, V, H, T, N, Dirty>
+    > crate::store::StoreMut for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
     }
 }
 
+// StoreDeletable for (Unmerkleized,NonDurable) (aka mutable) state
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -546,55 +593,15 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreDeletable for Db<E, K, V, H, T, N, Dirty>
+    > crate::store::StoreDeletable for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
     }
 }
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > CleanStore for Db<E, K, V, H, T, N, Clean<DigestOf<H>>>
-{
-    type Digest = H::Digest;
-    type Operation = Operation<K, V>;
-    type Dirty = Db<E, K, V, H, T, N, Dirty>;
-
-    fn root(&self) -> Self::Digest {
-        self.root()
-    }
-
-    async fn proof(
-        &self,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        self.any.proof(start_loc, max_ops).await
-    }
-
-    async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        self.any
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await
-    }
-
-    fn into_dirty(self) -> Self::Dirty {
-        self.into_dirty()
-    }
-}
-
-impl<E, K, V, T, H, const N: usize> Batchable for Db<E, K, V, H, T, N, Dirty>
+// Batchable for (Unmerkleized,NonDurable) (aka mutable) state
+impl<E, K, V, T, H, const N: usize> Batchable for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
@@ -618,6 +625,9 @@ where
     }
 }
 
+// AuthenticatedStore for Merkleized states (both Durable and NonDurable)
+// TODO: This is broken -- it's computing proofs only over the any db mmr not the grafted mmr, so
+// they won't validate against the grafted root.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -625,17 +635,38 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > DirtyStore for Db<E, K, V, H, T, N, Dirty>
+        D: crate::qmdb::store::State,
+    > AuthenticatedStore for Db<E, K, V, H, T, N, Merkleized<H>, D>
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
-    type Clean = Db<E, K, V, H, T, N, Clean<DigestOf<H>>>;
 
-    async fn merkleize(self) -> Result<Self::Clean, Error> {
-        self.merkleize().await
+    fn root(&self) -> Self::Digest {
+        self.cached_root
+            .expect("Merkleized state must have cached root")
+    }
+
+    async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.any.proof(start_loc, max_ops).await
+    }
+
+    async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.any
+            .historical_proof(historical_size, start_loc, max_ops)
+            .await
     }
 }
 
+// PrunableStore for (Merkleized,Durable) state.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -643,35 +674,83 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > CleanAny for Db<E, K, V, H, T, N, Clean<DigestOf<H>>>
+        D: crate::qmdb::store::State,
+    > PrunableStore for Db<E, K, V, H, T, N, Merkleized<H>, D>
 {
-    type Key = K;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
-        self.get(key).await
-    }
-
-    async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
-        self.commit(metadata).await
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
-    }
-
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
     }
+}
 
-    async fn close(self) -> Result<(), Error> {
+// CleanStore for Merkleized, Durable state
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > CleanStore for Db<E, K, V, H, T, N, Merkleized<H>, Durable>
+{
+    type Operation = Operation<K, V>;
+    type Dirty = Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
+
+    fn into_dirty(self) -> Self::Dirty {
+        self.into_dirty()
+    }
+}
+
+// DirtyStore for Unmerkleized, NonDurable state
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > DirtyStore for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
+{
+    type Operation = Operation<K, V>;
+    type Clean = Db<E, K, V, H, T, N, Merkleized<H>, Durable>;
+
+    async fn commit(self, metadata: Option<V>) -> Result<(Self::Clean, Range<Location>), Error> {
+        let (durable, range) = self.commit(metadata).await?;
+        let clean = durable.into_provable().await?;
+        Ok((clean, range))
+    }
+}
+
+// Persistable for Merkleized, Durable state
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > Persistable for Db<E, K, V, H, T, N, Merkleized<H>, Durable>
+{
+    type Error = Error;
+
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        // No-op, DB already recoverable.
+        Ok(())
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        self.sync().await
+    }
+
+    async fn close(self) -> Result<(), Self::Error> {
         self.close().await
     }
 
-    async fn destroy(self) -> Result<(), Error> {
+    async fn destroy(self) -> Result<(), Self::Error> {
         self.destroy().await
     }
 }
 
+// MerkleizedDurableAny implementation
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -679,24 +758,129 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > DirtyAny for Db<E, K, V, H, T, N, Dirty>
+    > MerkleizedDurableAny for Db<E, K, V, H, T, N, Merkleized<H>, Durable>
 {
-    type Key = K;
+    type Mutable = Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
 
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
-        self.get(key).await
+    fn into_mutable(self) -> Self::Mutable {
+        self.into_dirty()
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > Db<E, K, V, H, T, N, Unmerkleized, Durable>
+{
+    /// Merkleize the database and transition to the provable state.
+    pub async fn into_provable(
+        self,
+    ) -> Result<Db<E, K, V, H, T, N, Merkleized<H>, Durable>, Error> {
+        // Merkleize the any db's log
+        let any = AnyDb {
+            log: self.any.log.merkleize(),
+            inactivity_floor_loc: self.any.inactivity_floor_loc,
+            last_commit_loc: self.any.last_commit_loc,
+            snapshot: self.any.snapshot,
+            durable_state: crate::qmdb::store::Clean,
+            active_keys: self.any.active_keys,
+            _update: core::marker::PhantomData,
+        };
+
+        // Merkleize the bitmap using the clean MMR
+        let mut hasher = StandardHasher::<H>::new();
+        let height = Db::<E, K, V, H, T, N, Merkleized<H>, Durable>::grafting_height();
+        let mut status =
+            merkleize_grafted_bitmap(&mut hasher, self.status, &any.log.mmr, height).await?;
+
+        // Prune the bitmap of no-longer-necessary bits.
+        status.prune_to_bit(*any.inactivity_floor_loc)?;
+
+        // Compute and cache the root
+        let cached_root = Some(root(&mut hasher, height, &status, &any.log.mmr).await?);
+
+        Ok(Db {
+            any,
+            status,
+            context: self.context,
+            bitmap_metadata_partition: self.bitmap_metadata_partition,
+            cached_root,
+        })
+    }
+}
+
+// UnmerkleizedDurableAny implementation
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > UnmerkleizedDurableAny for Db<E, K, V, H, T, N, Unmerkleized, Durable>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+    type Mutable = Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
+    type Provable = Db<E, K, V, H, T, N, Merkleized<H>, Durable>;
+
+    fn into_mutable(self) -> Self::Mutable {
+        Db {
+            any: self.any.into_mutable(),
+            status: self.status,
+            context: self.context,
+            bitmap_metadata_partition: self.bitmap_metadata_partition,
+            cached_root: None,
+        }
     }
 
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Error> {
-        self.update(key, value).await
+    async fn into_provable(self) -> Result<Self::Provable, Error> {
+        self.into_provable().await
+    }
+}
+
+// MerkleizedNonDurableAny implementation
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > MerkleizedNonDurableAny for Db<E, K, V, H, T, N, Merkleized<H>, NonDurable>
+{
+    type Durable = Db<E, K, V, H, T, N, Merkleized<H>, Durable>;
+
+    async fn commit(self, metadata: Option<V>) -> Result<(Self::Durable, Range<Location>), Error> {
+        self.commit(metadata).await
+    }
+}
+
+// UnmerkleizedNonDurableAny implementation
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > UnmerkleizedNonDurableAny for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+    type Durable = Db<E, K, V, H, T, N, Unmerkleized, Durable>;
+    type Provable = Db<E, K, V, H, T, N, Merkleized<H>, NonDurable>;
+
+    async fn commit(self, metadata: Option<V>) -> Result<(Self::Durable, Range<Location>), Error> {
+        self.commit(metadata).await
     }
 
-    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Error> {
-        self.create(key, value).await
-    }
-
-    async fn delete(&mut self, key: Self::Key) -> Result<bool, Error> {
-        self.delete(key).await
+    async fn into_provable(self) -> Result<Self::Provable, Error> {
+        self.into_provable().await
     }
 }
 
@@ -704,9 +888,7 @@ impl<
 pub mod test {
     use super::*;
     use crate::{
-        index::Unordered as _,
-        mmr::hasher::Hasher as _,
-        qmdb::{any::AnyExt, store::batch_tests},
+        index::Unordered as _, mmr::hasher::Hasher as _, qmdb::store::batch_tests,
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -736,11 +918,12 @@ pub mod test {
         }
     }
 
-    /// A type alias for the concrete [Db] type used in these unit tests.
+    /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
     type CleanCurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;
 
-    /// A type alias for the Dirty variant of CurrentTest.
-    type DirtyCurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, Dirty>;
+    /// A type alias for the Dirty (Unmerkleized, NonDurable) variant of CurrentTest.
+    type DirtyCurrentTest =
+        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, Unmerkleized, NonDurable>;
 
     /// Return an [Db] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context, partition_prefix: &str) -> CleanCurrentTest {
@@ -759,22 +942,22 @@ pub mod test {
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
             let root0 = db.root();
-            db.close().await.unwrap();
+            drop(db);
             let db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 1);
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root0);
 
             // Add one key.
+            let mut db = db.into_dirty();
             let k1 = Sha256::hash(&0u64.to_be_bytes());
             let v1 = Sha256::hash(&10u64.to_be_bytes());
-            let mut db = db.into_dirty();
             assert!(db.create(k1, v1).await.unwrap());
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
-            let mut db = db.merkleize().await.unwrap();
-            let range = db.commit(None).await.unwrap();
-            assert_eq!(range.start, 1);
-            assert_eq!(range.end, 4);
+            let (db, range) = db.commit(None).await.unwrap();
+            let db = db.into_provable().await.unwrap();
+            assert_eq!(*range.start, 1);
+            assert_eq!(*range.end, 4);
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 1 move + 1 initial commit.
             let root1 = db.root();
@@ -792,11 +975,10 @@ pub mod test {
             // Delete that one key.
             assert!(db.delete(k1).await.unwrap());
             let metadata = Sha256::hash(&1u64.to_be_bytes());
-            let mut db = db.merkleize().await.unwrap();
-            let range = db.commit(Some(metadata)).await.unwrap();
-            assert_eq!(range.start, 4);
-            assert_eq!(range.end, 6);
-
+            let (db, range) = db.commit(Some(metadata)).await.unwrap();
+            let db = db.into_provable().await.unwrap();
+            assert_eq!(*range.start, 4);
+            assert_eq!(*range.end, 6);
             assert_eq!(db.op_count(), 6); // 1 update, 2 commits, 1 move, 1 delete.
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             let root2 = db.root();
@@ -804,20 +986,37 @@ pub mod test {
             // Repeated delete of same key should fail.
             let mut db = db.into_dirty();
             assert!(!db.delete(k1).await.unwrap());
-            let db = db.merkleize().await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+            let db = db.into_provable().await.unwrap();
+            // Commit adds a commit even for no-op, so op_count increases and root changes.
+            assert_eq!(db.op_count(), 7);
+            let root3 = db.root();
+            assert!(root3 != root2);
 
             // Confirm close/re-open preserves state.
             db.close().await.unwrap();
             let db = open_db(context.clone(), partition).await;
-            assert_eq!(db.op_count(), 6); // 1 update, 2 commits, 1 move, 1 delete + 1 initial commit.
-            assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
-            assert_eq!(db.root(), root2);
+            assert_eq!(db.op_count(), 7);
+            // Last commit had no metadata (passed None to commit).
+            assert!(db.get_metadata().await.unwrap().is_none());
+            assert_eq!(db.root(), root3);
 
             // Confirm all activity bits are false except for the last commit.
             for i in 0..*db.op_count() - 1 {
                 assert!(!db.status.get_bit(i));
             }
             assert!(db.status.get_bit(*db.op_count() - 1));
+
+            // Test that we can do a non-durable root.
+            let mut db = db.into_mutable();
+            db.update(k1, v1).await.unwrap();
+            let db = db.into_provable().await.unwrap();
+            assert_ne!(db.root(), root3);
+
+            // Test that we can do a merkleized commit.
+            let (db, _) = db.commit(None).await.unwrap();
+            assert!(db.get_metadata().await.unwrap().is_none());
+            assert_eq!(db.op_count(), 10);
 
             db.destroy().await.unwrap();
         });
@@ -867,8 +1066,8 @@ pub mod test {
             assert_eq!(db.any.snapshot.items(), 857);
 
             // Test that commit + sync w/ pruning will raise the activity floor.
-            let mut db = db.merkleize().await.unwrap();
-            db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+            let mut db = db.into_provable().await.unwrap();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.op_count(), 1957);
@@ -914,8 +1113,8 @@ pub mod test {
             let k = Sha256::fill(0x01);
             let v1 = Sha256::fill(0xA1);
             db.update(k, v1).await.unwrap();
-            let mut db = db.merkleize().await.unwrap();
-            db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+            let db = db.into_provable().await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
@@ -943,8 +1142,8 @@ pub mod test {
             // Update the key to a new value (v2), which inactivates the previous operation.
             let mut db = db.into_dirty();
             db.update(k, v2).await.unwrap();
-            let mut db = db.merkleize().await.unwrap();
-            db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+            let db = db.into_provable().await.unwrap();
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
@@ -1051,13 +1250,13 @@ pub mod test {
     }
 
     /// Apply random operations to the given db, committing them (randomly & at the end) only if
-    /// `commit_changes` is true.
+    /// `commit_changes` is true. Returns a dirty db; callers should commit if needed.
     async fn apply_random_ops(
         num_elements: u64,
         commit_changes: bool,
         rng_seed: u64,
         mut db: DirtyCurrentTest,
-    ) -> Result<CleanCurrentTest, Error> {
+    ) -> Result<DirtyCurrentTest, Error> {
         // Log the seed with high visibility to make failures reproducible.
         warn!("rng_seed={}", rng_seed);
         let mut rng = StdRng::seed_from_u64(rng_seed);
@@ -1080,18 +1279,17 @@ pub mod test {
             db.update(rand_key, v).await.unwrap();
             if commit_changes && rng.next_u32() % 20 == 0 {
                 // Commit every ~20 updates.
-                let mut clean_db = db.merkleize().await?;
-                clean_db.commit(None).await?;
+                let (durable_db, _) = db.commit(None).await?;
+                let clean_db = durable_db.into_provable().await?;
                 db = clean_db.into_dirty();
             }
         }
         if commit_changes {
-            let mut clean_db = db.merkleize().await?;
-            clean_db.commit(None).await?;
-            Ok(clean_db)
-        } else {
-            db.merkleize().await
+            let (durable_db, _) = db.commit(None).await?;
+            let clean_db = durable_db.into_provable().await?;
+            db = clean_db.into_dirty();
         }
+        Ok(db)
     }
 
     #[test_traced("DEBUG")]
@@ -1104,6 +1302,8 @@ pub mod test {
             let db = apply_random_ops(200, true, context.next_u64(), db)
                 .await
                 .unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+            let db = db.into_provable().await.unwrap();
             let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
@@ -1145,6 +1345,8 @@ pub mod test {
             let db = apply_random_ops(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+            let db = db.into_provable().await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
@@ -1225,6 +1427,8 @@ pub mod test {
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+            let db = db.into_provable().await.unwrap();
 
             // Close the db, then replay its operations with a bitmap.
             let root = db.root();
@@ -1256,8 +1460,8 @@ pub mod test {
                 let mut dirty_db = db.into_dirty();
                 dirty_db.update(k, v).await.unwrap();
                 assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
-                db = dirty_db.merkleize().await.unwrap();
-                db.commit(None).await.unwrap();
+                let (durable_db, _) = dirty_db.commit(None).await.unwrap();
+                db = durable_db.into_provable().await.unwrap();
                 let root = db.root();
 
                 // Create a proof for the current value of k.
@@ -1296,9 +1500,11 @@ pub mod test {
             let partition = "build_random_fail_commit";
             let rng_seed = context.next_u64();
             let db = open_db(context.clone(), partition).await.into_dirty();
-            let mut db = apply_random_ops(ELEMENTS, true, rng_seed, db)
+            let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+            let mut db = db.into_provable().await.unwrap();
             let committed_root = db.root();
             let committed_op_count = db.op_count();
             let committed_inactivity_floor = db.any.inactivity_floor_loc();
@@ -1311,7 +1517,7 @@ pub mod test {
 
             // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
             // state of the DB should be as of the last commit.
-            db.simulate_commit_failure_before_any_writes();
+            drop(db);
             let db = open_db(context.clone(), partition).await;
             assert_eq!(db.root(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
@@ -1322,10 +1528,12 @@ pub mod test {
                 .unwrap();
 
             // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
-            // before the state of the pruned bitmap can be written to disk.
-            db.simulate_commit_failure_after_any_db_commit()
-                .await
-                .unwrap();
+            // before the state of the pruned bitmap can be written to disk (i.e., before
+            // into_provable is called). We do this by committing and then dropping the durable
+            // db without calling close or into_provable.
+            let (durable_db, _) = db.commit(None).await.unwrap();
+            let committed_op_count = durable_db.op_count();
+            drop(durable_db);
 
             // We should be able to recover, so the root should differ from the previous commit, and
             // the op count should be greater than before.
@@ -1339,13 +1547,15 @@ pub mod test {
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
-            let db = apply_random_ops(ELEMENTS, false, rng_seed + 1, db.into_dirty())
+            let (db, _) = db.commit(None).await.unwrap();
+            let db = apply_random_ops(ELEMENTS, false, rng_seed + 1, db.into_mutable())
                 .await
                 .unwrap();
-            let mut db = db.into_dirty().merkleize().await.unwrap();
-            db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+            let mut db = db.into_provable().await.unwrap();
             db.prune(db.any.inactivity_floor_loc()).await.unwrap();
             // State from scenario #2 should match that of a successful commit.
+            assert_eq!(db.op_count(), committed_op_count);
             assert_eq!(db.root(), scenario_2_root);
 
             db.destroy().await.unwrap();
@@ -1382,10 +1592,10 @@ pub mod test {
 
                 // Commit periodically
                 if i % 50 == 49 {
-                    let mut clean_no_pruning = db_no_pruning.merkleize().await.unwrap();
-                    clean_no_pruning.commit(None).await.unwrap();
-                    let mut clean_pruning = db_pruning.merkleize().await.unwrap();
-                    clean_pruning.commit(None).await.unwrap();
+                    let (db_1, _) = db_no_pruning.commit(None).await.unwrap();
+                    let clean_no_pruning = db_1.into_provable().await.unwrap();
+                    let (db_2, _) = db_pruning.commit(None).await.unwrap();
+                    let mut clean_pruning = db_2.into_provable().await.unwrap();
                     clean_pruning
                         .prune(clean_no_pruning.any.inactivity_floor_loc())
                         .await
@@ -1396,10 +1606,10 @@ pub mod test {
             }
 
             // Final commit
-            let mut db_no_pruning = db_no_pruning.merkleize().await.unwrap();
-            db_no_pruning.commit(None).await.unwrap();
-            let mut db_pruning = db_pruning.merkleize().await.unwrap();
-            db_pruning.commit(None).await.unwrap();
+            let (db_1, _) = db_no_pruning.commit(None).await.unwrap();
+            let db_no_pruning = db_1.into_provable().await.unwrap();
+            let (db_2, _) = db_pruning.commit(None).await.unwrap();
+            let db_pruning = db_2.into_provable().await.unwrap();
 
             // Get roots from both databases
             let root_no_pruning = db_no_pruning.root();
@@ -1442,7 +1652,7 @@ pub mod test {
         batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
             let prefix = format!("current_unordered_batch_{seed}");
-            AnyExt::new(open_db(ctx, &prefix).await)
+            open_db(ctx, &prefix).await.into_dirty()
         });
     }
 }

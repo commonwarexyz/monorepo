@@ -5,7 +5,11 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     qmdb::{
-        any::{ordered::fixed::Db, FixedConfig as Config},
+        any::{
+            db::{Durable, Merkleized},
+            ordered::fixed::Db,
+            FixedConfig as Config,
+        },
         store::Batchable as _,
     },
     translator::EightCap,
@@ -21,6 +25,8 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
+type OrderedDb =
+    Db<deterministic::Context, Key, Value, Sha256, EightCap, Merkleized<Sha256>, Durable>;
 
 const MAX_OPS: usize = 25;
 
@@ -57,9 +63,10 @@ fn fuzz(data: FuzzInput) {
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
 
-        let mut db = Db::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
+        let mut db = OrderedDb::init(context.clone(), cfg.clone())
             .await
-            .expect("init qmdb");
+            .expect("init qmdb")
+            .into_mutable();
         let mut batch = Some(db.start_batch());
         let mut last_commit = None;
 
@@ -101,9 +108,11 @@ fn fuzz(data: FuzzInput) {
                         .await
                         .expect("write batch should not fail");
                     last_commit = Some(Value::new(*value));
-                    db.commit(Some(Value::new(*value)))
+                    let (durable_db, _) = db
+                        .commit(Some(Value::new(*value)))
                         .await
                         .expect("commit should not fail");
+                    db = durable_db.into_provable().into_mutable();
 
                     // Restore batch for subsequent operations
                     batch = Some(db.start_batch());
@@ -145,7 +154,8 @@ fn fuzz(data: FuzzInput) {
         db.write_batch(iter)
             .await
             .expect("write batch should not fail");
-        db.commit(None).await.expect("commit should not fail");
+        let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+        let db = durable_db.into_provable();
 
         // Comprehensive final verification - check ALL keys ever touched
         for key in &all_keys {
@@ -186,7 +196,9 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        db.destroy().await.expect("destroy should not fail");
+        db.destroy()
+            .await
+            .expect("destroy should not fail");
         expected_state.clear();
         all_keys.clear();
     });
