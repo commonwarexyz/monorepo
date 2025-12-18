@@ -981,6 +981,11 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
         };
 
         // Update recipients in checked and send
+        //
+        // While SplitForwarder does not enforce any relationship between the original recipients
+        // and the new recipients, it is typically some subset of the original recipients. This
+        // means we may over-rate limit some recipients (who are never actually sent a message here) but
+        // we prefer this to not providing feedback at all (we would have to skip check entirely).
         self.checked.modify_recipients(recipients);
         self.checked.send(message, priority).await
     }
