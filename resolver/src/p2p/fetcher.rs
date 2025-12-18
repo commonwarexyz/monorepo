@@ -1235,6 +1235,107 @@ mod tests {
     }
 
     #[test]
+    fn test_waiter_after_empty() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+            let other_public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let config = Config {
+                me: Some(public_key.clone()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+                retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+            };
+            let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
+                Fetcher::new(context.clone(), config);
+            fetcher.reconcile(&[public_key, other_public_key]);
+            let mut sender = WrappedSender::new(FailMockSender::default());
+
+            // Add a key to pending
+            fetcher.add_ready(MockKey(1));
+            fetcher.fetch(&mut sender).await; // won't be delivered, so immediately re-added
+            fetcher.fetch(&mut sender).await; // waiter activated
+
+            // Check pending deadline
+            assert_eq!(fetcher.len_pending(), 1);
+            let pending_deadline = fetcher.get_pending_deadline().unwrap();
+            assert!(pending_deadline > context.current());
+
+            // Cancel key
+            assert!(fetcher.cancel(&MockKey(1)));
+            assert!(fetcher.get_pending_deadline().is_none());
+
+            // Advance time past previous deadline
+            context.sleep(Duration::from_secs(10)).await;
+
+            // Add a new key for retry (should be larger than original waiter wait)
+            fetcher.add_retry(MockKey(2));
+            let next_deadline = fetcher.get_pending_deadline().unwrap();
+            assert_eq!(
+                next_deadline,
+                context.current() + Duration::from_millis(100)
+            );
+        });
+    }
+
+    #[test]
+    fn test_waiter_cleared_on_target_modification() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let blocked_peer =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(99).public_key();
+            let config = Config {
+                me: Some(public_key.clone()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+                retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+            };
+            let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
+                Fetcher::new(context.clone(), config);
+            fetcher.reconcile(&[public_key, peer1.clone()]);
+            let mut sender = WrappedSender::new(FailMockSender::default());
+
+            // Block the peer we'll use as target, so fetch has no eligible participants
+            fetcher.block(blocked_peer.clone());
+
+            // Add key with targets pointing only to blocked peer
+            fetcher.add_ready(MockKey(1));
+            fetcher.add_targets(MockKey(1), [blocked_peer.clone()]);
+            fetcher.fetch(&mut sender).await;
+
+            // Waiter should be set to far future (no eligible participants)
+            assert!(fetcher.waiter.is_some());
+            let far_future = fetcher.waiter.unwrap();
+            assert!(far_future > context.current() + Duration::from_secs(1000));
+
+            // Add targets should clear the waiter
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            assert!(fetcher.waiter.is_none());
+
+            // Pending deadline should now be reasonable
+            let deadline = fetcher.get_pending_deadline().unwrap();
+            assert!(deadline <= context.current() + Duration::from_millis(100));
+
+            // Set waiter again by targeting blocked peer
+            fetcher.clear_targets(&MockKey(1));
+            fetcher.add_targets(MockKey(1), [blocked_peer.clone()]);
+            fetcher.fetch(&mut sender).await;
+            assert!(fetcher.waiter.is_some());
+
+            // clear_targets should clear the waiter
+            fetcher.clear_targets(&MockKey(1));
+            assert!(fetcher.waiter.is_none());
+        });
+    }
+
+    #[test]
     fn test_add_targets() {
         let runner = Runner::default();
         runner.start(|context| async {
@@ -1592,107 +1693,6 @@ mod tests {
                 found_different_order,
                 "Shuffling should produce different orders"
             );
-        });
-    }
-
-    #[test]
-    fn test_waiter_after_empty() {
-        let runner = Runner::default();
-        runner.start(|context| async move {
-            let public_key =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
-            let other_public_key =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let config = Config {
-                me: Some(public_key.clone()),
-                initial: Duration::from_millis(100),
-                timeout: Duration::from_secs(5),
-                retry_timeout: Duration::from_millis(100),
-                priority_requests: false,
-            };
-            let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
-                Fetcher::new(context.clone(), config);
-            fetcher.reconcile(&[public_key, other_public_key]);
-            let mut sender = WrappedSender::new(FailMockSender::default());
-
-            // Add a key to pending
-            fetcher.add_ready(MockKey(1));
-            fetcher.fetch(&mut sender).await; // won't be delivered, so immediately re-added
-            fetcher.fetch(&mut sender).await; // waiter activated
-
-            // Check pending deadline
-            assert_eq!(fetcher.len_pending(), 1);
-            let pending_deadline = fetcher.get_pending_deadline().unwrap();
-            assert!(pending_deadline > context.current());
-
-            // Cancel key
-            assert!(fetcher.cancel(&MockKey(1)));
-            assert!(fetcher.get_pending_deadline().is_none());
-
-            // Advance time past previous deadline
-            context.sleep(Duration::from_secs(10)).await;
-
-            // Add a new key for retry (should be larger than original waiter wait)
-            fetcher.add_retry(MockKey(2));
-            let next_deadline = fetcher.get_pending_deadline().unwrap();
-            assert_eq!(
-                next_deadline,
-                context.current() + Duration::from_millis(100)
-            );
-        });
-    }
-
-    #[test]
-    fn test_waiter_cleared_on_target_modification() {
-        let runner = Runner::default();
-        runner.start(|context| async move {
-            let public_key =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
-            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
-            let blocked_peer =
-                commonware_cryptography::ed25519::PrivateKey::from_seed(99).public_key();
-            let config = Config {
-                me: Some(public_key.clone()),
-                initial: Duration::from_millis(100),
-                timeout: Duration::from_secs(5),
-                retry_timeout: Duration::from_millis(100),
-                priority_requests: false,
-            };
-            let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
-                Fetcher::new(context.clone(), config);
-            fetcher.reconcile(&[public_key, peer1.clone()]);
-            let mut sender = WrappedSender::new(FailMockSender::default());
-
-            // Block the peer we'll use as target, so fetch has no eligible participants
-            fetcher.block(blocked_peer.clone());
-
-            // Add key with targets pointing only to blocked peer
-            fetcher.add_ready(MockKey(1));
-            fetcher.add_targets(MockKey(1), [blocked_peer.clone()]);
-            fetcher.fetch(&mut sender).await;
-
-            // Waiter should be set to far future (no eligible participants)
-            assert!(fetcher.waiter.is_some());
-            let far_future = fetcher.waiter.unwrap();
-            assert!(far_future > context.current() + Duration::from_secs(1000));
-
-            // Add targets should clear the waiter
-            fetcher.add_targets(MockKey(1), [peer1.clone()]);
-            assert!(fetcher.waiter.is_none());
-
-            // Pending deadline should now be reasonable
-            let deadline = fetcher.get_pending_deadline().unwrap();
-            assert!(deadline <= context.current() + Duration::from_millis(100));
-
-            // Set waiter again by targeting blocked peer
-            fetcher.clear_targets(&MockKey(1));
-            fetcher.add_targets(MockKey(1), [blocked_peer.clone()]);
-            fetcher.fetch(&mut sender).await;
-            assert!(fetcher.waiter.is_some());
-
-            // clear_targets should clear the waiter
-            fetcher.clear_targets(&MockKey(1));
-            assert!(fetcher.waiter.is_none());
         });
     }
 }
