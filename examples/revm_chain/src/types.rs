@@ -11,6 +11,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
+use commonware_cryptography::{Committable, Digestible, Hasher as _, Sha256};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 /// Block identifier (32 bytes).
@@ -180,6 +181,38 @@ impl Block {
 
 pub fn block_id(block: &Block) -> BlockId {
     BlockId(keccak256(block.encode()))
+}
+
+fn digest_for_block_id(id: &BlockId) -> crate::consensus::ConsensusDigest {
+    let mut hasher = Sha256::default();
+    hasher.update(id.0.as_slice());
+    hasher.finalize()
+}
+
+impl Digestible for Block {
+    type Digest = crate::consensus::ConsensusDigest;
+
+    fn digest(&self) -> Self::Digest {
+        crate::consensus::digest_for_block(self)
+    }
+}
+
+impl Committable for Block {
+    type Commitment = crate::consensus::ConsensusDigest;
+
+    fn commitment(&self) -> Self::Commitment {
+        crate::consensus::digest_for_block(self)
+    }
+}
+
+impl commonware_consensus::Block for Block {
+    fn height(&self) -> u64 {
+        self.height
+    }
+
+    fn parent(&self) -> Self::Commitment {
+        digest_for_block_id(&self.parent)
+    }
 }
 
 impl Write for Block {
