@@ -62,9 +62,6 @@ impl crate::Stream for Stream {
         timeout(self.read_timeout, read_fut)
             .await
             .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::RecvFailed)?;
-
-        Ok(())
     }
 }
 

@@ -10,7 +10,7 @@ use crate::{
     utils::limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
     Channel, Message, Recipients, UnlimitedSender as _,
 };
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
@@ -1250,9 +1250,7 @@ impl Link {
         context.with_label("link").spawn(move |context| async move {
             // Dial the peer and handshake by sending it the dialer's public key
             let (mut sink, _) = context.dial(socket).await.unwrap();
-            if let Err(err) =
-                send_frame(&mut sink, Bytes::from_owner(dialer.clone()), max_size).await
-            {
+            if let Err(err) = send_frame(&mut sink, dialer.as_ref(), max_size).await {
                 error!(?err, "failed to send public key to listener");
                 return;
             }
@@ -1263,10 +1261,7 @@ impl Link {
                 context.sleep_until(receive_complete_at).await;
 
                 // Send the message
-                let mut data = bytes::BytesMut::with_capacity(Channel::SIZE + message.len());
-                data.extend_from_slice(&channel.to_be_bytes());
-                data.extend_from_slice(&message);
-                let data = data.freeze();
+                let data = Bytes::from_owner(channel.to_be_bytes()).chain(message);
                 let _ = send_frame(&mut sink, data, max_size).await;
 
                 // Bump received messages metric
