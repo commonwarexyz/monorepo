@@ -185,6 +185,16 @@ pub struct CheckedSender<'a, S: UnlimitedSender> {
     recipients: Recipients<S::PublicKey>,
 }
 
+impl<S: UnlimitedSender> CheckedSender<'_, S> {
+    /// Update the recipients to send to.
+    ///
+    /// This is useful when a forwarder filters recipients after the rate limit
+    /// check has already been performed.
+    pub(crate) fn set_recipients(&mut self, recipients: Recipients<S::PublicKey>) {
+        self.recipients = recipients;
+    }
+}
+
 impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
     type PublicKey = S::PublicKey;
     type Error = S::Error;
