@@ -719,13 +719,13 @@ mod tests {
             recipients: Recipients<Self::PublicKey>,
         ) -> Result<Self::Checked<'a>, SystemTime> {
             let peer = match &recipients {
-                Recipients::One(p) => p.clone(),
+                Recipients::One(p) => p,
                 _ => unimplemented!(),
             };
 
             {
                 let rate_limiter = self.rate_limiter.write().await;
-                if let Err(not_until) = rate_limiter.check_key(&peer) {
+                if let Err(not_until) = rate_limiter.check_key(peer) {
                     return Err(not_until.earliest_possible());
                 }
             }
