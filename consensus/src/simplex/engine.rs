@@ -1,6 +1,7 @@
 use super::{
     actors::{batcher, resolver, voter},
     config::Config,
+    elector::Config as Elector,
     types::{Activity, Context},
 };
 use crate::{simplex::scheme::Scheme, Automaton, Relay, Reporter};
@@ -15,6 +16,7 @@ use tracing::debug;
 pub struct Engine<
     E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
+    L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
@@ -23,7 +25,7 @@ pub struct Engine<
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, S, B, D, A, R, F>,
+    voter: voter::Actor<E, S, L, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
     batcher: batcher::Actor<E, S, B, D, F>,
@@ -36,15 +38,16 @@ pub struct Engine<
 impl<
         E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
         S: Scheme<D>,
+        L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Engine<E, S, B, D, A, R, F>
+    > Engine<E, S, L, B, D, A, R, F>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<S, B, D, A, R, F>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -68,6 +71,7 @@ impl<
             context.with_label("voter"),
             voter::Config {
                 scheme: cfg.scheme.clone(),
+                elector: cfg.elector,
                 blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,

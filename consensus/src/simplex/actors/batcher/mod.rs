@@ -33,6 +33,7 @@ mod tests {
     use crate::{
         simplex::{
             actors::voter,
+            elector::RoundRobin,
             mocks,
             scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
             types::{
@@ -141,8 +142,9 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().try_into().unwrap(),
+                participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -302,8 +304,9 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().try_into().unwrap(),
+                participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -447,8 +450,9 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().try_into().unwrap(),
+                participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -637,8 +641,9 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().try_into().unwrap(),
+                participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -840,8 +845,9 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().try_into().unwrap(),
+                participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -966,8 +972,9 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().try_into().unwrap(),
+                participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
@@ -1094,8 +1101,9 @@ mod tests {
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
-                participants: participants.clone().try_into().unwrap(),
+                participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);

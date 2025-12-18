@@ -6,7 +6,10 @@ use crate::{
     engine, namespace,
     setup::{ParticipantConfig, PeerConfig},
 };
-use commonware_consensus::{marshal::resolver::p2p as marshal_resolver, simplex::scheme::Scheme};
+use commonware_consensus::{
+    marshal::resolver::p2p as marshal_resolver,
+    simplex::{elector::Config as Elector, scheme::Scheme},
+};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
@@ -33,12 +36,13 @@ const MESSAGE_BACKLOG: usize = 10;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
 /// Run the validator node service.
-pub async fn run<S>(
+pub async fn run<S, L>(
     context: tokio::Context,
     args: super::ParticipantArgs,
     callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
 ) where
     S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
+    L: Elector<S>,
     Provider<S, ed25519::PrivateKey>:
         EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
@@ -116,7 +120,7 @@ pub async fn run<S>(
     };
     let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
-    let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
+    let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L>::new(
         context.with_label("engine"),
         engine::Config {
             signer: config.signing_key.clone(),
@@ -157,7 +161,10 @@ mod test {
         dkg::{PostUpdate, Update},
     };
     use anyhow::anyhow;
-    use commonware_consensus::types::Epoch;
+    use commonware_consensus::{
+        simplex::elector::{Random, RoundRobin},
+        types::Epoch,
+    };
     use commonware_cryptography::{
         bls12381::{
             dkg::{deal, Output},
@@ -316,7 +323,7 @@ mod test {
             }
         }
 
-        async fn start_one<S>(
+        async fn start_one<S, L>(
             &mut self,
             ctx: &deterministic::Context,
             oracle: &mut Oracle<PublicKey, deterministic::Context>,
@@ -324,6 +331,7 @@ mod test {
             pk: PublicKey,
         ) where
             S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = PublicKey>,
+            L: Elector<S>,
             Provider<S, PrivateKey>:
                 EpochProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {
@@ -379,7 +387,7 @@ mod test {
                 priority_responses: false,
             };
             let marshal = marshal_resolver::init(ctx, resolver_cfg, marshal);
-            let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
+            let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L>::new(
                 ctx.with_label(&format!("validator_{}", &pk)),
                 engine::Config {
                     signer: sk.clone(),
@@ -418,9 +426,10 @@ mod test {
             pk: PublicKey,
         ) {
             if self.output.is_none() {
-                self.start_one::<EdScheme>(ctx, oracle, updates, pk).await;
+                self.start_one::<EdScheme, RoundRobin>(ctx, oracle, updates, pk)
+                    .await;
             } else {
-                self.start_one::<ThresholdScheme<MinSig>>(ctx, oracle, updates, pk)
+                self.start_one::<ThresholdScheme<MinSig>, Random>(ctx, oracle, updates, pk)
                     .await;
             }
         }
@@ -713,9 +722,9 @@ mod test {
 
                         info!(pk = ?pk, "restarting participant");
                         if team.output.is_none() {
-                            team.start_one::<EdScheme>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                            team.start_one::<EdScheme, RoundRobin>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         } else {
-                            team.start_one::<ThresholdScheme<MinSig>>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                            team.start_one::<ThresholdScheme<MinSig>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         }
                     },
                     _ = crash_receiver.next() => {

@@ -12,6 +12,7 @@ use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
         config,
+        elector::Config as Elector,
         mocks::{application, relay, reporter},
         scheme::Scheme,
         Engine,
@@ -53,6 +54,7 @@ where
     <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
+    type Elector: Elector<Self::Scheme>;
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
 }
 
@@ -204,6 +206,7 @@ fn run<P: Simplex>(input: FuzzInput) {
         for i in (f as usize)..(n as usize) {
             let validator = participants[i].clone();
             let context = context.with_label(&format!("validator-{validator}"));
+            let elector = P::Elector::default();
             let reporter_cfg = reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants
@@ -211,6 +214,7 @@ fn run<P: Simplex>(input: FuzzInput) {
                     .try_into()
                     .expect("public keys are unique"),
                 scheme: schemes[i].clone(),
+                elector: elector.clone(),
             };
             let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
             reporters.push(reporter.clone());
@@ -232,6 +236,7 @@ fn run<P: Simplex>(input: FuzzInput) {
             let engine_cfg = config::Config {
                 blocker,
                 scheme: schemes[i].clone(),
+                elector,
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),

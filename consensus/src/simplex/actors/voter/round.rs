@@ -1,12 +1,10 @@
 use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
-    simplex::{
-        scheme::SeededScheme,
-        types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
-    },
+    simplex::types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
     types::Round as Rnd,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
+use commonware_utils::ordered::Quorum;
 use std::{
     mem::replace,
     time::{Duration, SystemTime},
@@ -21,7 +19,7 @@ pub struct Leader<P: PublicKey> {
 }
 
 /// Per-[Rnd] state machine.
-pub struct Round<S: SeededScheme, D: Digest> {
+pub struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
     scheme: S,
 
@@ -47,7 +45,7 @@ pub struct Round<S: SeededScheme, D: Digest> {
     broadcast_finalization: bool,
 }
 
-impl<S: SeededScheme, D: Digest> Round<S, D> {
+impl<S: Scheme, D: Digest> Round<S, D> {
     pub const fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
         Self {
             start,
@@ -132,18 +130,16 @@ impl<S: SeededScheme, D: Digest> Round<S, D> {
         self.advance_deadline = None;
     }
 
-    /// Picks and stores the leader for this round using the deterministic lottery.
-    pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let (leader, leader_idx) = crate::simplex::select_leader::<S>(
-            self.scheme.participants().as_ref(),
-            self.round,
-            seed,
-        );
-        debug!(round=?self.round, ?leader, ?leader_idx, "leader elected");
-        self.leader = Some(Leader {
-            idx: leader_idx,
-            key: leader,
-        });
+    /// Sets the leader for this round using the pre-computed leader index.
+    pub fn set_leader(&mut self, leader: u32) {
+        let key = self
+            .scheme
+            .participants()
+            .key(leader)
+            .cloned()
+            .expect("leader index comes from elector, must be within bounds");
+        debug!(round=?self.round, ?leader, ?key, "leader elected");
+        self.leader = Some(Leader { idx: leader, key });
     }
 
     /// Returns the notarization certificate if we already reconstructed one.
@@ -508,7 +504,7 @@ mod tests {
         let mut round = Round::new(leader_scheme, proposal_a.round, SystemTime::UNIX_EPOCH);
 
         // Set proposal from batcher
-        round.set_leader(None);
+        round.set_leader(0);
         assert!(round.set_proposal(proposal_a.clone()));
         assert!(round.verified());
 
@@ -527,7 +523,7 @@ mod tests {
         let (accepted, equivocator) = round.add_notarization(certificate.clone());
         assert!(accepted);
         assert!(equivocator.is_some());
-        assert_eq!(equivocator.unwrap(), participants[2]);
+        assert_eq!(equivocator.unwrap(), participants[0]);
         assert_eq!(round.broadcast_notarization(), Some(certificate));
 
         // Should not vote again
@@ -561,7 +557,7 @@ mod tests {
         let mut round = Round::new(leader_scheme, proposal_a.round, SystemTime::UNIX_EPOCH);
 
         // Set proposal from batcher
-        round.set_leader(None);
+        round.set_leader(0);
         assert!(round.set_proposal(proposal_a.clone()));
         assert!(round.verified());
 
@@ -580,7 +576,7 @@ mod tests {
         let (accepted, equivocator) = round.add_finalization(certificate.clone());
         assert!(accepted);
         assert!(equivocator.is_some());
-        assert_eq!(equivocator.unwrap(), participants[2]);
+        assert_eq!(equivocator.unwrap(), participants[0]);
         assert_eq!(round.broadcast_finalization(), Some(certificate));
 
         // Add conflicting notarization certificate
@@ -619,7 +615,7 @@ mod tests {
         let mut round = Round::new(leader_scheme, proposal.round, SystemTime::UNIX_EPOCH);
 
         // Set proposal from batcher
-        round.set_leader(None);
+        round.set_leader(0);
         assert!(round.set_proposal(proposal.clone()));
 
         // Add matching notarization certificate
@@ -681,7 +677,7 @@ mod tests {
 
         // Replay messages and verify broadcast flags
         let mut round = Round::new(local_scheme, round, now);
-        round.set_leader(None);
+        round.set_leader(0);
         round.replay(&Artifact::Notarize(notarize_local));
         assert!(round.broadcast_notarize);
         round.replay(&Artifact::Nullify(nullify_local));
@@ -722,7 +718,7 @@ mod tests {
 
         // Replay finalize and verify nullify is blocked
         let mut round = Round::new(local_scheme, round_info, now);
-        round.set_leader(None);
+        round.set_leader(0);
         round.replay(&Artifact::Finalize(finalize_local));
 
         // Check that construct_nullify returns None
