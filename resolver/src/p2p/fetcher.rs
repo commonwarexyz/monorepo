@@ -693,27 +693,25 @@ mod tests {
 
     // Mock sender that rate-limits per peer
     #[derive(Clone)]
-    struct RateLimitedMockSender {
+    struct RateLimitedMockSender<E: Clock> {
         inner: SuccessMockSenderInner,
-        used_peers: std::sync::Arc<std::sync::Mutex<HashMap<Ed25519PublicKey, SystemTime>>>,
-        rate_limit_duration: Duration,
+        rate_limiter: std::sync::Arc<
+            futures::lock::Mutex<commonware_runtime::KeyedRateLimiter<Ed25519PublicKey, E>>,
+        >,
     }
 
-    impl RateLimitedMockSender {
-        fn new(rate_limit_duration: Duration) -> Self {
+    impl<E: Clock> RateLimitedMockSender<E> {
+        fn new(quota: commonware_runtime::Quota, clock: E) -> Self {
             Self {
                 inner: SuccessMockSenderInner,
-                used_peers: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-                rate_limit_duration,
+                rate_limiter: std::sync::Arc::new(futures::lock::Mutex::new(
+                    commonware_runtime::KeyedRateLimiter::hashmap_with_clock(quota, clock),
+                )),
             }
-        }
-
-        fn reset(&self) {
-            self.used_peers.lock().unwrap().clear();
         }
     }
 
-    impl LimitedSender for RateLimitedMockSender {
+    impl<E: Clock> LimitedSender for RateLimitedMockSender<E> {
         type PublicKey = Ed25519PublicKey;
         type Checked<'a> = CheckedSender<'a, SuccessMockSenderInner>;
 
@@ -726,14 +724,11 @@ mod tests {
                 _ => unimplemented!(),
             };
 
-            let mut used = self.used_peers.lock().unwrap();
-            if let Some(next_available) = used.get(&peer) {
-                return Err(*next_available);
+            let rate_limiter = self.rate_limiter.lock().await;
+            if let Err(not_until) = rate_limiter.check_key(&peer) {
+                return Err(not_until.earliest_possible());
             }
-
-            let next_available = SystemTime::now() + self.rate_limit_duration;
-            used.insert(peer, next_available);
-            drop(used);
+            drop(rate_limiter);
 
             Ok(CheckedSender {
                 sender: &mut self.inner,
@@ -1686,11 +1681,13 @@ mod tests {
                 retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
             };
-            let mut fetcher: Fetcher<_, _, MockKey, RateLimitedMockSender> =
+            let mut fetcher: Fetcher<_, _, MockKey, RateLimitedMockSender<Context>> =
                 Fetcher::new(context.clone(), config);
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
-            let rate_limited_sender = RateLimitedMockSender::new(Duration::from_secs(1));
-            let mut sender = WrappedSender::new(rate_limited_sender.clone());
+            let quota =
+                commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(1).unwrap());
+            let mut sender =
+                WrappedSender::new(RateLimitedMockSender::new(quota, context.clone()));
 
             // Add three keys with different targets:
             // - MockKey(1) targeted to peer1
@@ -1724,8 +1721,8 @@ mod tests {
             assert_eq!(fetcher.len_pending(), 1); // MockKey(2) still pending
             assert!(fetcher.waiter.is_some()); // Waiter set
 
-            // Reset rate limits (simulating time passing)
-            rate_limited_sender.reset();
+            // Wait for rate limit to reset
+            context.sleep(Duration::from_secs(1)).await;
 
             // Now MockKey(2) can be fetched
             fetcher.fetch(&mut sender).await;
