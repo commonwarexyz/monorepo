@@ -300,7 +300,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Metrics + RNetwork + RngCore>
     let (network, mut oracle) = Network::new(
         context.with_label("network"),
         Config {
-            max_size: usize::MAX,
+            max_size: u32::MAX,
             disconnect_on_block: true,
             tracked_peer_sets: None,
         },

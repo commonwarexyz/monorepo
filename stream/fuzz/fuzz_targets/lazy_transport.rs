@@ -8,7 +8,7 @@ use libfuzzer_sys::fuzz_target;
 use std::{cell::RefCell, time::Duration};
 
 static NAMESPACE: &[u8] = b"lazy_fuzz_transport";
-const MAX_MESSAGE_SIZE: usize = 1023 * 1024; // 64KB buffer
+const MAX_MESSAGE_SIZE: u32 = 1023 * 1024; // ~1MB buffer
 
 struct TransportPair {
     dialer_sender: Sender<mocks::Sink>,
@@ -80,7 +80,7 @@ thread_local! {
 }
 
 fn fuzz(data: &[u8]) {
-    if data.is_empty() || data.len() > MAX_MESSAGE_SIZE {
+    if data.is_empty() || data.len() > MAX_MESSAGE_SIZE as usize {
         return;
     }
 

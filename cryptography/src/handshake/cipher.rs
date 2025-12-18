@@ -9,7 +9,7 @@ use std::vec::Vec;
 use zeroize::ZeroizeOnDrop;
 
 /// The amount of overhead in a ciphertext, compared to the plain message.
-pub const CIPHERTEXT_OVERHEAD: usize = <ChaCha20Poly1305 as AeadCore>::TagSize::USIZE;
+pub const CIPHERTEXT_OVERHEAD: u32 = <ChaCha20Poly1305 as AeadCore>::TagSize::U32;
 
 /// How many bytes are in a nonce.
 const NONCE_SIZE_BYTES: usize = <ChaCha20Poly1305 as AeadCore>::NonceSize::USIZE;

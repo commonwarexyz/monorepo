@@ -54,7 +54,7 @@ pub struct PeerCtx {
 const MAX_OPERATIONS: usize = 30;
 const MAX_PEERS: usize = 8;
 const MIN_PEERS: usize = 4;
-const MAX_MSG_SIZE: usize = 1024 * 1024; // 1MB
+const MAX_MSG_SIZE: u32 = 1024 * 1024; // 1MB
 const MAX_INDEX: u8 = 10;
 const TRACKED_PEER_SETS: usize = 5;
 const DEFAULT_MESSAGE_BACKLOG: usize = 128;
@@ -482,7 +482,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     let from_idx = (from_idx as usize) % peers.len();
 
                     // Clamp message size to not exceed max (accounting for channel overhead)
-                    let msg_size = msg_size.clamp(0, MAX_MSG_SIZE - Channel::SIZE);
+                    let msg_size = msg_size.clamp(0, MAX_MSG_SIZE as usize - Channel::SIZE);
 
                     // Generate random message payload
                     let mut bytes = vec![0u8; msg_size];
