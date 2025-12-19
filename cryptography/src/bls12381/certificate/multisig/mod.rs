@@ -374,12 +374,12 @@ mod macros {
     ///   This type pre-computes and stores any protocol-specific namespace bytes derived from
     ///   a base namespace. The scheme calls `$namespace::derive(base)` at construction time
     ///   to create the namespace, then passes it to `Subject::namespace()` during signing
-    ///   and verification. For simple protocols, `Vec<u8>` or `Bytes` can be used directly.
-    ///   For protocols with multiple message types a custom struct can pre-compute all variants.
+    ///   and verification. For simple protocols with only a base namespace, `Vec<u8>` can be used directly.
+    ///   For protocols with multiple message types, a custom struct can pre-compute all variants.
     ///
     /// # Example
     /// ```ignore
-    /// // For simple protocols with a single namespace:
+    /// // For non-generic subject types with a single namespace:
     /// impl_certificate_bls12381_multisig!(MySubject, Vec<u8>);
     ///
     /// // For protocols with generic subject types:
