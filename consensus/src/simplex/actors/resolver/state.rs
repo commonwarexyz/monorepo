@@ -508,7 +508,7 @@ mod tests {
         assert!(state.is_failed(View::new(5)));
         // Satisfied_by should be cleaned up
         assert!(!state.satisfied_by.contains_key(&View::new(5)));
-        // Both view 5 and view 2 should have nullification-only requests
+        // Both view 5 and view 2 should have requests
         let outstanding = resolver.outstanding();
         assert!(outstanding.contains(&5));
         assert!(outstanding.contains(&2));
