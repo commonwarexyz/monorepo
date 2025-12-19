@@ -22,7 +22,10 @@ use commonware_utils::ordered::{Quorum, Set};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 use tracing::{debug, trace, warn};
 
 pub struct Actor<
@@ -441,7 +444,7 @@ impl<
             }
 
             // Process batch verification results (if any)
-            if let Some((view, voters, failed)) = selected {
+            let verified_view = if let Some((view, voters, failed)) = selected {
                 timer.observe();
 
                 // Process verified votes
@@ -463,6 +466,7 @@ impl<
                 for valid in voters {
                     round.add_verified(valid);
                 }
+                Some(view)
             } else {
                 timer.cancel();
                 trace!(
@@ -471,18 +475,25 @@ impl<
                     waiting = work.len(),
                     "no verifier ready"
                 );
-            }
+                None
+            };
 
-            // Try to construct and forward certificates for the current view.
-            // This runs regardless of whether batch verification happened above,
-            // which is necessary for single-validator (quorum=1) where our own
-            // pre-verified vote is sufficient.
-            if let Some(round) = work.get_mut(&current) {
+            // Try to construct and forward certificates.
+            // We always try for the current view (because the last vote processed
+            // may have come from us), and also for the batch-verified view if different.
+            for view in [Some(current), verified_view]
+                .into_iter()
+                .flatten()
+                .collect::<BTreeSet<_>>()
+            {
+                let Some(round) = work.get_mut(&view) else {
+                    continue;
+                };
                 if let Some(notarization) = self
                     .recover_latency
                     .time_some(|| round.try_construct_notarization(&self.scheme))
                 {
-                    debug!(view = %current, "constructed notarization, forwarding to voter");
+                    debug!(%view, "constructed notarization, forwarding to voter");
                     voter
                         .recovered(Certificate::Notarization(notarization))
                         .await;
@@ -491,7 +502,7 @@ impl<
                     .recover_latency
                     .time_some(|| round.try_construct_nullification(&self.scheme))
                 {
-                    debug!(view = %current, "constructed nullification, forwarding to voter");
+                    debug!(%view, "constructed nullification, forwarding to voter");
                     voter
                         .recovered(Certificate::Nullification(nullification))
                         .await;
@@ -500,7 +511,7 @@ impl<
                     .recover_latency
                     .time_some(|| round.try_construct_finalization(&self.scheme))
                 {
-                    debug!(view = %current, "constructed finalization, forwarding to voter");
+                    debug!(%view, "constructed finalization, forwarding to voter");
                     voter
                         .recovered(Certificate::Finalization(finalization))
                         .await;
