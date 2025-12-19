@@ -60,11 +60,11 @@ hash = "030caacb9ab46d08601977418808dc5ff729bddb9f6bb2ea685920539b69ecfb"
 
 ["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Activity<Scheme,Sha256Digest>>"]
 n_cases = 65536
-hash = "a8ef2ff63052b8bd3f724b7e74e11771b65762dacbbb3810bfe85778f929b84b"
+hash = "fd31aef02e7aa81867c66e5165eb95e6b1c5e9b2ff7245d1bcba29ba0f72ac92"
 
 ["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Artifact<Scheme,Sha256Digest>>"]
 n_cases = 65536
-hash = "6a9dcfd0a5973534d017f9fb957e9f4505edacc205183fb0d9baa69de5b1e635"
+hash = "9182d35e4d726179cc4cb48d094f85baba7763a88f597ccb3531e21ed2214a98"
 
 ["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Backfiller<Scheme,Sha256Digest>>"]
 n_cases = 65536
