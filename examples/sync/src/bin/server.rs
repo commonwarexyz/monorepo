@@ -1,5 +1,5 @@
 //! Server that serves operations and proofs to clients attempting to sync a
-//! [commonware_storage::qmdb::any::unordered::fixed::Any] database.
+//! [commonware_storage::qmdb::any::unordered::fixed::Db] database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};

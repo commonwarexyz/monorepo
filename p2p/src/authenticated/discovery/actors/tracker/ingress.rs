@@ -39,9 +39,11 @@ pub enum Message<C: PublicKey> {
     Block { public_key: C },
 
     // ---------- Used by peer ----------
-    /// Notify the tracker that a peer has been successfully connected, and that a
-    /// [types::Payload::Peers] message (containing solely the local node's information) should be
-    /// sent to the peer.
+    /// Notify the tracker that a peer has been successfully connected.
+    ///
+    /// The tracker responds with the greeting info that must be sent to the peer
+    /// before any other messages. If the peer is not eligible, the channel is dropped
+    /// (signaling termination).
     Connect {
         /// The public key of the peer.
         public_key: C,
@@ -49,8 +51,8 @@ pub enum Message<C: PublicKey> {
         /// `true` if we are the dialer, `false` if we are the listener.
         dialer: bool,
 
-        /// The mailbox of the peer actor.
-        peer: Mailbox<peer::Message<C>>,
+        /// One-shot channel to return the greeting info. Dropped if peer is not eligible.
+        responder: oneshot::Sender<types::Info<C>>,
     },
 
     /// Ready to send a [types::Payload::BitVec] message to a peer. This message doubles as a
@@ -103,12 +105,12 @@ pub enum Message<C: PublicKey> {
     },
 
     // ---------- Used by listener ----------
-    /// Check if we should listen to a peer.
-    Listenable {
+    /// Check if a peer is acceptable (can accept an incoming connection from them).
+    Acceptable {
         /// The public key of the peer to check.
         public_key: C,
 
-        /// The sender to respond with the listenable status.
+        /// The sender to respond with whether the peer is acceptable.
         responder: oneshot::Sender<bool>,
     },
 
@@ -134,14 +136,19 @@ pub enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> UnboundedMailbox<Message<C>> {
-    /// Send a `Connect` message to the tracker.
-    pub async fn connect(&mut self, public_key: C, dialer: bool, peer: Mailbox<peer::Message<C>>) {
+    /// Send a `Connect` message to the tracker and receive the greeting info.
+    ///
+    /// Returns `Some(info)` if the peer is eligible, `None` if the channel was
+    /// dropped (peer not eligible).
+    pub async fn connect(&mut self, public_key: C, dialer: bool) -> Option<types::Info<C>> {
+        let (tx, rx) = oneshot::channel();
         self.send(Message::Connect {
             public_key,
             dialer,
-            peer,
+            responder: tx,
         })
         .unwrap();
+        rx.await.ok()
     }
 
     /// Send a `Construct` message to the tracker.
@@ -177,10 +184,10 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
         rx.await.unwrap()
     }
 
-    /// Send a `Listenable` message to the tracker.
-    pub async fn listenable(&mut self, public_key: C) -> bool {
+    /// Send an `Acceptable` message to the tracker.
+    pub async fn acceptable(&mut self, public_key: C) -> bool {
         let (tx, rx) = oneshot::channel();
-        self.send(Message::Listenable {
+        self.send(Message::Acceptable {
             public_key,
             responder: tx,
         })

@@ -6,9 +6,8 @@ use crate::{
     mmr::{mem::Clean, Location},
     qmdb::{
         any::{
-            init_fixed_authenticated_log,
-            unordered::{FixedOperation as Operation, IndexedLog},
-            FixedConfig as Config, FixedValue,
+            init_fixed_authenticated_log, unordered, value::FixedEncoding, FixedConfig as Config,
+            FixedValue,
         },
         Error,
     },
@@ -19,15 +18,18 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
 
+pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
+pub type Operation<K, V> = unordered::Operation<K, FixedEncoding<V>>;
+
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
+pub type Db<E, K, V, H, T, S = Clean<DigestOf<H>>> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+    Db<E, K, V, H, T>
 {
-    /// Returns an [Any] QMDB initialized from `cfg`. Any uncommitted log operations will be
+    /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         Self::init_with_callback(context, cfg, None, |_, _| {}).await
@@ -74,7 +76,7 @@ pub(super) mod test {
         index::Unordered as _,
         mmr::{Position, StandardHasher},
         qmdb::{
-            any::unordered::FixedOperation as Operation,
+            any::unordered::{fixed::Operation, Update},
             store::{batch_tests, CleanStore as _},
             verify_proof,
         },
@@ -110,8 +112,8 @@ pub(super) mod test {
         }
     }
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
-    pub(crate) type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    /// A type alias for the concrete [Db] type used in these unit tests.
+    pub(crate) type AnyTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     #[inline]
     fn to_digest(i: u64) -> Digest {
@@ -159,7 +161,7 @@ pub(super) mod test {
                 ops.push(Operation::Delete(prev_key));
             } else {
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(key, value));
+                ops.push(Operation::Update(Update(key, value)));
                 prev_key = key;
             }
         }
@@ -170,7 +172,7 @@ pub(super) mod test {
     pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
-                Operation::Update(key, value) => {
+                Operation::Update(Update(key, value)) => {
                     db.update(key, value).await.unwrap();
                 }
                 Operation::Delete(key) => {
@@ -526,7 +528,7 @@ pub(super) mod test {
             // Changing the ops should cause verification to fail
             {
                 let mut ops = ops.clone();
-                ops[0] = Operation::Update(Sha256::hash(b"key1"), Sha256::hash(b"value1"));
+                ops[0] = Operation::Update(Update(Sha256::hash(b"key1"), Sha256::hash(b"value1")));
                 let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,
@@ -538,10 +540,10 @@ pub(super) mod test {
             }
             {
                 let mut ops = ops.clone();
-                ops.push(Operation::Update(
+                ops.push(Operation::Update(Update(
                     Sha256::hash(b"key1"),
                     Sha256::hash(b"value1"),
-                ));
+                )));
                 let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,

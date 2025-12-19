@@ -49,6 +49,9 @@ use key_exchange::{EphemeralPublicKey, SecretKey};
 mod cipher;
 pub use cipher::{RecvCipher, SendCipher, CIPHERTEXT_OVERHEAD};
 
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
+
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE";
 const LABEL_CIPHER_L2D: &[u8] = b"cipher_l2d";
 const LABEL_CIPHER_D2L: &[u8] = b"cipher_d2l";

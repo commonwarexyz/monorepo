@@ -2,7 +2,7 @@
 
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
-use governor::Quota;
+use commonware_runtime::Quota;
 use std::{collections::HashSet, net::IpAddr};
 
 pub mod actor;
@@ -24,5 +24,6 @@ pub struct Config<C: Signer> {
     pub tracked_peer_sets: usize,
     pub allowed_connection_rate_per_peer: Quota,
     pub allow_private_ips: bool,
+    pub allow_dns: bool,
     pub listener: Mailbox<HashSet<IpAddr>>,
 }

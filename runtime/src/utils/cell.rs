@@ -263,3 +263,15 @@ where
 }
 
 impl<C> ReasonablyRealtime for Cell<C> where C: ReasonablyRealtime {}
+
+impl<C> crate::Resolver for Cell<C>
+where
+    C: crate::Resolver,
+{
+    fn resolve(
+        &self,
+        host: &str,
+    ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, crate::Error>> + Send {
+        self.as_ref().resolve(host)
+    }
+}

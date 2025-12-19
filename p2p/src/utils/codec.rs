@@ -1,8 +1,8 @@
 //! Codec wrapper for [Sender] and [Receiver].
 
-use crate::{Receiver, Recipients, Sender};
-use bytes::Bytes;
+use crate::{CheckedSender, Receiver, Recipients, Sender};
 use commonware_codec::{Codec, Error};
+use std::time::SystemTime;
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
 pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
@@ -23,7 +23,6 @@ pub type WrappedMessage<P, V> = (P, Result<V, Error>);
 #[derive(Clone)]
 pub struct WrappedSender<S: Sender, V: Codec> {
     sender: S,
-
     _phantom_v: std::marker::PhantomData<V>,
 }
 
@@ -42,11 +41,43 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         recipients: Recipients<S::PublicKey>,
         message: V,
         priority: bool,
-    ) -> Result<Vec<S::PublicKey>, S::Error> {
+    ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
         let encoded = message.encode();
         self.sender
-            .send(recipients, Bytes::from(encoded), priority)
+            .send(recipients, encoded.freeze(), priority)
             .await
+    }
+
+    /// Check if a message can be sent to a set of recipients, returning a [CheckedWrappedSender]
+    /// or the time at which the send can be retried.
+    pub async fn check(
+        &mut self,
+        recipients: Recipients<S::PublicKey>,
+    ) -> Result<CheckedWrappedSender<'_, S, V>, SystemTime> {
+        self.sender
+            .check(recipients)
+            .await
+            .map(|checked| CheckedWrappedSender {
+                sender: checked,
+                _phantom_v: std::marker::PhantomData,
+            })
+    }
+}
+
+#[derive(Debug)]
+pub struct CheckedWrappedSender<'a, S: Sender, V: Codec> {
+    sender: S::Checked<'a>,
+    _phantom_v: std::marker::PhantomData<V>,
+}
+
+impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
+    pub async fn send(
+        self,
+        message: V,
+        priority: bool,
+    ) -> Result<Vec<S::PublicKey>, <S::Checked<'a> as CheckedSender>::Error> {
+        let encoded = message.encode();
+        self.sender.send(encoded.freeze(), priority).await
     }
 }
 
@@ -54,7 +85,6 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
 pub struct WrappedReceiver<R: Receiver, V: Codec> {
     config: V::Cfg,
     receiver: R,
-
     _phantom_v: std::marker::PhantomData<V>,
 }
 

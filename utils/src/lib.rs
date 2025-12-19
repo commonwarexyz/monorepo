@@ -28,9 +28,12 @@ pub mod bitmap;
 #[cfg(feature = "std")]
 pub mod channels;
 pub mod hex_literal;
+pub mod hostname;
+pub use hostname::Hostname;
 #[cfg(feature = "std")]
 pub mod net;
 pub mod ordered;
+pub mod vec;
 
 /// A type that can be constructed from an iterator, possibly failing.
 pub trait TryFromIterator<T>: Sized {

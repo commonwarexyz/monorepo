@@ -1,4 +1,4 @@
-//! An append-only log for storing fixed length items on disk.
+//! An append-only log for storing fixed length _items_ on disk.
 //!
 //! In addition to replay, stored items can be fetched directly by their `position` in the journal,
 //! where position is defined as the item's order of insertion starting from 0, unaffected by

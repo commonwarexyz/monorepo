@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     mmr::{self, hasher::Standard, MAX_LOCATION},
     qmdb::{
-        any::{unordered::variable::Any, VariableConfig as Config},
+        any::{unordered::variable::Db, VariableConfig as Config},
         store::CleanStore as _,
         verify_proof,
     },
@@ -159,7 +159,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
+        let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
             context.clone(),
             test_config("qmdb_any_variable_fuzz_test"),
         )
@@ -273,7 +273,7 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("Simulate failure should not fail");
 
-                    db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
+                    db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
                         context.clone(),
                         test_config("src"),
                     )

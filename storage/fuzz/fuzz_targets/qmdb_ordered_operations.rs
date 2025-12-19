@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     mmr::{Location, Position, Proof, StandardHasher as Standard},
     qmdb::{
-        any::{ordered::fixed::Any, FixedConfig as Config},
+        any::{ordered::fixed::Db, FixedConfig as Config},
         store::CleanStore as _,
         verify_proof,
     },
@@ -82,7 +82,7 @@ fn fuzz(data: FuzzInput) {
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
 
-        let mut db = Any::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
+        let mut db = Db::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
             .await
             .expect("init qmdb");
 

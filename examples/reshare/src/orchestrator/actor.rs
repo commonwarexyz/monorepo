@@ -9,7 +9,9 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
     simplex::{
-        self, scheme,
+        self,
+        elector::Config as Elector,
+        scheme,
         types::{Certificate, Context},
     },
     types::{Epoch, EpochConfig, EpochStrategy, ViewDelta},
@@ -21,20 +23,19 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
-    Blocker, Receiver, Recipients, Sender,
+    Blocker, CheckedSender, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{NZUsize, NZU32};
+use commonware_utils::NZUsize;
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
 use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
-pub struct Config<B, V, C, H, A, S>
+pub struct Config<B, V, C, H, A, S, L>
 where
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
@@ -43,6 +44,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
+    L: Elector<S>,
 {
     pub oracle: B,
     pub application: A,
@@ -55,11 +57,13 @@ where
 
     // Partition prefix used for orchestrator metadata persistence
     pub partition_prefix: String,
+
+    pub _phantom: PhantomData<L>,
 }
 
-pub struct Actor<E, B, V, C, H, A, S>
+pub struct Actor<E, B, V, C, H, A, S, L>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
@@ -67,6 +71,7 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
+    L: Elector<S>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
@@ -81,11 +86,12 @@ where
     muxer_size: usize,
     partition_prefix: String,
     pool_ref: PoolRef,
+    _phantom: PhantomData<L>,
 }
 
-impl<E, B, V, C, H, A, S> Actor<E, B, V, C, H, A, S>
+impl<E, B, V, C, H, A, S, L> Actor<E, B, V, C, H, A, S, L>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
@@ -93,9 +99,13 @@ where
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
+    L: Elector<S>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
-    pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {
+    pub fn new(
+        context: E,
+        config: Config<B, V, C, H, A, S, L>,
+    ) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         let pool_ref = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));
 
@@ -111,6 +121,7 @@ where
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 pool_ref,
+                _phantom: PhantomData,
             },
             Mailbox::new(sender),
         )
@@ -211,6 +222,11 @@ where
                     continue;
                 }
 
+                let Ok(checked) = orchestrator_sender.check(Recipients::One(from.clone())).await else {
+                    debug!(%their_epoch, ?from, "recipient rate-limited, cannot respond yet.");
+                    continue;
+                };
+
                 // If we're not in the committee of the latest epoch we know about and we observe another
                 // participant that is ahead of us, send a message on the orchestrator channel to prompt
                 // them to send us the finalization of the epoch boundary block for our latest known epoch.
@@ -227,8 +243,7 @@ where
                 );
 
                 // Send the request to the orchestrator. This operation is best-effort.
-                if orchestrator_sender.send(
-                    Recipients::One(from),
+                if checked.send(
                     our_epoch.encode().freeze(),
                     true
                 ).await.is_err() {
@@ -350,10 +365,12 @@ where
         >,
     ) -> Handle<()> {
         // Start the new engine
+        let elector = L::default();
         let engine = simplex::Engine::new(
             self.context.with_label("consensus_engine"),
             simplex::Config {
                 scheme,
+                elector,
                 blocker: self.oracle.clone(),
                 automaton: self.application.clone(),
                 relay: self.application.clone(),
@@ -371,7 +388,6 @@ where
                 activity_timeout: ViewDelta::new(256),
                 skip_timeout: ViewDelta::new(10),
                 fetch_concurrent: 32,
-                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 buffer_pool: self.pool_ref.clone(),
             },
         );

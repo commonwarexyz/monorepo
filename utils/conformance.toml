@@ -6,6 +6,10 @@ hash = "c49f13e5df245eb2343e64a24eaa4dc9d9b6f698dcc50622953216a44302dc86"
 n_cases = 65536
 hash = "07161626ba27702dd0c4699ac8bc20bf0d2c8fb6e378644b7899af0d4a060dbd"
 
+["commonware_utils::hostname::tests::conformance::CodecConformance<Hostname>"]
+n_cases = 65536
+hash = "7e48234785aa28a959d63b7e477ac404cc07930c159501b2f7303ff461036fd0"
+
 ["commonware_utils::ordered::test::conformance::CodecConformance<BiMap<u32,u32>>"]
 n_cases = 65536
 hash = "256ec1e04a9ad4b493d52f559f6c4142592e4642937e04ade19edc19d088046e"

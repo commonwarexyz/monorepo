@@ -22,7 +22,7 @@
 //! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). If
 //! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
 
-use crate::{simplex::types::Subject, types::Round};
+use crate::simplex::types::Subject;
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{certificate, Digest};
@@ -41,32 +41,17 @@ impl<'a, D: Digest> certificate::Subject for Subject<'a, D> {
     }
 }
 
-/// Extension trait for schemes that can derive randomness from certificates.
-///
-/// Some signing schemes (like [`bls12381_threshold`]) produce certificates that contain
-/// embedded randomness which can be extracted and used for leader election or other
-/// protocol-level randomness requirements. This trait provides a uniform interface for
-/// extracting that randomness when available.
-///
-/// Schemes that do not support embedded randomness (like [`ed25519`] and [`bls12381_multisig`])
-/// implement this trait but return `None` from [`SeededScheme::seed`].
-pub trait SeededScheme: certificate::Scheme {
-    /// Randomness seed derived from a certificate, if the scheme supports it.
-    type Seed: Clone + Encode + Send;
-
-    /// Extracts randomness seed, if provided by the scheme, derived from the certificate
-    /// for the given round.
-    fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed>;
-}
-
 /// Marker trait for signing schemes compatible with `simplex`.
 ///
 /// This trait binds a [`certificate::Scheme`] to the [`Subject`] subject type
 /// used by the simplex protocol. It is automatically implemented for any scheme
 /// whose subject type matches `Subject<'a, D>`.
-pub trait Scheme<D: Digest>: for<'a> SeededScheme<Subject<'a, D> = Subject<'a, D>> {}
+pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = Subject<'a, D>> {}
 
-impl<D: Digest, S> Scheme<D> for S where S: for<'a> SeededScheme<Subject<'a, D> = Subject<'a, D>> {}
+impl<D: Digest, S> Scheme<D> for S where
+    S: for<'a> certificate::Scheme<Subject<'a, D> = Subject<'a, D>>
+{
+}
 
 // Constants for domain separation in signature verification
 // These are used to prevent cross-protocol attacks and message-type confusion

@@ -30,6 +30,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{ordered::Set, Acknowledgement as _, NZU32};
 use futures::{channel::mpsc, StreamExt};
+use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
 use std::num::NonZeroU32;
 use tracing::{debug, info, warn};
@@ -109,6 +110,11 @@ where
     signer: C,
     peer_config: PeerConfig<C::PublicKey>,
     partition_prefix: String,
+
+    successful_epochs: Counter,
+    failed_epochs: Counter,
+    our_reveals: Counter,
+    all_reveals: Counter,
 }
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
@@ -121,7 +127,23 @@ where
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub async fn init(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
+        // Create mailbox
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+
+        // Create metrics
+        let successful_epochs = Counter::default();
+        let failed_epochs = Counter::default();
+        let our_reveals = Counter::default();
+        let all_reveals = Counter::default();
+        context.register(
+            "successful_epochs",
+            "successful epochs",
+            successful_epochs.clone(),
+        );
+        context.register("failed_epochs", "failed epochs", failed_epochs.clone());
+        context.register("our_reveals", "our share was revealed", our_reveals.clone());
+        context.register("all_reveals", "all share reveals", all_reveals.clone());
+
         (
             Self {
                 context: ContextCell::new(context),
@@ -130,6 +152,11 @@ where
                 signer: config.signer,
                 peer_config: config.peer_config,
                 partition_prefix: config.partition_prefix,
+
+                successful_epochs,
+                failed_epochs,
+                our_reveals,
+                all_reveals,
             },
             Mailbox::new(sender),
         )
@@ -473,8 +500,18 @@ where
                                 };
                             if success {
                                 info!(?epoch, "epoch succeeded");
+                                self.successful_epochs.inc();
+
+                                // Record reveals
+                                let output = next_output.as_ref().expect("output exists on success");
+                                let revealed = output.revealed();
+                                self.all_reveals.inc_by(revealed.len() as u64);
+                                if revealed.position(&self_pk).is_some() {
+                                    self.our_reveals.inc();
+                                }
                             } else {
                                 warn!(?epoch, "epoch failed");
+                                self.failed_epochs.inc();
                             }
                             storage
                                 .append_epoch(EpochState {

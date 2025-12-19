@@ -155,41 +155,30 @@ impl<T: Translator, V: Eq> Ordered for Index<T, V> {
     where
         Self: 'a;
 
-    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
+    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
     where
         Self::Value: 'a,
     {
         let res = self.prev_translated_key_no_cycle(key);
-        if res.is_some() {
-            return res;
+        if let Some(res) = res {
+            return Some((res, false));
         }
 
-        self.last_translated_key()
+        self.last_translated_key().map(|res| (res, true))
     }
 
-    /// Get the values associated with the translated key that lexicographically follows the result
-    /// of translating `key`.
-    ///
-    /// For example, if the translator is looking only at the first byte of a key, and the index
-    /// contains values for translated keys 0b, 1c, and 2d, then `get_next([0b, 01, 02, ...])` would
-    /// return the values associated with 1c, `get_next([2a, 01, 02, ...])` would return the values
-    /// associated with 2d, and `get_next([2d])` would return `None`. Because values associated with
-    /// the same translated key can appear in any order, keys with the same first byte in this
-    /// example would need to be ordered by the caller if a full ordering over the untranslated
-    /// keyspace is desired.
-    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
+    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
     where
         Self::Value: 'a,
     {
         let res = self.next_translated_key_no_cycle(key);
-        if res.is_some() {
-            return res;
+        if let Some(res) = res {
+            return Some((res, false));
         }
 
-        self.first_translated_key()
+        self.first_translated_key().map(|res| (res, true))
     }
 
-    /// Get the values associated with the lexicographically first translated key.
     fn first_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
     where
         Self::Value: 'a,
@@ -199,7 +188,6 @@ impl<T: Translator, V: Eq> Ordered for Index<T, V> {
             .map(|(_, record)| ImmutableCursor::new(record))
     }
 
-    /// Get the values associated with the lexicographically last translated key.
     fn last_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
     where
         Self::Value: 'a,
@@ -389,55 +377,65 @@ mod tests {
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x00 is 0b.
-            let mut next = index.next_translated_key(&[0x00]).unwrap();
+            let (mut next, wrapped) = index.next_translated_key(&[0x00]).unwrap();
+            assert!(!wrapped);
             assert_eq!(next.next().unwrap(), &1);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x0b is 1c.
-            let mut next = index.next_translated_key(&hex!("0x0b0102")).unwrap();
+            let (mut next, wrapped) = index.next_translated_key(&hex!("0x0b0102")).unwrap();
+            assert!(!wrapped);
             assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x1b is 1c.
-            let mut next = index.next_translated_key(&hex!("0x1b010203")).unwrap();
+            let (mut next, wrapped) = index.next_translated_key(&hex!("0x1b010203")).unwrap();
+            assert!(!wrapped);
             assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x2a is 2d.
-            let mut next = index.next_translated_key(&hex!("0x2a01020304")).unwrap();
+            let (mut next, wrapped) = index.next_translated_key(&hex!("0x2a01020304")).unwrap();
+            assert!(!wrapped);
             assert_eq!(next.next().unwrap(), &3);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x2d cycles around to 0x0b.
-            let mut next = index.next_translated_key(k3).unwrap();
+            let (mut next, wrapped) = index.next_translated_key(k3).unwrap();
+            assert!(wrapped);
             assert_eq!(next.next().unwrap(), &1);
             assert_eq!(next.next(), None);
 
             // Another cycle-around case.
-            let mut next = index.next_translated_key(&hex!("0x2eFF")).unwrap();
+            let (mut next, wrapped) = index.next_translated_key(&hex!("0x2eFF")).unwrap();
+            assert!(wrapped);
             assert_eq!(next.next().unwrap(), &1);
             assert_eq!(next.next(), None);
 
             // Previous translated key of first key is the last key.
-            let mut prev = index.prev_translated_key(k1).unwrap();
+            let (mut prev, wrapped) = index.prev_translated_key(k1).unwrap();
+            assert!(wrapped);
             assert_eq!(prev.next().unwrap(), &3);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 0b.
-            let mut prev = index.prev_translated_key(&hex!("0x0c0102")).unwrap();
+            let (mut prev, wrapped) = index.prev_translated_key(&hex!("0x0c0102")).unwrap();
+            assert!(!wrapped);
             assert_eq!(prev.next().unwrap(), &1);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 1c.
-            let mut prev = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
+            let (mut prev, wrapped) = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
+            assert!(!wrapped);
             assert_eq!(prev.next().unwrap(), &21);
             assert_eq!(prev.next().unwrap(), &22);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 2d.
-            let mut prev = index.prev_translated_key(&hex!("0xCC0102")).unwrap();
+            let (mut prev, wrapped) = index.prev_translated_key(&hex!("0xCC0102")).unwrap();
+            assert!(!wrapped);
             assert_eq!(prev.next().unwrap(), &3);
             assert_eq!(prev.next(), None);
 

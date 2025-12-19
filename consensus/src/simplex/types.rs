@@ -867,8 +867,9 @@ where
 /// Aggregated notarization certificate recovered from notarize votes.
 /// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
 ///
-/// Some signing schemes embed an additional randomness seed in the certificate (used for
-/// leader rotation), it can be accessed via [`super::scheme::SeededScheme::seed`].
+/// Some signing schemes (like [`super::scheme::bls12381_threshold`]) embed an additional
+/// randomness seed in the certificate. For threshold signatures, the seed can be accessed
+/// via [`super::scheme::bls12381_threshold::Seedable::seed`].
 #[derive(Clone, Debug)]
 pub struct Notarization<S: Scheme, D: Digest> {
     /// The proposal that has been notarized.
@@ -1339,8 +1340,9 @@ where
 /// Aggregated finalization certificate recovered from finalize votes.
 /// When a proposal is finalized, it becomes the canonical block for its view.
 ///
-/// Some signing schemes embed an additional randomness seed in the certificate (used for
-/// leader rotation), it can be accessed via [`super::scheme::SeededScheme::seed`].
+/// Some signing schemes (like [`super::scheme::bls12381_threshold`]) embed an additional
+/// randomness seed in the certificate. For threshold signatures, the seed can be accessed
+/// via [`super::scheme::bls12381_threshold::Seedable::seed`].
 #[derive(Clone, Debug)]
 pub struct Finalization<S: Scheme, D: Digest> {
     /// The proposal that has been finalized.

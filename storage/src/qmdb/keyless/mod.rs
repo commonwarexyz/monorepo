@@ -417,7 +417,7 @@ mod test {
         }
     }
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
+    /// A type alias for the concrete [Keyless] type used in these unit tests.
     type Db = Keyless<deterministic::Context, Vec<u8>, Sha256, Clean<<Sha256 as Hasher>::Digest>>;
 
     /// Return a [Keyless] database initialized with a fixed config.

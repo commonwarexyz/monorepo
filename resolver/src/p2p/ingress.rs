@@ -1,6 +1,6 @@
 use crate::Resolver;
 use commonware_cryptography::PublicKey;
-use commonware_utils::Span;
+use commonware_utils::{vec::NonEmptyVec, Span};
 use futures::{channel::mpsc, SinkExt};
 
 type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
@@ -12,8 +12,8 @@ pub struct FetchRequest<K, P> {
     /// Target peers to restrict the fetch to.
     ///
     /// - `None`: No targeting (or clear existing targeting), try any available peer
-    /// - `Some(peers)`: Only try the specified peers (must be non-empty)
-    pub targets: Option<Vec<P>>,
+    /// - `Some(peers)`: Only try the specified peers
+    pub targets: Option<NonEmptyVec<P>>,
 }
 
 /// Messages that can be sent to the peer actor.
@@ -125,15 +125,7 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// Targets are automatically cleared when the fetch succeeds or is canceled.
     /// When a peer is blocked (sent invalid data), only that peer is removed
     /// from the target set.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `targets` is empty or if the send fails.
-    pub async fn fetch_targeted(&mut self, key: K, targets: Vec<P>) {
-        assert!(
-            !targets.is_empty(),
-            "targets must not be empty; use fetch() for untargeted requests"
-        );
+    pub async fn fetch_targeted(&mut self, key: K, targets: NonEmptyVec<P>) {
         self.sender
             .send(Message::Fetch(vec![FetchRequest {
                 key,
@@ -146,25 +138,14 @@ impl<K: Span, P: PublicKey> Mailbox<K, P> {
     /// Send fetch requests for multiple keys, each with their own targets.
     ///
     /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any `targets` is empty or if the send fails.
-    pub async fn fetch_all_targeted(&mut self, requests: Vec<(K, Vec<P>)>) {
+    pub async fn fetch_all_targeted(&mut self, requests: Vec<(K, NonEmptyVec<P>)>) {
         self.sender
             .send(Message::Fetch(
                 requests
                     .into_iter()
-                    .map(|(key, targets)| {
-                        assert!(
-                            !targets.is_empty(),
-                            "targets must not be empty; use fetch() for untargeted requests"
-                        );
-
-                        FetchRequest {
-                            key,
-                            targets: Some(targets),
-                        }
+                    .map(|(key, targets)| FetchRequest {
+                        key,
+                        targets: Some(targets),
                     })
                     .collect(),
             ))

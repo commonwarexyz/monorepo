@@ -126,14 +126,12 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
-        utils::requester,
         Manager,
     };
-    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_storage::archive::immutable;
     use commonware_utils::{NZUsize, NZU64};
     use futures::StreamExt;
-    use governor::Quota;
     use rand::{
         seq::{IteratorRandom, SliceRandom},
         Rng,
@@ -173,12 +171,13 @@ mod tests {
 
     async fn setup_validator(
         context: deterministic::Context,
-        oracle: &mut Oracle<K>,
+        oracle: &mut Oracle<K, deterministic::Context>,
         validator: K,
         provider: P,
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
+        u64,
     ) {
         let config = Config {
             provider,
@@ -203,12 +202,8 @@ mod tests {
             manager: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            requester_config: requester::Config {
-                me: Some(validator.clone()),
-                rate_limit: Quota::per_second(NonZeroU32::new(5).unwrap()),
-                initial: Duration::from_secs(1),
-                timeout: Duration::from_secs(2),
-            },
+            initial: Duration::from_secs(1),
+            timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
@@ -298,7 +293,7 @@ mod tests {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let (actor, mailbox) = actor::Actor::init(
+        let (actor, mailbox, processed_height) = actor::Actor::init(
             context.clone(),
             finalizations_by_height,
             finalized_blocks,
@@ -310,7 +305,7 @@ mod tests {
         // Start the application
         actor.start(application.clone(), buffer, resolver);
 
-        (application, mailbox)
+        (application, mailbox, processed_height)
     }
 
     fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
@@ -340,7 +335,7 @@ mod tests {
     fn setup_network(
         context: deterministic::Context,
         tracked_peer_sets: Option<usize>,
-    ) -> Oracle<K> {
+    ) -> Oracle<K, deterministic::Context> {
         let (network, oracle) = Network::new(
             context.with_label("network"),
             simulated::Config {
@@ -353,7 +348,11 @@ mod tests {
         oracle
     }
 
-    async fn setup_network_links(oracle: &mut Oracle<K>, peers: &[K], link: Link) {
+    async fn setup_network_links(
+        oracle: &mut Oracle<K, deterministic::Context>,
+        peers: &[K],
+        link: Link,
+    ) {
         for p1 in peers.iter() {
             for p2 in peers.iter() {
                 if p2 == p1 {
@@ -432,7 +431,7 @@ mod tests {
                 .update(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate() {
-                let (application, actor) = setup_validator(
+                let (application, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
@@ -583,7 +582,7 @@ mod tests {
                 .update(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate().skip(1) {
-                let (application, actor) = setup_validator(
+                let (application, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
@@ -672,7 +671,7 @@ mod tests {
 
             // Create the first validator now that all blocks have been finalized by the others.
             let validator = participants.first().unwrap();
-            let (app, mut actor) = setup_validator(
+            let (app, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 validator.clone(),
@@ -742,7 +741,7 @@ mod tests {
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor) = setup_validator(
+                let (_application, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
@@ -797,7 +796,7 @@ mod tests {
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor) = setup_validator(
+                let (_application, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
@@ -873,7 +872,7 @@ mod tests {
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor) = setup_validator(
+                let (_application, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
@@ -941,7 +940,7 @@ mod tests {
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor) = setup_validator(
+                let (_application, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
@@ -1052,7 +1051,7 @@ mod tests {
 
             // Single validator actor
             let me = participants[0].clone();
-            let (_application, mut actor) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
@@ -1112,7 +1111,7 @@ mod tests {
 
             // Single validator actor
             let me = participants[0].clone();
-            let (_application, mut actor) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
@@ -1193,7 +1192,7 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (application, mut actor) = setup_validator(
+            let (application, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
@@ -1252,7 +1251,7 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_application, mut actor) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
@@ -1310,7 +1309,7 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_application, mut actor) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
@@ -1364,7 +1363,7 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_application, mut actor) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
@@ -1449,7 +1448,7 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_base_app, marshal) = setup_validator(
+            let (_base_app, marshal, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me.clone(),
@@ -1581,7 +1580,7 @@ mod tests {
             // Set up two validators
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate().take(2) {
-                let (_app, actor) = setup_validator(
+                let (_app, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
@@ -1676,6 +1675,75 @@ mod tests {
             // Validator 1 should still have the original finalization (v2)
             let fin0_after = actors[1].get_finalization(1).await.unwrap();
             assert_eq!(fin0_after.round().view(), View::new(2));
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_init_processed_height() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+
+            // Test 1: Fresh init should return processed height 0
+            let me = participants[0].clone();
+            let (application, mut actor, initial_height) = setup_validator(
+                context.with_label("validator-0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            assert_eq!(initial_height, 0);
+
+            // Process multiple blocks (1, 2, 3)
+            let mut parent = Sha256::hash(b"");
+            let mut blocks = Vec::new();
+            for i in 1..=3 {
+                let block = B::new::<Sha256>(parent, i, i);
+                let commitment = block.digest();
+                let round = Round::new(Epoch::new(0), View::new(i));
+
+                actor.verified(round, block.clone()).await;
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i - 1),
+                    payload: commitment,
+                };
+                let finalization = make_finalization(proposal, &schemes, QUORUM);
+                actor.report(Activity::Finalization(finalization)).await;
+
+                blocks.push(block);
+                parent = commitment;
+            }
+
+            // Wait for application to process all blocks
+            while application.blocks().len() < 3 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Set marshal's processed height to 3
+            actor.set_floor(3).await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Verify application received all blocks
+            assert_eq!(application.blocks().len(), 3);
+            assert_eq!(application.tip(), Some((3, blocks[2].digest())));
+
+            // Test 2: Restart with marshal processed height = 3
+            let (_restart_application, _restart_actor, restart_height) = setup_validator(
+                context.with_label("validator-0-restart"),
+                &mut oracle,
+                me,
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            assert_eq!(restart_height, 3);
         })
     }
 
