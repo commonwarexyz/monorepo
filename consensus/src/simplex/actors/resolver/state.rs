@@ -6,7 +6,7 @@ use crate::{
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::Resolver;
 use commonware_utils::sequence::U64;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Tracks all known certificates from the last
 /// certified notarization or finalized view to the current view.
@@ -27,7 +27,7 @@ pub struct State<S: Scheme, D: Digest> {
     /// Maps notarization view -> request views it satisfied.
     /// When a higher-view notarization satisfies a lower-view request,
     /// we track it here so we can re-request on certification failure.
-    satisfied_by: HashMap<View, HashSet<View>>,
+    satisfied_by: HashMap<View, BTreeSet<View>>,
     /// Views where certification has failed. Only nullifications
     /// are accepted for these views.
     failed_views: HashSet<View>,
