@@ -1682,7 +1682,7 @@ mod tests {
             // Test 1: Fresh init should return processed height 0
             let me = participants[0].clone();
             let (application, mut actor, initial_height) = setup_validator(
-                context.with_label("validator-0"),
+                context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1726,7 +1726,7 @@ mod tests {
 
             // Test 2: Restart with marshal processed height = 3
             let (_restart_application, _restart_actor, restart_height) = setup_validator(
-                context.with_label("validator-0-restart"),
+                context.with_label("validator_0_restart"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),

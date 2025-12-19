@@ -5267,7 +5267,7 @@ mod tests {
                         (resolver_sender_secondary, resolver_receiver_secondary),
                     ),
                 ] {
-                    let label = format!("twin-{idx}-{twin_label}");
+                    let label = format!("twin_{idx}_{twin_label}");
                     let context = context.with_label(&label);
 
                     let reporter_config = mocks::reporter::Config {
@@ -5325,7 +5325,7 @@ mod tests {
 
             // Create honest engines
             for (idx, validator) in participants.iter().enumerate().skip(faults as usize) {
-                let label = format!("honest-{idx}");
+                let label = format!("honest_{idx}");
                 let context = context.with_label(&label);
 
                 let reporter_config = mocks::reporter::Config {

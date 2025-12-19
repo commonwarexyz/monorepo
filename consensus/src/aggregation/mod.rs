@@ -436,7 +436,8 @@ mod tests {
 
                     // Spawn validator engines
                     for (idx, participant) in fixture.participants.iter().enumerate() {
-                        let validator_context = context.with_label(&format!("participant_{participant}"));
+                        let validator_context =
+                            context.with_label(&format!("participant_{participant}"));
 
                         // Create Provider and register scheme for epoch
                         let provider = mocks::Provider::new();
@@ -585,7 +586,8 @@ mod tests {
 
                 // Start validator engines with Skip strategy for skip_index
                 for (idx, participant) in fixture.participants.iter().enumerate() {
-                    let validator_context = context.with_label(&format!("participant_{participant}"));
+                    let validator_context =
+                        context.with_label(&format!("participant_{participant}"));
 
                     // Create Provider and register scheme for epoch
                     let provider = mocks::Provider::new();
@@ -668,7 +670,8 @@ mod tests {
 
                 // Start validator engines with Correct strategy (will sign everything now)
                 for (idx, participant) in fixture.participants.iter().enumerate() {
-                    let validator_context = context.with_label(&format!("participant_{participant}"));
+                    let validator_context =
+                        context.with_label(&format!("participant_{participant}"));
 
                     // Create Provider and register scheme for epoch
                     let provider = mocks::Provider::new();

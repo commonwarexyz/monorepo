@@ -249,7 +249,7 @@ impl NetworkScheme for Discovery {
 
         // Create the network and oracle for controlling it
         let (mut network, mut oracle) =
-            discovery::Network::new(context.with_label("fuzzed-discovery-network"), config);
+            discovery::Network::new(context.with_label("fuzzed_discovery_network"), config);
 
         // Pre-register some peer subsets to seed the network
         // Each index gets a randomized subset of 3 peers
@@ -318,7 +318,7 @@ impl NetworkScheme for Lookup {
 
         // Create the network and oracle
         let (mut network, mut oracle) =
-            LookupNetwork::new(context.with_label("fuzzed-lookup-network"), config);
+            LookupNetwork::new(context.with_label("fuzzed_lookup_network"), config);
 
         // For lookup, we must provide both public keys AND addresses
         // (unlike discovery which finds addresses through the protocol)
