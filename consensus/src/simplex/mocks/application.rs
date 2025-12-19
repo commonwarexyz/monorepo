@@ -10,7 +10,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
@@ -19,10 +19,11 @@ use futures::{
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
+use tracing::debug;
 
 pub enum Message<D: Digest, P: PublicKey> {
     Genesis {
@@ -124,10 +125,6 @@ impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
 const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
-
-enum Waiter<D: Digest, P: PublicKey> {
-    Verify(Context<D, P>, oneshot::Sender<bool>),
-}
 
 /// Predicate to determine whether a payload should be certified.
 /// Returning true means certify, false means reject.
@@ -323,65 +320,63 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
     async fn run(mut self) {
         // Setup digest tracking
         #[allow(clippy::type_complexity)]
-        let mut waiters: BTreeMap<H::Digest, Vec<Waiter<H::Digest, P>>> = BTreeMap::new();
+        let mut waiters: HashMap<
+            H::Digest,
+            Vec<(Context<H::Digest, P>, oneshot::Sender<bool>)>,
+        > = HashMap::new();
         let mut seen: HashMap<H::Digest, Bytes> = HashMap::new();
 
         // Handle actions
-        loop {
-            // Request any missing payloads
-            for payload in waiters.keys() {
-                self.relay.request(*payload, self.me.clone()).await;
-            }
-
-            // Wait for a message or a broadcast
-            select! {
-                message = self.mailbox.next() => {
-                    let message = match message {
-                        Some(message) => message,
-                        None => break,
-                    };
-                    match message {
-                        Message::Genesis { epoch, response } => {
-                            let digest = self.genesis(epoch);
-                            let _ = response.send(digest);
-                        }
-                        Message::Propose { context, response } => {
-                            let digest = self.propose(context).await;
-                            let _ = response.send(digest);
-                        }
-                        Message::Verify { context, payload, response } => {
-                            if let Some(contents) = seen.get(&payload) {
-                                let verified = self.verify(context, payload, contents.clone()).await;
-                                let _ = response.send(verified);
-                            } else {
-                                waiters
-                                    .entry(payload)
-                                    .or_default()
-                                    .push(Waiter::Verify(context, response));
-                            }
-                        }
-                        Message::Certify { payload, response } => {
-                            let contents = seen.get(&payload).cloned().unwrap_or_default();
-                            let certified = self.certify(payload, contents).await;
-                            let _ = response.send(certified);
-                        }
-                        Message::Broadcast { payload } => {
-                            self.broadcast(payload).await;
+        select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("context shutdown, stopping application");
+            },
+            message = self.mailbox.next() => {
+                let message = match message {
+                    Some(message) => message,
+                    None => break,
+                };
+                match message {
+                    Message::Genesis { epoch, response } => {
+                        let digest = self.genesis(epoch);
+                        let _ = response.send(digest);
+                    }
+                    Message::Propose { context, response } => {
+                        let digest = self.propose(context).await;
+                        let _ = response.send(digest);
+                    }
+                    Message::Verify { context, payload, response } => {
+                        if let Some(contents) = seen.get(&payload) {
+                            let verified = self.verify(context, payload, contents.clone()).await;
+                            let _ = response.send(verified);
+                        } else {
+                            waiters
+                                .entry(payload)
+                                .or_default()
+                                .push((context, response));
                         }
                     }
-                },
-                broadcast = self.broadcast.next() => {
-                    // Record digest for future use
-                    let (digest, contents) = broadcast.expect("broadcast closed");
-                    seen.insert(digest, contents.clone());
+                    Message::Certify { payload, response } => {
+                        let contents = seen.get(&payload).cloned().unwrap_or_default();
+                        let certified = self.certify(payload, contents).await;
+                        let _ = response.send(certified);
+                    }
+                    Message::Broadcast { payload } => {
+                        self.broadcast(payload).await;
+                    }
+                }
+            },
+            broadcast = self.broadcast.next() => {
+                // Record digest for future use
+                let (digest, contents) = broadcast.expect("broadcast closed");
+                seen.insert(digest, contents.clone());
 
-                    // Check if we have a waiter
-                    if let Some(waiters) = waiters.remove(&digest) {
-                        for waiter in waiters {
-                            let Waiter::Verify(context, sender) = waiter;
-                            let success = self.verify(context, digest, contents.clone()).await;
-                            let _ = sender.send(success);
-                        }
+                // Check if we have a waiter
+                if let Some(waiters) = waiters.remove(&digest) {
+                    for (context, sender) in waiters {
+                        let verified = self.verify(context, digest, contents.clone()).await;
+                        sender.send(verified).expect("Failed to send verification");
                     }
                 }
             }
