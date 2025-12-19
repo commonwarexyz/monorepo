@@ -854,6 +854,46 @@ mod test {
     }
 
     #[test_group("slow")]
+    #[test_traced("DEBUG")]
+    fn dkg_single_participant_single_epoch() {
+        Plan {
+            seed: 0,
+            total: 1,
+            per_round: vec![1],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Dkg,
+            crash: None,
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("DEBUG")]
+    fn reshare_single_participant_two_epochs() {
+        Plan {
+            seed: 0,
+            total: 1,
+            per_round: vec![1],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(2),
+            crash: None,
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn reshare_single_epoch() {
         Plan {
