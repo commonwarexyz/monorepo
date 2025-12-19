@@ -84,6 +84,16 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// A channel to send the retrieved finalization.
         response: oneshot::Sender<Option<Finalization<S, B::Commitment>>>,
     },
+    /// A request to fetch a finalization by height from the network.
+    ///
+    /// Unlike [Self::GetFinalization] which only checks local storage, this triggers
+    /// a network fetch if the finalization is not available locally.
+    FetchFinalization {
+        /// The height of the finalization to fetch.
+        height: u64,
+        /// A channel to send the retrieved finalization once available.
+        response: oneshot::Sender<Option<Finalization<S, B::Commitment>>>,
+    },
     /// A request to retrieve a block by its commitment.
     Subscribe {
         /// The view in which the block was notarized. This is an optimization
@@ -219,6 +229,38 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         })
     }
 
+    /// Fetches a [Finalization] by height, triggering a network fetch if not locally available.
+    ///
+    /// Unlike [get_finalization](Self::get_finalization) which only checks local storage,
+    /// this method will request the finalization from the network via the resolver if it
+    /// is not available locally. The returned finalization has been validated by marshal
+    /// to ensure the block height matches the requested height and the cryptographic
+    /// signature is valid.
+    ///
+    /// Returns `None` if the fetch fails or times out (caller should retry).
+    pub async fn fetch_finalization(
+        &mut self,
+        height: u64,
+    ) -> Option<Finalization<S, B::Commitment>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::FetchFinalization {
+                height,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            error!("failed to send fetch finalization message to actor: receiver dropped");
+            return None;
+        }
+        rx.await.unwrap_or_else(|_| {
+            error!("failed to fetch finalization: receiver dropped");
+            None
+        })
+    }
+
     /// A request to retrieve a block by its commitment.
     ///
     /// If the block is found available locally, the block will be returned immediately.
@@ -305,6 +347,7 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         }
     }
 
+    // TODO: remove
     /// Notifies the actor of a verified [`Finalization`].
     ///
     /// This is a trusted call that injects a finalization directly into marshal. The
