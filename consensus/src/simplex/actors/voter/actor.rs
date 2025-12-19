@@ -840,8 +840,10 @@ impl<
                 pending_verify = self.try_verify().await;
             }
 
-            // Attempt to certify any views that we have notarizations for
-            for v in take(&mut self.certification_candidates) {
+            // Attempt to certify any views that we have notarizations for.
+            // Use split_off to only process views above last_finalized to handle edge cases
+            // where finalization arrives between iterations.
+            for v in take(&mut self.certification_candidates).split_off(&self.state.last_finalized().next()) {
                 debug!(%v, "taking certification candidate");
                 match self.try_certify(v).await {
                     CertifyResult::Ready(Request(ctx, receiver)) => {
