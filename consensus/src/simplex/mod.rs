@@ -3148,7 +3148,7 @@ mod tests {
 
             // Check equivocator blocking (we aren't guaranteed a fault will be produced
             // because it may not be possible to extract a conflicting vote from the certificate
-            // we receive, depending on message ordering)
+            // we receive)
             let byz = &participants[0];
             let blocked = oracle.blocked().await.unwrap();
             for (a, b) in &blocked {

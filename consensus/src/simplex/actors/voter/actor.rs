@@ -849,7 +849,9 @@ impl<
             // Attempt to certify any views that we have notarizations for.
             // Use split_off to only process views above last_finalized to handle edge cases
             // where finalization arrives between iterations.
-            for v in take(&mut self.certification_candidates).split_off(&self.state.last_finalized().next()) {
+            for v in take(&mut self.certification_candidates)
+                .split_off(&self.state.last_finalized().next())
+            {
                 debug!(%v, "taking certification candidate");
                 if let Some(Request(ctx, receiver)) = self.try_certify(v).await {
                     let view = ctx.view();
