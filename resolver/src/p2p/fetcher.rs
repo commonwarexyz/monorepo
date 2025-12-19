@@ -537,6 +537,11 @@ where
         self.waiter = None;
     }
 
+    /// Returns whether a key has targets set.
+    pub fn has_targets(&self, key: &Key) -> bool {
+        self.targets.contains_key(key)
+    }
+
     /// Returns the number of fetches.
     pub fn len(&self) -> usize {
         self.pending.len() + self.requests.len()
