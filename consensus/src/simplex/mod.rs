@@ -130,9 +130,9 @@
 //!
 //! ### Fetching Missing Certificates
 //!
-//! Instead of trying to fetch all possible certificates above the last finalized view, we only attempt to fetch
-//! nullifications for all views from the last finalized view to the current view. This technique, however,
-//! is not sufficient to guarantee progress.
+//! Instead of trying to fetch all possible certificates above the floor, we only attempt to fetch
+//! nullifications for all views from the floor (last certified notarization or finalization) to the current view.
+//! This technique, however, is not sufficient to guarantee progress.
 //!
 //! Consider the case where `f` honest participants have seen a finalization for a given view `v` (and nullifications only
 //! from `v` to the current view `c`) but the remaining `f+1` honest participants have not (they have exclusively seen
