@@ -14,11 +14,6 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
-/// Location of a record in `Journal`.
-struct Location {
-    offset: u32,
-}
-
 /// Record stored in the `Archive`.
 struct Record<K: Array, V: Codec> {
     index: u64,
@@ -86,7 +81,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     // to its corresponding index. To avoid iterating over this keys map during pruning, we map said
     // indexes to their locations in the journal.
     keys: Index<T, u64>,
-    indices: BTreeMap<u64, Location>,
+    indices: BTreeMap<u64, u32>,
     intervals: RMap,
 
     items_tracked: Gauge,
@@ -134,7 +129,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 let (_, offset, _, data) = result?;
 
                 // Store index
-                indices.insert(data.index, Location { offset });
+                indices.insert(data.index, offset);
 
                 // Store index in keys
                 keys.insert(&data.key, data.index);
@@ -195,14 +190,14 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         self.gets.inc();
 
         // Get index location
-        let location = match self.indices.get(&index) {
-            Some(offset) => offset,
+        let offset = match self.indices.get(&index) {
+            Some(offset) => *offset,
             None => return Ok(None),
         };
 
         // Fetch item from disk
         let section = self.section(index);
-        let record = self.journal.get(section, location.offset).await?;
+        let record = self.journal.get(section, offset).await?;
         Ok(Some(record.value))
     }
 
@@ -220,9 +215,9 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             }
 
             // Fetch item from disk
-            let location = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
+            let offset = *self.indices.get(index).ok_or(Error::RecordCorrupted)?;
             let section = self.section(*index);
-            let record = self.journal.get(section, location.offset).await?;
+            let record = self.journal.get(section, offset).await?;
 
             // Get key from item
             if record.key.as_ref() == key.as_ref() {
@@ -317,7 +312,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
         let (offset, _) = self.journal.append(section, record).await?;
 
         // Store index
-        self.indices.insert(index, Location { offset });
+        self.indices.insert(index, offset);
 
         // Store interval
         self.intervals.insert(index);

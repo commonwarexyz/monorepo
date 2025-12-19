@@ -11,11 +11,6 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
-/// Location of a record in `Journal`.
-struct Location {
-    offset: u32,
-}
-
 /// Record stored in the `Cache`.
 struct Record<V: Codec> {
     index: u64,
@@ -70,7 +65,7 @@ pub struct Cache<E: Storage + Metrics, V: Codec> {
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
-    indices: BTreeMap<u64, Location>,
+    indices: BTreeMap<u64, u32>,
     intervals: RMap,
 
     items_tracked: Gauge,
@@ -115,7 +110,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
                 let (_, offset, _, data) = result?;
 
                 // Store index
-                indices.insert(data.index, Location { offset });
+                indices.insert(data.index, offset);
 
                 // Store index in intervals
                 intervals.insert(data.index);
@@ -159,14 +154,14 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         self.gets.inc();
 
         // Get index location
-        let location = match self.indices.get(&index) {
-            Some(offset) => offset,
+        let offset = match self.indices.get(&index) {
+            Some(offset) => *offset,
             None => return Ok(None),
         };
 
         // Fetch item from disk
         let section = self.section(index);
-        let record = self.journal.get(section, location.offset).await?;
+        let record = self.journal.get(section, offset).await?;
         Ok(Some(record.value))
     }
 
@@ -269,7 +264,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         let (offset, _) = self.journal.append(section, record).await?;
 
         // Store index
-        self.indices.insert(index, Location { offset });
+        self.indices.insert(index, offset);
 
         // Add index to intervals
         self.intervals.insert(index);
