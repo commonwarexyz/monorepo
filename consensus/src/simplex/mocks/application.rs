@@ -127,7 +127,6 @@ type Latency = (f64, f64);
 
 enum Waiter<D: Digest, P: PublicKey> {
     Verify(Context<D, P>, oneshot::Sender<bool>),
-    Certify(D, oneshot::Sender<bool>),
 }
 
 /// Predicate to determine whether a payload should be certified.
@@ -362,15 +361,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                             }
                         }
                         Message::Certify { payload, response } => {
-                            if let Some(contents) = seen.get(&payload) {
-                                let certified = self.certify(payload, contents.clone()).await;
-                                let _ = response.send(certified);
-                            } else {
-                                waiters
-                                    .entry(payload)
-                                    .or_default()
-                                    .push(Waiter::Certify(payload, response));
-                            }
+                            let contents = seen.get(&payload).cloned().unwrap_or_default();
+                            let certified = self.certify(payload, contents).await;
+                            let _ = response.send(certified);
                         }
                         Message::Broadcast { payload } => {
                             self.broadcast(payload).await;
@@ -385,10 +378,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                     // Check if we have a waiter
                     if let Some(waiters) = waiters.remove(&digest) {
                         for waiter in waiters {
-                            let (success, sender) = match waiter {
-                                Waiter::Verify(context, sender) => (self.verify(context, digest, contents.clone()).await, sender),
-                                Waiter::Certify(payload, sender) => (self.certify(payload, contents.clone()).await, sender),
-                            };
+                            let Waiter::Verify(context, sender) = waiter;
+                            let success = self.verify(context, digest, contents.clone()).await;
                             let _ = sender.send(success);
                         }
                     }

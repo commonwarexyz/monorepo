@@ -1433,7 +1433,7 @@ mod tests {
                 propose_latency: (50.0, 10.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Sometimes,
+                should_certify: mocks::application::CertifyFn::Always,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);

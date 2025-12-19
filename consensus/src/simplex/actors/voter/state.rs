@@ -890,8 +890,8 @@ mod tests {
                 .iter()
                 .map(|scheme| Notarize::sign(scheme, &namespace, parent_proposal.clone()).unwrap())
                 .collect();
-            let notarization =
-                Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
+            let notarization = Notarization::from_notarizes(&verifier, notarize_votes.iter())
+                .expect("notarization");
             state.add_notarization(notarization.clone());
 
             // Insert proposal at view 2 with parent at view 1
@@ -911,8 +911,8 @@ mod tests {
                 .iter()
                 .map(|scheme| Finalize::sign(scheme, &namespace, parent_proposal.clone()).unwrap())
                 .collect();
-            let finalization =
-                Finalization::from_finalizes(&verifier, finalize_votes.iter()).expect("finalization");
+            let finalization = Finalization::from_finalizes(&verifier, finalize_votes.iter())
+                .expect("finalization");
             state.add_finalization(finalization.clone());
 
             // parent_certificate now returns the finalization (preferred)
