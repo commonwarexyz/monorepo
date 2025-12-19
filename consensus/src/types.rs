@@ -360,9 +360,13 @@ pub trait Epocher: Clone + Send + Sync + 'static {
     fn length_at(&self, height: u64) -> Option<u64>;
 
     /// Returns the first block height in the given epoch.
+    ///
+    /// The epoch should be obtained from [`containing`](Self::containing) to ensure validity.
     fn first(&self, epoch: Epoch) -> u64;
 
     /// Returns the last block height in the given epoch.
+    ///
+    /// The epoch should be obtained from [`containing`](Self::containing) to ensure validity.
     fn last(&self, epoch: Epoch) -> u64;
 
     /// Returns the phase of the given height within its epoch.
