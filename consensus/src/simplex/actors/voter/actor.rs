@@ -329,14 +329,20 @@ impl<
     }
 
     /// Attempt to certify a proposal for the given view.
-    async fn try_certify(&mut self, view: View) -> CertifyResult<Request<Rnd, bool>> {
+    ///
+    /// If the proposal is not yet available but certification is pending,
+    /// the view is re-added to candidates for later retry.
+    async fn try_certify(&mut self, view: View) -> Option<Request<Rnd, bool>> {
         match self.state.try_certify(view) {
             CertifyResult::Ready(proposal) => {
                 let receiver = self.automaton.certify(proposal.payload).await;
-                CertifyResult::Ready(Request(proposal.round, receiver))
+                Some(Request(proposal.round, receiver))
             }
-            CertifyResult::Pending => CertifyResult::Pending,
-            CertifyResult::Skip => CertifyResult::Skip,
+            CertifyResult::Pending => {
+                self.certification_candidates.insert(view);
+                None
+            }
+            CertifyResult::Skip => None,
         }
     }
 
@@ -845,17 +851,10 @@ impl<
             // where finalization arrives between iterations.
             for v in take(&mut self.certification_candidates).split_off(&self.state.last_finalized().next()) {
                 debug!(%v, "taking certification candidate");
-                match self.try_certify(v).await {
-                    CertifyResult::Ready(Request(ctx, receiver)) => {
-                        let view = ctx.view();
-                        let handle = certify_pool.push(async move { (ctx, receiver.await) });
-                        self.state.set_certify_handle(view, handle);
-                    }
-                    CertifyResult::Pending => {
-                        // Proposal not yet available, re-add for later retry
-                        self.certification_candidates.insert(v);
-                    }
-                    CertifyResult::Skip => {}
+                if let Some(Request(ctx, receiver)) = self.try_certify(v).await {
+                    let view = ctx.view();
+                    let handle = certify_pool.push(async move { (ctx, receiver.await) });
+                    self.state.set_certify_handle(view, handle);
                 }
             }
 
