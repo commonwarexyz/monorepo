@@ -148,10 +148,6 @@ impl<
     }
 
     /// Validates an incoming message, returning the parsed message if valid.
-    ///
-    /// If `nullification_only` is true, only nullifications and finalizations are accepted.
-    /// Notarizations are rejected without signature verification in this case.
-    /// Notarizations at views known to have failed certification are also rejected.
     fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
         // Decode message
         let incoming =
@@ -160,14 +156,7 @@ impl<
         // Validate message
         match incoming {
             Certificate::Notarization(notarization) => {
-                // Reject notarizations at views we know failed certification
-                if self.state.is_failed(notarization.view()) {
-                    debug!(
-                        notarization_view = %notarization.view(),
-                        "rejecting notarization for view with failed certification"
-                    );
-                    return None;
-                }
+                let notarization_view = notarization.view();
                 if notarization.view() < view {
                     debug!(%view, received = %notarization.view(), "notarization below view");
                     return None;
@@ -180,11 +169,18 @@ impl<
                     );
                     return None;
                 }
+                if self.state.is_failed(notarization_view) {
+                    debug!(
+                        %notarization_view,
+                        "rejecting notarization for view with failed certification"
+                    );
+                    return None;
+                }
                 if !notarization.verify(&mut self.context, &self.scheme, &self.namespace) {
                     debug!(%view, "notarization failed verification");
                     return None;
                 }
-                debug!(%view, received = %notarization.view(), "received notarization for request");
+                debug!(%view, received = %notarization_view, "received notarization for request");
                 Some(Certificate::Notarization(notarization))
             }
             Certificate::Finalization(finalization) => {
