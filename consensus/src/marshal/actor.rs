@@ -174,7 +174,7 @@ where
         finalizations_by_height: FC,
         finalized_blocks: FB,
         config: Config<B, P>,
-    ) -> (Self, Mailbox<P::Scheme, B>) {
+    ) -> (Self, Mailbox<P::Scheme, B>, u64) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -242,6 +242,7 @@ where
                 processed_height,
             },
             Mailbox::new(sender),
+            last_processed_height,
         )
     }
 

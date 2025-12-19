@@ -218,7 +218,7 @@ where
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
         let provider = Provider::new(config.signer.clone());
-        let (marshal, marshal_mailbox) = marshal::Actor::init(
+        let (marshal, marshal_mailbox, _processed_height) = marshal::Actor::init(
             context.with_label("marshal"),
             finalizations_by_height,
             finalized_blocks,
