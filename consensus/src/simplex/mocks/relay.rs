@@ -13,7 +13,6 @@ use tracing::{error, warn};
 pub struct Relay<D: Digest, P: PublicKey> {
     #[allow(clippy::type_complexity)]
     recipients: Mutex<BTreeMap<P, Vec<mpsc::UnboundedSender<(D, Bytes)>>>>,
-    payloads: Mutex<BTreeMap<D, Bytes>>,
 }
 
 impl<D: Digest, P: PublicKey> Relay<D, P> {
@@ -22,7 +21,6 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
     pub const fn new() -> Self {
         Self {
             recipients: Mutex::new(BTreeMap::new()),
-            payloads: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -52,9 +50,6 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
 
     /// Broadcasts a payload to all registered recipients.
     pub async fn broadcast(&self, sender: &P, (payload, data): (D, Bytes)) {
-        // Record payload for future use
-        self.payloads.lock().unwrap().insert(payload, data.clone());
-
         // Send to all recipients
         let channels = {
             let mut channels = Vec::new();
