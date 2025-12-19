@@ -181,7 +181,7 @@ mod tests {
     ) {
         let config = Config {
             provider,
-            epoch_config: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: ViewDelta::new(10),
@@ -462,8 +462,8 @@ mod tests {
                 assert!(height > 0, "genesis block should not have been generated");
 
                 // Calculate the epoch and round for the block
-                let epoch_config = FixedEpocher::new(BLOCKS_PER_EPOCH);
-                let epoch = epoch_config.epoch_for_height(height).unwrap();
+                let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+                let epoch = epocher.epoch_for_height(height).unwrap();
                 let round = Round::new(epoch, View::new(height));
 
                 // Broadcast block by one validator
@@ -501,9 +501,9 @@ mod tests {
                         .enumerate()
                     {
                         if (do_finalize && i < QUORUM as usize) || height == NUM_BLOCKS || {
-                            let epoch_config = FixedEpocher::new(BLOCKS_PER_EPOCH);
-                            let epoch = epoch_config.epoch_for_height(height).unwrap();
-                            height == epoch_config.last_height_in_epoch(epoch)
+                            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+                            let epoch = epocher.epoch_for_height(height).unwrap();
+                            height == epocher.last_height_in_epoch(epoch)
                         } {
                             actor.report(Activity::Finalization(fin.clone())).await;
                         }
@@ -513,9 +513,9 @@ mod tests {
                     // individual participant.
                     for actor in actors.iter_mut() {
                         if context.gen_bool(0.2) || height == NUM_BLOCKS || {
-                            let epoch_config = FixedEpocher::new(BLOCKS_PER_EPOCH);
-                            let epoch = epoch_config.epoch_for_height(height).unwrap();
-                            height == epoch_config.last_height_in_epoch(epoch)
+                            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+                            let epoch = epocher.epoch_for_height(height).unwrap();
+                            height == epocher.last_height_in_epoch(epoch)
                         } {
                             actor.report(Activity::Finalization(fin.clone())).await;
                         }
@@ -611,8 +611,8 @@ mod tests {
                 assert!(height > 0, "genesis block should not have been generated");
 
                 // Calculate the epoch and round for the block
-                let epoch_config = FixedEpocher::new(BLOCKS_PER_EPOCH);
-                let epoch = epoch_config.epoch_for_height(height).unwrap();
+                let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+                let epoch = epocher.epoch_for_height(height).unwrap();
                 let round = Round::new(epoch, View::new(height));
 
                 // Broadcast block by one validator

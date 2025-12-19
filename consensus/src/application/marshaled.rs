@@ -84,7 +84,7 @@ where
     context: E,
     application: A,
     marshal: marshal::Mailbox<S, B>,
-    epoch_config: ES,
+    epocher: ES,
     last_built: Arc<Mutex<Option<(Round, B)>>>,
 
     build_duration: Gauge,
@@ -99,12 +99,7 @@ where
     ES: Epocher,
 {
     /// Creates a new [Marshaled] wrapper.
-    pub fn new(
-        context: E,
-        application: A,
-        marshal: marshal::Mailbox<S, B>,
-        epoch_config: ES,
-    ) -> Self {
+    pub fn new(context: E, application: A, marshal: marshal::Mailbox<S, B>, epocher: ES) -> Self {
         let build_duration = Gauge::default();
         context.register(
             "build_duration",
@@ -116,7 +111,7 @@ where
             context,
             application,
             marshal,
-            epoch_config,
+            epocher,
             last_built: Arc::new(Mutex::new(None)),
 
             build_duration,
@@ -156,9 +151,9 @@ where
             return self.application.genesis().await.commitment();
         }
 
-        let epoch_config = &self.epoch_config;
-        let height = epoch_config
-            .last_height_in_epoch(epoch.previous().expect("checked to be non-zero above"));
+        let epocher = &self.epocher;
+        let height =
+            epocher.last_height_in_epoch(epoch.previous().expect("checked to be non-zero above"));
         let Some(block) = self.marshal.get_block(height).await else {
             // A new consensus engine will never be started without having the genesis block
             // of the new epoch (the last block of the previous epoch) already stored.
@@ -183,7 +178,7 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let last_built = self.last_built.clone();
-        let epoch_config = self.epoch_config.clone();
+        let epocher = self.epocher.clone();
 
         // Metrics
         let build_duration = self.build_duration.clone();
@@ -226,8 +221,8 @@ where
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
                 // by the epoch transition.
-                let epoch_config = &epoch_config;
-                let last_in_epoch = epoch_config.last_height_in_epoch(consensus_context.epoch());
+                let epocher = &epocher;
+                let last_in_epoch = epocher.last_height_in_epoch(consensus_context.epoch());
                 if parent.height() == last_in_epoch {
                     let digest = parent.commitment();
                     {
@@ -308,7 +303,7 @@ where
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let epoch_config = self.epoch_config.clone();
+        let epocher = self.epocher.clone();
 
         let (mut tx, rx) = oneshot::channel();
         self.context
@@ -352,8 +347,8 @@ where
 
                 // You can only re-propose the same block if it's the last height in the epoch.
                 if parent.commitment() == block.commitment() {
-                    let epoch_config = &epoch_config;
-                    let last_in_epoch = epoch_config.last_height_in_epoch(context.epoch());
+                    let epocher = &epocher;
+                    let last_in_epoch = epocher.last_height_in_epoch(context.epoch());
                     if block.height() == last_in_epoch {
                         marshal.verified(context.round, block).await;
                         let _ = tx.send(true);
@@ -365,7 +360,7 @@ where
 
                 // Blocks are invalid if they are not within the current epoch and they aren't
                 // a re-proposal of the boundary block.
-                if epoch_config.epoch_for_height(block.height()).unwrap() != context.epoch() {
+                if epocher.epoch_for_height(block.height()).unwrap() != context.epoch() {
                     let _ = tx.send(false);
                     return;
                 }

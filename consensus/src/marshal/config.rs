@@ -17,7 +17,7 @@ where
     pub provider: P,
 
     /// Configuration for epoch lengths across block height ranges.
-    pub epoch_config: ES,
+    pub epocher: ES,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,

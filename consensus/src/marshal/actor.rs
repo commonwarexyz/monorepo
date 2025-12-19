@@ -121,7 +121,7 @@ where
     // Provider for epoch-specific signing schemes
     provider: P,
     // Epoch configuration
-    epoch_config: ES,
+    epocher: ES,
     // Unique application namespace
     namespace: Vec<u8>,
     // Minimum number of views to retain temporary data after the application processes a block
@@ -226,7 +226,7 @@ where
                 context: ContextCell::new(context),
                 mailbox,
                 provider: config.provider,
-                epoch_config: config.epoch_config,
+                epocher: config.epocher,
                 namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
@@ -599,7 +599,7 @@ where
                                     let _ = response.send(true);
                                 },
                                 Request::Finalized { height } => {
-                                    let Some(epoch) = self.epoch_config.epoch_for_height(height) else {
+                                    let Some(epoch) = self.epocher.epoch_for_height(height) else {
                                         error!(height, "no epoch mapping for height");
                                         let _ = response.send(false);
                                         continue;
