@@ -36,6 +36,7 @@ zstd = { workspace = true, optional = true }
 commonware-conformance.workspace = true
 commonware-math.workspace = true
 commonware-storage = { path = ".", features = ["std"] }
+crc.workspace = true
 criterion.workspace = true
 rand.workspace = true
 rstest.workspace = true
@@ -70,6 +71,11 @@ fuzzing = []
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
+
+[[bench]]
+name = "crc32"
+harness = false
+path = "src/crc32/benches/bench.rs"
 
 [[bench]]
 name = "qmdb"
