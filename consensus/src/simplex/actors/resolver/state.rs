@@ -97,7 +97,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     /// Inform the [Resolver] of any missing nullifications.
     async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64>) {
-        // We must either receive a nullification or a notarization (at the view or higher),
+        // We must either receive a nullification or a finalization (at the view or higher),
         // so we don't need to worry about getting stuck. All requests will be resolved or pruned.
         let start = self.fetch_floor.max(self.floor_view().next());
         let views: Vec<_> = View::range(start, self.current_view)
