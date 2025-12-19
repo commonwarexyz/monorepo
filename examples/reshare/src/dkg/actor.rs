@@ -11,7 +11,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::{
-    types::{Epoch, Epocher, FixedEpocher},
+    types::{Epoch, EpochPhase, Epocher, FixedEpocher},
     Reporter,
 };
 use commonware_cryptography::{
@@ -402,9 +402,9 @@ where
                         }
                         MailboxMessage::Finalized { block, response } => {
                             let block_epoch = epocher.epoch_for_height(block.height).unwrap();
+                            let phase = epocher.phase_at(block.height).unwrap();
                             let first_height = epocher.first_height_in_epoch(block_epoch);
                             let relative_height = block.height - first_height;
-                            let mid_point = BLOCKS_PER_EPOCH / 2;
                             info!(epoch = %block_epoch, relative_height, "processing finalized block");
 
                             // Skip blocks from previous epochs (can happen on restart if we
@@ -437,7 +437,7 @@ where
                             }
 
                             // In the first half of the epoch, continuously distribute shares
-                            if relative_height < mid_point {
+                            if phase == EpochPhase::Early {
                                 if let Some(ref mut ds) = dealer_state {
                                     Self::distribute_shares(
                                         &self_pk,
@@ -452,8 +452,7 @@ where
                             }
 
                             // At or past the midpoint, finalize dealer if not already done.
-                            // The >= check handles restart after midpoint acknowledgment.
-                            if relative_height >= mid_point {
+                            if matches!(phase, EpochPhase::Midpoint | EpochPhase::Late) {
                                 if let Some(ref mut ds) = dealer_state {
                                     ds.finalize();
                                 }
