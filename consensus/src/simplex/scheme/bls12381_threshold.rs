@@ -461,11 +461,11 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let vote_namespace = subject.namespace(namespace);
         let vote_message = subject.message();
         let vote_signature =
-            partial_sign_message::<V>(share, Some(vote_namespace), vote_message.as_ref()).value;
+            partial_sign_message::<V>(share, Some(vote_namespace), &vote_message).value;
 
         let seed_message = seed_message_from_subject(&subject);
         let seed_signature =
-            partial_sign_message::<V>(share, Some(&namespace.seed), seed_message.as_ref()).value;
+            partial_sign_message::<V>(share, Some(&namespace.seed), &seed_message).value;
 
         let signature = Signature {
             vote_signature,
@@ -544,7 +544,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
             polynomial,
             Some(vote_namespace),
-            vote_message.as_ref(),
+            &vote_message,
             vote_partials.iter(),
         ) {
             for partial in errs {
@@ -556,7 +556,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
             polynomial,
             Some(&namespace.seed),
-            seed_message.as_ref(),
+            &seed_message,
             seed_partials
                 .iter()
                 .filter(|partial| !invalid.contains(&partial.index)),
@@ -640,7 +640,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             identity,
             &[
                 (Some(vote_namespace), vote_message.as_ref()),
-                (Some(namespace.seed.as_ref()), seed_message.as_ref()),
+                (Some(&namespace.seed), seed_message.as_ref()),
             ],
             &signature,
             1,
@@ -1375,13 +1375,11 @@ mod tests {
         let notarize_ns = notarize_namespace(NAMESPACE);
         let notarize_message = proposal.encode();
         let expected_message =
-            partial_sign_message::<V>(share, Some(notarize_ns.as_ref()), notarize_message.as_ref())
-                .value;
+            partial_sign_message::<V>(share, Some(&notarize_ns), &notarize_message).value;
 
         let seed_ns = seed_namespace(NAMESPACE);
         let seed_message = proposal.round.encode();
-        let expected_seed =
-            partial_sign_message::<V>(share, Some(seed_ns.as_ref()), seed_message.as_ref()).value;
+        let expected_seed = partial_sign_message::<V>(share, Some(&seed_ns), &seed_message).value;
 
         assert_eq!(vote.signer, share.index);
         assert_eq!(vote.signature.vote_signature, expected_message);

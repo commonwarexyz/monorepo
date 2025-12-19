@@ -366,7 +366,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             self.identity(),
             &messages
                 .iter()
-                .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
+                .map(|(namespace, message)| (*namespace, message.as_ref()))
                 .collect::<Vec<_>>(),
             &signature,
             1,

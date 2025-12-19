@@ -593,7 +593,7 @@ mod tests {
     fn bad_signature() {
         let (private_key, public_key, message, _) = vector_1();
         let private_key_2 = PrivateKey::random(&mut OsRng);
-        let bad_signature = private_key_2.sign_inner(None, message.as_ref());
+        let bad_signature = private_key_2.sign_inner(None, &message);
         test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }
 
