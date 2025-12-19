@@ -26,9 +26,7 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream> {
     /// Hashing scheme to use.
     pub hasher: H,
 
-    /// Namespace for domain separation.
     pub namespace: Vec<u8>,
-
     pub identity: Sharing<MinSig>,
     pub other_public: <MinSig as Variant>::Public,
 
