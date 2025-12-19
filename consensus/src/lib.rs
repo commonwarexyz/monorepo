@@ -100,12 +100,10 @@ cfg_if::cfg_if! {
                 payload: Self::Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
 
-            /// Determine whether a notarized payload is safe to finalize. If not, the payload will
-            /// be excluded from the blockchain and will not be finalized. Therefore, the return
-            /// value must be deterministic and consistent across all participants.
+            /// Determine whether a verified payload is safe to commit.
             ///
-            /// Applications that employ erasure-coding can override this to delay or prevent
-            /// finalization until they have reconstructed and validated the full block (e.g., after
+            /// Applications that employ erasure coding can override this method to delay or prevent
+            /// finalization until they have reconstructed and validated the full block (e.g. after
             /// receiving enough shards).
             fn certify(
                 &mut self,
