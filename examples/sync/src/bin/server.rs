@@ -314,7 +314,7 @@ where
 
                     // Start a new task to handle the message.
                     // The response will be sent on `response_sender`.
-                    context.with_label("request-handler").spawn({
+                    context.with_label("request_handler").spawn({
                         let state = state.clone();
                         let mut response_sender = response_sender.clone();
                         move |_| async move {

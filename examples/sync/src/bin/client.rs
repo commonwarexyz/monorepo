@@ -130,7 +130,7 @@ where
             let resolver = resolver.clone();
             let initial_target_clone = initial_target.clone();
             let target_update_interval = config.target_update_interval;
-            context.with_label("target-update").spawn(move |context| {
+            context.with_label("target_update").spawn(move |context| {
                 target_update_task(
                     context,
                     resolver,
@@ -191,7 +191,7 @@ where
             let resolver = resolver.clone();
             let initial_target_clone = initial_target.clone();
             let target_update_interval = config.target_update_interval;
-            context.with_label("target-update").spawn(move |context| {
+            context.with_label("target_update").spawn(move |context| {
                 target_update_task(
                     context,
                     resolver,

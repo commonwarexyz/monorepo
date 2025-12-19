@@ -432,7 +432,7 @@ mod tests {
                 .await;
             for (i, validator) in participants.iter().enumerate() {
                 let (application, actor, _processed_height) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -577,7 +577,7 @@ mod tests {
                 .await;
             for (i, validator) in participants.iter().enumerate().skip(1) {
                 let (application, actor, _processed_height) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -666,7 +666,7 @@ mod tests {
             // Create the first validator now that all blocks have been finalized by the others.
             let validator = participants.first().unwrap();
             let (app, mut actor, _processed_height) = setup_validator(
-                context.with_label("validator-0"),
+                context.with_label("validator_0"),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -736,7 +736,7 @@ mod tests {
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
                 let (_application, actor, _processed_height) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -791,7 +791,7 @@ mod tests {
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
                 let (_application, actor, _processed_height) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -867,7 +867,7 @@ mod tests {
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
                 let (_application, actor, _processed_height) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -935,7 +935,7 @@ mod tests {
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
                 let (_application, actor, _processed_height) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -1046,7 +1046,7 @@ mod tests {
             // Single validator actor
             let me = participants[0].clone();
             let (_application, mut actor, _processed_height) = setup_validator(
-                context.with_label("validator-0"),
+                context.with_label("validator_0"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1106,7 +1106,7 @@ mod tests {
             // Single validator actor
             let me = participants[0].clone();
             let (_application, mut actor, _processed_height) = setup_validator(
-                context.with_label("validator-0"),
+                context.with_label("validator_0"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1187,7 +1187,7 @@ mod tests {
 
             let me = participants[0].clone();
             let (application, mut actor, _processed_height) = setup_validator(
-                context.with_label("validator-0"),
+                context.with_label("validator_0"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1246,7 +1246,7 @@ mod tests {
 
             let me = participants[0].clone();
             let (_application, mut actor, _processed_height) = setup_validator(
-                context.with_label("validator-0"),
+                context.with_label("validator_0"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1304,7 +1304,7 @@ mod tests {
 
             let me = participants[0].clone();
             let (_application, mut actor, _processed_height) = setup_validator(
-                context.with_label("validator-0"),
+                context.with_label("validator_0"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1358,7 +1358,7 @@ mod tests {
 
             let me = participants[0].clone();
             let (_application, mut actor, _processed_height) = setup_validator(
-                context.with_label("validator-0"),
+                context.with_label("validator_0"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1443,7 +1443,7 @@ mod tests {
 
             let me = participants[0].clone();
             let (_base_app, marshal, _processed_height) = setup_validator(
-                context.with_label("validator-0"),
+                context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1577,7 +1577,7 @@ mod tests {
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate().take(2) {
                 let (_app, actor, _processed_height) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -1688,7 +1688,7 @@ mod tests {
             // Test 1: Fresh init should return processed height 0
             let me = participants[0].clone();
             let (application, mut actor, initial_height) = setup_validator(
-                context.with_label("validator-0"),
+                context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1732,7 +1732,7 @@ mod tests {
 
             // Test 2: Restart with marshal processed height = 3
             let (_restart_application, _restart_actor, restart_height) = setup_validator(
-                context.with_label("validator-0-restart"),
+                context.with_label("validator_0_restart"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1822,7 +1822,7 @@ mod tests {
 
             let me = participants[0].clone();
             let (_base_app, marshal, _processed_height) = setup_validator(
-                context.with_label("validator-0"),
+                context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1888,7 +1888,7 @@ mod tests {
             // Set up one validator
             let (i, validator) = participants.iter().enumerate().next().unwrap();
             let mut actor = setup_validator(
-                context.with_label(&format!("validator-{i}")),
+                context.with_label(&format!("validator_{i}")),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
@@ -1915,7 +1915,7 @@ mod tests {
 
             // Restart marshal, removing any in-memory cache
             let mut actor = setup_validator(
-                context.with_label(&format!("validator-{i}")),
+                context.with_label(&format!("validator_{i}")),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
