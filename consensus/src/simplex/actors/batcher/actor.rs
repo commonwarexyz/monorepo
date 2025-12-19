@@ -22,10 +22,7 @@ use commonware_utils::ordered::{Quorum, Set};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace, warn};
 
 pub struct Actor<
@@ -481,11 +478,11 @@ impl<
             // Try to construct and forward certificates.
             // We always try for the current view (because the last vote processed
             // may have come from us), and also for the batch-verified view if different.
-            for view in [Some(current), verified_view]
-                .into_iter()
-                .flatten()
-                .collect::<BTreeSet<_>>()
-            {
+            let views_to_check = match verified_view {
+                Some(v) if v != current => [Some(current), Some(v)],
+                _ => [Some(current), None],
+            };
+            for view in views_to_check.into_iter().flatten() {
                 let Some(round) = work.get_mut(&view) else {
                     continue;
                 };
