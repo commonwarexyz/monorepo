@@ -95,10 +95,7 @@
 
 use crate::journal::Error;
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    varint::{Decoder, UInt},
-    Codec, EncodeSize, ReadExt, Write as CodecWrite,
-};
+use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
     buffer::{Append, PoolRef, Read},
     telemetry::metrics::status::GaugeExt,
@@ -297,32 +294,29 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             reader.seek_to(file_offset).map_err(Error::Runtime)?;
         }
 
-        // Read varint size byte-by-byte
+        // Read varint size (max 5 bytes for u32, and min item size is 5 bytes)
         let mut hasher = crc32fast::Hasher::new();
-        let mut decoder = Decoder::<u32>::new();
-        let mut varint_buf = Vec::with_capacity(5);
-        let mut byte = [0u8; 1];
-        let size = loop {
-            reader
-                .read_exact(&mut byte, 1)
-                .await
-                .map_err(Error::Runtime)?;
-            varint_buf.push(byte[0]);
-            match decoder.feed(byte[0]) {
-                Ok(Some(size)) => break size as usize,
-                Ok(None) => continue,
-                Err(e) => return Err(Error::Codec(e)),
-            }
-        };
-        hasher.update(&varint_buf);
-
-        // Read remaining
-        let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
-        let mut buf = vec![0u8; buf_size];
+        let mut varint_buf = [0u8; 5];
         reader
-            .read_exact(&mut buf, buf_size)
+            .read_exact(&mut varint_buf, 5)
             .await
             .map_err(Error::Runtime)?;
+        let mut varint = varint_buf.as_ref();
+        let size = UInt::<u32>::read(&mut varint).map_err(Error::Codec)?.0 as usize;
+        let varint_len = 5 - varint.remaining();
+        hasher.update(&varint_buf[..varint_len]);
+
+        // Read remaining data+checksum (we already have some bytes from the varint read)
+        let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
+        let already_read = 5 - varint_len;
+        let mut buf = vec![0u8; buf_size];
+        buf[..already_read].copy_from_slice(&varint_buf[varint_len..]);
+        if buf_size > already_read {
+            reader
+                .read_exact(&mut buf[already_read..], buf_size - already_read)
+                .await
+                .map_err(Error::Runtime)?;
+        }
 
         // Read item
         let item = &buf[..size];
