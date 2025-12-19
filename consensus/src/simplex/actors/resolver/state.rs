@@ -122,6 +122,9 @@ impl<S: Scheme, D: Digest> State<S, D> {
         // Update the fetch floor to reduce duplicate iteration in the future.
         if let Some(&last) = views.last() {
             self.fetch_floor = last.next();
+        } else {
+            // Nothing to fetch, bump floor to avoid re-scanning.
+            self.fetch_floor = self.current_view;
         }
 
         // Send the requests to the resolver.
