@@ -130,7 +130,8 @@ impl<
                 };
                 match message {
                     MailboxMessage::Certificate(certificate) => {
-                        self.state.handle(certificate, &mut resolver).await;
+                        // Certificates from mailbox have no associated request view
+                        self.state.handle(certificate, None, &mut resolver).await;
                     }
                     MailboxMessage::Certified { view, success } => {
                         self.state.handle_certified(view, success, &mut resolver).await;
@@ -150,6 +151,7 @@ impl<
     ///
     /// If `nullification_only` is true, only nullifications and finalizations are accepted.
     /// Notarizations are rejected without signature verification in this case.
+    /// Notarizations at views known to have failed certification are also rejected.
     fn validate(
         &mut self,
         view: View,
@@ -165,6 +167,14 @@ impl<
             Certificate::Notarization(notarization) => {
                 if nullification_only {
                     debug!(%view, "rejecting notarization for nullification-only request");
+                    return None;
+                }
+                // Reject notarizations at views we know failed certification
+                if self.state.is_failed(notarization.view()) {
+                    debug!(
+                        notarization_view = %notarization.view(),
+                        "rejecting notarization for view with failed certification"
+                    );
                     return None;
                 }
                 if notarization.view() < view {
@@ -255,8 +265,8 @@ impl<
                 // Notify voter as soon as possible
                 voter.resolved(parsed.clone()).await;
 
-                // Process message
-                self.state.handle(parsed, resolver).await;
+                // Process message with the request view for tracking
+                self.state.handle(parsed, Some(view), resolver).await;
             }
             Message::Produce {
                 view,

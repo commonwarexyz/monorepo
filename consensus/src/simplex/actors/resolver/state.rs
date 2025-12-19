@@ -9,7 +9,7 @@ use crate::{
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::Resolver;
 use commonware_utils::sequence::prefixed_u64::U64 as PrefixedU64;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Tracks all known certificates from the last
 /// certified notarization or finalized view to the current view.
@@ -27,11 +27,18 @@ pub struct State<S: Scheme, D: Digest> {
     /// Next view to consider when fetching. Avoids re-scanning
     /// views we've already requested or have nullifications for.
     fetch_floor: View,
+    /// Maps notarization view -> request views it satisfied.
+    /// When a higher-view notarization satisfies a lower-view request,
+    /// we track it here so we can re-request on certification failure.
+    satisfied_by: HashMap<View, HashSet<View>>,
+    /// Views where certification has failed. Only nullifications
+    /// are accepted for these views.
+    failed_views: HashSet<View>,
 }
 
 impl<S: Scheme, D: Digest> State<S, D> {
     /// Create a new instance of [State].
-    pub const fn new(fetch_concurrent: usize) -> Self {
+    pub fn new(fetch_concurrent: usize) -> Self {
         Self {
             current_view: View::zero(),
             floor: None,
@@ -39,13 +46,26 @@ impl<S: Scheme, D: Digest> State<S, D> {
             nullifications: BTreeMap::new(),
             fetch_concurrent,
             fetch_floor: View::zero(),
+            satisfied_by: HashMap::new(),
+            failed_views: HashSet::new(),
         }
     }
 
+    /// Returns true if the given view has failed certification.
+    pub fn is_failed(&self, view: View) -> bool {
+        self.failed_views.contains(&view)
+    }
+
     /// Handle a new certificate and update the [Resolver] accordingly.
+    ///
+    /// The `request_view` parameter is the view that was originally requested
+    /// when this certificate was fetched. If the certificate is a notarization
+    /// at a higher view, we track that the request_view was "satisfied by" this
+    /// notarization so we can re-request on certification failure.
     pub async fn handle(
         &mut self,
         certificate: Certificate<S, D>,
+        request_view: Option<View>,
         resolver: &mut impl Resolver<Key = PrefixedU64>,
     ) {
         match certificate {
@@ -69,6 +89,13 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 let view = notarization.view();
                 if self.encounter_view(view) {
                     self.notarizations.insert(view, notarization);
+
+                    // Track if this notarization satisfied a lower-view request
+                    if let Some(req_view) = request_view {
+                        if req_view < view {
+                            self.satisfied_by.entry(view).or_default().insert(req_view);
+                        }
+                    }
                 }
             }
             Certificate::Finalization(finalization) => {
@@ -99,12 +126,29 @@ impl<S: Scheme, D: Digest> State<S, D> {
                     self.prune(resolver).await;
                 }
             }
+            // Clean up satisfaction tracking - floor advancement covers these views
+            self.satisfied_by.remove(&view);
         } else {
-            // Certification failed - discard notarization and force-request nullification
+            // Certification failed - discard notarization and mark view as failed
             self.notarizations.remove(&view);
+            self.failed_views.insert(view);
+
+            // Request nullification for this view
             resolver
                 .fetch(PrefixedU64::new(PREFIX_NULLIFICATION_ONLY, view.get()))
                 .await;
+
+            // Re-request any lower views this notarization had satisfied
+            if let Some(satisfied_views) = self.satisfied_by.remove(&view) {
+                let floor = self.floor_view();
+                for v in satisfied_views {
+                    if v > floor {
+                        resolver
+                            .fetch(PrefixedU64::new(PREFIX_NULLIFICATION_ONLY, v.get()))
+                            .await;
+                    }
+                }
+            }
         }
     }
 
@@ -167,6 +211,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
         let floor = self.floor_view();
         self.notarizations.retain(|view, _| *view > floor);
         self.nullifications.retain(|view, _| *view > floor);
+        self.satisfied_by.retain(|view, _| *view > floor);
+        self.failed_views.retain(|view| *view > floor);
         // Retain only requests for views above the floor (check value, ignore prefix)
         resolver.retain(move |key| key.value() > floor.get()).await;
     }
@@ -307,6 +353,7 @@ mod tests {
         state
             .handle(
                 Certificate::Nullification(nullification_v4.clone()),
+                None,
                 &mut resolver,
             )
             .await;
@@ -323,6 +370,7 @@ mod tests {
         state
             .handle(
                 Certificate::Nullification(nullification_v2.clone()),
+                None,
                 &mut resolver,
             )
             .await;
@@ -339,6 +387,7 @@ mod tests {
         state
             .handle(
                 Certificate::Nullification(nullification_v1.clone()),
+                None,
                 &mut resolver,
             )
             .await;
@@ -358,7 +407,7 @@ mod tests {
         for view in 4..=6 {
             let nullification = build_nullification(&schemes, &verifier, View::new(view));
             state
-                .handle(Certificate::Nullification(nullification), &mut resolver)
+                .handle(Certificate::Nullification(nullification), None, &mut resolver)
                 .await;
         }
         assert_eq!(state.current_view, View::new(6));
@@ -372,6 +421,7 @@ mod tests {
         state
             .handle(
                 Certificate::Notarization(notarization.clone()),
+                None,
                 &mut resolver,
             )
             .await;
@@ -388,6 +438,7 @@ mod tests {
         state
             .handle(
                 Certificate::Finalization(finalization.clone()),
+                None,
                 &mut resolver,
             )
             .await;
@@ -407,6 +458,7 @@ mod tests {
         state
             .handle(
                 Certificate::Finalization(finalization.clone()),
+                None,
                 &mut resolver,
             )
             .await;
@@ -422,6 +474,7 @@ mod tests {
         state
             .handle(
                 Certificate::Nullification(nullification_v4.clone()),
+                None,
                 &mut resolver,
             )
             .await;
@@ -437,6 +490,7 @@ mod tests {
         state
             .handle(
                 Certificate::Nullification(nullification_v1.clone()),
+                None,
                 &mut resolver,
             )
             .await;
@@ -453,5 +507,74 @@ mod tests {
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
         assert!(resolver.outstanding().is_empty());
+    }
+
+    #[test_async]
+    async fn certification_failure_re_requests_satisfied_views() {
+        let (schemes, verifier) = ed25519_fixture();
+        let mut state: State<TestScheme, Sha256Digest> = State::new(10);
+        let mut resolver = MockResolver::default();
+
+        // Notarization at view 5 satisfies request for view 2
+        let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
+        state
+            .handle(
+                Certificate::Notarization(notarization_v5.clone()),
+                Some(View::new(2)),
+                &mut resolver,
+            )
+            .await;
+
+        // Verify tracking
+        assert!(state.satisfied_by.contains_key(&View::new(5)));
+        assert!(state.satisfied_by[&View::new(5)].contains(&View::new(2)));
+        assert!(!state.is_failed(View::new(5)));
+
+        // Certification fails for view 5
+        state
+            .handle_certified(View::new(5), false, &mut resolver)
+            .await;
+
+        // View 5 should be marked as failed
+        assert!(state.is_failed(View::new(5)));
+        // Satisfied_by should be cleaned up
+        assert!(!state.satisfied_by.contains_key(&View::new(5)));
+        // Both view 5 and view 2 should have nullification-only requests
+        let outstanding = resolver.outstanding();
+        assert!(outstanding.contains(&(PREFIX_NULLIFICATION_ONLY, 5)));
+        assert!(outstanding.contains(&(PREFIX_NULLIFICATION_ONLY, 2)));
+    }
+
+    #[test_async]
+    async fn certification_success_clears_tracking() {
+        let (schemes, verifier) = ed25519_fixture();
+        let mut state: State<TestScheme, Sha256Digest> = State::new(10);
+        let mut resolver = MockResolver::default();
+
+        // Notarization at view 5 satisfies request for view 2
+        let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
+        state
+            .handle(
+                Certificate::Notarization(notarization_v5.clone()),
+                Some(View::new(2)),
+                &mut resolver,
+            )
+            .await;
+
+        assert!(state.satisfied_by.contains_key(&View::new(5)));
+
+        // Certification succeeds for view 5
+        state
+            .handle_certified(View::new(5), true, &mut resolver)
+            .await;
+
+        // Floor should be set
+        assert!(
+            matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v5)
+        );
+        // Tracking should be cleaned up
+        assert!(!state.satisfied_by.contains_key(&View::new(5)));
+        // View 5 should not be marked as failed
+        assert!(!state.is_failed(View::new(5)));
     }
 }
