@@ -1418,10 +1418,8 @@ mod tests {
                 .await;
 
             // Wait for the fetch to complete
-            let mut attempts = 0;
-            while actor1.get_finalization(5).await.is_none() && attempts < 100 {
-                context.sleep(Duration::from_millis(50)).await;
-                attempts += 1;
+            while actor1.get_finalization(5).await.is_none() {
+                context.sleep(Duration::from_millis(10)).await;
             }
 
             // Verify validator 1 now has the finalization
