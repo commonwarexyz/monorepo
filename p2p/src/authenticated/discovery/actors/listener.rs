@@ -232,7 +232,7 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
-                            context.into(),
+                            context.into_present(),
                             address,
                             stream_cfg,
                             sink,
