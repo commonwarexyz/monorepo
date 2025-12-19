@@ -96,7 +96,7 @@ pub struct CodecConfig {
 ///
 /// // Each person produces reshards, their own checked shard, and checking data
 /// // to check other peoples reshards.
-/// let (mut checking_data_w_shard, reshards): (Vec<_>, Vec<_>) = shards
+/// let (mut checking_data_w_shard, mut reshards): (Vec<_>, Vec<_>) = shards
 ///         .into_iter()
 ///         .enumerate()
 ///         .map(|(i, shard)| {
@@ -106,19 +106,26 @@ pub struct CodecConfig {
 ///         .collect();
 /// // Let's pretend that the last item is "ours"
 /// let (checking_data, checked_shard) = checking_data_w_shard.pop().unwrap();
+/// reshards.pop();
+///
 /// // We can use this checking_data to check the other shards.
 /// let mut checked_shards = Vec::new();
 /// checked_shards.push(checked_shard);
-/// for (i, reshard) in reshards.into_iter().enumerate().skip(1) {
+/// for (i, reshard) in reshards.into_iter().enumerate() {
 ///   checked_shards.push(RS::check(&config, &commitment, &checking_data, i as u16, reshard).unwrap())
 /// }
 ///
+/// // We can recover the data from any `minimum_shards` checked shards.
 /// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2], CONCURRENCY).unwrap();
 /// assert_eq!(&data[..], &data2[..]);
 ///
 /// // Decoding works with different shards, with a guarantee to get the same result.
 /// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..], CONCURRENCY).unwrap();
 /// assert_eq!(&data[..], &data3[..]);
+///
+/// // Of course, we can also recover from all shards; this will also check that there are no duplicates.
+/// let data4 = RS::decode(&config, &commitment, checking_data, &checked_shards, CONCURRENCY).unwrap();
+/// assert_eq!(&data[..], &data4[..]);
 /// ```
 pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// A commitment attesting to the shards of data.
