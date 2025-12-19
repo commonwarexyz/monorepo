@@ -228,7 +228,7 @@ fn run<P: Simplex>(input: FuzzInput) {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: application::CertifyFn::Sometimes,
+                should_certify: application::Certifier::Sometimes,
             };
             let (actor, application) =
                 application::Application::new(context.with_label("application"), app_cfg);

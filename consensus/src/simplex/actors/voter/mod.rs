@@ -176,7 +176,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: mocks::application::CertifyFn::Sometimes,
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -415,7 +415,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Sometimes,
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_config);
@@ -693,7 +693,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Sometimes,
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -877,7 +877,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Sometimes,
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1071,7 +1071,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Sometimes,
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1251,7 +1251,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (100_000.0, 0.0), // Very slow verification
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Sometimes,
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1437,7 +1437,7 @@ mod tests {
                 propose_latency: (50.0, 10.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Always,
+                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1653,7 +1653,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Sometimes,
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1885,7 +1885,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Sometimes,
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -2048,7 +2048,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Sometimes,
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -2226,7 +2226,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (10.0, 0.0), // 10ms verification latency
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Always,
+                should_certify: mocks::application::Certifier::Always,
             };
             let (mut actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -2452,7 +2452,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Custom(Box::new(move |d| {
+                should_certify: mocks::application::Certifier::Custom(Box::new(move |d| {
                     tracker.lock().unwrap().push(d);
                     true
                 })),
@@ -2586,7 +2586,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Custom(Box::new(move |d| {
+                should_certify: mocks::application::Certifier::Custom(Box::new(move |d| {
                     tracker.lock().unwrap().push(d);
                     true
                 })),

@@ -504,7 +504,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -772,7 +772,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -940,7 +940,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::CertifyFn::Sometimes,
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -1130,7 +1130,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1251,7 +1251,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: mocks::application::CertifyFn::Sometimes,
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -1392,7 +1392,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1643,7 +1643,7 @@ mod tests {
                         propose_latency: (10_000.0, 0.0),
                         verify_latency: (10_000.0, 5.0),
                         certify_latency: (10_000.0, 5.0),
-                        should_certify: mocks::application::CertifyFn::Sometimes,
+                        should_certify: mocks::application::Certifier::Sometimes,
                     }
                 } else {
                     mocks::application::Config {
@@ -1653,7 +1653,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::CertifyFn::Sometimes,
+                        should_certify: mocks::application::Certifier::Sometimes,
                     }
                 };
                 let (actor, application) = mocks::application::Application::new(
@@ -1831,7 +1831,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2045,7 +2045,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2256,7 +2256,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2491,7 +2491,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::CertifyFn::Sometimes,
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -2670,7 +2670,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2850,7 +2850,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::CertifyFn::Sometimes,
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3026,7 +3026,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::CertifyFn::Sometimes,
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3117,7 +3117,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
-                should_certify: mocks::application::CertifyFn::Sometimes,
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -3318,7 +3318,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::CertifyFn::Sometimes,
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3486,7 +3486,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::CertifyFn::Sometimes,
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3668,7 +3668,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::CertifyFn::Sometimes,
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3818,7 +3818,7 @@ mod tests {
                     propose_latency: (100.0, 50.0),
                     verify_latency: (50.0, 40.0),
                     certify_latency: (50.0, 40.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -3978,7 +3978,7 @@ mod tests {
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::CertifyFn::Sometimes,
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -4164,7 +4164,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -4401,7 +4401,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::CertifyFn::Sometimes,
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label(&format!("application_{}", *validator)),
@@ -4737,7 +4737,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -4888,7 +4888,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -4983,7 +4983,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -5381,7 +5381,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
                         certify_latency: (10.0, 5.0),
-                        should_certify: mocks::application::CertifyFn::Sometimes,
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -5439,7 +5439,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::CertifyFn::Sometimes,
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),

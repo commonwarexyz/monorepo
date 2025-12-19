@@ -130,7 +130,7 @@ type Latency = (f64, f64);
 
 /// Predicate to determine whether a payload should be certified.
 /// Returning true means certify, false means reject.
-pub enum CertifyFn<D: Digest> {
+pub enum Certifier<D: Digest> {
     /// Always certify.
     Always,
     /// Certify sometimes, but not always. The behavior is to certify pseudorandomly
@@ -157,7 +157,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
 
     /// Predicate to determine whether a payload should be certified.
     /// Returning true means certify, false means reject.
-    pub should_certify: CertifyFn<H::Digest>,
+    pub should_certify: Certifier<H::Digest>,
 }
 
 pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
@@ -175,7 +175,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     certify_latency: Normal<f64>,
 
     fail_verification: bool,
-    should_certify: CertifyFn<H::Digest>,
+    should_certify: Certifier<H::Digest>,
 
     pending: HashMap<H::Digest, Bytes>,
 
@@ -304,9 +304,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
         // Use configured predicate to determine certification
         match &self.should_certify {
-            CertifyFn::Always => true,
-            CertifyFn::Sometimes => (payload.as_ref().last().copied().unwrap_or(0) % 11) < 9,
-            CertifyFn::Custom(func) => func(payload),
+            Certifier::Always => true,
+            Certifier::Sometimes => (payload.as_ref().last().copied().unwrap_or(0) % 11) < 9,
+            Certifier::Custom(func) => func(payload),
         }
     }
 
