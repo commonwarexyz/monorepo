@@ -67,8 +67,8 @@ use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
     handshake::{
-        dial_end, dial_start, listen_end, listen_start, Ack, Context, Error as HandshakeError,
-        RecvCipher, SendCipher, Syn, SynAck, CIPHERTEXT_OVERHEAD,
+        self, dial_end, dial_start, listen_end, listen_start, Ack, Context,
+        Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck,
     },
     transcript::Transcript,
     Signer,
@@ -79,6 +79,11 @@ use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
+
+const CIPHERTEXT_OVERHEAD: u32 = {
+    assert!(handshake::CIPHERTEXT_OVERHEAD <= u32::MAX as usize);
+    handshake::CIPHERTEXT_OVERHEAD as u32
+};
 
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
