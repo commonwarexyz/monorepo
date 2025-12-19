@@ -156,8 +156,11 @@ mod tests {
         },
         types::{Epoch, Round, View},
     };
-    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
+    use commonware_cryptography::{
+        certificate::mocks::Fixture, ed25519::PublicKey, sha256::Digest as Sha256Digest,
+    };
     use commonware_macros::test_async;
+    use commonware_utils::vec::NonEmptyVec;
     use rand::{rngs::StdRng, SeedableRng};
     use std::{
         collections::BTreeSet,
@@ -187,6 +190,7 @@ mod tests {
 
     impl Resolver for MockResolver {
         type Key = U64;
+        type PublicKey = PublicKey;
 
         async fn fetch(&mut self, key: U64) {
             self.outstanding.lock().unwrap().insert(key);
@@ -194,6 +198,18 @@ mod tests {
 
         async fn fetch_all(&mut self, keys: Vec<U64>) {
             for key in keys {
+                self.outstanding.lock().unwrap().insert(key);
+            }
+        }
+
+        async fn fetch_targeted(&mut self, key: U64, _targets: NonEmptyVec<PublicKey>) {
+            // For testing, just treat targeted fetch the same as regular fetch
+            self.outstanding.lock().unwrap().insert(key);
+        }
+
+        async fn fetch_all_targeted(&mut self, requests: Vec<(U64, NonEmptyVec<PublicKey>)>) {
+            // For testing, just treat targeted fetch the same as regular fetch
+            for (key, _targets) in requests {
                 self.outstanding.lock().unwrap().insert(key);
             }
         }

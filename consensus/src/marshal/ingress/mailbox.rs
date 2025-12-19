@@ -5,6 +5,7 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_storage::archive;
+use commonware_utils::vec::NonEmptyVec;
 use futures::{
     channel::{mpsc, oneshot},
     future::BoxFuture,
@@ -90,9 +91,16 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     /// a network fetch if the finalization is not available locally. This is
     /// fire-and-forget, the finalization will be stored in marshal and delivered
     /// via the normal finalization flow when available.
+    ///
+    /// Targets are required because this is typically called when a peer claims to
+    /// be ahead. If a target returns invalid data, the resolver will block them.
+    /// Sending this message multiple times with different targets adds to the
+    /// target set.
     EnsureFinalization {
         /// The height of the finalization to fetch.
         height: u64,
+        /// Target peers to fetch from. Added to any existing targets for this height.
+        targets: NonEmptyVec<S::PublicKey>,
     },
     /// A request to retrieve a block by its commitment.
     Subscribe {
@@ -235,12 +243,20 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     /// this method will request the finalization from the network via the resolver if it
     /// is not available locally.
     ///
+    /// Targets are required because this is typically called when a peer claims to be
+    /// ahead. By targeting only those peers, we limit who we ask. If a target returns
+    /// invalid data, they will be blocked by the resolver. If targets don't respond
+    /// or return "no data", they effectively rate-limit themselves.
+    ///
+    /// Calling this multiple times for the same height with different targets will
+    /// add to the target set if there is an ongoing fetch, allowing more peers to be tried.
+    ///
     /// This is fire-and-forget, the finalization will be stored in marshal and delivered
     /// via the normal finalization flow when available.
-    pub async fn ensure_finalization(&mut self, height: u64) {
+    pub async fn ensure_finalization(&mut self, height: u64, targets: NonEmptyVec<S::PublicKey>) {
         if self
             .sender
-            .send(Message::EnsureFinalization { height })
+            .send(Message::EnsureFinalization { height, targets })
             .await
             .is_err()
         {

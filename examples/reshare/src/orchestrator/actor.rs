@@ -22,7 +22,7 @@ use commonware_p2p::{
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::NZUsize;
+use commonware_utils::{vec::NonEmptyVec, NZUsize};
 use futures::{channel::mpsc, StreamExt};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
@@ -208,6 +208,9 @@ where
 
                 // If we're not in the committee of the latest epoch we know about and we observe
                 // another participant that is ahead of us, ensure we have the boundary finalization.
+                // We target only the peer who claims to be ahead. If we receive messages from
+                // multiple peers claiming to be ahead, each call adds them to the target set,
+                // giving us more peers to try fetching from.
                 let boundary_height = epocher.last(our_epoch).expect("our epoch should exist");
                 debug!(
                     ?from,
@@ -216,7 +219,7 @@ where
                     boundary_height,
                     "received backup message from future epoch, ensuring boundary finalization"
                 );
-                self.marshal.ensure_finalization(boundary_height).await;
+                self.marshal.ensure_finalization(boundary_height, NonEmptyVec::new(from)).await;
             },
             transition = self.mailbox.next() => {
                 let Some(transition) = transition else {
