@@ -130,18 +130,18 @@
 //! ### Fetching Missing Certificates
 //!
 //! Instead of trying to fetch all possible certificates above the last finalized view, we only attempt to fetch
-//! nullifications for all views from the last notarized/finalized view to the current view. This technique, however,
+//! nullifications for all views from the last finalized view to the current view. This technique, however,
 //! is not sufficient to guarantee progress.
 //!
-//! Consider the case where `f` honest participants have seen a notarization for a given view `v` (and nullifications only
+//! Consider the case where `f` honest participants have seen a finalization for a given view `v` (and nullifications only
 //! from `v` to the current view `c`) but the remaining `f+1` honest participants have not (they have exclusively seen
 //! nullifications from some view `o < v` to `c`). Neither partition of participants will vote for the other's proposals.
 //!
-//! To ensure progress is eventually made, leaders with nullified proposals broadcast the best notarization/finalization
+//! To ensure progress is eventually made, leaders with nullified proposals directly broadcast the best finalization
 //! certificate they are aware of to ensure all honest participants eventually consider the same proposal ancestry valid.
 //!
 //! _While a more aggressive recovery mechanism could be employed, like requiring all participants to broadcast their highest
-//! notarization/finalization certificate after nullification, it would impose significant overhead under normal network
+//! finalization certificate after nullification, it would impose significant overhead under normal network
 //! conditions (whereas the approach described incurs no overhead under normal network conditions). Recall, honest participants
 //! already broadcast observed certificates to all other participants in each view (and misaligned participants should only ever
 //! be observed following severe network degradation)._
@@ -3163,8 +3163,7 @@ mod tests {
     #[test_traced]
     fn test_equivocator_bls12381_threshold_min_pk() {
         let detected = (0..5)
-            .map(|seed| equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>))
-            .any(|d| d);
+            .any(|seed| equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>));
         assert!(
             detected,
             "expected at least one seed to detect equivocation"
@@ -3174,9 +3173,9 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_equivocator_bls12381_threshold_min_sig() {
-        let detected = (0..5)
-            .map(|seed| equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>))
-            .any(|d| d);
+        let detected = (0..5).any(|seed| {
+            equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>)
+        });
         assert!(
             detected,
             "expected at least one seed to detect equivocation"
@@ -3186,11 +3185,9 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_equivocator_bls12381_multisig_min_pk() {
-        let detected = (0..5)
-            .map(|seed| {
-                equivocator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>)
-            })
-            .any(|d| d);
+        let detected = (0..5).any(|seed| {
+            equivocator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>)
+        });
         assert!(
             detected,
             "expected at least one seed to detect equivocation"
@@ -3200,11 +3197,9 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_equivocator_bls12381_multisig_min_sig() {
-        let detected = (0..5)
-            .map(|seed| {
-                equivocator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>)
-            })
-            .any(|d| d);
+        let detected = (0..5).any(|seed| {
+            equivocator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>)
+        });
         assert!(
             detected,
             "expected at least one seed to detect equivocation"
@@ -3214,9 +3209,7 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_equivocator_ed25519() {
-        let detected = (0..5)
-            .map(|seed| equivocator::<_, _, RoundRobin>(seed, ed25519::fixture))
-            .any(|d| d);
+        let detected = (0..5).any(|seed| equivocator::<_, _, RoundRobin>(seed, ed25519::fixture));
         assert!(
             detected,
             "expected at least one seed to detect equivocation"
