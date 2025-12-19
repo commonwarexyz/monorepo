@@ -14,7 +14,7 @@ use commonware_consensus::{
         scheme,
         types::{Certificate, Context},
     },
-    types::{Epoch, EpochConfig, EpochStrategy, ViewDelta},
+    types::{Epoch, Epocher, FixedEpocher, ViewDelta},
     Automaton, Relay,
 };
 use commonware_cryptography::{
@@ -230,7 +230,7 @@ where
                 // If we're not in the committee of the latest epoch we know about and we observe another
                 // participant that is ahead of us, send a message on the orchestrator channel to prompt
                 // them to send us the finalization of the epoch boundary block for our latest known epoch.
-                let epoch_config = EpochConfig::fixed(BLOCKS_PER_EPOCH);
+                let epoch_config = FixedEpocher::new(BLOCKS_PER_EPOCH);
                 let boundary_height = epoch_config.last_height_in_epoch(our_epoch);
                 if self.marshal.get_finalization(boundary_height).await.is_some() {
                     // Only request the orchestrator if we don't already have it.
@@ -268,7 +268,7 @@ where
                 // Fetch the finalization certificate for the last block within the subchannel's epoch.
                 // If the node is state synced, marshal may not have the finalization locally, and the
                 // peer will need to fetch it from another node on the network.
-                let epoch_config = EpochConfig::fixed(BLOCKS_PER_EPOCH);
+                let epoch_config = FixedEpocher::new(BLOCKS_PER_EPOCH);
                 let boundary_height = epoch_config.last_height_in_epoch(epoch);
                 let Some(finalization) = self.marshal.get_finalization(boundary_height).await else {
                     debug!(%epoch, ?from, "missing finalization for old epoch");

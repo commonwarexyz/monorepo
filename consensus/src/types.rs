@@ -335,7 +335,7 @@ impl From<Round> for (Epoch, View) {
 /// required epoch boundary calculations.
 ///
 /// These operations must be consistent with each other and deterministic.
-pub trait EpochStrategy: Clone + Send + Sync + 'static {
+pub trait Epocher: Clone + Send + Sync + 'static {
     /// Returns the epoch that the given block height belongs to.
     ///
     /// Returns `None` if the height is not covered by this epoch strategy.
@@ -358,7 +358,7 @@ pub trait EpochStrategy: Clone + Send + Sync + 'static {
 /// Enables networks to change block times while maintaining consistent epoch durations.
 /// For example, a network might start with 10-second blocks and later upgrade to 1-second blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VariableEpochStrategy {
+pub struct VariableEpocher {
     /// Sorted ranges of (start_height, epoch_length) defining epoch transitions.
     ranges: Vec<(u64, u64)>,
 }
@@ -367,23 +367,18 @@ pub struct VariableEpochStrategy {
 ///
 /// All epochs have the same length, providing the simplest epoch strategy.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FixedEpochStrategy {
+pub struct FixedEpocher {
     /// The number of blocks per epoch.
     epoch_length: u64,
 }
 
-/// Legacy type alias for backward compatibility.
-///
-/// New code should prefer using specific strategy types directly or the [`EpochStrategy`] trait.
-pub type EpochConfig = VariableEpochStrategy;
-
-impl FixedEpochStrategy {
+impl FixedEpocher {
     /// Creates a new fixed epoch strategy.
     ///
     /// # Example
     /// ```rust
-    /// # use commonware_consensus::types::FixedEpochStrategy;
-    /// let strategy = FixedEpochStrategy::new(60_480);
+    /// # use commonware_consensus::types::FixedEpocher;
+    /// let strategy = FixedEpocher::new(60_480);
     /// ```
     pub fn new(epoch_length: u64) -> Self {
         assert!(epoch_length > 0, "epoch length must be positive");
@@ -391,7 +386,7 @@ impl FixedEpochStrategy {
     }
 }
 
-impl EpochStrategy for FixedEpochStrategy {
+impl Epocher for FixedEpocher {
     fn epoch_for_height(&self, height: u64) -> Option<Epoch> {
         Some(Epoch::new(height / self.epoch_length))
     }
@@ -409,15 +404,15 @@ impl EpochStrategy for FixedEpochStrategy {
     }
 }
 
-impl VariableEpochStrategy {
+impl VariableEpocher {
     /// Creates a variable epoch strategy from height ranges.
     ///
     /// Ranges must cover all heights starting from 0 with no gaps.
     ///
     /// # Example  
     /// ```rust
-    /// # use commonware_consensus::types::VariableEpochStrategy;
-    /// let strategy = VariableEpochStrategy::new(vec![
+    /// # use commonware_consensus::types::VariableEpocher;
+    /// let strategy = VariableEpocher::new(vec![
     ///     (0, 60_480),        // Initial phase: 60,480 blocks per epoch
     ///     (100_000, 604_800), // Later phase: 604,800 blocks per epoch
     /// ]).expect("valid configuration");
@@ -454,7 +449,7 @@ impl VariableEpochStrategy {
     }
 }
 
-impl EpochStrategy for VariableEpochStrategy {
+impl Epocher for VariableEpocher {
     fn epoch_for_height(&self, height: u64) -> Option<Epoch> {
         let _epoch_length = self.epoch_length_at(height)?;
 
@@ -514,7 +509,7 @@ impl EpochStrategy for VariableEpochStrategy {
     }
 }
 
-impl VariableEpochStrategy {
+impl VariableEpocher {
     /// Returns the epoch length for the given epoch number.
     fn epoch_length_for_epoch(&self, epoch: Epoch) -> u64 {
         let (_, epoch_length) = self.epoch_info(epoch);
@@ -563,43 +558,6 @@ impl VariableEpochStrategy {
         // Fallback (should not reach here with proper validation)
         let fallback_height = epoch.get() * self.ranges[0].1;
         (fallback_height, self.ranges[0].1)
-    }
-}
-
-// Legacy implementation for backward compatibility
-impl EpochConfig {
-    /// Creates a fixed epoch length configuration.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use commonware_consensus::types::EpochConfig;
-    /// let config = EpochConfig::fixed(60_480);
-    /// ```
-    pub fn fixed(epoch_length: u64) -> Self {
-        Self::new(vec![(0, epoch_length)]).expect("valid fixed epoch config")
-    }
-
-    /// Returns the epoch the given height belongs to using the provided configuration.
-    ///
-    /// Returns `None` if the height is not covered by any epoch range.
-    pub fn epoch_with_config(config: &Self, height: u64) -> Option<Epoch> {
-        config.epoch_for_height(height)
-    }
-
-    /// Creates a variable epoch length configuration.
-    ///
-    /// Ranges must cover all heights starting from 0 with no gaps.
-    ///
-    /// # Example  
-    /// ```rust
-    /// # use commonware_consensus::types::EpochConfig;
-    /// let config = EpochConfig::variable(vec![
-    ///     (0, 60_480),        // Initial phase: 60,480 blocks per epoch
-    ///     (100_000, 604_800), // Later phase: 604,800 blocks per epoch
-    /// ]).expect("valid configuration");
-    /// ```
-    pub fn variable(ranges: Vec<(u64, u64)>) -> Result<Self, &'static str> {
-        Self::new(ranges)
     }
 }
 
@@ -1021,61 +979,9 @@ mod tests {
     }
 
     #[test]
-    fn test_epoch_config_functionality() {
-        // Fixed epoch configuration
-        let fixed_config = EpochConfig::fixed(10);
-        assert_eq!(
-            EpochConfig::epoch_with_config(&fixed_config, 0),
-            Some(Epoch::new(0))
-        );
-        assert_eq!(
-            EpochConfig::epoch_with_config(&fixed_config, 9),
-            Some(Epoch::new(0))
-        );
-        assert_eq!(
-            EpochConfig::epoch_with_config(&fixed_config, 10),
-            Some(Epoch::new(1))
-        );
-
-        // Variable epoch configuration with transitions
-        let variable_config = EpochConfig::variable(vec![
-            (0, 5),   // First range: 5 blocks per epoch
-            (20, 10), // Second range: 10 blocks per epoch
-        ])
-        .expect("valid config");
-
-        assert_eq!(
-            EpochConfig::epoch_with_config(&variable_config, 4),
-            Some(Epoch::new(0))
-        );
-        assert_eq!(
-            EpochConfig::epoch_with_config(&variable_config, 19),
-            Some(Epoch::new(3))
-        );
-        assert_eq!(
-            EpochConfig::epoch_with_config(&variable_config, 20),
-            Some(Epoch::new(4))
-        );
-        assert_eq!(
-            EpochConfig::epoch_with_config(&variable_config, 29),
-            Some(Epoch::new(4))
-        );
-        assert_eq!(
-            EpochConfig::epoch_with_config(&variable_config, 30),
-            Some(Epoch::new(5))
-        );
-
-        // Configuration validation
-        assert!(EpochConfig::variable(vec![]).is_err());
-        assert!(EpochConfig::variable(vec![(10, 5)]).is_err());
-        assert!(EpochConfig::variable(vec![(0, 0)]).is_err());
-        assert!(EpochConfig::variable(vec![(0, 5), (0, 10)]).is_err()); // Duplicate start heights
-    }
-
-    #[test]
     fn test_variable_epoch_block_time_transition() {
         // Test maintaining consistent epoch duration across block time changes
-        let config = EpochConfig::variable(vec![
+        let config = VariableEpocher::new(vec![
             (0, 60_480),        // Initial phase: 60,480 blocks per epoch
             (100_000, 604_800), // Later phase: 604,800 blocks per epoch
         ])
@@ -1086,37 +992,22 @@ mod tests {
         assert_eq!(config.epoch_length_at(200_000), Some(604_800));
 
         // Verify epoch progression across transitions
-        assert_eq!(
-            EpochConfig::epoch_with_config(&config, 0),
-            Some(Epoch::new(0))
-        );
-        assert_eq!(
-            EpochConfig::epoch_with_config(&config, 60_479),
-            Some(Epoch::new(0))
-        );
-        assert_eq!(
-            EpochConfig::epoch_with_config(&config, 60_480),
-            Some(Epoch::new(1))
-        );
-        assert_eq!(
-            EpochConfig::epoch_with_config(&config, 100_000),
-            Some(Epoch::new(1))
-        );
-        assert_eq!(
-            EpochConfig::epoch_with_config(&config, 704_800),
-            Some(Epoch::new(2))
-        );
+        assert_eq!(config.epoch_for_height(0), Some(Epoch::new(0)));
+        assert_eq!(config.epoch_for_height(60_479), Some(Epoch::new(0)));
+        assert_eq!(config.epoch_for_height(60_480), Some(Epoch::new(1)));
+        assert_eq!(config.epoch_for_height(100_000), Some(Epoch::new(1)));
+        assert_eq!(config.epoch_for_height(704_800), Some(Epoch::new(2)));
 
         // Test edge case: u64::MAX height
         assert_eq!(
-            EpochConfig::epoch_with_config(&config, u64::MAX),
+            config.epoch_for_height(u64::MAX),
             Some(Epoch::new((u64::MAX - 100_000) / 604_800 + 1))
         );
     }
 
     #[test]
     fn test_fixed_epoch_strategy() {
-        let strategy = FixedEpochStrategy::new(100);
+        let strategy = FixedEpocher::new(100);
 
         // Test basic epoch calculation
         assert_eq!(strategy.epoch_for_height(0), Some(Epoch::new(0)));
@@ -1135,12 +1026,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "epoch length must be positive")]
     fn test_fixed_epoch_strategy_zero_length() {
-        FixedEpochStrategy::new(0);
+        FixedEpocher::new(0);
     }
 
     #[test]
     fn test_variable_epoch_strategy() {
-        let strategy = VariableEpochStrategy::new(vec![
+        let strategy = VariableEpocher::new(vec![
             (0, 10),  // Epochs 0-3: 10 blocks each (heights 0-39)
             (40, 20), // Epochs 4+: 20 blocks each (heights 40+)
         ])
@@ -1164,25 +1055,25 @@ mod tests {
     #[test]
     fn test_variable_epoch_strategy_validation() {
         // Empty ranges
-        assert!(VariableEpochStrategy::new(vec![]).is_err());
+        assert!(VariableEpocher::new(vec![]).is_err());
 
         // Must start at height 0
-        assert!(VariableEpochStrategy::new(vec![(10, 5)]).is_err());
+        assert!(VariableEpocher::new(vec![(10, 5)]).is_err());
 
         // Zero epoch length
-        assert!(VariableEpochStrategy::new(vec![(0, 0)]).is_err());
+        assert!(VariableEpocher::new(vec![(0, 0)]).is_err());
 
         // Duplicate start heights
-        assert!(VariableEpochStrategy::new(vec![(0, 5), (0, 10)]).is_err());
+        assert!(VariableEpocher::new(vec![(0, 5), (0, 10)]).is_err());
 
         // Valid configuration
-        assert!(VariableEpochStrategy::new(vec![(0, 10), (100, 20)]).is_ok());
+        assert!(VariableEpocher::new(vec![(0, 10), (100, 20)]).is_ok());
     }
 
     #[test]
-    fn test_epoch_strategy_trait_usage() {
+    fn test_epocher_trait_usage() {
         // Test that both strategies can be used through the trait
-        fn test_strategy_behavior<S: EpochStrategy>(strategy: &S) {
+        fn test_strategy_behavior<S: Epocher>(strategy: &S) {
             let epoch = strategy.epoch_for_height(50).expect("valid height");
             let length = strategy.epoch_length_at(50).expect("valid height");
             let first = strategy.first_height_in_epoch(epoch);
@@ -1193,9 +1084,8 @@ mod tests {
             assert_eq!(last - first + 1, length);
         }
 
-        let fixed = FixedEpochStrategy::new(100);
-        let variable =
-            VariableEpochStrategy::new(vec![(0, 50), (100, 200)]).expect("valid strategy");
+        let fixed = FixedEpocher::new(100);
+        let variable = VariableEpocher::new(vec![(0, 50), (100, 200)]).expect("valid strategy");
 
         test_strategy_behavior(&fixed);
         test_strategy_behavior(&variable);

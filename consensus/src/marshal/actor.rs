@@ -16,7 +16,7 @@ use crate::{
         scheme::Scheme,
         types::{Finalization, Notarization},
     },
-    types::{Epoch, EpochConfig, Round, ViewDelta},
+    types::{Epoch, Epocher, Round, ViewDelta},
     Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
@@ -100,13 +100,14 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<E, B, P, FC, FB, A = Exact>
+pub struct Actor<E, B, P, FC, FB, ES, A = Exact>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
+    ES: Epocher,
     A: Acknowledgement,
 {
     // ---------- Context ----------
@@ -120,7 +121,7 @@ where
     // Provider for epoch-specific signing schemes
     provider: P,
     // Epoch configuration
-    epoch_config: EpochConfig,
+    epoch_config: ES,
     // Unique application namespace
     namespace: Vec<u8>,
     // Minimum number of views to retain temporary data after the application processes a block
@@ -159,13 +160,14 @@ where
     processed_height: Gauge,
 }
 
-impl<E, B, P, FC, FB, A> Actor<E, B, P, FC, FB, A>
+impl<E, B, P, FC, FB, ES, A> Actor<E, B, P, FC, FB, ES, A>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
+    ES: Epocher,
     A: Acknowledgement,
 {
     /// Create a new application actor.
@@ -173,7 +175,7 @@ where
         context: E,
         finalizations_by_height: FC,
         finalized_blocks: FB,
-        config: Config<B, P>,
+        config: Config<B, P, ES>,
     ) -> (Self, Mailbox<P::Scheme, B>, u64) {
         // Initialize cache
         let prunable_config = cache::Config {
@@ -597,7 +599,7 @@ where
                                     let _ = response.send(true);
                                 },
                                 Request::Finalized { height } => {
-                                    let Some(epoch) = EpochConfig::epoch_with_config(&self.epoch_config, height) else {
+                                    let Some(epoch) = self.epoch_config.epoch_for_height(height) else {
                                         error!(height, "no epoch mapping for height");
                                         let _ = response.send(false);
                                         continue;

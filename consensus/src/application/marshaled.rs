@@ -36,7 +36,7 @@
 use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
     simplex::types::Context,
-    types::{Epoch, EpochConfig, EpochStrategy, Round},
+    types::{Epoch, Epocher, Round},
     Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
 };
 use commonware_cryptography::certificate::Scheme;
@@ -73,35 +73,37 @@ use tracing::{debug, warn};
 ///
 /// Applications do not need to re-implement these checks in their own verification logic.
 #[derive(Clone)]
-pub struct Marshaled<E, S, A, B>
+pub struct Marshaled<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: Block,
+    ES: Epocher,
 {
     context: E,
     application: A,
     marshal: marshal::Mailbox<S, B>,
-    epoch_config: EpochConfig,
+    epoch_config: ES,
     last_built: Arc<Mutex<Option<(Round, B)>>>,
 
     build_duration: Gauge,
 }
 
-impl<E, S, A, B> Marshaled<E, S, A, B>
+impl<E, S, A, B, ES> Marshaled<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,
+    ES: Epocher,
 {
     /// Creates a new [Marshaled] wrapper.
     pub fn new(
         context: E,
         application: A,
         marshal: marshal::Mailbox<S, B>,
-        epoch_config: EpochConfig,
+        epoch_config: ES,
     ) -> Self {
         let build_duration = Gauge::default();
         context.register(
@@ -122,7 +124,7 @@ where
     }
 }
 
-impl<E, S, A, B> Automaton for Marshaled<E, S, A, B>
+impl<E, S, A, B, ES> Automaton for Marshaled<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -133,6 +135,7 @@ where
         Context = Context<B::Commitment, S::PublicKey>,
     >,
     B: Block,
+    ES: Epocher,
 {
     type Digest = B::Commitment;
     type Context = Context<Self::Digest, S::PublicKey>;
@@ -362,10 +365,7 @@ where
 
                 // Blocks are invalid if they are not within the current epoch and they aren't
                 // a re-proposal of the boundary block.
-                let epoch_config = &epoch_config;
-                if EpochConfig::epoch_with_config(epoch_config, block.height()).unwrap()
-                    != context.epoch()
-                {
+                if epoch_config.epoch_for_height(block.height()).unwrap() != context.epoch() {
                     let _ = tx.send(false);
                     return;
                 }
@@ -420,12 +420,13 @@ where
     }
 }
 
-impl<E, S, A, B> Relay for Marshaled<E, S, A, B>
+impl<E, S, A, B, ES> Relay for Marshaled<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,
+    ES: Epocher,
 {
     type Digest = B::Commitment;
 
@@ -459,13 +460,14 @@ where
     }
 }
 
-impl<E, S, A, B> Reporter for Marshaled<E, S, A, B>
+impl<E, S, A, B, ES> Reporter for Marshaled<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
     B: Block,
+    ES: Epocher,
 {
     type Activity = A::Activity;
 
