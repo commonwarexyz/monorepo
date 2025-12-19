@@ -295,7 +295,7 @@ where
             result = &mut pending_boundary_fetch => {
                 let epoch = pending_boundary_epoch.take().expect("epoch should be set");
                 pending_boundary_fetch = None.into();
-                if let Some(_) = result {
+                if result.is_some() {
                     // Finalization is already stored in marshal by the actor.
                     // The application will be notified via the normal finalization flow.
                     debug!(%epoch, "fetched boundary finalization");
