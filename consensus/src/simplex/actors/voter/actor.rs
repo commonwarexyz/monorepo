@@ -851,8 +851,8 @@ impl<
             for v in take(&mut self.certification_candidates)
                 .split_off(&self.state.last_finalized().next())
             {
-                debug!(%v, "taking certification candidate");
                 if let Some(Request(ctx, receiver)) = self.try_certify(v).await {
+                    debug!(%v, "attempting certification");
                     let view = ctx.view();
                     let handle = certify_pool.push(async move { (ctx, receiver.await) });
                     self.state.set_certify_handle(view, handle);
@@ -962,7 +962,8 @@ impl<
                         }
                         Err(err) => {
                             // The application did not explicitly respond whether certification succeeded.
-                            // Retry the certification request.
+                            // Retry the certification request (we should never assume failure here because
+                            // we persist certification results to the journal).
                             debug!(?err, ?round, "failed to certify proposal");
                             self.state.retry_certification(view);
                             self.certification_candidates.insert(view);
