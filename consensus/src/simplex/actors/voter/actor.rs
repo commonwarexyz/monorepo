@@ -403,8 +403,8 @@ impl<
         }
         self.append_journal(view, artifact).await;
 
-        // If we were the leader, we should emit a certifiable chain of ancestor certificates such
-        // that other peers are able to verify my proposal in the future.
+        // If we were the leader and proposed, we should emit the parent certificate (a notarization or finalization)
+        // of our proposal
         self.state
             .leader_index(view)
             .filter(|&leader| self.state.is_me(leader))
