@@ -258,15 +258,25 @@ impl<
                 // Process message
                 self.state.handle(parsed, resolver).await;
             }
-            Message::Produce { view, response } => {
+            Message::Produce {
+                view,
+                nullification_only,
+                response,
+            } => {
                 // Produce message for view
-                let Some(voter) = self.state.get(view) else {
+                let Some(certificate) = self.state.get(view) else {
                     // If we drop the response channel, the resolver will automatically
                     // send an error response to the caller (so they don't need to wait
                     // the full timeout)
                     return;
                 };
-                let _ = response.send(voter.encode().into());
+
+                // If nullification_only, only produce nullifications or finalizations
+                if nullification_only && matches!(certificate, Certificate::Notarization(_)) {
+                    return;
+                }
+
+                let _ = response.send(certificate.encode().into());
             }
         }
     }

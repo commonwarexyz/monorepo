@@ -77,6 +77,7 @@ pub enum Message {
     },
     Produce {
         view: View,
+        nullification_only: bool,
         response: oneshot::Sender<Bytes>,
     },
 }
@@ -116,10 +117,12 @@ impl Producer for Handler {
 
     async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
+        let nullification_only = key.prefix() == PREFIX_NULLIFICATION_ONLY;
         if self
             .sender
             .send(Message::Produce {
                 view: View::new(key.value()),
+                nullification_only,
                 response,
             })
             .await
