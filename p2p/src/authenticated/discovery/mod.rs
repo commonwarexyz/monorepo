@@ -159,7 +159,7 @@
 //! // Configure network
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
-//! const MAX_MESSAGE_SIZE: usize = 1_024; // 1KB
+//! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let p2p_cfg = discovery::Config::local(
 //!     signer.clone(),
 //!     application_namespace,
@@ -271,7 +271,7 @@ mod tests {
     /// errors when tests are run immediately after each other.
     async fn run_network(
         context: impl Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics,
-        max_message_size: usize,
+        max_message_size: u32,
         base_port: u16,
         n: usize,
         mode: Mode,
@@ -287,7 +287,7 @@ mod tests {
         let (complete_sender, mut complete_receiver) = mpsc::channel(peers.len());
         for (i, peer) in peers.iter().enumerate() {
             // Create peer context
-            let context = context.with_label(&format!("peer-{i}"));
+            let context = context.with_label(&format!("peer_{i}"));
 
             // Derive port
             let port = base_port + i as u16;
@@ -463,7 +463,7 @@ mod tests {
 
     fn run_deterministic_test(seed: u64, mode: Mode) {
         // Configure test
-        const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
+        const MAX_MESSAGE_SIZE: u32 = 1_024 * 1_024; // 1MB
         const NUM_PEERS: usize = 25;
         const BASE_PORT: u16 = 3000;
 
@@ -525,7 +525,7 @@ mod tests {
     fn test_tokio_connectivity() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
+            const MAX_MESSAGE_SIZE: u32 = 1_024 * 1_024; // 1MB
             let base_port = 3000;
             let n = 10;
             run_network(context, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
@@ -552,7 +552,7 @@ mod tests {
             let mut waiters = Vec::new();
             for (i, peer) in peers.iter().enumerate() {
                 // Create peer context
-                let context = context.with_label(&format!("peer-{i}"));
+                let context = context.with_label(&format!("peer_{i}"));
 
                 // Derive port
                 let port = base_port + i as u16;
@@ -714,7 +714,7 @@ mod tests {
                 vec![(peers[1].public_key(), socket1.into())],
                 1_024 * 1_024, // 1MB
             );
-            let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
+            let (mut network0, mut oracle0) = Network::new(context.with_label("peer_0"), config0);
             oracle0
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
@@ -730,7 +730,7 @@ mod tests {
                 vec![(peers[0].public_key(), socket0.into())],
                 1_024 * 1_024, // 1MB
             );
-            let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
+            let (mut network1, mut oracle1) = Network::new(context.with_label("peer_1"), config1);
             oracle1
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
@@ -861,7 +861,7 @@ mod tests {
             // Create networks for all peers
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
             for (i, peer) in peers.iter().enumerate() {
-                let peer_context = context.with_label(&format!("peer-{i}"));
+                let peer_context = context.with_label(&format!("peer_{i}"));
                 let port = base_port + i as u16;
 
                 // Create bootstrappers (everyone connects to peer 0)
@@ -945,26 +945,26 @@ mod tests {
                 })
             };
             for i in 0..n {
-                let prefix = format!("peer-{i}_network");
+                let prefix = format!("peer_{i}_network");
                 assert!(
                     is_running(&format!("{prefix}_tracker")),
-                    "peer-{i} tracker should be running"
+                    "peer_{i} tracker should be running"
                 );
                 assert!(
                     is_running(&format!("{prefix}_router")),
-                    "peer-{i} router should be running"
+                    "peer_{i} router should be running"
                 );
                 assert!(
                     is_running(&format!("{prefix}_spawner")),
-                    "peer-{i} spawner should be running"
+                    "peer_{i} spawner should be running"
                 );
                 assert!(
                     is_running(&format!("{prefix}_listener")),
-                    "peer-{i} listener should be running"
+                    "peer_{i} listener should be running"
                 );
                 assert!(
                     is_running(&format!("{prefix}_dialer")),
-                    "peer-{i} dialer should be running"
+                    "peer_{i} dialer should be running"
                 );
             }
 
@@ -999,26 +999,26 @@ mod tests {
                 })
             };
             for i in 0..n {
-                let prefix = format!("peer-{i}_network");
+                let prefix = format!("peer_{i}_network");
                 assert!(
                     is_stopped(&format!("{prefix}_tracker")),
-                    "peer-{i} tracker should be stopped"
+                    "peer_{i} tracker should be stopped"
                 );
                 assert!(
                     is_stopped(&format!("{prefix}_router")),
-                    "peer-{i} router should be stopped"
+                    "peer_{i} router should be stopped"
                 );
                 assert!(
                     is_stopped(&format!("{prefix}_spawner")),
-                    "peer-{i} spawner should be stopped"
+                    "peer_{i} spawner should be stopped"
                 );
                 assert!(
                     is_stopped(&format!("{prefix}_listener")),
-                    "peer-{i} listener should be stopped"
+                    "peer_{i} listener should be stopped"
                 );
                 assert!(
                     is_stopped(&format!("{prefix}_dialer")),
-                    "peer-{i} dialer should be stopped"
+                    "peer_{i} dialer should be stopped"
                 );
             }
         });
@@ -1132,7 +1132,7 @@ mod tests {
             // Create networks
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
             for (i, peer) in peers.iter().enumerate() {
-                let context = context.with_label(&format!("peer-{i}"));
+                let context = context.with_label(&format!("peer_{i}"));
                 let port = base_port + i as u16;
 
                 // Create bootstrappers - use DNS for non-zero peers
@@ -1253,7 +1253,7 @@ mod tests {
 
             // Create network for peer 0 (bootstrapper, no DNS)
             let config0 = Config::test(peer0.clone(), socket0, vec![], 1_024 * 1_024);
-            let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
+            let (mut network0, mut oracle0) = Network::new(context.with_label("peer_0"), config0);
             oracle0
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
@@ -1274,7 +1274,7 @@ mod tests {
                 )],
                 1_024 * 1_024,
             );
-            let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
+            let (mut network1, mut oracle1) = Network::new(context.with_label("peer_1"), config1);
             oracle1
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
@@ -1373,7 +1373,7 @@ mod tests {
             // Create networks
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
             for (i, peer) in peers.iter().enumerate() {
-                let context = context.with_label(&format!("peer-{i}"));
+                let context = context.with_label(&format!("peer_{i}"));
                 let port = base_port + i as u16;
 
                 // Use DNS for bootstrapper
@@ -1494,7 +1494,7 @@ mod tests {
             // Create peer 0 (bootstrapper) with allow_private_ips=true
             let mut config0 = Config::test(peer0.clone(), socket0, vec![], 1_024 * 1_024);
             config0.allow_private_ips = true;
-            let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
+            let (mut network0, mut oracle0) = Network::new(context.with_label("peer_0"), config0);
             oracle0
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
@@ -1512,7 +1512,7 @@ mod tests {
             )];
             let mut config1 = Config::test(peer1.clone(), socket1, bootstrappers, 1_024 * 1_024);
             config1.allow_private_ips = false; // This should prevent dialing the private IP
-            let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
+            let (mut network1, mut oracle1) = Network::new(context.with_label("peer_1"), config1);
             oracle1
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
@@ -1592,7 +1592,7 @@ mod tests {
                 )];
                 let config0 = Config::test(peer0.clone(), socket0, bootstrappers0, 1_024 * 1_024);
                 let (mut network0, mut oracle0) =
-                    Network::new(context.with_label("peer-0"), config0);
+                    Network::new(context.with_label("peer_0"), config0);
                 oracle0
                     .update(0, addresses.clone().try_into().unwrap())
                     .await;
@@ -1610,7 +1610,7 @@ mod tests {
                 )];
                 let config1 = Config::test(peer1.clone(), socket1, bootstrappers1, 1_024 * 1_024);
                 let (mut network1, mut oracle1) =
-                    Network::new(context.with_label("peer-1"), config1);
+                    Network::new(context.with_label("peer_1"), config1);
                 oracle1
                     .update(0, addresses.clone().try_into().unwrap())
                     .await;

@@ -86,7 +86,7 @@ impl<P: PublicKey, F> SplitRouter<P> for F where
 /// Configuration for the simulated network.
 pub struct Config {
     /// Maximum size of a message that can be sent over the network.
-    pub max_size: usize,
+    pub max_size: u32,
 
     /// True if peers should disconnect upon being blocked. While production networking would
     /// typically disconnect, for testing purposes it may be useful to keep peers connected,
@@ -106,7 +106,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     context: ContextCell<E>,
 
     // Maximum size of a message that can be sent over the network
-    max_size: usize,
+    max_size: u32,
 
     // True if peers should disconnect upon being blocked.
     // While production networking would typically disconnect, for testing purposes it may be useful
@@ -763,7 +763,7 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
 pub struct UnlimitedSender<P: PublicKey> {
     me: P,
     channel: Channel,
-    max_size: usize,
+    max_size: u32,
     high: mpsc::UnboundedSender<Task<P>>,
     low: mpsc::UnboundedSender<Task<P>>,
 }
@@ -779,7 +779,7 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
         priority: bool,
     ) -> Result<Vec<P>, Error> {
         // Check message size
-        if message.len() > self.max_size {
+        if message.len() > self.max_size as usize {
             return Err(Error::MessageTooLarge(message.len()));
         }
 
@@ -821,7 +821,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
         context: impl Spawner + Metrics,
         me: P,
         channel: Channel,
-        max_size: usize,
+        max_size: u32,
         mut sender: mpsc::UnboundedSender<Task<P>>,
         oracle_sender: mpsc::UnboundedSender<ingress::Message<P, E>>,
         clock: E,
@@ -1083,7 +1083,7 @@ impl<P: PublicKey> Peer<P> {
         context: E,
         public_key: P,
         socket: SocketAddr,
-        max_size: usize,
+        max_size: u32,
     ) -> Self {
         // The control is used to register channels.
         // There is exactly one mailbox created for each channel that the peer is registered for.
@@ -1241,7 +1241,7 @@ impl Link {
         socket: SocketAddr,
         sampler: Normal<f64>,
         success_rate: f64,
-        max_size: usize,
+        max_size: u32,
         received_messages: Family<metrics::Message, Counter>,
     ) -> Self {
         // Spawn a task that will wait for messages to be sent to the link and then send them
@@ -1305,7 +1305,7 @@ mod tests {
     use futures::FutureExt;
     use std::num::NonZeroU32;
 
-    const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+    const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);

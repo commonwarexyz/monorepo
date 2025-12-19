@@ -145,9 +145,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
-                allowed_bit_vec_rate: self.cfg.allowed_bit_vec_rate,
                 max_peer_set_size: self.cfg.max_peer_set_size,
-                allowed_peers_rate: self.cfg.allowed_peers_rate,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
                 info_verifier: self.info_verifier,
             },
@@ -159,7 +157,10 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
         let stream_cfg = StreamConfig {
             signing_key: self.cfg.crypto,
             namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: self.cfg.max_message_size + types::MAX_PAYLOAD_DATA_OVERHEAD,
+            max_message_size: self
+                .cfg
+                .max_message_size
+                .saturating_add(types::MAX_PAYLOAD_DATA_OVERHEAD),
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,

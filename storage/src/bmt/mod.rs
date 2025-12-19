@@ -43,6 +43,7 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
 /// There should never be more than 255 levels in a proof (would mean the Binary Merkle Tree
@@ -104,7 +105,7 @@ pub struct Tree<H: Hasher> {
     empty: bool,
 
     /// The digests at each level of the tree (from leaves to root).
-    levels: Vec<Vec<H::Digest>>,
+    levels: NonEmptyVec<NonEmptyVec<H::Digest>>,
 }
 
 impl<H: Hasher> Tree<H> {
@@ -121,13 +122,12 @@ impl<H: Hasher> Tree<H> {
         }
 
         // Create the first level
-        let mut levels = Vec::new();
-        levels.push(leaves);
+        let mut levels = non_empty_vec![non_empty_vec![@leaves]];
 
         // Construct the tree level-by-level
-        let mut current_level = levels.last().unwrap();
-        while current_level.len() > 1 {
-            let mut next_level = Vec::with_capacity(current_level.len().div_ceil(2));
+        let mut current_level = levels.last();
+        while !current_level.is_singleton() {
+            let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
             for chunk in current_level.chunks(2) {
                 // Hash the left child
                 hasher.update(&chunk[0]);
@@ -145,15 +145,15 @@ impl<H: Hasher> Tree<H> {
             }
 
             // Add the computed level to the tree
-            levels.push(next_level);
-            current_level = levels.last().unwrap();
+            levels.push(non_empty_vec![@next_level]);
+            current_level = levels.last();
         }
         Self { empty, levels }
     }
 
     /// Returns the root of the tree.
     pub fn root(&self) -> H::Digest {
-        *self.levels.last().unwrap().first().unwrap()
+        *self.levels.last().first()
     }
 
     /// Generates a Merkle proof for the leaf at `position`.
@@ -162,15 +162,15 @@ impl<H: Hasher> Tree<H> {
     /// the root.
     pub fn proof(&self, position: u32) -> Result<Proof<H>, Error> {
         // Ensure the position is within bounds
-        if self.empty || position >= self.levels.first().unwrap().len() as u32 {
+        if self.empty || position >= self.levels.first().len().get() as u32 {
             return Err(Error::InvalidPosition(position));
         }
 
         // For each level (except the root level) record the sibling
-        let mut siblings = Vec::with_capacity(self.levels.len() - 1);
+        let mut siblings = Vec::with_capacity(self.levels.len().get() - 1);
         let mut index = position as usize;
         for level in &self.levels {
-            if level.len() == 1 {
+            if level.is_singleton() {
                 break;
             }
             let sibling_index = if index.is_multiple_of(2) {
@@ -178,7 +178,7 @@ impl<H: Hasher> Tree<H> {
             } else {
                 index - 1
             };
-            let sibling = if sibling_index < level.len() {
+            let sibling = if sibling_index < level.len().get() {
                 level[sibling_index]
             } else {
                 // If no right child exists, use a duplicate of the current node.
@@ -209,7 +209,7 @@ impl<H: Hasher> Tree<H> {
         if start > end {
             return Err(Error::InvalidPosition(start));
         }
-        let leaf_count = self.levels.first().unwrap().len() as u32;
+        let leaf_count = self.levels.first().len().get() as u32;
         if start >= leaf_count {
             return Err(Error::InvalidPosition(start));
         }
@@ -221,7 +221,7 @@ impl<H: Hasher> Tree<H> {
         let mut siblings = Vec::new();
         for (level_idx, level) in self.levels.iter().enumerate() {
             // If the level has only one node, we're done
-            if level.len() == 1 {
+            if level.is_singleton() {
                 break;
             }
 
@@ -239,7 +239,7 @@ impl<H: Hasher> Tree<H> {
             // Check if we need a right sibling
             let mut right = None;
             if level_end.is_multiple_of(2) {
-                if level_end + 1 < level.len() {
+                if level_end + 1 < level.len().get() {
                     // Our range ends at an even index, so we need the odd sibling to the right
                     right = Some(level[level_end + 1]);
                 } else {

@@ -36,8 +36,8 @@
 use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
     simplex::types::Context,
-    types::{Epoch, Round},
-    utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
+    types::{Epoch, Epocher, Round},
+    Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
@@ -73,36 +73,33 @@ use tracing::{debug, warn};
 ///
 /// Applications do not need to re-implement these checks in their own verification logic.
 #[derive(Clone)]
-pub struct Marshaled<E, S, A, B>
+pub struct Marshaled<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: Block,
+    ES: Epocher,
 {
     context: E,
     application: A,
     marshal: marshal::Mailbox<S, B>,
-    epoch_length: u64,
+    epocher: ES,
     last_built: Arc<Mutex<Option<(Round, B)>>>,
 
     build_duration: Gauge,
 }
 
-impl<E, S, A, B> Marshaled<E, S, A, B>
+impl<E, S, A, B, ES> Marshaled<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,
+    ES: Epocher,
 {
     /// Creates a new [Marshaled] wrapper.
-    pub fn new(
-        context: E,
-        application: A,
-        marshal: marshal::Mailbox<S, B>,
-        epoch_length: u64,
-    ) -> Self {
+    pub fn new(context: E, application: A, marshal: marshal::Mailbox<S, B>, epocher: ES) -> Self {
         let build_duration = Gauge::default();
         context.register(
             "build_duration",
@@ -114,7 +111,7 @@ where
             context,
             application,
             marshal,
-            epoch_length,
+            epocher,
             last_built: Arc::new(Mutex::new(None)),
 
             build_duration,
@@ -122,7 +119,7 @@ where
     }
 }
 
-impl<E, S, A, B> Automaton for Marshaled<E, S, A, B>
+impl<E, S, A, B, ES> Automaton for Marshaled<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -133,6 +130,7 @@ where
         Context = Context<B::Commitment, S::PublicKey>,
     >,
     B: Block,
+    ES: Epocher,
 {
     type Digest = B::Commitment;
     type Context = Context<Self::Digest, S::PublicKey>;
@@ -153,14 +151,15 @@ where
             return self.application.genesis().await.commitment();
         }
 
-        let height = utils::last_block_in_epoch(
-            self.epoch_length,
-            epoch.previous().expect("checked to be non-zero above"),
-        );
-        let Some(block) = self.marshal.get_block(height).await else {
+        let prev = epoch.previous().expect("checked to be non-zero above");
+        let last_height = self
+            .epocher
+            .last(prev)
+            .expect("previous epoch should exist");
+        let Some(block) = self.marshal.get_block(last_height).await else {
             // A new consensus engine will never be started without having the genesis block
             // of the new epoch (the last block of the previous epoch) already stored.
-            unreachable!("missing starting epoch block at height {}", height);
+            unreachable!("missing starting epoch block at height {}", last_height);
         };
         block.commitment()
     }
@@ -181,7 +180,7 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let last_built = self.last_built.clone();
-        let epoch_length = self.epoch_length;
+        let epocher = self.epocher.clone();
 
         // Metrics
         let build_duration = self.build_duration.clone();
@@ -224,8 +223,9 @@ where
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
                 // by the epoch transition.
-                let last_in_epoch =
-                    utils::last_block_in_epoch(epoch_length, consensus_context.epoch());
+                let last_in_epoch = epocher
+                    .last(consensus_context.epoch())
+                    .expect("current epoch should exist");
                 if parent.height() == last_in_epoch {
                     let digest = parent.commitment();
                     {
@@ -306,7 +306,7 @@ where
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let epoch_length = self.epoch_length;
+        let epocher = self.epocher.clone();
 
         let (mut tx, rx) = oneshot::channel();
         self.context
@@ -350,7 +350,9 @@ where
 
                 // You can only re-propose the same block if it's the last height in the epoch.
                 if parent.commitment() == block.commitment() {
-                    let last_in_epoch = utils::last_block_in_epoch(epoch_length, context.epoch());
+                    let last_in_epoch = epocher
+                        .last(context.epoch())
+                        .expect("current epoch should exist");
                     if block.height() == last_in_epoch {
                         marshal.verified(context.round, block).await;
                         let _ = tx.send(true);
@@ -362,7 +364,15 @@ where
 
                 // Blocks are invalid if they are not within the current epoch and they aren't
                 // a re-proposal of the boundary block.
-                if utils::epoch(epoch_length, block.height()) != context.epoch() {
+                let Some(block_bounds) = epocher.containing(block.height()) else {
+                    debug!(
+                        height = block.height(),
+                        "block height not covered by epoch strategy"
+                    );
+                    let _ = tx.send(false);
+                    return;
+                };
+                if block_bounds.epoch() != context.epoch() {
                     let _ = tx.send(false);
                     return;
                 }
@@ -417,12 +427,13 @@ where
     }
 }
 
-impl<E, S, A, B> Relay for Marshaled<E, S, A, B>
+impl<E, S, A, B, ES> Relay for Marshaled<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,
+    ES: Epocher,
 {
     type Digest = B::Commitment;
 
@@ -456,13 +467,14 @@ where
     }
 }
 
-impl<E, S, A, B> Reporter for Marshaled<E, S, A, B>
+impl<E, S, A, B, ES> Reporter for Marshaled<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
     B: Block,
+    ES: Epocher,
 {
     type Activity = A::Activity;
 

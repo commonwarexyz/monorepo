@@ -198,7 +198,7 @@ mod tests {
         let mut reporters = BTreeMap::new();
 
         for (idx, participant) in fixture.participants.iter().enumerate() {
-            let context = context.with_label(&participant.to_string());
+            let context = context.with_label(&format!("participant_{participant}"));
 
             // Create Provider and register scheme for epoch
             let provider = mocks::Provider::new();
@@ -429,7 +429,8 @@ mod tests {
 
                     // Spawn validator engines
                     for (idx, participant) in fixture.participants.iter().enumerate() {
-                        let validator_context = context.with_label(&participant.to_string());
+                        let validator_context =
+                            context.with_label(&format!("participant_{participant}"));
 
                         // Create Provider and register scheme for epoch
                         let provider = mocks::Provider::new();
@@ -576,7 +577,8 @@ mod tests {
 
                 // Start validator engines with Skip strategy for skip_index
                 for (idx, participant) in fixture.participants.iter().enumerate() {
-                    let validator_context = context.with_label(&participant.to_string());
+                    let validator_context =
+                        context.with_label(&format!("participant_{participant}"));
 
                     // Create Provider and register scheme for epoch
                     let provider = mocks::Provider::new();
@@ -658,7 +660,8 @@ mod tests {
 
                 // Start validator engines with Correct strategy (will sign everything now)
                 for (idx, participant) in fixture.participants.iter().enumerate() {
-                    let validator_context = context.with_label(&participant.to_string());
+                    let validator_context =
+                        context.with_label(&format!("participant_{participant}"));
 
                     // Create Provider and register scheme for epoch
                     let provider = mocks::Provider::new();
@@ -966,7 +969,7 @@ mod tests {
 
             // Start only 2 out of 5 validators (below quorum of 3)
             for (idx, participant) in fixture.participants.iter().take(2).enumerate() {
-                let context = context.with_label(&participant.to_string());
+                let context = context.with_label(&format!("participant_{participant}"));
 
                 // Create Provider and register scheme for epoch
                 let provider = mocks::Provider::new();

@@ -16,8 +16,8 @@ use crate::{
         scheme::Scheme,
         types::{Finalization, Notarization},
     },
-    types::{Epoch, Round, ViewDelta},
-    utils, Block, Reporter,
+    types::{Epoch, Epocher, Round, ViewDelta},
+    Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
@@ -100,13 +100,14 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<E, B, P, FC, FB, A = Exact>
+pub struct Actor<E, B, P, FC, FB, ES, A = Exact>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
+    ES: Epocher,
     A: Acknowledgement,
 {
     // ---------- Context ----------
@@ -119,8 +120,8 @@ where
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
     provider: P,
-    // Epoch length (in blocks)
-    epoch_length: u64,
+    // Epoch configuration
+    epocher: ES,
     // Minimum number of views to retain temporary data after the application processes a block
     view_retention_timeout: ViewDelta,
     // Maximum number of blocks to repair at once
@@ -157,13 +158,14 @@ where
     processed_height: Gauge,
 }
 
-impl<E, B, P, FC, FB, A> Actor<E, B, P, FC, FB, A>
+impl<E, B, P, FC, FB, ES, A> Actor<E, B, P, FC, FB, ES, A>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
+    ES: Epocher,
     A: Acknowledgement,
 {
     /// Create a new application actor.
@@ -171,8 +173,8 @@ where
         context: E,
         finalizations_by_height: FC,
         finalized_blocks: FB,
-        config: Config<B, P>,
-    ) -> (Self, Mailbox<P::Scheme, B>) {
+        config: Config<B, P, ES>,
+    ) -> (Self, Mailbox<P::Scheme, B>, u64) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -222,7 +224,7 @@ where
                 context: ContextCell::new(context),
                 mailbox,
                 provider: config.provider,
-                epoch_length: config.epoch_length,
+                epocher: config.epocher,
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
@@ -239,6 +241,7 @@ where
                 processed_height,
             },
             Mailbox::new(sender),
+            last_processed_height,
         )
     }
 
@@ -593,8 +596,11 @@ where
                                     let _ = response.send(true);
                                 },
                                 Request::Finalized { height } => {
-                                    let epoch = utils::epoch(self.epoch_length, height);
-                                    let Some(scheme) = self.get_scheme_certificate_verifier(epoch) else {
+                                    let Some(bounds) = self.epocher.containing(height) else {
+                                        let _ = response.send(false);
+                                        continue;
+                                    };
+                                    let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
                                         let _ = response.send(false);
                                         continue;
                                     };

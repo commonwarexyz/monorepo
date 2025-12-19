@@ -14,7 +14,8 @@ use commonware_storage::{
             FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
         current::{
-            ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
+            ordered::fixed::Db as OCurrent, unordered::fixed::Db as UCurrent,
+            FixedConfig as CConfig,
         },
         store::{Batchable, Config as SConfig, Store},
         Error,

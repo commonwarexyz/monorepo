@@ -206,7 +206,7 @@ mod tests {
         let namespace = b"my testing namespace";
 
         for (idx, validator) in fixture.participants.iter().enumerate() {
-            let context = context.with_label(&validator.to_string());
+            let context = context.with_label(&format!("validator_{validator}"));
             let monitor = mocks::Monitor::new(epoch);
             let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
 
@@ -710,7 +710,7 @@ mod tests {
             let namespace = b"my testing namespace";
 
             for (idx, validator) in fixture.participants.iter().enumerate() {
-                let context = context.with_label(&validator.to_string());
+                let context = context.with_label(&format!("validator_{validator}"));
                 let monitor = mocks::Monitor::new(epoch);
                 monitors.insert(validator.clone(), monitor.clone());
                 let sequencers = mocks::Sequencers::<PublicKey>::new(fixture.participants.clone());
@@ -862,7 +862,7 @@ mod tests {
 
             // Spawn validator engines (no signing key, only validate)
             for (idx, validator) in fixture.participants.iter().enumerate() {
-                let context = context.with_label(&validator.to_string());
+                let context = context.with_label(&format!("validator_{validator}"));
                 let monitor = mocks::Monitor::new(epoch);
                 let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
 

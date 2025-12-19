@@ -164,7 +164,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // Attempt to remove any old records from the rate limiter.
         // This is a best-effort attempt to prevent memory usage from growing indefinitely.
-        self.rate_limiter.shrink_to_fit();
+        //
+        // We don't reduce the capacity of the rate limiter to avoid re-allocation on
+        // future peer set additions.
+        self.rate_limiter.retain_recent();
+
         Some(deleted_peers)
     }
 
