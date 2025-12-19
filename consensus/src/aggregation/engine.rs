@@ -248,9 +248,12 @@ impl<
             buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::init(self.context.with_label("journal").into(), journal_cfg)
-            .await
-            .expect("init failed");
+        let journal = Journal::init(
+            self.context.with_label("journal").into_present(),
+            journal_cfg,
+        )
+        .await
+        .expect("init failed");
         let unverified_indices = self.replay(&journal).await;
         self.journal = Some(journal);
 
