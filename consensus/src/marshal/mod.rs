@@ -1682,7 +1682,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(NAMESPACE, &mut context, NUM_VALIDATORS);
 
             // Test 1: Fresh init should return processed height 0
             let me = participants[0].clone();
@@ -1817,7 +1817,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(NAMESPACE, &mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_base_app, marshal, _processed_height) = setup_validator(
