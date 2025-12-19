@@ -1,4 +1,4 @@
-use super::round::Round;
+use super::round::{CertifyResult, Round};
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
@@ -227,7 +227,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
         (retry, nullify, cert)
     }
 
-    /// Inserts a notarization certificate and advances into the next view.
+    /// Inserts a notarization certificate and prepares the next view's leader.
+    ///
+    /// Does not advance into the next view until certification passes.
     pub fn add_notarization(
         &mut self,
         notarization: Notarization<S, D>,
@@ -434,13 +436,12 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
             .unwrap_or(false)
     }
 
-    /// Attempt to mark certification as in-flight; returns `None` to avoid duplicate requests.
-    pub fn try_certify(&mut self, view: View) -> Option<(Rnd, Proposal<D>)> {
-        let proposal = self
-            .views
-            .get_mut(&view)
-            .and_then(|round| round.should_certify())?;
-        Some((proposal.round, proposal))
+    /// Attempt to certify a view's proposal.
+    pub fn try_certify(&mut self, view: View) -> CertifyResult<Proposal<D>> {
+        let Some(round) = self.views.get_mut(&view) else {
+            return CertifyResult::Skip;
+        };
+        round.should_certify()
     }
 
     /// Store the abort handle for an in-flight certification request.

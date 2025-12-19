@@ -1,5 +1,6 @@
 use super::{
     ingress::Message,
+    round::CertifyResult,
     state::{Config as StateConfig, State},
     Config, Mailbox,
 };
@@ -327,14 +328,22 @@ impl<
         Some(Request(context, receiver))
     }
 
-    /// Returns a request to certify a proposal if it should be requested.
+    /// Attempt to certify a proposal for the given view.
     ///
-    /// Returns `None` if the proposal should not be certified for any reason, for example if it
-    /// already has a certification request or does not have enough information to make the request.
+    /// If the proposal is not yet available but certification is pending,
+    /// the view is re-added to candidates for later retry.
     async fn try_certify(&mut self, view: View) -> Option<Request<Rnd, bool>> {
-        let (round, proposal) = self.state.try_certify(view)?;
-        let receiver = self.automaton.certify(proposal.payload).await;
-        Some(Request(round, receiver))
+        match self.state.try_certify(view) {
+            CertifyResult::Ready(proposal) => {
+                let receiver = self.automaton.certify(proposal.payload).await;
+                Some(Request(proposal.round, receiver))
+            }
+            CertifyResult::Pending => {
+                self.certification_candidates.insert(view);
+                None
+            }
+            CertifyResult::Skip => None,
+        }
     }
 
     /// Handle a timeout.
@@ -430,6 +439,9 @@ impl<
             return;
         };
 
+        // Remove from candidates since certification is complete
+        self.certification_candidates.remove(&view);
+
         // Persist certification result for recovery
         let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
         self.append_journal(view, artifact.clone()).await;
@@ -458,6 +470,14 @@ impl<
             self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
+
+        // Prune certification candidates that are no longer needed. This also
+        // bounds the size of certification_candidates during replay (views are
+        // added when notarizations are replayed, then removed here when
+        // finalizations are replayed).
+        let last_finalized = self.state.last_finalized();
+        self.certification_candidates
+            .retain(|v| *v > last_finalized);
     }
 
     /// Build, persist, and broadcast a notarize vote when this view is ready.
@@ -826,12 +846,12 @@ impl<
                 pending_verify = self.try_verify().await;
             }
 
-            // Attempt to certify any views that we have notarizations for
-            let candidates = take(&mut self.certification_candidates)
-                .range(self.state.last_finalized().next()..)
-                .copied()
-                .collect::<Vec<_>>();
-            for v in candidates {
+            // Attempt to certify any views that we have notarizations for.
+            // Use split_off to only process views above last_finalized to handle edge cases
+            // where finalization arrives between iterations.
+            for v in take(&mut self.certification_candidates)
+                .split_off(&self.state.last_finalized().next())
+            {
                 debug!(%v, "taking certification candidate");
                 if let Some(Request(ctx, receiver)) = self.try_certify(v).await {
                     let view = ctx.view();
