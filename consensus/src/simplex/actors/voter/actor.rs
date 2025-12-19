@@ -405,11 +405,10 @@ impl<
 
         // If we were the leader, we should emit a certifiable chain of ancestor certificates such
         // that other peers are able to verify my proposal in the future.
-        let leader = self.state.leader_index(view)?;
-        if self.state.is_me(leader) {
-            return self.state.parent_certificate(view);
-        }
-        None
+        self.state
+            .leader_index(view)
+            .filter(|&leader| self.state.is_me(leader))
+            .and_then(|_| self.state.parent_certificate(view))
     }
 
     /// Persists our notarize vote to the journal for crash recovery.
