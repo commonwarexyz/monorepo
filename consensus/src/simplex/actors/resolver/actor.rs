@@ -18,7 +18,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::StaticManager, Blocker, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{ordered::Quorum, sequence::prefixed_u64::U64 as PrefixedU64};
+use commonware_utils::{ordered::Quorum, sequence::U64};
 use futures::{channel::mpsc, StreamExt};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
@@ -235,7 +235,7 @@ impl<
         &mut self,
         message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
-        resolver: &mut p2p::Mailbox<PrefixedU64, S::PublicKey>,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
     ) {
         match message {
             HandlerMessage::Deliver {

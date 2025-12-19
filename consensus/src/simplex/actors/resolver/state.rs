@@ -338,10 +338,7 @@ mod tests {
         assert!(
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
-        assert_eq!(
-            resolver.outstanding(),
-            vec![(PREFIX_ANY, 1), (PREFIX_ANY, 2)]
-        ); // limited to concurrency
+        assert_eq!(resolver.outstanding(), vec![1, 2]); // limited to concurrency
 
         let nullification_v2 = build_nullification(&schemes, &verifier, View::new(2));
         state
@@ -355,10 +352,7 @@ mod tests {
         assert!(
             matches!(state.get(View::new(2)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
-        assert_eq!(
-            resolver.outstanding(),
-            vec![(PREFIX_ANY, 1), (PREFIX_ANY, 3)]
-        ); // limited to concurrency
+        assert_eq!(resolver.outstanding(), vec![1, 3]); // limited to concurrency
 
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
         state
@@ -372,7 +366,7 @@ mod tests {
         assert!(
             matches!(state.get(View::new(1)), Some(Certificate::Nullification(n)) if n == &nullification_v1)
         );
-        assert_eq!(resolver.outstanding(), vec![(PREFIX_ANY, 3)]);
+        assert_eq!(resolver.outstanding(), vec![3]);
     }
 
     #[test_async]
@@ -392,10 +386,7 @@ mod tests {
                 .await;
         }
         assert_eq!(state.current_view, View::new(6));
-        assert_eq!(
-            resolver.outstanding(),
-            vec![(PREFIX_ANY, 1), (PREFIX_ANY, 2), (PREFIX_ANY, 3)]
-        );
+        assert_eq!(resolver.outstanding(), vec![1, 2, 3]);
 
         // Notarization does not set floor or prune
         let notarization = build_notarization(&schemes, &verifier, View::new(6));
@@ -409,10 +400,7 @@ mod tests {
 
         assert!(state.floor.is_none());
         assert_eq!(state.nullifications.len(), 3); // nullifications remain
-        assert_eq!(
-            resolver.outstanding(),
-            vec![(PREFIX_ANY, 1), (PREFIX_ANY, 2), (PREFIX_ANY, 3)]
-        ); // requests remain
+        assert_eq!(resolver.outstanding(), vec![1, 2, 3]); // requests remain
 
         // Finalization sets floor and prunes
         let finalization = build_finalization(&schemes, &verifier, View::new(6));
@@ -522,8 +510,8 @@ mod tests {
         assert!(!state.satisfied_by.contains_key(&View::new(5)));
         // Both view 5 and view 2 should have nullification-only requests
         let outstanding = resolver.outstanding();
-        assert!(outstanding.contains(&(PREFIX_NULLIFICATION_ONLY, 5)));
-        assert!(outstanding.contains(&(PREFIX_NULLIFICATION_ONLY, 2)));
+        assert!(outstanding.contains(&5));
+        assert!(outstanding.contains(&2));
     }
 
     #[test_async]
