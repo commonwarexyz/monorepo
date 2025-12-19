@@ -1,8 +1,8 @@
 //! Authenticated journal implementation.
 //!
-//! An authenticated journal maintains a contiguous journal of operations alongside a Merkle Mountain
-//! Range (MMR). The operation at index i in the journal corresponds to the leaf at Location i in the
-//! MMR. This structure enables efficient proofs that an operation is included in the journal at a
+//! An authenticated journal maintains a contiguous journal of items alongside a Merkle Mountain
+//! Range (MMR). The item at index i in the journal corresponds to the leaf at Location i in the
+//! MMR. This structure enables efficient proofs that an item is included in the journal at a
 //! specific location.
 
 use crate::{
@@ -33,22 +33,22 @@ pub enum Error {
     #[error("journal error: {0}")]
     Journal(#[from] super::Error),
 }
-/// An append-only data structure that maintains a sequential journal of operations alongside a
-/// Merkle Mountain Range (MMR). The operation at index i in the journal corresponds to the leaf at
-/// Location i in the MMR. This structure enables efficient proofs that an operation is included in
-/// the journal at a specific location.
+/// An append-only data structure that maintains a sequential journal of items alongside a Merkle
+/// Mountain Range (MMR). The item at index i in the journal corresponds to the leaf at Location i
+/// in the MMR. This structure enables efficient proofs that an item is included in the journal at a
+/// specific location.
 pub struct Journal<E, C, H, S: State<H::Digest> = Dirty>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: Encode>,
     H: Hasher,
 {
-    /// MMR where each leaf is an operation digest.
-    /// Invariant: leaf i corresponds to operation i in the journal.
+    /// MMR where each leaf is an item digest.
+    /// Invariant: leaf i corresponds to item i in the journal.
     pub(crate) mmr: Mmr<E, H::Digest, S>,
 
-    /// Journal of operations.
-    /// Invariant: operation i corresponds to leaf i in the MMR.
+    /// Journal of items.
+    /// Invariant: item i corresponds to leaf i in the MMR.
     pub(crate) journal: C,
 
     pub(crate) hasher: StandardHasher<H>,
@@ -78,7 +78,7 @@ where
         self.journal.pruning_boundary().into()
     }
 
-    /// Read an operation from the journal at the given location.
+    /// Read an item from the journal at the given location.
     pub async fn read(&self, loc: Location) -> Result<C::Item, Error> {
         self.journal.read(*loc).await.map_err(Error::Journal)
     }
@@ -91,15 +91,15 @@ where
     H: Hasher,
     S: State<DigestOf<H>>,
 {
-    pub async fn append(&mut self, op: C::Item) -> Result<Location, Error> {
-        let encoded_op = op.encode();
+    pub async fn append(&mut self, item: C::Item) -> Result<Location, Error> {
+        let encoded_item = item.encode();
 
-        // Append operation to the journal and update the MMR in parallel.
+        // Append item to the journal and update the MMR in parallel.
         let (_, loc) = try_join!(
             self.mmr
-                .add(&mut self.hasher, &encoded_op)
+                .add(&mut self.hasher, &encoded_item)
                 .map_err(Error::Mmr),
-            self.journal.append(op).map_err(Into::into)
+            self.journal.append(item).map_err(Into::into)
         )?;
 
         Ok(Location::new_unchecked(loc))
@@ -146,9 +146,9 @@ where
         })
     }
 
-    /// Align `mmr` to be consistent with `journal`. Any elements in `mmr` that aren't in `journal` are popped, and any
-    /// elements in `journal` that aren't in `mmr` are added to `mmr`. Operations are added to `mmr` in batches of size
-    /// `apply_batch_size` to avoid memory bloat.
+    /// Align `mmr` to be consistent with `journal`. Any items in `mmr` that aren't in `journal` are
+    /// popped, and any items in `journal` that aren't in `mmr` are added to `mmr`. Items are added
+    /// to `mmr` in batches of size `apply_batch_size` to avoid memory bloat.
     async fn align(
         mut mmr: CleanMmr<E, H::Digest>,
         journal: &C,
@@ -161,12 +161,12 @@ where
         let mut mmr_size = mmr.leaves();
         if mmr_size > journal_size {
             let pop_count = mmr_size - journal_size;
-            warn!(journal_size, ?pop_count, "popping MMR operations");
+            warn!(journal_size, ?pop_count, "popping MMR items");
             mmr.pop(hasher, *pop_count as usize).await?;
             mmr_size = Location::new_unchecked(journal_size);
         }
 
-        // If the MMR is behind, replay journal operations to catch up.
+        // If the MMR is behind, replay journal items to catch up.
         if mmr_size < journal_size {
             let replay_count = journal_size - *mmr_size;
             warn!(
@@ -205,9 +205,9 @@ where
             return Ok(self.pruning_boundary());
         }
 
-        // Sync the mmr before pruning the journal, otherwise the MMR tip could end up behind the journal's
-        // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
-        // the operations between the MMR tip and the journal pruning boundary.
+        // Sync the mmr before pruning the journal, otherwise the MMR tip could end up behind the
+        // journal's pruning boundary on restart from an unclean shutdown, and there would be no way
+        // to replay the items between the MMR tip and the journal pruning boundary.
         self.mmr.sync().await?;
 
         // Prune the journal and check if anything was actually pruned
@@ -234,18 +234,17 @@ where
     C: Contiguous<Item: Encode>,
     H: Hasher,
 {
-    /// Generate a proof of inclusion for operations starting at `start_loc`.
+    /// Generate a proof of inclusion for items starting at `start_loc`.
     ///
-    /// Returns a proof and the operations corresponding to the leaves in the range
-    /// `start_loc..end_loc`, where `end_loc` is the minimum of the current operation count and
-    /// `start_loc + max_ops`.
+    /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
+    /// where `end_loc` is the minimum of the current item count and `start_loc + max_ops`.
     ///
     /// # Errors
     ///
     /// - Returns [Error::Mmr] with [crate::mmr::Error::LocationOverflow] if `start_loc` >
     ///   [crate::mmr::MAX_LOCATION].
     /// - Returns [Error::Mmr] with [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= current
-    ///   operation count.
+    ///   item count.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
     ///   pruned.
     pub async fn proof(
@@ -259,16 +258,15 @@ where
     /// Generate a historical proof with respect to the state of the MMR when it had
     /// `historical_size` items.
     ///
-    /// Returns a proof and the operations corresponding to the leaves in the range
-    /// `start_loc..end_loc`, where `end_loc` is the minimum of `historical_size` and `start_loc +
-    /// max_ops`.
+    /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
+    /// where `end_loc` is the minimum of `historical_size` and `start_loc + max_ops`.
     ///
     /// # Errors
     ///
     /// - Returns [Error::Mmr] with [crate::mmr::Error::LocationOverflow] if `historical_size` or
     ///   `start_loc` > [crate::mmr::MAX_LOCATION].
     /// - Returns [Error::Mmr] with [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >=
-    ///   `historical_size` or `historical_size` > number of operations in the journal.
+    ///   `historical_size` or `historical_size` > number of items in the journal.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
     ///   pruned.
     pub async fn historical_proof(
@@ -399,7 +397,7 @@ where
     }
 }
 
-/// The number of operations to apply to the MMR in a single batch.
+/// The number of items to apply to the MMR in a single batch.
 const APPLY_BATCH_SIZE: u64 = 1 << 16;
 
 impl<E, O, H> Journal<E, fixed::Journal<E, O>, H, Clean<H::Digest>>
@@ -408,9 +406,9 @@ where
     O: CodecFixed<Cfg = ()>,
     H: Hasher,
 {
-    /// Create a new [Journal] for fixed-length operations.
+    /// Create a new [Journal] for fixed-length items.
     ///
-    /// The journal will be rewound to the last operation that matches the `rewind_predicate` on
+    /// The journal will be rewound to the last item that matches the `rewind_predicate` on
     /// initialization.
     pub async fn new(
         context: E,
@@ -420,7 +418,7 @@ where
     ) -> Result<Self, Error> {
         let mut journal = fixed::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
-        // Rewind journal to last matching operation.
+        // Rewind journal to last matching item.
         journal.rewind_to(rewind_predicate).await?;
 
         // Align the MMR and journal.
@@ -447,9 +445,9 @@ where
     O: Codec + Encode,
     H: Hasher,
 {
-    /// Create a new [Journal] for variable-length operations.
+    /// Create a new [Journal] for variable-length items.
     ///
-    /// The journal will be rewound to the last operation that matches the `rewind_predicate` on
+    /// The journal will be rewound to the last item that matches the `rewind_predicate` on
     /// initialization.
     pub async fn new(
         context: E,
@@ -462,7 +460,7 @@ where
         let mut journal =
             variable::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
-        // Rewind to last matching operation.
+        // Rewind to last matching item.
         journal.rewind_to(rewind_predicate).await?;
 
         // Align the MMR and journal.
