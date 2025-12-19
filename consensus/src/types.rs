@@ -328,6 +328,19 @@ impl From<Round> for (Epoch, View) {
     }
 }
 
+/// Represents the relative position within an epoch.
+///
+/// Epochs are divided into two halves with a distinct midpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EpochPhase {
+    /// First half of the epoch (0 <= relative < length/2).
+    Early,
+    /// Exactly at the midpoint (relative == length/2).
+    Midpoint,
+    /// Second half of the epoch (length/2 < relative < length).
+    Late,
+}
+
 /// Strategy for determining epoch boundaries and lengths based on block height.
 ///
 /// This trait allows different epoch calculation strategies to be implemented and used
@@ -351,6 +364,25 @@ pub trait Epocher: Clone + Send + Sync + 'static {
 
     /// Returns the last block height in the given epoch.
     fn last_height_in_epoch(&self, epoch: Epoch) -> u64;
+
+    /// Returns the phase of the given height within its epoch.
+    ///
+    /// Returns `None` if the height is not covered by this epoch strategy.
+    fn phase_at(&self, height: u64) -> Option<EpochPhase> {
+        let epoch = self.epoch_for_height(height)?;
+        let epoch_length = self.epoch_length_at(height)?;
+        let first = self.first_height_in_epoch(epoch);
+        let relative = height - first;
+        let midpoint = epoch_length / 2;
+
+        Some(if relative < midpoint {
+            EpochPhase::Early
+        } else if relative == midpoint {
+            EpochPhase::Midpoint
+        } else {
+            EpochPhase::Late
+        })
+    }
 }
 
 /// Configuration for variable epoch lengths across block height ranges.
@@ -1089,6 +1121,45 @@ mod tests {
 
         test_strategy_behavior(&fixed);
         test_strategy_behavior(&variable);
+    }
+
+    #[test]
+    fn test_epoch_phase() {
+        // Test with epoch length of 30 (midpoint = 15)
+        let epocher = FixedEpocher::new(30);
+
+        // Early phase: relative 0-14
+        assert_eq!(epocher.phase_at(0), Some(EpochPhase::Early));
+        assert_eq!(epocher.phase_at(14), Some(EpochPhase::Early));
+
+        // Midpoint: relative 15
+        assert_eq!(epocher.phase_at(15), Some(EpochPhase::Midpoint));
+
+        // Late phase: relative 16-29
+        assert_eq!(epocher.phase_at(16), Some(EpochPhase::Late));
+        assert_eq!(epocher.phase_at(29), Some(EpochPhase::Late));
+
+        // Second epoch starts at height 30
+        assert_eq!(epocher.phase_at(30), Some(EpochPhase::Early));
+        assert_eq!(epocher.phase_at(44), Some(EpochPhase::Early));
+        assert_eq!(epocher.phase_at(45), Some(EpochPhase::Midpoint));
+        assert_eq!(epocher.phase_at(46), Some(EpochPhase::Late));
+
+        // Test with epoch length 10 (midpoint = 5)
+        let epocher = FixedEpocher::new(10);
+        assert_eq!(epocher.phase_at(0), Some(EpochPhase::Early)); // relative 0
+        assert_eq!(epocher.phase_at(4), Some(EpochPhase::Early)); // relative 4
+        assert_eq!(epocher.phase_at(5), Some(EpochPhase::Midpoint)); // relative 5
+        assert_eq!(epocher.phase_at(6), Some(EpochPhase::Late)); // relative 6
+        assert_eq!(epocher.phase_at(9), Some(EpochPhase::Late)); // relative 9
+
+        // Test with odd epoch length 11 (midpoint = 5 via integer division)
+        let epocher = FixedEpocher::new(11);
+        assert_eq!(epocher.phase_at(0), Some(EpochPhase::Early)); // relative 0
+        assert_eq!(epocher.phase_at(4), Some(EpochPhase::Early)); // relative 4
+        assert_eq!(epocher.phase_at(5), Some(EpochPhase::Midpoint)); // relative 5
+        assert_eq!(epocher.phase_at(6), Some(EpochPhase::Late)); // relative 6
+        assert_eq!(epocher.phase_at(10), Some(EpochPhase::Late)); // relative 10
     }
 
     #[cfg(feature = "arbitrary")]
