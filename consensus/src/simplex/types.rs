@@ -572,6 +572,11 @@ impl<S: Scheme, D: Digest> Read for Artifact<S, D> {
                 let v = Finalization::read_cfg(reader, cfg)?;
                 Ok(Self::Finalization(v))
             }
+            6 => {
+                let r = Round::read(reader)?;
+                let b = bool::read(reader)?;
+                Ok(Self::Certification(r, b))
+            }
             _ => Err(Error::Invalid(
                 "consensus::simplex::Artifact",
                 "Invalid type",
