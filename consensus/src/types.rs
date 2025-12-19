@@ -462,16 +462,20 @@ impl FixedEpocher {
 impl Epocher for FixedEpocher {
     fn containing(&self, height: u64) -> Option<EpochInfo> {
         let epoch = Epoch::new(height / self.0);
-        let first = epoch.get() * self.0;
+        let first = epoch.get().checked_mul(self.0)?;
         Some(EpochInfo::new(epoch, height, first, self.0))
     }
 
     fn first(&self, epoch: Epoch) -> Option<u64> {
-        Some(epoch.get() * self.0)
+        epoch.get().checked_mul(self.0)
     }
 
     fn last(&self, epoch: Epoch) -> Option<u64> {
-        Some(epoch.get() * self.0 + self.0 - 1)
+        epoch
+            .get()
+            .checked_add(1)?
+            .checked_mul(self.0)?
+            .checked_sub(1)
     }
 }
 
