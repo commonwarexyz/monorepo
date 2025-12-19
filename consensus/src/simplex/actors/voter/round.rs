@@ -11,6 +11,16 @@ use std::{
 };
 use tracing::debug;
 
+/// Result of attempting to certify a proposal.
+pub enum CertifyResult<T> {
+    /// Proposal is ready for certification.
+    Ready(T),
+    /// Has notarization but proposal not yet available.
+    Pending,
+    /// Certification not needed (already certified, no notarization, or handle exists).
+    Skip,
+}
+
 /// Tracks the leader of a round.
 #[derive(Debug, Clone)]
 pub struct Leader<P: PublicKey> {
@@ -118,17 +128,17 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.request_verify()
     }
 
-    /// Returns the proposal if we should attempt to certify it.
-    ///
-    /// Returns `None` if the proposal should not be certified for any reason, for example if it
-    /// already has a certification request or does not have enough information to make the request.
-    pub fn should_certify(&mut self) -> Option<Proposal<D>> {
-        // Ignore any requests where we cannot certify or have already requested certification.
+    /// Attempt to certify this round's proposal.
+    pub fn should_certify(&mut self) -> CertifyResult<Proposal<D>> {
+        // Skip if no notarization, already certified, or handle exists
         if self.notarization.is_none() || self.certified.is_some() || self.certify_handle.is_some()
         {
-            return None;
+            return CertifyResult::Skip;
         }
-        self.proposal.proposal().cloned()
+        self.proposal
+            .proposal()
+            .cloned()
+            .map_or(CertifyResult::Pending, CertifyResult::Ready)
     }
 
     /// Sets the handle for the certification request.
@@ -139,11 +149,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Clears the handle for the certification request.
     pub fn unset_certify_handle(&mut self) {
         self.certify_handle = None;
-    }
-
-    /// Returns true if certification is pending (has notarization, not yet certified, no handle).
-    pub const fn is_certification_pending(&self) -> bool {
-        self.notarization.is_some() && self.certified.is_none() && self.certify_handle.is_none()
     }
 
     /// Returns the elected leader (if any) for this round.

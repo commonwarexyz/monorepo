@@ -1,4 +1,4 @@
-use super::round::Round;
+use super::round::{CertifyResult, Round};
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
@@ -436,13 +436,12 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
             .unwrap_or(false)
     }
 
-    /// Attempt to mark certification as in-flight; returns `None` to avoid duplicate requests.
-    pub fn try_certify(&mut self, view: View) -> Option<(Rnd, Proposal<D>)> {
-        let proposal = self
-            .views
-            .get_mut(&view)
-            .and_then(|round| round.should_certify())?;
-        Some((proposal.round, proposal))
+    /// Attempt to certify a view's proposal.
+    pub fn try_certify(&mut self, view: View) -> CertifyResult<Proposal<D>> {
+        let Some(round) = self.views.get_mut(&view) else {
+            return CertifyResult::Skip;
+        };
+        round.should_certify()
     }
 
     /// Store the abort handle for an in-flight certification request.
@@ -459,14 +458,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
             return;
         };
         round.unset_certify_handle();
-    }
-
-    /// Returns true if certification is pending for the given view.
-    pub fn is_certification_pending(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .map(|round| round.is_certification_pending())
-            .unwrap_or(false)
     }
 
     /// Marks proposal certification as complete and returns the notarization.

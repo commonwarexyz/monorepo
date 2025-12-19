@@ -1,5 +1,6 @@
 use super::{
     ingress::Message,
+    round::CertifyResult,
     state::{Config as StateConfig, State},
     Config, Mailbox,
 };
@@ -327,14 +328,16 @@ impl<
         Some(Request(context, receiver))
     }
 
-    /// Returns a request to certify a proposal if it should be requested.
-    ///
-    /// Returns `None` if the proposal should not be certified for any reason, for example if it
-    /// already has a certification request or does not have enough information to make the request.
-    async fn try_certify(&mut self, view: View) -> Option<Request<Rnd, bool>> {
-        let (round, proposal) = self.state.try_certify(view)?;
-        let receiver = self.automaton.certify(proposal.payload).await;
-        Some(Request(round, receiver))
+    /// Attempt to certify a proposal for the given view.
+    async fn try_certify(&mut self, view: View) -> CertifyResult<Request<Rnd, bool>> {
+        match self.state.try_certify(view) {
+            CertifyResult::Ready(proposal) => {
+                let receiver = self.automaton.certify(proposal.payload).await;
+                CertifyResult::Ready(Request(proposal.round, receiver))
+            }
+            CertifyResult::Pending => CertifyResult::Pending,
+            CertifyResult::Skip => CertifyResult::Skip,
+        }
     }
 
     /// Handle a timeout.
@@ -840,13 +843,17 @@ impl<
             // Attempt to certify any views that we have notarizations for
             for v in take(&mut self.certification_candidates) {
                 debug!(%v, "taking certification candidate");
-                if let Some(Request(ctx, receiver)) = self.try_certify(v).await {
-                    let view = ctx.view();
-                    let handle = certify_pool.push(async move { (ctx, receiver.await) });
-                    self.state.set_certify_handle(view, handle);
-                } else if self.state.is_certification_pending(v) {
-                    // Proposal not yet available, re-add for later retry
-                    self.certification_candidates.insert(v);
+                match self.try_certify(v).await {
+                    CertifyResult::Ready(Request(ctx, receiver)) => {
+                        let view = ctx.view();
+                        let handle = certify_pool.push(async move { (ctx, receiver.await) });
+                        self.state.set_certify_handle(view, handle);
+                    }
+                    CertifyResult::Pending => {
+                        // Proposal not yet available, re-add for later retry
+                        self.certification_candidates.insert(v);
+                    }
+                    CertifyResult::Skip => {}
                 }
             }
 
