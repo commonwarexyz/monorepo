@@ -9,6 +9,7 @@
 //! * Wicked Fast Block Times (2 Network Hops)
 //! * Optimal Finalization Latency (3 Network Hops)
 //! * Externalized Uptime and Fault Proofs
+//! * Require Certification Before Finalization
 //! * Decoupled Block Broadcast and Sync
 //! * Lazy Message Verification
 //! * Application-Defined Block Format
@@ -198,6 +199,21 @@
 //! These threshold signatures over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` (i.e. the consensus certificates)
 //! can be used to secure interoperability between different consensus instances and user interactions with an infrastructure provider
 //! (where any data served can be proven to derive from some finalized block of some consensus instance with a known static public key).
+//!
+//! ## Certification
+//!
+//! After a payload is notarized, the application can optionally delay or prevent finalization via the
+//! [`Automaton::certify`](crate::Automaton::certify) method. This is particularly useful for systems that employ
+//! erasure coding, where participants may want to wait until they have received enough shards to reconstruct
+//! and validate the full block before voting to finalize.
+//!
+//! If `certify` returns `false`, the participant will not broadcast a `finalize` vote for the payload.
+//! Because finalization requires `2f+1` `finalize` votes, a payload will only be finalized if a quorum
+//! of participants certify it. By default, `certify` returns `true` for all payloads, meaning finalization
+//! proceeds immediately after notarization.
+//!
+//! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
+//! liveness._
 //!
 //! ## Persistence
 //!
