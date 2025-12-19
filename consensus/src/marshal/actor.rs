@@ -599,12 +599,12 @@ where
                                     let _ = response.send(true);
                                 },
                                 Request::Finalized { height } => {
-                                    let Some(epoch) = self.epocher.containing(height) else {
+                                    let Some(bounds) = self.epocher.containing(height) else {
                                         error!(height, "no epoch mapping for height");
                                         let _ = response.send(false);
                                         continue;
                                     };
-                                    let Some(scheme) = self.get_scheme_certificate_verifier(epoch) else {
+                                    let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
                                         let _ = response.send(false);
                                         continue;
                                     };

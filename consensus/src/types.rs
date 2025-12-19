@@ -342,6 +342,79 @@ pub enum EpochPhase {
     Late,
 }
 
+/// Information about an epoch relative to a specific height.
+///
+/// This type is returned by [`Epocher::containing`] to provide all epoch-related information
+/// in a single, validated structure. Methods like [`first`](Self::first), [`last`](Self::last),
+/// [`relative`](Self::relative), and [`phase`](Self::phase) can only be called on a valid
+/// `EpochInfo`, ensuring that epoch boundary calculations are always safe.
+///
+/// The stored height (from the [`Epocher::containing`] call) determines what
+/// [`relative`](Self::relative) and [`phase`](Self::phase) return.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EpochInfo {
+    epoch: Epoch,
+    height: u64,
+    first: u64,
+    length: u64,
+}
+
+impl EpochInfo {
+    /// Creates a new `EpochInfo`.
+    pub const fn new(epoch: Epoch, height: u64, first: u64, length: u64) -> Self {
+        Self {
+            epoch,
+            height,
+            first,
+            length,
+        }
+    }
+
+    /// Returns the epoch.
+    pub const fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+
+    /// Returns the queried height.
+    pub const fn height(&self) -> u64 {
+        self.height
+    }
+
+    /// Returns the first block height in this epoch.
+    pub const fn first(&self) -> u64 {
+        self.first
+    }
+
+    /// Returns the last block height in this epoch.
+    pub const fn last(&self) -> u64 {
+        self.first + self.length - 1
+    }
+
+    /// Returns the length of this epoch.
+    pub const fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// Returns the relative position of the queried height within this epoch.
+    pub const fn relative(&self) -> u64 {
+        self.height - self.first
+    }
+
+    /// Returns the phase of the queried height within this epoch.
+    pub const fn phase(&self) -> EpochPhase {
+        let relative = self.relative();
+        let midpoint = self.length / 2;
+
+        if relative < midpoint {
+            EpochPhase::Early
+        } else if relative == midpoint {
+            EpochPhase::Midpoint
+        } else {
+            EpochPhase::Late
+        }
+    }
+}
+
 /// Strategy for determining epoch boundaries and lengths based on block height.
 ///
 /// This trait allows different epoch calculation strategies to be implemented and used
@@ -350,54 +423,20 @@ pub enum EpochPhase {
 ///
 /// These operations must be consistent with each other and deterministic.
 pub trait Epocher: Clone + Send + Sync + 'static {
-    /// Returns the epoch containing the given block height.
+    /// Returns the bounds of the epoch containing the given block height.
     ///
     /// Returns `None` if the height is not covered by this epoch strategy.
-    fn containing(&self, height: u64) -> Option<Epoch>;
-
-    /// Returns the epoch length at the given block height.
-    ///
-    /// Returns `None` if the height is not covered by this epoch strategy.
-    fn length_at(&self, height: u64) -> Option<u64>;
-
-    /// Returns the relative position of a height within its epoch.
-    ///
-    /// The relative position is the offset from the first block in the epoch.
-    /// For example, if an epoch starts at height 100, then height 105 has
-    /// relative position 5.
-    ///
-    /// Returns `None` if the height is not covered by this epoch strategy.
-    fn relative(&self, height: u64) -> Option<u64> {
-        let epoch = self.containing(height)?;
-        Some(height - self.first(epoch))
-    }
-
-    /// Returns the phase of the given height within its epoch.
-    ///
-    /// Returns `None` if the height is not covered by this epoch strategy.
-    fn phase_at(&self, height: u64) -> Option<EpochPhase> {
-        let relative = self.relative(height)?;
-        let length = self.length_at(height)?;
-        let midpoint = length / 2;
-
-        Some(if relative < midpoint {
-            EpochPhase::Early
-        } else if relative == midpoint {
-            EpochPhase::Midpoint
-        } else {
-            EpochPhase::Late
-        })
-    }
+    fn containing(&self, height: u64) -> Option<EpochInfo>;
 
     /// Returns the first block height in the given epoch.
     ///
-    /// The epoch should be obtained from [`containing`](Self::containing) to ensure validity.
-    fn first(&self, epoch: Epoch) -> u64;
+    /// Returns `None` if the epoch is not covered by this epoch strategy.
+    fn first(&self, epoch: Epoch) -> Option<u64>;
 
     /// Returns the last block height in the given epoch.
     ///
-    /// The epoch should be obtained from [`containing`](Self::containing) to ensure validity.
-    fn last(&self, epoch: Epoch) -> u64;
+    /// Returns `None` if the epoch is not covered by this epoch strategy.
+    fn last(&self, epoch: Epoch) -> Option<u64>;
 }
 
 /// Configuration for fixed epoch lengths.
@@ -421,20 +460,18 @@ impl FixedEpocher {
 }
 
 impl Epocher for FixedEpocher {
-    fn containing(&self, height: u64) -> Option<Epoch> {
-        Some(Epoch::new(height / self.0))
+    fn containing(&self, height: u64) -> Option<EpochInfo> {
+        let epoch = Epoch::new(height / self.0);
+        let first = epoch.get() * self.0;
+        Some(EpochInfo::new(epoch, height, first, self.0))
     }
 
-    fn length_at(&self, _height: u64) -> Option<u64> {
-        Some(self.0)
+    fn first(&self, epoch: Epoch) -> Option<u64> {
+        Some(epoch.get() * self.0)
     }
 
-    fn first(&self, epoch: Epoch) -> u64 {
-        epoch.get() * self.0
-    }
-
-    fn last(&self, epoch: Epoch) -> u64 {
-        self.first(epoch) + self.0 - 1
+    fn last(&self, epoch: Epoch) -> Option<u64> {
+        Some(epoch.get() * self.0 + self.0 - 1)
     }
 }
 
@@ -858,79 +895,95 @@ mod tests {
 
     #[test]
     fn test_fixed_epoch_strategy() {
-        let strategy = FixedEpocher::new(NZU64!(100));
+        let epocher = FixedEpocher::new(NZU64!(100));
 
-        // Test basic epoch calculation
-        assert_eq!(strategy.containing(0), Some(Epoch::new(0)));
-        assert_eq!(strategy.containing(99), Some(Epoch::new(0)));
-        assert_eq!(strategy.containing(100), Some(Epoch::new(1)));
+        // Test containing returns correct EpochInfo
+        let bounds = epocher.containing(0).unwrap();
+        assert_eq!(bounds.epoch(), Epoch::new(0));
+        assert_eq!(bounds.first(), 0);
+        assert_eq!(bounds.last(), 99);
+        assert_eq!(bounds.length(), 100);
 
-        // Test epoch length is constant
-        assert_eq!(strategy.length_at(0), Some(100));
-        assert_eq!(strategy.length_at(999), Some(100));
+        let bounds = epocher.containing(99).unwrap();
+        assert_eq!(bounds.epoch(), Epoch::new(0));
 
-        // Test epoch boundaries
-        assert_eq!(strategy.first(Epoch::new(1)), 100);
-        assert_eq!(strategy.last(Epoch::new(1)), 199);
+        let bounds = epocher.containing(100).unwrap();
+        assert_eq!(bounds.epoch(), Epoch::new(1));
+        assert_eq!(bounds.first(), 100);
+        assert_eq!(bounds.last(), 199);
+
+        // Test first/last return correct boundaries
+        assert_eq!(epocher.first(Epoch::new(0)), Some(0));
+        assert_eq!(epocher.last(Epoch::new(0)), Some(99));
+        assert_eq!(epocher.first(Epoch::new(1)), Some(100));
+        assert_eq!(epocher.last(Epoch::new(1)), Some(199));
+        assert_eq!(epocher.first(Epoch::new(5)), Some(500));
+        assert_eq!(epocher.last(Epoch::new(5)), Some(599));
     }
 
     #[test]
-    fn test_relative_height() {
+    fn test_epoch_bounds_relative() {
         let epocher = FixedEpocher::new(NZU64!(100));
 
         // Epoch 0: heights 0-99
-        assert_eq!(epocher.relative(0), Some(0));
-        assert_eq!(epocher.relative(50), Some(50));
-        assert_eq!(epocher.relative(99), Some(99));
+        assert_eq!(epocher.containing(0).unwrap().relative(), 0);
+        assert_eq!(epocher.containing(50).unwrap().relative(), 50);
+        assert_eq!(epocher.containing(99).unwrap().relative(), 99);
 
         // Epoch 1: heights 100-199
-        assert_eq!(epocher.relative(100), Some(0));
-        assert_eq!(epocher.relative(150), Some(50));
-        assert_eq!(epocher.relative(199), Some(99));
+        assert_eq!(epocher.containing(100).unwrap().relative(), 0);
+        assert_eq!(epocher.containing(150).unwrap().relative(), 50);
+        assert_eq!(epocher.containing(199).unwrap().relative(), 99);
 
         // Epoch 5: heights 500-599
-        assert_eq!(epocher.relative(500), Some(0));
-        assert_eq!(epocher.relative(567), Some(67));
-        assert_eq!(epocher.relative(599), Some(99));
+        assert_eq!(epocher.containing(500).unwrap().relative(), 0);
+        assert_eq!(epocher.containing(567).unwrap().relative(), 67);
+        assert_eq!(epocher.containing(599).unwrap().relative(), 99);
     }
 
     #[test]
-    fn test_epoch_phase() {
+    fn test_epoch_bounds_phase() {
         // Test with epoch length of 30 (midpoint = 15)
         let epocher = FixedEpocher::new(NZU64!(30));
 
         // Early phase: relative 0-14
-        assert_eq!(epocher.phase_at(0), Some(EpochPhase::Early));
-        assert_eq!(epocher.phase_at(14), Some(EpochPhase::Early));
+        assert_eq!(epocher.containing(0).unwrap().phase(), EpochPhase::Early);
+        assert_eq!(epocher.containing(14).unwrap().phase(), EpochPhase::Early);
 
         // Midpoint: relative 15
-        assert_eq!(epocher.phase_at(15), Some(EpochPhase::Midpoint));
+        assert_eq!(
+            epocher.containing(15).unwrap().phase(),
+            EpochPhase::Midpoint
+        );
 
         // Late phase: relative 16-29
-        assert_eq!(epocher.phase_at(16), Some(EpochPhase::Late));
-        assert_eq!(epocher.phase_at(29), Some(EpochPhase::Late));
+        assert_eq!(epocher.containing(16).unwrap().phase(), EpochPhase::Late);
+        assert_eq!(epocher.containing(29).unwrap().phase(), EpochPhase::Late);
 
         // Second epoch starts at height 30
-        assert_eq!(epocher.phase_at(30), Some(EpochPhase::Early));
-        assert_eq!(epocher.phase_at(44), Some(EpochPhase::Early));
-        assert_eq!(epocher.phase_at(45), Some(EpochPhase::Midpoint));
-        assert_eq!(epocher.phase_at(46), Some(EpochPhase::Late));
+        assert_eq!(epocher.containing(30).unwrap().phase(), EpochPhase::Early);
+        assert_eq!(epocher.containing(44).unwrap().phase(), EpochPhase::Early);
+        assert_eq!(
+            epocher.containing(45).unwrap().phase(),
+            EpochPhase::Midpoint
+        );
+        assert_eq!(epocher.containing(46).unwrap().phase(), EpochPhase::Late);
 
         // Test with epoch length 10 (midpoint = 5)
         let epocher = FixedEpocher::new(NZU64!(10));
-        assert_eq!(epocher.phase_at(0), Some(EpochPhase::Early)); // relative 0
-        assert_eq!(epocher.phase_at(4), Some(EpochPhase::Early)); // relative 4
-        assert_eq!(epocher.phase_at(5), Some(EpochPhase::Midpoint)); // relative 5
-        assert_eq!(epocher.phase_at(6), Some(EpochPhase::Late)); // relative 6
-        assert_eq!(epocher.phase_at(9), Some(EpochPhase::Late)); // relative 9
+        assert_eq!(epocher.containing(0).unwrap().phase(), EpochPhase::Early);
+        assert_eq!(epocher.containing(4).unwrap().phase(), EpochPhase::Early);
+        assert_eq!(epocher.containing(5).unwrap().phase(), EpochPhase::Midpoint);
+        assert_eq!(epocher.containing(6).unwrap().phase(), EpochPhase::Late);
+        assert_eq!(epocher.containing(9).unwrap().phase(), EpochPhase::Late);
 
         // Test with odd epoch length 11 (midpoint = 5 via integer division)
         let epocher = FixedEpocher::new(NZU64!(11));
-        assert_eq!(epocher.phase_at(0), Some(EpochPhase::Early)); // relative 0
-        assert_eq!(epocher.phase_at(4), Some(EpochPhase::Early)); // relative 4
-        assert_eq!(epocher.phase_at(5), Some(EpochPhase::Midpoint)); // relative 5
-        assert_eq!(epocher.phase_at(6), Some(EpochPhase::Late)); // relative 6
-        assert_eq!(epocher.phase_at(10), Some(EpochPhase::Late)); // relative 10
+        assert_eq!(epocher.containing(0).unwrap().phase(), EpochPhase::Early);
+        assert_eq!(epocher.containing(4).unwrap().phase(), EpochPhase::Early);
+        assert_eq!(epocher.containing(5).unwrap().phase(), EpochPhase::Midpoint);
+        assert_eq!(epocher.containing(6).unwrap().phase(), EpochPhase::Late);
+        assert_eq!(epocher.containing(10).unwrap().phase(), EpochPhase::Late);
     }
 
     #[cfg(feature = "arbitrary")]

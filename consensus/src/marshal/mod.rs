@@ -463,8 +463,8 @@ mod tests {
                 assert!(height > 0, "genesis block should not have been generated");
 
                 // Calculate the epoch and round for the block
-                let epoch = epocher.containing(height).unwrap();
-                let round = Round::new(epoch, View::new(height));
+                let bounds = epocher.containing(height).unwrap();
+                let round = Round::new(bounds.epoch(), View::new(height));
 
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (NUM_VALIDATORS as u64)) as usize;
@@ -502,7 +502,7 @@ mod tests {
                     {
                         if (do_finalize && i < QUORUM as usize)
                             || height == NUM_BLOCKS
-                            || height == epocher.last(epoch)
+                            || height == bounds.last()
                         {
                             actor.report(Activity::Finalization(fin.clone())).await;
                         }
@@ -511,9 +511,7 @@ mod tests {
                     // If `quorum_sees_finalization` is not set, finalize randomly with a 20% chance for each
                     // individual participant.
                     for actor in actors.iter_mut() {
-                        if context.gen_bool(0.2)
-                            || height == NUM_BLOCKS
-                            || height == epocher.last(epoch)
+                        if context.gen_bool(0.2) || height == NUM_BLOCKS || height == bounds.last()
                         {
                             actor.report(Activity::Finalization(fin.clone())).await;
                         }
@@ -610,8 +608,8 @@ mod tests {
                 assert!(height > 0, "genesis block should not have been generated");
 
                 // Calculate the epoch and round for the block
-                let epoch = epocher.containing(height).unwrap();
-                let round = Round::new(epoch, View::new(height));
+                let bounds = epocher.containing(height).unwrap();
+                let round = Round::new(bounds.epoch(), View::new(height));
 
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (applications.len() as u64)) as usize;

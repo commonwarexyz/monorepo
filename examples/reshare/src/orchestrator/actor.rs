@@ -231,7 +231,7 @@ where
                 // If we're not in the committee of the latest epoch we know about and we observe another
                 // participant that is ahead of us, send a message on the orchestrator channel to prompt
                 // them to send us the finalization of the epoch boundary block for our latest known epoch.
-                let boundary_height = epocher.last(our_epoch);
+                let boundary_height = epocher.last(our_epoch).expect("our epoch should exist");
                 if self.marshal.get_finalization(boundary_height).await.is_some() {
                     // Only request the orchestrator if we don't already have it.
                     continue;
@@ -268,7 +268,7 @@ where
                 // Fetch the finalization certificate for the last block within the subchannel's epoch.
                 // If the node is state synced, marshal may not have the finalization locally, and the
                 // peer will need to fetch it from another node on the network.
-                let boundary_height = epocher.last(epoch);
+                let boundary_height = epocher.last(epoch).expect("requested epoch should exist");
                 let Some(finalization) = self.marshal.get_finalization(boundary_height).await else {
                     debug!(%epoch, ?from, "missing finalization for old epoch");
                     continue;

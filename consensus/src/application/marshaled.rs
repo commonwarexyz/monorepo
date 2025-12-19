@@ -151,13 +151,15 @@ where
             return self.application.genesis().await.commitment();
         }
 
-        let height = self
+        let prev = epoch.previous().expect("checked to be non-zero above");
+        let last_height = self
             .epocher
-            .last(epoch.previous().expect("checked to be non-zero above"));
-        let Some(block) = self.marshal.get_block(height).await else {
+            .last(prev)
+            .expect("previous epoch should exist");
+        let Some(block) = self.marshal.get_block(last_height).await else {
             // A new consensus engine will never be started without having the genesis block
             // of the new epoch (the last block of the previous epoch) already stored.
-            unreachable!("missing starting epoch block at height {}", height);
+            unreachable!("missing starting epoch block at height {}", last_height);
         };
         block.commitment()
     }
@@ -221,7 +223,9 @@ where
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
                 // by the epoch transition.
-                let last_in_epoch = epocher.last(consensus_context.epoch());
+                let last_in_epoch = epocher
+                    .last(consensus_context.epoch())
+                    .expect("current epoch should exist");
                 if parent.height() == last_in_epoch {
                     let digest = parent.commitment();
                     {
@@ -346,7 +350,9 @@ where
 
                 // You can only re-propose the same block if it's the last height in the epoch.
                 if parent.commitment() == block.commitment() {
-                    let last_in_epoch = epocher.last(context.epoch());
+                    let last_in_epoch = epocher
+                        .last(context.epoch())
+                        .expect("current epoch should exist");
                     if block.height() == last_in_epoch {
                         marshal.verified(context.round, block).await;
                         let _ = tx.send(true);
@@ -358,7 +364,7 @@ where
 
                 // Blocks are invalid if they are not within the current epoch and they aren't
                 // a re-proposal of the boundary block.
-                let Some(block_epoch) = epocher.containing(block.height()) else {
+                let Some(block_bounds) = epocher.containing(block.height()) else {
                     debug!(
                         height = block.height(),
                         "block height not covered by epoch strategy"
@@ -366,7 +372,7 @@ where
                     let _ = tx.send(false);
                     return;
                 };
-                if block_epoch != context.epoch() {
+                if block_bounds.epoch() != context.epoch() {
                     let _ = tx.send(false);
                     return;
                 }

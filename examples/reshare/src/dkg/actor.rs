@@ -401,9 +401,10 @@ where
                             }
                         }
                         MailboxMessage::Finalized { block, response } => {
-                            let block_epoch = epocher.containing(block.height).expect("block height covered by epoch strategy");
-                            let phase = epocher.phase_at(block.height).expect("block height covered by epoch strategy");
-                            let relative_height = epocher.relative(block.height).expect("block height covered by epoch strategy");
+                            let bounds = epocher.containing(block.height).expect("block height covered by epoch strategy");
+                            let block_epoch = bounds.epoch();
+                            let phase = bounds.phase();
+                            let relative_height = bounds.relative();
                             info!(epoch = %block_epoch, relative_height, "processing finalized block");
 
                             // Skip blocks from previous epochs (can happen on restart if we
@@ -458,8 +459,7 @@ where
                             }
 
                             // Continue if not the last block in the epoch
-                            let last_height = epocher.last(block_epoch);
-                            if block.height != last_height {
+                            if block.height != bounds.last() {
                                 // Acknowledge block processing
                                 response.acknowledge();
                                 continue;
