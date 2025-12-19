@@ -86,7 +86,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             }
             Certificate::Finalization(finalization) => {
                 let view = finalization.view();
-                if self.encounter_view(view) {
+                if self.encounter_view(view) || self.can_upgrade_floor(view) {
                     self.floor = Some(Certificate::Finalization(finalization));
                     self.prune(resolver).await;
                 }
@@ -164,6 +164,17 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .as_ref()
             .map(|floor| floor.view())
             .unwrap_or(View::zero())
+    }
+
+    /// Returns true if the floor can be upgraded at the given view.
+    ///
+    /// A finalization can upgrade a notarization at the same view since
+    /// finalization is a stronger proof than notarization.
+    fn can_upgrade_floor(&self, view: View) -> bool {
+        matches!(
+            self.floor.as_ref(),
+            Some(Certificate::Notarization(n)) if n.view() == view
+        )
     }
 
     /// Inform the [Resolver] of any missing nullifications.
@@ -547,5 +558,46 @@ mod tests {
         assert!(!state.satisfied_by.contains_key(&View::new(5)));
         // View 5 should not be marked as failed
         assert!(!state.is_failed(View::new(5)));
+    }
+
+    #[test_async]
+    async fn finalization_upgrades_certified_notarization_at_same_view() {
+        let (schemes, verifier) = ed25519_fixture();
+        let mut state: State<TestScheme, Sha256Digest> = State::new(10);
+        let mut resolver = MockResolver::default();
+
+        // Create and certify a notarization at view 5
+        let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
+        state
+            .handle(
+                Certificate::Notarization(notarization_v5.clone()),
+                None,
+                &mut resolver,
+            )
+            .await;
+        state
+            .handle_certified(View::new(5), true, &mut resolver)
+            .await;
+
+        // Floor should be the notarization at view 5
+        assert!(
+            matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v5)
+        );
+        assert_eq!(state.floor_view(), View::new(5));
+
+        // A finalization at the same view should upgrade the floor
+        let finalization_v5 = build_finalization(&schemes, &verifier, View::new(5));
+        state
+            .handle(
+                Certificate::Finalization(finalization_v5.clone()),
+                None,
+                &mut resolver,
+            )
+            .await;
+
+        // Floor should now be the finalization (stronger proof)
+        assert!(
+            matches!(state.floor.as_ref(), Some(Certificate::Finalization(f)) if f == &finalization_v5)
+        );
     }
 }

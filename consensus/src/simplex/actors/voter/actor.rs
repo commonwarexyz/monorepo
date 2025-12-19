@@ -762,9 +762,11 @@ impl<
                             continue;
                         };
                         resolver.certified(round.view(), success).await;
-                        self.reporter
-                            .report(Activity::Certification(notarization))
-                            .await;
+                        if success {
+                            self.reporter
+                                .report(Activity::Certification(notarization))
+                                .await;
+                        }
                     }
                     Artifact::Nullify(nullify) => {
                         self.handle_nullify(nullify.clone()).await;
@@ -969,9 +971,11 @@ impl<
                                 continue;
                             };
                             resolver.certified(view, certified).await;
-                            self.reporter
-                                .report(Activity::Certification(notarization))
-                                .await;
+                            if certified {
+                                self.reporter
+                                    .report(Activity::Certification(notarization))
+                                    .await;
+                            }
                         }
                         Err(err) => {
                             // The application did not explicitly respond whether certification succeeded.
