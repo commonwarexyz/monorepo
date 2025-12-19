@@ -88,9 +88,6 @@ struct BlockSubscription<B: Block> {
     _aborter: Aborter,
 }
 
-/// Waiters for finalization fetch requests.
-type FinalizationWaiters<S, C> = Vec<oneshot::Sender<Option<Finalization<S, C>>>>;
-
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
 /// of blocks.
@@ -145,8 +142,6 @@ where
     tip: u64,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
-    // Pending finalization fetch requests waiting for network resolution
-    finalization_fetches: BTreeMap<u64, FinalizationWaiters<P::Scheme, B::Commitment>>,
 
     // ---------- Storage ----------
     // Prunable cache
@@ -241,7 +236,6 @@ where
                 pending_ack: None.into(),
                 tip: 0,
                 block_subscriptions: BTreeMap::new(),
-                finalization_fetches: BTreeMap::new(),
                 cache,
                 application_metadata,
                 finalizations_by_height,
@@ -301,15 +295,6 @@ where
             self.block_subscriptions.retain(|_, bs| {
                 bs.subscribers.retain(|tx| !tx.is_canceled());
                 !bs.subscribers.is_empty()
-            });
-
-            // Remove any dropped pending fetch finalization waiters.
-            //
-            // We don't cancel the resolver fetch because gap repair may also be
-            // fetching the same height.
-            self.finalization_fetches.retain(|_, waiters| {
-                waiters.retain(|tx| !tx.is_canceled());
-                !waiters.is_empty()
             });
 
             // Select messages
@@ -445,21 +430,19 @@ where
                             let finalization = self.get_finalization_by_height(height).await;
                             let _ = response.send(finalization);
                         }
-                        Message::FetchFinalization { height, response } => {
-                            // Check if finalization is already available locally
-                            if let Some(finalization) = self.get_finalization_by_height(height).await {
-                                let _ = response.send(Some(finalization));
+                        Message::EnsureFinalization { height } => {
+                            // Skip if height is at or below the floor
+                            if height <= self.last_processed_height {
+                                continue;
+                            }
+
+                            // Skip if finalization is already available locally
+                            if self.get_finalization_by_height(height).await.is_some() {
                                 continue;
                             }
 
                             // Trigger a fetch via the resolver
                             resolver.fetch(Request::<B>::Finalized { height }).await;
-
-                            // Register the waiter
-                            self.finalization_fetches
-                                .entry(height)
-                                .or_default()
-                                .push(response);
                         }
                         Message::Subscribe { round, commitment, response } => {
                             // Check for block locally
@@ -545,18 +528,6 @@ where
                                 error!(?err, height, "failed to prune finalized archives");
                                 return;
                             }
-
-                            // Clean up pending finalization fetch waiters for pruned heights
-                            self.finalization_fetches.retain(|h, waiters| {
-                                if *h <= height {
-                                    for waiter in waiters.drain(..) {
-                                        let _ = waiter.send(None);
-                                    }
-                                    false
-                                } else {
-                                    true
-                                }
-                            });
                         }
                     }
                 },
@@ -678,19 +649,12 @@ where
                                         height,
                                         block.commitment(),
                                         block,
-                                        Some(finalization.clone()),
+                                        Some(finalization),
                                         &mut application,
                                         &mut buffer,
                                         &mut resolver,
                                     )
                                     .await;
-
-                                    // Notify any pending fetch finalization waiters
-                                    if let Some(waiters) = self.finalization_fetches.remove(&height) {
-                                        for waiter in waiters {
-                                            let _ = waiter.send(Some(finalization.clone()));
-                                        }
-                                    }
                                 },
                                 Request::Notarized { round } => {
                                     let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
