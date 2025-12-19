@@ -1280,8 +1280,10 @@ mod tests {
                 .await
                 .expect("Failed to create blob");
 
-            // Write incomplete size data (less than 4 bytes)
-            let incomplete_data = vec![0x00, 0x01]; // Less than 4 bytes
+            // Write incomplete varint by encoding u32::MAX (5 bytes) and truncating to 1 byte
+            let mut incomplete_data = Vec::new();
+            UInt(u32::MAX).write(&mut incomplete_data);
+            incomplete_data.truncate(1);
             blob.write_at(incomplete_data, 0)
                 .await
                 .expect("Failed to write incomplete data");
@@ -1333,15 +1335,15 @@ mod tests {
                 .await
                 .expect("Failed to create blob");
 
-            // Write size but no item data
-            let item_size: u32 = 10; // Size of the item
+            // Write size but incomplete item data
+            let item_size: u32 = 10; // Size indicates 10 bytes of data
             let mut buf = Vec::new();
-            buf.put_u32(item_size);
-            let data = [2u8; 5];
+            UInt(item_size).write(&mut buf); // Varint encoding
+            let data = [2u8; 5]; // Only 5 bytes, not 10 + 4 (checksum)
             BufMut::put_slice(&mut buf, &data);
             blob.write_at(buf, 0)
                 .await
-                .expect("Failed to write item size");
+                .expect("Failed to write incomplete item");
             blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
@@ -1394,18 +1396,13 @@ mod tests {
             let item_data = b"Test data";
             let item_size = item_data.len() as u32;
 
-            // Write size
-            let mut offset = 0;
-            blob.write_at(item_size.to_be_bytes().to_vec(), offset)
+            // Write size (varint) and data, but no checksum
+            let mut buf = Vec::new();
+            UInt(item_size).write(&mut buf);
+            BufMut::put_slice(&mut buf, item_data);
+            blob.write_at(buf, 0)
                 .await
-                .expect("Failed to write item size");
-            offset += 4;
-
-            // Write item data
-            blob.write_at(item_data.to_vec(), offset)
-                .await
-                .expect("Failed to write item data");
-            // Do not write checksum (omit it)
+                .expect("Failed to write item without checksum");
 
             blob.sync().await.expect("Failed to sync blob");
 
@@ -1462,23 +1459,14 @@ mod tests {
             let item_size = item_data.len() as u32;
             let incorrect_checksum: u32 = 0xDEADBEEF;
 
-            // Write size
-            let mut offset = 0;
-            blob.write_at(item_size.to_be_bytes().to_vec(), offset)
+            // Write size (varint), data, and incorrect checksum
+            let mut buf = Vec::new();
+            UInt(item_size).write(&mut buf);
+            BufMut::put_slice(&mut buf, item_data);
+            buf.put_u32(incorrect_checksum);
+            blob.write_at(buf, 0)
                 .await
-                .expect("Failed to write item size");
-            offset += 4;
-
-            // Write item data
-            blob.write_at(item_data.to_vec(), offset)
-                .await
-                .expect("Failed to write item data");
-            offset += item_data.len() as u64;
-
-            // Write incorrect checksum
-            blob.write_at(incorrect_checksum.to_be_bytes().to_vec(), offset)
-                .await
-                .expect("Failed to write incorrect checksum");
+                .expect("Failed to write item with bad checksum");
 
             blob.sync().await.expect("Failed to sync blob");
 
