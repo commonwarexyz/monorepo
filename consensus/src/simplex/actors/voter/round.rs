@@ -141,6 +141,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.certify_handle = None;
     }
 
+    /// Returns true if certification is pending (has notarization, not yet certified, no handle).
+    pub const fn is_certification_pending(&self) -> bool {
+        self.notarization.is_some() && self.certified.is_none() && self.certify_handle.is_none()
+    }
+
     /// Returns the elected leader (if any) for this round.
     pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
         self.leader.clone()

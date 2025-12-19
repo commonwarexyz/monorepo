@@ -837,6 +837,9 @@ impl<
                     let view = ctx.view();
                     let handle = certify_pool.push(async move { (ctx, receiver.await) });
                     self.state.set_certify_handle(view, handle);
+                } else if self.state.is_certification_pending(v) {
+                    // Proposal not yet available, re-add for later retry
+                    self.certification_candidates.insert(v);
                 }
             }
 

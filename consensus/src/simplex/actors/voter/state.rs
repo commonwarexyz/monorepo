@@ -461,6 +461,14 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
         round.unset_certify_handle();
     }
 
+    /// Returns true if certification is pending for the given view.
+    pub fn is_certification_pending(&self, view: View) -> bool {
+        self.views
+            .get(&view)
+            .map(|round| round.is_certification_pending())
+            .unwrap_or(false)
+    }
+
     /// Marks proposal certification as complete and returns the notarization.
     ///
     /// Returns `None` if the view was already pruned. Otherwise returns the notarization
