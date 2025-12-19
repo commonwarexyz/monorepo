@@ -138,7 +138,7 @@ mod tests {
     };
     use std::{
         collections::BTreeMap,
-        num::{NonZeroU32, NonZeroUsize},
+        num::{NonZeroU32, NonZeroU64, NonZeroUsize},
         time::{Duration, Instant},
     };
     use tracing::info;
@@ -156,7 +156,7 @@ mod tests {
     const NUM_VALIDATORS: u32 = 4;
     const QUORUM: u32 = 3;
     const NUM_BLOCKS: u64 = 160;
-    const BLOCKS_PER_EPOCH: u64 = 20;
+    const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(20);
     const LINK: Link = Link {
         latency: Duration::from_millis(100),
         jitter: Duration::from_millis(1),
@@ -1472,7 +1472,8 @@ mod tests {
             // With BLOCKS_PER_EPOCH=20: epoch 0 is heights 0-19, epoch 1 is heights 20-39
             //
             // Store honest parent at height 21 (epoch 1)
-            let honest_parent = B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH + 1, 1000);
+            let honest_parent =
+                B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH.get() + 1, 1000);
             let parent_commitment = honest_parent.commitment();
             let parent_round = Round::new(Epoch::new(1), View::new(21));
             marshal
@@ -1483,7 +1484,8 @@ mod tests {
             // Byzantine proposer broadcasts malicious block at height 35
             // In reality this would come via buffered broadcast, but for test simplicity
             // we call broadcast() directly which makes it available for subscription
-            let malicious_block = B::new::<Sha256>(parent_commitment, BLOCKS_PER_EPOCH + 15, 2000);
+            let malicious_block =
+                B::new::<Sha256>(parent_commitment, BLOCKS_PER_EPOCH.get() + 15, 2000);
             let malicious_commitment = malicious_block.commitment();
             marshal
                 .clone()
@@ -1523,7 +1525,7 @@ mod tests {
             //
             // Create another malicious block with correct height but invalid parent commitment
             let malicious_block =
-                B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH + 2, 3000);
+                B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH.get() + 2, 3000);
             let malicious_commitment = malicious_block.commitment();
             marshal
                 .clone()

@@ -33,6 +33,7 @@ use commonware_utils::sequence::U64;
 use std::{
     fmt::{self, Display, Formatter},
     marker::PhantomData,
+    num::NonZeroU64,
 };
 
 /// Represents a distinct segment of a contiguous sequence of views.
@@ -393,10 +394,7 @@ pub trait Epocher: Clone + Send + Sync + 'static {
 ///
 /// All epochs have the same length, providing the simplest epoch strategy.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FixedEpocher {
-    /// The number of blocks per epoch.
-    epoch_length: u64,
-}
+pub struct FixedEpocher(u64);
 
 impl FixedEpocher {
     /// Creates a new fixed epoch strategy.
@@ -404,29 +402,29 @@ impl FixedEpocher {
     /// # Example
     /// ```rust
     /// # use commonware_consensus::types::FixedEpocher;
-    /// let strategy = FixedEpocher::new(60_480);
+    /// # use commonware_utils::NZU64;
+    /// let strategy = FixedEpocher::new(NZU64!(60_480));
     /// ```
-    pub fn new(epoch_length: u64) -> Self {
-        assert!(epoch_length > 0, "epoch length must be positive");
-        Self { epoch_length }
+    pub const fn new(length: NonZeroU64) -> Self {
+        Self(length.get())
     }
 }
 
 impl Epocher for FixedEpocher {
     fn containing(&self, height: u64) -> Option<Epoch> {
-        Some(Epoch::new(height / self.epoch_length))
+        Some(Epoch::new(height / self.0))
     }
 
     fn length_at(&self, _height: u64) -> Option<u64> {
-        Some(self.epoch_length)
+        Some(self.0)
     }
 
     fn first(&self, epoch: Epoch) -> u64 {
-        epoch.get() * self.epoch_length
+        epoch.get() * self.0
     }
 
     fn last(&self, epoch: Epoch) -> u64 {
-        self.first(epoch) + self.epoch_length - 1
+        self.first(epoch) + self.0 - 1
     }
 }
 
@@ -495,6 +493,7 @@ impl ExactSizeIterator for ViewRange {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode, EncodeSize};
+    use commonware_utils::NZU64;
 
     #[test]
     fn test_epoch_constructors() {
@@ -849,7 +848,7 @@ mod tests {
 
     #[test]
     fn test_fixed_epoch_strategy() {
-        let strategy = FixedEpocher::new(100);
+        let strategy = FixedEpocher::new(NZU64!(100));
 
         // Test basic epoch calculation
         assert_eq!(strategy.containing(0), Some(Epoch::new(0)));
@@ -866,15 +865,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "epoch length must be positive")]
-    fn test_fixed_epoch_strategy_zero_length() {
-        FixedEpocher::new(0);
-    }
-
-    #[test]
     fn test_epoch_phase() {
         // Test with epoch length of 30 (midpoint = 15)
-        let epocher = FixedEpocher::new(30);
+        let epocher = FixedEpocher::new(NZU64!(30));
 
         // Early phase: relative 0-14
         assert_eq!(epocher.phase_at(0), Some(EpochPhase::Early));
@@ -894,7 +887,7 @@ mod tests {
         assert_eq!(epocher.phase_at(46), Some(EpochPhase::Late));
 
         // Test with epoch length 10 (midpoint = 5)
-        let epocher = FixedEpocher::new(10);
+        let epocher = FixedEpocher::new(NZU64!(10));
         assert_eq!(epocher.phase_at(0), Some(EpochPhase::Early)); // relative 0
         assert_eq!(epocher.phase_at(4), Some(EpochPhase::Early)); // relative 4
         assert_eq!(epocher.phase_at(5), Some(EpochPhase::Midpoint)); // relative 5
@@ -902,7 +895,7 @@ mod tests {
         assert_eq!(epocher.phase_at(9), Some(EpochPhase::Late)); // relative 9
 
         // Test with odd epoch length 11 (midpoint = 5 via integer division)
-        let epocher = FixedEpocher::new(11);
+        let epocher = FixedEpocher::new(NZU64!(11));
         assert_eq!(epocher.phase_at(0), Some(EpochPhase::Early)); // relative 0
         assert_eq!(epocher.phase_at(4), Some(EpochPhase::Early)); // relative 4
         assert_eq!(epocher.phase_at(5), Some(EpochPhase::Midpoint)); // relative 5
