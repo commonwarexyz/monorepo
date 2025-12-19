@@ -16,6 +16,8 @@
 //!   type safety to prevent mixing epoch and view deltas. Type aliases [`EpochDelta`] and
 //!   [`ViewDelta`] are provided for convenience.
 //!
+//! - [`Epocher`]: Mechanism for determining epoch boundaries.
+//!
 //! # Arithmetic Safety
 //!
 //! Arithmetic operations avoid silent errors. Only `next()` panics on overflow. All other
@@ -343,14 +345,6 @@ pub enum EpochPhase {
 }
 
 /// Information about an epoch relative to a specific height.
-///
-/// This type is returned by [`Epocher::containing`] to provide all epoch-related information
-/// in a single, validated structure. Methods like [`first`](Self::first), [`last`](Self::last),
-/// [`relative`](Self::relative), and [`phase`](Self::phase) can only be called on a valid
-/// `EpochInfo`, ensuring that epoch boundary calculations are always safe.
-///
-/// The stored height (from the [`Epocher::containing`] call) determines what
-/// [`relative`](Self::relative) and [`phase`](Self::phase) return.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EpochInfo {
     epoch: Epoch,
@@ -360,7 +354,7 @@ pub struct EpochInfo {
 }
 
 impl EpochInfo {
-    /// Creates a new `EpochInfo`.
+    /// Creates a new [`EpochInfo`].
     pub const fn new(epoch: Epoch, height: u64, first: u64, length: u64) -> Self {
         Self {
             epoch,
@@ -415,33 +409,25 @@ impl EpochInfo {
     }
 }
 
-/// Strategy for determining epoch boundaries and lengths based on block height.
-///
-/// This trait allows different epoch calculation strategies to be implemented and used
-/// interchangeably. The consensus system can use any implementation that provides the
-/// required epoch boundary calculations.
-///
-/// These operations must be consistent with each other and deterministic.
+/// Mechanism for determining epoch boundaries.
 pub trait Epocher: Clone + Send + Sync + 'static {
-    /// Returns the bounds of the epoch containing the given block height.
+    /// Returns the information about an epoch containing the given block height.
     ///
-    /// Returns `None` if the height is not covered by this epoch strategy.
+    /// Returns `None` if the height is not supported.
     fn containing(&self, height: u64) -> Option<EpochInfo>;
 
     /// Returns the first block height in the given epoch.
     ///
-    /// Returns `None` if the epoch is not covered by this epoch strategy.
+    /// Returns `None` if the epoch is not supported.
     fn first(&self, epoch: Epoch) -> Option<u64>;
 
     /// Returns the last block height in the given epoch.
     ///
-    /// Returns `None` if the epoch is not covered by this epoch strategy.
+    /// Returns `None` if the epoch is not supported.
     fn last(&self, epoch: Epoch) -> Option<u64>;
 }
 
-/// Configuration for fixed epoch lengths.
-///
-/// All epochs have the same length, providing the simplest epoch strategy.
+/// Implementation of [`Epocher`] for fixed epoch lengths.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixedEpocher(u64);
 
