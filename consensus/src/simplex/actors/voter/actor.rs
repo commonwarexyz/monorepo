@@ -433,10 +433,13 @@ impl<
     ///
     /// The certification may succeed, in which case the proposal can be used in future views—
     /// or fail, in which case we should nullify the view as fast as possible.
-    async fn handle_certification(&mut self, view: View, success: bool) {
-        let Some(notarization) = self.state.certified(view, success) else {
-            return;
-        };
+    async fn handle_certification(
+        &mut self,
+        view: View,
+        success: bool,
+    ) -> Option<Notarization<S, D>> {
+        // Get the notarization before advancing state
+        let notarization = self.state.certified(view, success)?;
 
         // Remove from candidates since certification is complete
         self.certification_candidates.remove(&view);
@@ -446,12 +449,7 @@ impl<
         self.append_journal(view, artifact.clone()).await;
         self.sync_journal(view).await;
 
-        // Inform listeners of successful certification
-        if success {
-            self.reporter
-                .report(Activity::Certification(notarization))
-                .await;
-        }
+        Some(notarization)
     }
 
     /// Persists our finalize vote to the journal for crash recovery.
@@ -758,8 +756,15 @@ impl<
                             .await;
                     }
                     Artifact::Certification(round, success) => {
-                        self.handle_certification(round.view(), success).await;
+                        let Some(notarization) =
+                            self.handle_certification(round.view(), success).await
+                        else {
+                            continue;
+                        };
                         resolver.certified(round.view(), success).await;
+                        self.reporter
+                            .report(Activity::Certification(notarization))
+                            .await;
                     }
                     Artifact::Nullify(nullify) => {
                         self.handle_nullify(nullify.clone()).await;
@@ -959,8 +964,14 @@ impl<
                     view = round.view();
                     match certified {
                         Ok(certified) => {
-                            self.handle_certification(view, certified).await;
+                            let Some(notarization) = self.handle_certification(view, certified).await
+                            else {
+                                continue;
+                            };
                             resolver.certified(view, certified).await;
+                            self.reporter
+                                .report(Activity::Certification(notarization))
+                                .await;
                         }
                         Err(err) => {
                             // The application did not explicitly respond whether certification succeeded.
