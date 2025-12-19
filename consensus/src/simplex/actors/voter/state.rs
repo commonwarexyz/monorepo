@@ -227,7 +227,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
         (retry, nullify, cert)
     }
 
-    /// Inserts a notarization certificate and advances into the next view.
+    /// Inserts a notarization certificate and prepares the next view's leader.
+    ///
+    /// Does not advance into the next view until certification passes.
     pub fn add_notarization(
         &mut self,
         notarization: Notarization<S, D>,
