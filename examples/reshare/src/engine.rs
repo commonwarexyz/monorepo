@@ -218,7 +218,14 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let provider = Provider::new(config.signer.clone());
+        // Create the certificate verifier from the initial output (if available).
+        // This allows epoch-independent certificate verification after the DKG is complete.
+        let certificate_verifier = config
+            .output
+            .as_ref()
+            .and_then(<Provider<S, C> as EpochProvider>::certificate_verifier);
+        let provider = Provider::new(config.signer.clone(), certificate_verifier);
+
         let (marshal, marshal_mailbox, _processed_height) = marshal::Actor::init(
             context.with_label("marshal"),
             finalizations_by_height,
