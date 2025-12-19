@@ -1743,6 +1743,137 @@ mod tests {
         })
     }
 
+    #[test_traced("WARN")]
+    fn test_marshaled_rejects_unsupported_epoch() {
+        #[derive(Clone)]
+        struct MockVerifyingApp {
+            genesis: B,
+        }
+
+        impl crate::Application<deterministic::Context> for MockVerifyingApp {
+            type Block = B;
+            type Context = Context<D, K>;
+            type SigningScheme = S;
+
+            async fn genesis(&mut self) -> Self::Block {
+                self.genesis.clone()
+            }
+
+            async fn propose(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> Option<Self::Block> {
+                None
+            }
+        }
+
+        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
+            async fn verify(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> bool {
+                true
+            }
+        }
+
+        #[derive(Clone)]
+        struct LimitedEpocher {
+            inner: FixedEpocher,
+            max_epoch: u64,
+        }
+
+        impl Epocher for LimitedEpocher {
+            fn containing(&self, height: u64) -> Option<crate::types::EpochInfo> {
+                let bounds = self.inner.containing(height)?;
+                if bounds.epoch().get() > self.max_epoch {
+                    None
+                } else {
+                    Some(bounds)
+                }
+            }
+
+            fn first(&self, epoch: Epoch) -> Option<u64> {
+                if epoch.get() > self.max_epoch {
+                    None
+                } else {
+                    self.inner.first(epoch)
+                }
+            }
+
+            fn last(&self, epoch: Epoch) -> Option<u64> {
+                if epoch.get() > self.max_epoch {
+                    None
+                } else {
+                    self.inner.last(epoch)
+                }
+            }
+        }
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_base_app, marshal, _processed_height) = setup_validator(
+                context.with_label("validator-0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis = B::new::<Sha256>(Sha256::hash(b""), 0, 0);
+
+            let mock_app = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let limited_epocher = LimitedEpocher {
+                inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                max_epoch: 0,
+            };
+            let mut marshaled =
+                Marshaled::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
+
+            // Create a parent block at height 19 (last block in epoch 0, which is supported)
+            let parent = B::new::<Sha256>(genesis.commitment(), 19, 1000);
+            let parent_commitment = parent.commitment();
+            let parent_round = Round::new(Epoch::new(0), View::new(19));
+            marshal.clone().verified(parent_round, parent).await;
+
+            // Create a block at height 20 (first block in epoch 1, which is NOT supported)
+            let block = B::new::<Sha256>(parent_commitment, 20, 2000);
+            let block_commitment = block.commitment();
+            marshal
+                .clone()
+                .proposed(Round::new(Epoch::new(1), View::new(20)), block)
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            let unsupported_context = Context {
+                round: Round::new(Epoch::new(1), View::new(20)),
+                leader: me.clone(),
+                parent: (View::new(19), parent_commitment),
+            };
+
+            let verify = marshaled
+                .verify(unsupported_context, block_commitment)
+                .await;
+
+            assert!(
+                !verify.await.unwrap(),
+                "Block in unsupported epoch should be rejected"
+            );
+        })
+    }
+
     #[test_traced("INFO")]
     fn test_broadcast_caches_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
