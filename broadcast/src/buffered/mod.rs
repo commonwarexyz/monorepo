@@ -134,7 +134,7 @@ mod tests {
     ) -> BTreeMap<PublicKey, Mailbox<PublicKey, TestMessage>> {
         let mut mailboxes = BTreeMap::new();
         while let Some((peer, network)) = registrations.pop_first() {
-            let context = context.with_label(&peer.to_string());
+            let context = context.with_label(&format!("peer_{}", peer));
             let config = Config {
                 public_key: peer.clone(),
                 mailbox_size: 1024,

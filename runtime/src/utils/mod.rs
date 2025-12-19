@@ -97,7 +97,7 @@ pub fn create_pool<S: Spawner + Metrics>(
             // Tasks spawned in a thread pool are expected to run longer than any single
             // task and thus should be provisioned as a dedicated thread.
             context
-                .with_label("rayon-thread")
+                .with_label("rayon_thread")
                 .dedicated()
                 .spawn(move |_| async move { thread.run() });
             Ok(())
