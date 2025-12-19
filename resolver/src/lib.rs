@@ -54,9 +54,12 @@ pub trait Resolver: Clone + Send + 'static {
     /// persist through transient failures (timeout, "no data" response, send failure)
     /// since the peer might be slow or might receive the data later.
     ///
-    /// If a fetch is already in progress for this key, the new targets are added
-    /// to the existing target set. To clear targeting and fall back to any peer,
-    /// call [`fetch`](Self::fetch) instead.
+    /// If a fetch is already in progress for this key:
+    /// - If the existing fetch has targets, the new targets are added to the set
+    /// - If the existing fetch has no targets (can try any peer), it remains
+    ///   unrestricted (this call is ignored)
+    ///
+    /// To clear targeting and fall back to any peer, call [`fetch`](Self::fetch).
     ///
     /// Targets are automatically cleared when the fetch succeeds or is canceled.
     /// When a peer is blocked (sent invalid data), only that peer is removed
