@@ -1055,6 +1055,7 @@ mod tests {
         // For first invalid epoch, all methods should return None
         assert!(epocher.first(first_invalid_epoch).is_none());
         assert!(epocher.last(first_invalid_epoch).is_none());
+        assert!(epocher.containing(last_valid_last + 1).is_none());
     }
 
     #[cfg(feature = "arbitrary")]
