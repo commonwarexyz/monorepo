@@ -45,7 +45,7 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                 indexer: config.indexer,
                 public: *config.identity.public(),
                 other_certificate_verifier: Scheme::certificate_verifier(
-                    &config.other_namespace,
+                    &config.namespace,
                     config.other_public,
                 ),
                 hasher: config.hasher,
