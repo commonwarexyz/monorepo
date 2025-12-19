@@ -268,7 +268,10 @@ where
                 // Fetch the finalization certificate for the last block within the subchannel's epoch.
                 // If the node is state synced, marshal may not have the finalization locally, and the
                 // peer will need to fetch it from another node on the network.
-                let boundary_height = epocher.last(epoch).expect("requested epoch should exist");
+                let Some(boundary_height) = epocher.last(epoch) else {
+                    debug!(%epoch, ?from, "epoch not known");
+                    continue;
+                };
                 let Some(finalization) = self.marshal.get_finalization(boundary_height).await else {
                     debug!(%epoch, ?from, "missing finalization for old epoch");
                     continue;
