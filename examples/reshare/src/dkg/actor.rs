@@ -414,13 +414,6 @@ where
                                 continue;
                             }
 
-                            // Inform the orchestrator of the epoch exit after first finalization
-                            if relative_height == 0 {
-                                if let Some(prev) = block_epoch.previous() {
-                                    orchestrator.report(orchestrator::Message::Exit(prev)).await;
-                                }
-                            }
-
                             // Process dealer log from block if present
                             if let Some(log) = block.log {
                                 if let Some((dealer, dealer_log)) = log.check(&round) {
@@ -532,14 +525,15 @@ where
                                 Update::Failure { epoch }
                             };
 
+                            // Exit the engine for this epoch now that the boundary is finalized
+                            orchestrator
+                                .report(orchestrator::Message::Exit(epoch))
+                                .await;
+
                             // If the update is stop, wait forever.
                             if let PostUpdate::Stop = callback.on_update(update).await {
                                 // Close the mailbox to prevent accepting any new messages
                                 drop(self.mailbox);
-                                // Exit last consensus instance to avoid useless work while we wait for shutdown
-                                orchestrator
-                                    .report(orchestrator::Message::Exit(epoch))
-                                    .await;
                                 // Keep running until killed to keep the orchestrator mailbox alive
                                 info!("DKG complete; waiting for shutdown...");
                                 futures::future::pending::<()>().await;
