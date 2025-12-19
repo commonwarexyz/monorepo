@@ -328,7 +328,7 @@ impl<V: Variant> Seed<V> {
 
         verify_message::<V>(
             scheme.identity(),
-            Some(scheme.namespace().seed.as_ref()),
+            Some(&scheme.namespace().seed),
             &seed_message,
             &self.signature,
         )
@@ -456,16 +456,16 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
 
     fn sign<D: Digest>(&self, subject: Subject<'_, D>) -> Option<Attestation<Self>> {
         let share = self.share()?;
-        let ns = self.namespace();
 
-        let vote_namespace = subject.namespace(ns);
+        let namespace = self.namespace();
+        let vote_namespace = subject.namespace(namespace);
         let vote_message = subject.message();
         let vote_signature =
             partial_sign_message::<V>(share, Some(vote_namespace), vote_message.as_ref()).value;
 
         let seed_message = seed_message_from_subject(&subject);
         let seed_signature =
-            partial_sign_message::<V>(share, Some(ns.seed.as_ref()), seed_message.as_ref()).value;
+            partial_sign_message::<V>(share, Some(&namespace.seed), seed_message.as_ref()).value;
 
         let signature = Signature {
             vote_signature,
@@ -486,9 +486,9 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
             return false;
         };
-        let ns = self.namespace();
 
-        let vote_namespace = subject.namespace(ns);
+        let namespace = self.namespace();
+        let vote_namespace = subject.namespace(namespace);
         let vote_message = subject.message();
         let seed_message = seed_message_from_subject(&subject);
 
@@ -501,7 +501,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             &evaluated,
             &[
                 (Some(vote_namespace), vote_message.as_ref()),
-                (Some(ns.seed.as_ref()), seed_message.as_ref()),
+                (Some(&namespace.seed), seed_message.as_ref()),
             ],
             &sig,
             1,
@@ -520,7 +520,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
     {
-        let ns = self.namespace();
+        let namespace = self.namespace();
         let mut invalid = BTreeSet::new();
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = attestations
             .into_iter()
@@ -539,7 +539,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             .unzip();
 
         let polynomial = self.polynomial();
-        let vote_namespace = subject.namespace(ns);
+        let vote_namespace = subject.namespace(namespace);
         let vote_message = subject.message();
         if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
             polynomial,
@@ -555,7 +555,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let seed_message = seed_message_from_subject(&subject);
         if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
             polynomial,
-            Some(ns.seed.as_ref()),
+            Some(&namespace.seed),
             seed_message.as_ref(),
             seed_partials
                 .iter()
@@ -627,9 +627,9 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         certificate: &Self::Certificate,
     ) -> bool {
         let identity = self.identity();
-        let ns = self.namespace();
+        let namespace = self.namespace();
 
-        let vote_namespace = subject.namespace(ns);
+        let vote_namespace = subject.namespace(namespace);
         let vote_message = subject.message();
         let seed_message = seed_message_from_subject(&subject);
 
@@ -640,7 +640,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             identity,
             &[
                 (Some(vote_namespace), vote_message.as_ref()),
-                (Some(ns.seed.as_ref()), seed_message.as_ref()),
+                (Some(namespace.seed.as_ref()), seed_message.as_ref()),
             ],
             &signature,
             1,
@@ -655,7 +655,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
     {
         let identity = self.identity();
-        let ns = self.namespace();
+        let namespace = self.namespace();
 
         let mut seeds = HashMap::new();
         let mut messages = Vec::new();
@@ -663,7 +663,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
 
         for (context, certificate) in certificates {
             // Prepare vote message with context-specific namespace
-            let vote_namespace = context.namespace(ns);
+            let vote_namespace = context.namespace(namespace);
             let vote_message = context.message();
             messages.push((Some(vote_namespace), vote_message));
             signatures.push(&certificate.vote_signature);
@@ -678,7 +678,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
                 }
             } else {
                 let seed_message = seed_message_from_subject(&context);
-                messages.push((Some(ns.seed.as_ref()), seed_message));
+                messages.push((Some(&namespace.seed), seed_message));
                 signatures.push(&certificate.seed_signature);
                 seeds.insert(context.view(), &certificate.seed_signature);
             }
