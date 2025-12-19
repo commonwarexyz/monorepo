@@ -74,7 +74,11 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, FutureExt, StreamExt};
-    use std::{num::NonZeroU32, sync::Arc, time::Duration};
+    use std::{
+        num::NonZeroU32,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -2389,5 +2393,545 @@ mod tests {
             bls12381_multisig::fixture::<MinSig, _>,
         );
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(ed25519::fixture);
+    }
+
+    /// Tests that after replay, we do not re-certify views that have already been certified
+    /// or finalized. This prevents redundant work when restarting a voter.
+    fn no_recertification_after_replay<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: ElectorConfig<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"no_recertification_after_replay".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Track certify calls across restarts
+            let certify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));
+            let certify_tracker = certify_calls.clone();
+
+            // Setup application mock with tracking certify function
+            let elector = L::default();
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: participants[0].clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::CertifyFn::Custom(Box::new(move |digest| {
+                    certify_tracker.lock().unwrap().push(digest);
+                    true
+                })),
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+            actor.start();
+
+            // Initialize voter actor
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(participants[0].clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "no_recertification_after_replay".to_string(),
+                epoch: Epoch::new(333),
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_secs(1000),
+                nullify_retry: Duration::from_secs(1000),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, _) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register network channels for the validator
+            let me = participants[0].clone();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            // Start the actor
+            let handle = voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                vote_sender,
+                certificate_sender,
+            );
+
+            // Wait for batcher to be notified
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update { active, .. } => {
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Build notarization for view 1
+            let view = View::new(1);
+            let payload_digest = Sha256::hash(b"payload_for_certification");
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), view),
+                View::zero(),
+                payload_digest,
+            );
+
+            // Broadcast payload via relay so it can be verified
+            let leader = &participants[0];
+            let contents = (proposal.round, Sha256::hash(b"genesis"), 0u64).encode();
+            relay
+                .broadcast(leader, (payload_digest, contents.into()))
+                .await;
+
+            // Send proposal to voter
+            mailbox.proposal(proposal.clone()).await;
+
+            // Build and send notarization
+            let (_, notarization) = build_notarization(&schemes, &namespace, &proposal, quorum);
+            mailbox
+                .recovered(Certificate::Notarization(notarization.clone()))
+                .await;
+
+            // Wait for certification to complete by watching for view advancement
+            loop {
+                let message = batcher_receiver.next().await.unwrap();
+                if let batcher::Message::Update {
+                    current, active, ..
+                } = message
+                {
+                    active.send(true).unwrap();
+                    if current > view {
+                        break;
+                    }
+                }
+            }
+
+            // Verify certify was called exactly once
+            let calls_before_restart = certify_calls.lock().unwrap().len();
+            assert_eq!(
+                calls_before_restart, 1,
+                "certify should be called once before restart"
+            );
+
+            // Restart voter
+            handle.abort();
+
+            // Create new application with same tracker
+            let certify_tracker = certify_calls.clone();
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: participants[0].clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::CertifyFn::Custom(Box::new(move |digest| {
+                    certify_tracker.lock().unwrap().push(digest);
+                    true
+                })),
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app2"), application_cfg);
+            actor.start();
+
+            // Reinitialize voter actor (same partition for journal replay)
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(participants[0].clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "no_recertification_after_replay".to_string(),
+                epoch: Epoch::new(333),
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_secs(1000),
+                nullify_retry: Duration::from_secs(1000),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, _mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, _) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register new network channels
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            // Start the actor (triggers journal replay)
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                vote_sender,
+                certificate_sender,
+            );
+
+            // Wait for batcher to be notified (proves replay completed)
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current, active, ..
+                } => {
+                    assert!(current > view, "should resume at view after certified view");
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Give time for any erroneous certification attempts
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify certify was NOT called again
+            let calls_after_restart = certify_calls.lock().unwrap().len();
+            assert_eq!(
+                calls_after_restart, calls_before_restart,
+                "certify should not be called again after replay (was {} before, {} after)",
+                calls_before_restart, calls_after_restart
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_no_recertification_after_replay() {
+        no_recertification_after_replay::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        no_recertification_after_replay::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        no_recertification_after_replay::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        no_recertification_after_replay::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        no_recertification_after_replay::<_, _, RoundRobin>(ed25519::fixture);
+    }
+
+    /// Tests that after replay, finalized views do not trigger certification.
+    /// When a finalization is received without prior certification, we should
+    /// not attempt to certify after restart.
+    fn finalized_view_skips_certification_after_replay<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: ElectorConfig<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"finalized_skips_certify_replay".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Track certify calls across restarts
+            let certify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));
+            let certify_tracker = certify_calls.clone();
+
+            // Setup application mock with tracking certify function
+            let elector = L::default();
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: participants[0].clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::CertifyFn::Custom(Box::new(move |digest| {
+                    certify_tracker.lock().unwrap().push(digest);
+                    true
+                })),
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+            actor.start();
+
+            // Initialize voter actor
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(participants[0].clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "finalized_skips_certify_replay".to_string(),
+                epoch: Epoch::new(333),
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_secs(1000),
+                nullify_retry: Duration::from_secs(1000),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, _) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register network channels for the validator
+            let me = participants[0].clone();
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            // Start the actor
+            let handle = voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                vote_sender,
+                certificate_sender,
+            );
+
+            // Wait for batcher to be notified
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update { active, .. } => {
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Build finalization for view 2 (skipping view 1)
+            let view = View::new(2);
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), view),
+                view.previous().unwrap(),
+                Sha256::hash(b"finalized_payload"),
+            );
+            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal, quorum);
+
+            // Send finalization directly (no notarization)
+            mailbox
+                .recovered(Certificate::Finalization(finalization.clone()))
+                .await;
+
+            // Wait for finalization to be processed
+            loop {
+                let message = batcher_receiver.next().await.unwrap();
+                if let batcher::Message::Update {
+                    finalized, active, ..
+                } = message
+                {
+                    active.send(true).unwrap();
+                    if finalized >= view {
+                        break;
+                    }
+                }
+            }
+
+            // Verify certify was NOT called (finalization bypasses certification)
+            let calls_before_restart = certify_calls.lock().unwrap().len();
+            assert_eq!(
+                calls_before_restart, 0,
+                "certify should not be called when receiving finalization directly"
+            );
+
+            // Restart voter
+            handle.abort();
+
+            // Create new application with same tracker
+            let certify_tracker = certify_calls.clone();
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: participants[0].clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::CertifyFn::Custom(Box::new(move |digest| {
+                    certify_tracker.lock().unwrap().push(digest);
+                    true
+                })),
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app2"), application_cfg);
+            actor.start();
+
+            // Reinitialize voter actor (same partition for journal replay)
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(participants[0].clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "finalized_skips_certify_replay".to_string(),
+                epoch: Epoch::new(333),
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_secs(1000),
+                nullify_retry: Duration::from_secs(1000),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, _mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, _) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register new network channels
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            // Start the actor (triggers journal replay)
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                vote_sender,
+                certificate_sender,
+            );
+
+            // Wait for batcher to be notified (proves replay completed)
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    finalized, active, ..
+                } => {
+                    assert_eq!(
+                        finalized, view,
+                        "should resume with finalized view preserved"
+                    );
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Give time for any erroneous certification attempts
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify certify was still NOT called
+            let calls_after_restart = certify_calls.lock().unwrap().len();
+            assert_eq!(
+                calls_after_restart, 0,
+                "certify should not be called after replay for finalized views"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_finalized_view_skips_certification_after_replay() {
+        finalized_view_skips_certification_after_replay::<_, _, Random>(
+            bls12381_threshold::fixture::<MinPk, _>,
+        );
+        finalized_view_skips_certification_after_replay::<_, _, Random>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        finalized_view_skips_certification_after_replay::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        finalized_view_skips_certification_after_replay::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        finalized_view_skips_certification_after_replay::<_, _, RoundRobin>(ed25519::fixture);
     }
 }

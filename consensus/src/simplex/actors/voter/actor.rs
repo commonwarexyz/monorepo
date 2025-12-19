@@ -467,7 +467,8 @@ impl<
         // added when notarizations are replayed, then removed here when
         // finalizations are replayed).
         let last_finalized = self.state.last_finalized();
-        self.certification_candidates.retain(|v| *v > last_finalized);
+        self.certification_candidates
+            .retain(|v| *v > last_finalized);
     }
 
     /// Build, persist, and broadcast a notarize vote when this view is ready.
