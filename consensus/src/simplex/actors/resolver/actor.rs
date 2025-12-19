@@ -1,5 +1,5 @@
 use super::{
-    ingress::{Handler, Mailbox, Message},
+    ingress::{Handler, Mailbox, MailboxMessage, Message},
     Config,
 };
 use crate::{
@@ -18,7 +18,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::StaticManager, Blocker, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{ordered::Quorum, sequence::U64};
+use commonware_utils::{ordered::Quorum, sequence::prefixed_u64::U64 as PrefixedU64};
 use futures::{channel::mpsc, StreamExt};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
@@ -42,7 +42,7 @@ pub struct Actor<
 
     state: State<S, D>,
 
-    mailbox_receiver: mpsc::Receiver<Certificate<S, D>>,
+    mailbox_receiver: mpsc::Receiver<MailboxMessage<S, D>>,
 }
 
 impl<
@@ -128,7 +128,14 @@ impl<
                 let Some(message) = mailbox else {
                     break;
                 };
-                self.state.handle(message, &mut resolver).await;
+                match message {
+                    MailboxMessage::Certificate(certificate) => {
+                        self.state.handle(certificate, &mut resolver).await;
+                    }
+                    MailboxMessage::Certified { view, success } => {
+                        self.state.handle_certified(view, success, &mut resolver).await;
+                    }
+                }
             },
             handler = handler_rx.next() => {
                 let Some(message) = handler else {
@@ -140,7 +147,15 @@ impl<
     }
 
     /// Validates an incoming message, returning the parsed message if valid.
-    fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
+    ///
+    /// If `nullification_only` is true, only nullifications and finalizations are accepted.
+    /// Notarizations are rejected without signature verification in this case.
+    fn validate(
+        &mut self,
+        view: View,
+        nullification_only: bool,
+        data: Bytes,
+    ) -> Option<Certificate<S, D>> {
         // Decode message
         let incoming =
             Certificate::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config()).ok()?;
@@ -148,6 +163,10 @@ impl<
         // Validate message
         match incoming {
             Certificate::Notarization(notarization) => {
+                if nullification_only {
+                    debug!(%view, "rejecting notarization for nullification-only request");
+                    return None;
+                }
                 if notarization.view() < view {
                     debug!(%view, received = %notarization.view(), "notarization below view");
                     return None;
@@ -215,16 +234,17 @@ impl<
         &mut self,
         message: Message,
         voter: &mut voter::Mailbox<S, D>,
-        resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
+        resolver: &mut p2p::Mailbox<PrefixedU64, S::PublicKey>,
     ) {
         match message {
             Message::Deliver {
                 view,
+                nullification_only,
                 data,
                 response,
             } => {
                 // Validate incoming message
-                let Some(parsed) = self.validate(view, data) else {
+                let Some(parsed) = self.validate(view, nullification_only, data) else {
                     // Resolver will block any peers that send invalid responses, so
                     // we don't need to do again here
                     let _ = response.send(false);

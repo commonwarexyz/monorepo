@@ -433,7 +433,12 @@ impl<
     ///
     /// The certification may succeed, in which case the proposal can be used in future views—
     /// or fail, in which case we should nullify the view as fast as possible.
-    async fn handle_certification(&mut self, view: View, success: bool) {
+    async fn handle_certification(
+        &mut self,
+        view: View,
+        success: bool,
+        resolver: &mut resolver::Mailbox<S, D>,
+    ) {
         let Some(notarization) = self.state.certified(view, success) else {
             return;
         };
@@ -445,6 +450,9 @@ impl<
         let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
         self.append_journal(view, artifact.clone()).await;
         self.sync_journal(view).await;
+
+        // Notify resolver of certification result
+        resolver.certified(view, success).await;
 
         // Inform listeners of successful certification
         if success {
@@ -784,7 +792,8 @@ impl<
                             .await;
                     }
                     Artifact::Certification(round, success) => {
-                        self.handle_certification(round.view(), success).await;
+                        self.handle_certification(round.view(), success, &mut resolver)
+                            .await;
                     }
                 }
             }
@@ -958,7 +967,7 @@ impl<
                     view = round.view();
                     match certified {
                         Ok(certified) => {
-                            self.handle_certification(view, certified).await;
+                            self.handle_certification(view, certified, &mut resolver).await;
                         }
                         Err(err) => {
                             // The application did not explicitly respond whether certification succeeded.
