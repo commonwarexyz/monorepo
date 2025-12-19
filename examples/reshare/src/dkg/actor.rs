@@ -401,8 +401,8 @@ where
                             }
                         }
                         MailboxMessage::Finalized { block, response } => {
-                            let block_epoch = epocher.containing(block.height).unwrap();
-                            let phase = epocher.phase_at(block.height).unwrap();
+                            let block_epoch = epocher.containing(block.height).expect("block height covered by epoch strategy");
+                            let phase = epocher.phase_at(block.height).expect("block height covered by epoch strategy");
                             let first_height = epocher.first(block_epoch);
                             let relative_height = block.height - first_height;
                             info!(epoch = %block_epoch, relative_height, "processing finalized block");
