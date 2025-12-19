@@ -455,6 +455,7 @@ mod tests {
             }
 
             // Broadcast and finalize blocks in random order
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
             blocks.shuffle(&mut context);
             for block in blocks.iter() {
                 // Skip genesis block
@@ -462,7 +463,6 @@ mod tests {
                 assert!(height > 0, "genesis block should not have been generated");
 
                 // Calculate the epoch and round for the block
-                let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
                 let epoch = epocher.epoch_for_height(height).unwrap();
                 let round = Round::new(epoch, View::new(height));
 
@@ -500,11 +500,10 @@ mod tests {
                         .iter_mut()
                         .enumerate()
                     {
-                        if (do_finalize && i < QUORUM as usize) || height == NUM_BLOCKS || {
-                            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-                            let epoch = epocher.epoch_for_height(height).unwrap();
-                            height == epocher.last_height_in_epoch(epoch)
-                        } {
+                        if (do_finalize && i < QUORUM as usize)
+                            || height == NUM_BLOCKS
+                            || height == epocher.last_height_in_epoch(epoch)
+                        {
                             actor.report(Activity::Finalization(fin.clone())).await;
                         }
                     }
@@ -512,11 +511,10 @@ mod tests {
                     // If `quorum_sees_finalization` is not set, finalize randomly with a 20% chance for each
                     // individual participant.
                     for actor in actors.iter_mut() {
-                        if context.gen_bool(0.2) || height == NUM_BLOCKS || {
-                            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-                            let epoch = epocher.epoch_for_height(height).unwrap();
-                            height == epocher.last_height_in_epoch(epoch)
-                        } {
+                        if context.gen_bool(0.2)
+                            || height == NUM_BLOCKS
+                            || height == epocher.last_height_in_epoch(epoch)
+                        {
                             actor.report(Activity::Finalization(fin.clone())).await;
                         }
                     }
@@ -605,13 +603,13 @@ mod tests {
             }
 
             // Broadcast and finalize blocks
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
             for block in blocks.iter() {
                 // Skip genesis block
                 let height = block.height();
                 assert!(height > 0, "genesis block should not have been generated");
 
                 // Calculate the epoch and round for the block
-                let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
                 let epoch = epocher.epoch_for_height(height).unwrap();
                 let round = Round::new(epoch, View::new(height));
 

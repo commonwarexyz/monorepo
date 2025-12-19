@@ -196,6 +196,7 @@ where
     ) {
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let is_dkg = output.is_none();
+        let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
 
         // Initialize persistent state
         let mut storage = Storage::init(
@@ -400,7 +401,6 @@ where
                             }
                         }
                         MailboxMessage::Finalized { block, response } => {
-                            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
                             let block_epoch = epocher.epoch_for_height(block.height).unwrap();
                             let first_height = epocher.first_height_in_epoch(block_epoch);
                             let relative_height = block.height - first_height;
@@ -460,8 +460,6 @@ where
                             }
 
                             // Continue if not the last block in the epoch
-                            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-                            let block_epoch = epocher.epoch_for_height(block.height).unwrap();
                             let last_height = epocher.last_height_in_epoch(block_epoch);
                             if block.height != last_height {
                                 // Acknowledge block processing
