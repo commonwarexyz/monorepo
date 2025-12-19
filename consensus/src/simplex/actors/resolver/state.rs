@@ -112,23 +112,25 @@ impl<S: Scheme, D: Digest> State<S, D> {
                     self.prune(resolver).await;
                 }
             }
-            // Clean up satisfaction tracking - floor advancement covers these views
+
+            // Clean up satisfaction tracking
             self.satisfied_by.remove(&view);
         } else {
-            // Certification failed - discard notarization and mark view as failed
+            // Discard notarization and mark view as failed (ensures we can penalize
+            // malicious peers that hand us useless notarizations)
             self.notarizations.remove(&view);
             self.failed_views.insert(view);
 
-            // Request nullification for this view
-            resolver.fetch(view.into()).await;
+            // Request nullification for this view (if above floor)
+            let floor = self.floor_view();
+            if view > floor {
+                resolver.fetch(view.into()).await;
+            }
 
             // Re-request any lower views this notarization had satisfied
             if let Some(satisfied_views) = self.satisfied_by.remove(&view) {
-                let floor = self.floor_view();
-                for v in satisfied_views {
-                    if v > floor {
-                        resolver.fetch(v.into()).await;
-                    }
+                for &v in satisfied_views.iter().filter(|v| **v > floor) {
+                    resolver.fetch(v.into()).await;
                 }
             }
         }
