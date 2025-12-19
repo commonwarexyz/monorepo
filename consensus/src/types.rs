@@ -350,17 +350,17 @@ pub struct EpochInfo {
     epoch: Epoch,
     height: u64,
     first: u64,
-    length: u64,
+    last: u64,
 }
 
 impl EpochInfo {
     /// Creates a new [`EpochInfo`].
-    pub const fn new(epoch: Epoch, height: u64, first: u64, length: u64) -> Self {
+    pub const fn new(epoch: Epoch, height: u64, first: u64, last: u64) -> Self {
         Self {
             epoch,
             height,
             first,
-            length,
+            last,
         }
     }
 
@@ -381,12 +381,12 @@ impl EpochInfo {
 
     /// Returns the last block height in this epoch.
     pub const fn last(&self) -> u64 {
-        self.first + self.length - 1
+        self.last
     }
 
     /// Returns the length of this epoch.
     pub const fn length(&self) -> u64 {
-        self.length
+        self.last - self.first + 1
     }
 
     /// Returns the relative position of the queried height within this epoch.
@@ -397,7 +397,7 @@ impl EpochInfo {
     /// Returns the phase of the queried height within this epoch.
     pub const fn phase(&self) -> EpochPhase {
         let relative = self.relative();
-        let midpoint = self.length / 2;
+        let midpoint = self.length() / 2;
 
         if relative < midpoint {
             EpochPhase::Early
@@ -443,25 +443,29 @@ impl FixedEpocher {
     pub const fn new(length: NonZeroU64) -> Self {
         Self(length.get())
     }
+
+    /// Computes the first and last block height for an epoch, returning `None` if
+    /// either would overflow.
+    fn bounds(&self, epoch: Epoch) -> Option<(u64, u64)> {
+        let first = epoch.get().checked_mul(self.0)?;
+        let last = first.checked_add(self.0 - 1)?;
+        Some((first, last))
+    }
 }
 
 impl Epocher for FixedEpocher {
     fn containing(&self, height: u64) -> Option<EpochInfo> {
         let epoch = Epoch::new(height / self.0);
-        let first = epoch.get().checked_mul(self.0)?;
-        Some(EpochInfo::new(epoch, height, first, self.0))
+        let (first, last) = self.bounds(epoch)?;
+        Some(EpochInfo::new(epoch, height, first, last))
     }
 
     fn first(&self, epoch: Epoch) -> Option<u64> {
-        epoch.get().checked_mul(self.0)
+        self.bounds(epoch).map(|(first, _)| first)
     }
 
     fn last(&self, epoch: Epoch) -> Option<u64> {
-        epoch
-            .get()
-            .checked_add(1)?
-            .checked_mul(self.0)?
-            .checked_sub(1)
+        self.bounds(epoch).map(|(_, last)| last)
     }
 }
 
@@ -974,6 +978,84 @@ mod tests {
         assert_eq!(epocher.containing(5).unwrap().phase(), EpochPhase::Midpoint);
         assert_eq!(epocher.containing(6).unwrap().phase(), EpochPhase::Late);
         assert_eq!(epocher.containing(10).unwrap().phase(), EpochPhase::Late);
+    }
+
+    #[test]
+    fn test_fixed_epocher_overflow() {
+        // Test that containing() returns None when last() would overflow
+        let epocher = FixedEpocher::new(NZU64!(100));
+
+        // For epoch length 100:
+        // - last valid epoch = (u64::MAX - 100 + 1) / 100 = 184467440737095515
+        // - last valid first = 184467440737095515 * 100 = 18446744073709551500
+        // - last valid last = 18446744073709551500 + 99 = 18446744073709551599
+        // Heights 18446744073709551500 to 18446744073709551599 are in the last valid epoch
+        // Height 18446744073709551600 onwards would be in an invalid epoch
+
+        // This height is in the last valid epoch
+        let last_valid_first = 18446744073709551500u64;
+        let last_valid_last = 18446744073709551599u64;
+
+        let result = epocher.containing(last_valid_first);
+        assert!(result.is_some());
+        let bounds = result.unwrap();
+        assert_eq!(bounds.first(), last_valid_first);
+        assert_eq!(bounds.last(), last_valid_last);
+
+        let result = epocher.containing(last_valid_last);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().last(), last_valid_last);
+
+        // This height would be in an epoch where last() overflows
+        let overflow_height = last_valid_last + 1;
+        assert!(epocher.containing(overflow_height).is_none());
+
+        // u64::MAX is also in the overflow range
+        assert!(epocher.containing(u64::MAX).is_none());
+
+        // Test the boundary more precisely with epoch length 2
+        let epocher = FixedEpocher::new(NZU64!(2));
+
+        // u64::MAX - 1 is even, so epoch starts at u64::MAX - 1, last = u64::MAX
+        let result = epocher.containing(u64::MAX - 1);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().last(), u64::MAX);
+
+        // u64::MAX is odd, epoch would start at u64::MAX - 1
+        // first = u64::MAX - 1, last = first + 2 - 1 = u64::MAX (OK)
+        let result = epocher.containing(u64::MAX);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().last(), u64::MAX);
+
+        // Test with epoch length 1 (every height is its own epoch)
+        let epocher = FixedEpocher::new(NZU64!(1));
+        let result = epocher.containing(u64::MAX);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().last(), u64::MAX);
+
+        // Test case where first overflows (covered by existing checked_mul)
+        let epocher = FixedEpocher::new(NZU64!(u64::MAX));
+        assert!(epocher.containing(u64::MAX).is_none());
+
+        // Test consistency: first(), last(), and containing() should agree on valid epochs
+        let epocher = FixedEpocher::new(NZU64!(100));
+        let last_valid_epoch = Epoch::new(184467440737095515);
+        let first_invalid_epoch = Epoch::new(184467440737095516);
+
+        // For last valid epoch, all methods should return Some
+        assert!(epocher.first(last_valid_epoch).is_some());
+        assert!(epocher.last(last_valid_epoch).is_some());
+        let first = epocher.first(last_valid_epoch).unwrap();
+        assert!(epocher.containing(first).is_some());
+        assert_eq!(
+            epocher.containing(first).unwrap().last(),
+            epocher.last(last_valid_epoch).unwrap()
+        );
+
+        // For first invalid epoch, all methods should return None
+        assert!(epocher.first(first_invalid_epoch).is_none());
+        assert!(epocher.last(first_invalid_epoch).is_none());
+        assert!(epocher.containing(last_valid_last + 1).is_none());
     }
 
     #[cfg(feature = "arbitrary")]
