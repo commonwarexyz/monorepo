@@ -421,9 +421,10 @@ mod macros {
                 generic: $crate::bls12381::certificate::multisig::Generic<P, V, $namespace>,
             }
 
-            impl<P: $crate::PublicKey, V: $crate::bls12381::primitives::variant::Variant>
-                Scheme<P, V>
-            {
+            impl<
+                P: $crate::PublicKey,
+                V: $crate::bls12381::primitives::variant::Variant,
+            > Scheme<P, V> {
                 /// Creates a new scheme instance with the provided key material.
                 pub fn signer(
                     namespace: &[u8],
@@ -454,10 +455,9 @@ mod macros {
             }
 
             impl<
-                    P: $crate::PublicKey,
-                    V: $crate::bls12381::primitives::variant::Variant + Send + Sync,
-                > $crate::certificate::Scheme for Scheme<P, V>
-            {
+                P: $crate::PublicKey,
+                V: $crate::bls12381::primitives::variant::Variant + Send + Sync,
+            > $crate::certificate::Scheme for Scheme<P, V> {
                 type Subject<'a, D: $crate::Digest> = $subject;
                 type PublicKey = P;
                 type Signature = V::Signature;
@@ -509,7 +509,10 @@ mod macros {
                     self.generic.assemble(attestations)
                 }
 
-                fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: $crate::Digest>(
+                fn verify_certificate<
+                    R: rand::Rng + rand::CryptoRng,
+                    D: $crate::Digest,
+                >(
                     &self,
                     rng: &mut R,
                     subject: Self::Subject<'_, D>,
@@ -539,8 +542,7 @@ mod macros {
                     self.generic.certificate_codec_config()
                 }
 
-                fn certificate_codec_config_unbounded(
-                ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
                     $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::certificate_codec_config_unbounded()
                 }
             }
