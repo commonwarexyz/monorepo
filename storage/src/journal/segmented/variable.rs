@@ -135,6 +135,11 @@ pub struct Config<C> {
 
 pub(crate) const ITEM_ALIGNMENT: u64 = 16;
 
+/// Minimum size of any item: 1 byte varint (size=0) + 0 bytes data + 4 bytes checksum.
+/// This is also the max varint size for u32, so we can always read this many bytes
+/// at the start of an item to get the complete varint.
+const MIN_ITEM_SIZE: usize = 5;
+
 /// Computes the next offset for an item using the underlying `u64`
 /// offset of `Blob`.
 #[inline]
@@ -235,10 +240,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Read varint size (max 5 bytes for u32)
         let mut hasher = crc32fast::Hasher::new();
         let offset = offset as u64 * ITEM_ALIGNMENT;
-        let varint_buf = blob.read_at(vec![0; 5], offset).await?;
+        let varint_buf = blob.read_at(vec![0; MIN_ITEM_SIZE], offset).await?;
         let mut varint = varint_buf.as_ref();
         let size = UInt::<u32>::read(&mut varint).map_err(Error::Codec)?.0 as usize;
-        let varint_len = 5 - varint.remaining();
+        let varint_len = MIN_ITEM_SIZE - varint.remaining();
         hasher.update(&varint_buf.as_ref()[..varint_len]);
         let offset = offset
             .checked_add(varint_len as u64)
@@ -296,19 +301,19 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Read varint size (max 5 bytes for u32, and min item size is 5 bytes)
         let mut hasher = crc32fast::Hasher::new();
-        let mut varint_buf = [0u8; 5];
+        let mut varint_buf = [0u8; MIN_ITEM_SIZE];
         reader
-            .read_exact(&mut varint_buf, 5)
+            .read_exact(&mut varint_buf, MIN_ITEM_SIZE)
             .await
             .map_err(Error::Runtime)?;
         let mut varint = varint_buf.as_ref();
         let size = UInt::<u32>::read(&mut varint).map_err(Error::Codec)?.0 as usize;
-        let varint_len = 5 - varint.remaining();
+        let varint_len = MIN_ITEM_SIZE - varint.remaining();
         hasher.update(&varint_buf[..varint_len]);
 
         // Read remaining data+checksum (we already have some bytes from the varint read)
         let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
-        let already_read = 5 - varint_len;
+        let already_read = MIN_ITEM_SIZE - varint_len;
         let mut buf = vec![0u8; buf_size];
         buf[..already_read].copy_from_slice(&varint_buf[varint_len..]);
         if buf_size > already_read {
