@@ -1,5 +1,5 @@
 use crate::{
-    types::{Epoch, ViewDelta},
+    types::{Epoch, Epocher, ViewDelta},
     Block,
 };
 use commonware_cryptography::certificate::Provider;
@@ -7,16 +7,17 @@ use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
-pub struct Config<B, P>
+pub struct Config<B, P, ES>
 where
     B: Block,
     P: Provider<Scope = Epoch>,
+    ES: Epocher,
 {
     /// Provider for epoch-specific signing schemes.
     pub provider: P,
 
-    /// The length of an epoch in number of blocks.
-    pub epoch_length: u64,
+    /// Configuration for epoch lengths across block height ranges.
+    pub epocher: ES,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,

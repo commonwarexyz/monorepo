@@ -152,7 +152,7 @@ fn main() {
     }
 
     // Configure network
-    const MAX_MESSAGE_SIZE: usize = 1024; // 1 KB
+    const MAX_MESSAGE_SIZE: u32 = 1024; // 1 KB
     let p2p_cfg = discovery::Config::local(
         signer.clone(),
         APPLICATION_NAMESPACE,

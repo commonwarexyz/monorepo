@@ -148,7 +148,7 @@ fn main() {
                 context.register("messages", "Sent messages", messages.clone());
                 loop {
                     // Create message
-                    let mut msg = vec![0; config.message_size];
+                    let mut msg = vec![0; config.message_size as usize];
                     rng.fill_bytes(&mut msg);
 
                     // Send to all peers

@@ -701,7 +701,7 @@ impl<
 
         // Initialize journal
         let journal = Journal::<_, Artifact<S, D>>::init(
-            self.context.with_label("journal").into(),
+            self.context.with_label("journal").into_present(),
             JConfig {
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible

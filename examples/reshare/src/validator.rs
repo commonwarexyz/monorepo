@@ -33,7 +33,7 @@ const ORCHESTRATOR_CHANNEL: u64 = 6;
 
 const MAILBOX_SIZE: usize = 10;
 const MESSAGE_BACKLOG: usize = 10;
-const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// Run the validator node service.
 pub async fn run<S, L>(

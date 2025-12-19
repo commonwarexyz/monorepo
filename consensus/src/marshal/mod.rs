@@ -112,8 +112,8 @@ mod tests {
             scheme::bls12381_threshold,
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
-        types::{Epoch, Round, View, ViewDelta},
-        utils, Automaton, Block as _, Reporter, VerifyingApplication,
+        types::{Epoch, Epocher, FixedEpocher, Round, View, ViewDelta},
+        Automaton, Block as _, Reporter, VerifyingApplication,
     };
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
@@ -138,7 +138,7 @@ mod tests {
     };
     use std::{
         collections::BTreeMap,
-        num::{NonZeroU32, NonZeroUsize},
+        num::{NonZeroU32, NonZeroU64, NonZeroUsize},
         time::{Duration, Instant},
     };
     use tracing::info;
@@ -156,7 +156,7 @@ mod tests {
     const NUM_VALIDATORS: u32 = 4;
     const QUORUM: u32 = 3;
     const NUM_BLOCKS: u64 = 160;
-    const BLOCKS_PER_EPOCH: u64 = 20;
+    const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(20);
     const LINK: Link = Link {
         latency: Duration::from_millis(100),
         jitter: Duration::from_millis(1),
@@ -177,10 +177,11 @@ mod tests {
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
+        u64,
     ) {
         let config = Config {
             provider,
-            epoch_length: BLOCKS_PER_EPOCH,
+            epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: ViewDelta::new(10),
@@ -292,7 +293,7 @@ mod tests {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let (actor, mailbox) = actor::Actor::init(
+        let (actor, mailbox, processed_height) = actor::Actor::init(
             context.clone(),
             finalizations_by_height,
             finalized_blocks,
@@ -304,7 +305,7 @@ mod tests {
         // Start the application
         actor.start(application.clone(), buffer, resolver);
 
-        (application, mailbox)
+        (application, mailbox, processed_height)
     }
 
     fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
@@ -430,8 +431,8 @@ mod tests {
                 .update(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate() {
-                let (application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                let (application, actor, _processed_height) = setup_validator(
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -454,6 +455,7 @@ mod tests {
             }
 
             // Broadcast and finalize blocks in random order
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
             blocks.shuffle(&mut context);
             for block in blocks.iter() {
                 // Skip genesis block
@@ -461,8 +463,8 @@ mod tests {
                 assert!(height > 0, "genesis block should not have been generated");
 
                 // Calculate the epoch and round for the block
-                let epoch = utils::epoch(BLOCKS_PER_EPOCH, height);
-                let round = Round::new(epoch, View::new(height));
+                let bounds = epocher.containing(height).unwrap();
+                let round = Round::new(bounds.epoch(), View::new(height));
 
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (NUM_VALIDATORS as u64)) as usize;
@@ -500,7 +502,7 @@ mod tests {
                     {
                         if (do_finalize && i < QUORUM as usize)
                             || height == NUM_BLOCKS
-                            || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, height).is_some()
+                            || height == bounds.last()
                         {
                             actor.report(Activity::Finalization(fin.clone())).await;
                         }
@@ -509,9 +511,7 @@ mod tests {
                     // If `quorum_sees_finalization` is not set, finalize randomly with a 20% chance for each
                     // individual participant.
                     for actor in actors.iter_mut() {
-                        if context.gen_bool(0.2)
-                            || height == NUM_BLOCKS
-                            || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, height).is_some()
+                        if context.gen_bool(0.2) || height == NUM_BLOCKS || height == bounds.last()
                         {
                             actor.report(Activity::Finalization(fin.clone())).await;
                         }
@@ -576,8 +576,8 @@ mod tests {
                 .update(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate().skip(1) {
-                let (application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                let (application, actor, _processed_height) = setup_validator(
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -601,14 +601,15 @@ mod tests {
             }
 
             // Broadcast and finalize blocks
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
             for block in blocks.iter() {
                 // Skip genesis block
                 let height = block.height();
                 assert!(height > 0, "genesis block should not have been generated");
 
                 // Calculate the epoch and round for the block
-                let epoch = utils::epoch(BLOCKS_PER_EPOCH, height);
-                let round = Round::new(epoch, View::new(height));
+                let bounds = epocher.containing(height).unwrap();
+                let round = Round::new(bounds.epoch(), View::new(height));
 
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (applications.len() as u64)) as usize;
@@ -664,8 +665,8 @@ mod tests {
 
             // Create the first validator now that all blocks have been finalized by the others.
             let validator = participants.first().unwrap();
-            let (app, mut actor) = setup_validator(
-                context.with_label("validator-0"),
+            let (app, mut actor, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -734,8 +735,8 @@ mod tests {
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                let (_application, actor, _processed_height) = setup_validator(
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -789,8 +790,8 @@ mod tests {
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                let (_application, actor, _processed_height) = setup_validator(
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -865,8 +866,8 @@ mod tests {
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                let (_application, actor, _processed_height) = setup_validator(
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -933,8 +934,8 @@ mod tests {
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                let (_application, actor, _processed_height) = setup_validator(
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -1044,8 +1045,8 @@ mod tests {
 
             // Single validator actor
             let me = participants[0].clone();
-            let (_application, mut actor) = setup_validator(
-                context.with_label("validator-0"),
+            let (_application, mut actor, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1104,8 +1105,8 @@ mod tests {
 
             // Single validator actor
             let me = participants[0].clone();
-            let (_application, mut actor) = setup_validator(
-                context.with_label("validator-0"),
+            let (_application, mut actor, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1185,8 +1186,8 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (application, mut actor) = setup_validator(
-                context.with_label("validator-0"),
+            let (application, mut actor, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1244,8 +1245,8 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_application, mut actor) = setup_validator(
-                context.with_label("validator-0"),
+            let (_application, mut actor, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1302,8 +1303,8 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_application, mut actor) = setup_validator(
-                context.with_label("validator-0"),
+            let (_application, mut actor, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1356,8 +1357,8 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_application, mut actor) = setup_validator(
-                context.with_label("validator-0"),
+            let (_application, mut actor, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
@@ -1441,8 +1442,8 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_base_app, marshal) = setup_validator(
-                context.with_label("validator-0"),
+            let (_base_app, marshal, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
@@ -1456,8 +1457,12 @@ mod tests {
             let mock_app = MockVerifyingApp {
                 genesis: genesis.clone(),
             };
-            let mut marshaled =
-                Marshaled::new(context.clone(), mock_app, marshal.clone(), BLOCKS_PER_EPOCH);
+            let mut marshaled = Marshaled::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
 
             // Test case 1: Non-contiguous height
             //
@@ -1465,7 +1470,8 @@ mod tests {
             // With BLOCKS_PER_EPOCH=20: epoch 0 is heights 0-19, epoch 1 is heights 20-39
             //
             // Store honest parent at height 21 (epoch 1)
-            let honest_parent = B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH + 1, 1000);
+            let honest_parent =
+                B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH.get() + 1, 1000);
             let parent_commitment = honest_parent.commitment();
             let parent_round = Round::new(Epoch::new(1), View::new(21));
             marshal
@@ -1476,7 +1482,8 @@ mod tests {
             // Byzantine proposer broadcasts malicious block at height 35
             // In reality this would come via buffered broadcast, but for test simplicity
             // we call broadcast() directly which makes it available for subscription
-            let malicious_block = B::new::<Sha256>(parent_commitment, BLOCKS_PER_EPOCH + 15, 2000);
+            let malicious_block =
+                B::new::<Sha256>(parent_commitment, BLOCKS_PER_EPOCH.get() + 15, 2000);
             let malicious_commitment = malicious_block.commitment();
             marshal
                 .clone()
@@ -1516,7 +1523,7 @@ mod tests {
             //
             // Create another malicious block with correct height but invalid parent commitment
             let malicious_block =
-                B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH + 2, 3000);
+                B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH.get() + 2, 3000);
             let malicious_commitment = malicious_block.commitment();
             marshal
                 .clone()
@@ -1569,8 +1576,8 @@ mod tests {
             // Set up two validators
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate().take(2) {
-                let (_app, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
+                let (_app, actor, _processed_height) = setup_validator(
+                    context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
@@ -1667,6 +1674,206 @@ mod tests {
         })
     }
 
+    #[test_traced("WARN")]
+    fn test_init_processed_height() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+
+            // Test 1: Fresh init should return processed height 0
+            let me = participants[0].clone();
+            let (application, mut actor, initial_height) = setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            assert_eq!(initial_height, 0);
+
+            // Process multiple blocks (1, 2, 3)
+            let mut parent = Sha256::hash(b"");
+            let mut blocks = Vec::new();
+            for i in 1..=3 {
+                let block = B::new::<Sha256>(parent, i, i);
+                let commitment = block.digest();
+                let round = Round::new(Epoch::new(0), View::new(i));
+
+                actor.verified(round, block.clone()).await;
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i - 1),
+                    payload: commitment,
+                };
+                let finalization = make_finalization(proposal, &schemes, QUORUM);
+                actor.report(Activity::Finalization(finalization)).await;
+
+                blocks.push(block);
+                parent = commitment;
+            }
+
+            // Wait for application to process all blocks
+            while application.blocks().len() < 3 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Set marshal's processed height to 3
+            actor.set_floor(3).await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Verify application received all blocks
+            assert_eq!(application.blocks().len(), 3);
+            assert_eq!(application.tip(), Some((3, blocks[2].digest())));
+
+            // Test 2: Restart with marshal processed height = 3
+            let (_restart_application, _restart_actor, restart_height) = setup_validator(
+                context.with_label("validator_0_restart"),
+                &mut oracle,
+                me,
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            assert_eq!(restart_height, 3);
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_marshaled_rejects_unsupported_epoch() {
+        #[derive(Clone)]
+        struct MockVerifyingApp {
+            genesis: B,
+        }
+
+        impl crate::Application<deterministic::Context> for MockVerifyingApp {
+            type Block = B;
+            type Context = Context<D, K>;
+            type SigningScheme = S;
+
+            async fn genesis(&mut self) -> Self::Block {
+                self.genesis.clone()
+            }
+
+            async fn propose(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> Option<Self::Block> {
+                None
+            }
+        }
+
+        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
+            async fn verify(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> bool {
+                true
+            }
+        }
+
+        #[derive(Clone)]
+        struct LimitedEpocher {
+            inner: FixedEpocher,
+            max_epoch: u64,
+        }
+
+        impl Epocher for LimitedEpocher {
+            fn containing(&self, height: u64) -> Option<crate::types::EpochInfo> {
+                let bounds = self.inner.containing(height)?;
+                if bounds.epoch().get() > self.max_epoch {
+                    None
+                } else {
+                    Some(bounds)
+                }
+            }
+
+            fn first(&self, epoch: Epoch) -> Option<u64> {
+                if epoch.get() > self.max_epoch {
+                    None
+                } else {
+                    self.inner.first(epoch)
+                }
+            }
+
+            fn last(&self, epoch: Epoch) -> Option<u64> {
+                if epoch.get() > self.max_epoch {
+                    None
+                } else {
+                    self.inner.last(epoch)
+                }
+            }
+        }
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_base_app, marshal, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis = B::new::<Sha256>(Sha256::hash(b""), 0, 0);
+
+            let mock_app = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let limited_epocher = LimitedEpocher {
+                inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                max_epoch: 0,
+            };
+            let mut marshaled =
+                Marshaled::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
+
+            // Create a parent block at height 19 (last block in epoch 0, which is supported)
+            let parent = B::new::<Sha256>(genesis.commitment(), 19, 1000);
+            let parent_commitment = parent.commitment();
+            let parent_round = Round::new(Epoch::new(0), View::new(19));
+            marshal.clone().verified(parent_round, parent).await;
+
+            // Create a block at height 20 (first block in epoch 1, which is NOT supported)
+            let block = B::new::<Sha256>(parent_commitment, 20, 2000);
+            let block_commitment = block.commitment();
+            marshal
+                .clone()
+                .proposed(Round::new(Epoch::new(1), View::new(20)), block)
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            let unsupported_context = Context {
+                round: Round::new(Epoch::new(1), View::new(20)),
+                leader: me.clone(),
+                parent: (View::new(19), parent_commitment),
+            };
+
+            let verify = marshaled
+                .verify(unsupported_context, block_commitment)
+                .await;
+
+            assert!(
+                !verify.await.unwrap(),
+                "Block in unsupported epoch should be rejected"
+            );
+        })
+    }
+
     #[test_traced("INFO")]
     fn test_broadcast_caches_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -1681,7 +1888,7 @@ mod tests {
             // Set up one validator
             let (i, validator) = participants.iter().enumerate().next().unwrap();
             let mut actor = setup_validator(
-                context.with_label(&format!("validator-{i}")),
+                context.with_label(&format!("validator_{i}")),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
@@ -1708,7 +1915,7 @@ mod tests {
 
             // Restart marshal, removing any in-memory cache
             let mut actor = setup_validator(
-                context.with_label(&format!("validator-{i}")),
+                context.with_label(&format!("validator_{i}")),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),

@@ -47,7 +47,96 @@ const DATA_BITS_PER_BYTE: usize = 7;
 const DATA_BITS_MASK: u8 = 0x7F;
 
 /// The mask for the continuation bit in a byte.
+///
+/// In varint encoding, each byte uses 7 bits for data and 1 bit (the most significant)
+/// to indicate whether more bytes follow. If this bit is set, the varint continues,
+/// if clear this is the final byte.
 const CONTINUATION_BIT_MASK: u8 = 0x80;
+
+/// An incremental varint decoder for reading varints byte-by-byte from streams.
+///
+/// This is useful when reading from async streams where you receive one byte at a time
+/// and need to know when the varint is complete while also building up the decoded value.
+///
+/// # Example
+///
+/// ```
+/// use commonware_codec::varint::Decoder;
+///
+/// let mut decoder = Decoder::<u32>::new();
+///
+/// // Feed bytes one at a time (e.g., from a stream)
+/// // 300 encodes as [0xAC, 0x02]
+/// assert_eq!(decoder.feed(0xAC).unwrap(), None); // continuation bit set, need more
+/// assert_eq!(decoder.feed(0x02).unwrap(), Some(300)); // complete!
+/// ```
+#[derive(Debug, Clone)]
+pub struct Decoder<U: UPrim> {
+    result: U,
+    bits_read: usize,
+}
+
+impl<U: UPrim> Default for Decoder<U> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<U: UPrim> Decoder<U> {
+    /// Creates a new decoder ready to receive bytes.
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            result: U::from(0),
+            bits_read: 0,
+        }
+    }
+
+    /// Feeds a byte to the decoder.
+    ///
+    /// Returns:
+    /// - `Ok(Some(value))` when the varint is complete
+    /// - `Ok(None)` when more bytes are needed
+    /// - `Err(InvalidVarint)` if the varint is malformed (overflow or invalid encoding)
+    #[inline]
+    pub fn feed(&mut self, byte: u8) -> Result<Option<U>, Error> {
+        let max_bits = U::SIZE * BITS_PER_BYTE;
+
+        // If this is not the first byte, but the byte is completely zero, we have an invalid
+        // varint. This is because this byte has no data bits and no continuation, so there was no
+        // point in continuing to this byte in the first place. While the output could still result
+        // in a valid value, we ensure that every value has exactly one unique, valid encoding.
+        if byte == 0 && self.bits_read > 0 {
+            return Err(Error::InvalidVarint(U::SIZE));
+        }
+
+        // If this must be the last byte, check for overflow (i.e. set bits beyond the size of T).
+        // Because the continuation bit is the most-significant bit, this check also happens to
+        // check for an invalid continuation bit.
+        //
+        // If we have reached what must be the last byte, this check prevents continuing to read
+        // from the buffer by ensuring that the conditional (`if byte & CONTINUATION_BIT_MASK == 0`)
+        // always evaluates to true.
+        let remaining_bits = max_bits.checked_sub(self.bits_read).unwrap();
+        if remaining_bits <= DATA_BITS_PER_BYTE {
+            let relevant_bits = BITS_PER_BYTE - byte.leading_zeros() as usize;
+            if relevant_bits > remaining_bits {
+                return Err(Error::InvalidVarint(U::SIZE));
+            }
+        }
+
+        // Write the 7 bits of data to the result.
+        self.result |= U::from(byte & DATA_BITS_MASK) << self.bits_read;
+
+        // Check if complete (continuation bit not set)
+        if byte & CONTINUATION_BIT_MASK == 0 {
+            return Ok(Some(self.result));
+        }
+
+        self.bits_read += DATA_BITS_PER_BYTE;
+        Ok(None)
+    }
+}
 
 // ---------- Traits ----------
 
@@ -279,53 +368,19 @@ fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
     buf.put_u8(val.as_u8());
 }
 
-/// Decodes a unsigned integer from a varint.
+/// Decodes an unsigned integer from a varint.
 ///
 /// Returns an error if:
 /// - The varint is invalid (too long or malformed)
 /// - The buffer ends while reading
 fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
-    let max_bits = T::SIZE * BITS_PER_BYTE;
-    let mut result: T = T::from(0);
-    let mut bits_read = 0;
-
-    // Loop over all the bytes.
+    let mut decoder = Decoder::<T>::new();
     loop {
         // Read the next byte.
         let byte = u8::read(buf)?;
-
-        // If this is not the first byte, but the byte is completely zero, we have an invalid
-        // varint. This is because this byte has no data bits and no continuation, so there was no
-        // point in continuing to this byte in the first place. While the output could still result
-        // in a valid value, we ensure that every value has exactly one unique, valid encoding.
-        if byte == 0 && bits_read > 0 {
-            return Err(Error::InvalidVarint(T::SIZE));
+        if let Some(value) = decoder.feed(byte)? {
+            return Ok(value);
         }
-
-        // If this must be the last byte, check for overflow (i.e. set bits beyond the size of T).
-        // Because the continuation bit is the most-significant bit, this check also happens to
-        // check for an invalid continuation bit.
-        //
-        // If we have reached what must be the last byte, this check prevents continuing to read
-        // from the buffer by ensuring that the conditional (`if byte & CONTINUATION_BIT_MASK == 0`)
-        // always evaluates to true.
-        let remaining_bits = max_bits.checked_sub(bits_read).unwrap();
-        if remaining_bits <= DATA_BITS_PER_BYTE {
-            let relevant_bits = BITS_PER_BYTE - byte.leading_zeros() as usize;
-            if relevant_bits > remaining_bits {
-                return Err(Error::InvalidVarint(T::SIZE));
-            }
-        }
-
-        // Write the 7 bits of data to the result.
-        result |= T::from(byte & DATA_BITS_MASK) << bits_read;
-
-        // If the continuation bit is not set, return.
-        if byte & CONTINUATION_BIT_MASK == 0 {
-            return Ok(result);
-        }
-
-        bits_read += DATA_BITS_PER_BYTE;
     }
 }
 

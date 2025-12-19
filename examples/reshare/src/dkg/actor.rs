@@ -11,8 +11,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::{
-    types::Epoch,
-    utils::{epoch as compute_epoch, is_last_block_in_epoch, relative_height_in_epoch},
+    types::{Epoch, EpochPhase, Epocher, FixedEpocher},
     Reporter,
 };
 use commonware_cryptography::{
@@ -197,6 +196,7 @@ where
     ) {
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let is_dkg = output.is_none();
+        let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
 
         // Initialize persistent state
         let mut storage = Storage::init(
@@ -401,10 +401,10 @@ where
                             }
                         }
                         MailboxMessage::Finalized { block, response } => {
-                            let block_epoch = compute_epoch(BLOCKS_PER_EPOCH, block.height);
-                            let relative_height =
-                                relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
-                            let mid_point = BLOCKS_PER_EPOCH / 2;
+                            let bounds = epocher.containing(block.height).expect("block height covered by epoch strategy");
+                            let block_epoch = bounds.epoch();
+                            let phase = bounds.phase();
+                            let relative_height = bounds.relative();
                             info!(epoch = %block_epoch, relative_height, "processing finalized block");
 
                             // Skip blocks from previous epochs (can happen on restart if we
@@ -437,7 +437,7 @@ where
                             }
 
                             // In the first half of the epoch, continuously distribute shares
-                            if relative_height < mid_point {
+                            if phase == EpochPhase::Early {
                                 if let Some(ref mut ds) = dealer_state {
                                     Self::distribute_shares(
                                         &self_pk,
@@ -452,15 +452,14 @@ where
                             }
 
                             // At or past the midpoint, finalize dealer if not already done.
-                            // The >= check handles restart after midpoint acknowledgment.
-                            if relative_height >= mid_point {
+                            if matches!(phase, EpochPhase::Midpoint | EpochPhase::Late) {
                                 if let Some(ref mut ds) = dealer_state {
                                     ds.finalize();
                                 }
                             }
 
                             // Continue if not the last block in the epoch
-                            if is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height).is_none() {
+                            if block.height != bounds.last() {
                                 // Acknowledge block processing
                                 response.acknowledge();
                                 continue;

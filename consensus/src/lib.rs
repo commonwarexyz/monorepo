@@ -17,7 +17,6 @@ pub mod aggregation;
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod types;
-pub mod utils;
 
 use types::{Epoch, View};
 

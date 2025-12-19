@@ -12,7 +12,7 @@ use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
     simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
-    types::ViewDelta,
+    types::{FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
     bls12381::{
@@ -91,6 +91,7 @@ where
         Provider<S, C>,
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
+        FixedEpocher,
     >,
     #[allow(clippy::type_complexity)]
     orchestrator: orchestrator::Actor<
@@ -99,7 +100,7 @@ where
         V,
         C,
         H,
-        Marshaled<E, S, Application<E, S, H, C, V>, Block<H, C, V>>,
+        Marshaled<E, S, Application<E, S, H, C, V>, Block<H, C, V>, FixedEpocher>,
         S,
         L,
     >,
@@ -218,13 +219,13 @@ where
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
         let provider = Provider::new(config.signer.clone());
-        let (marshal, marshal_mailbox) = marshal::Actor::init(
+        let (marshal, marshal_mailbox, _processed_height) = marshal::Actor::init(
             context.with_label("marshal"),
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
                 provider: provider.clone(),
-                epoch_length: BLOCKS_PER_EPOCH,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
@@ -247,7 +248,7 @@ where
             context.with_label("application"),
             Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
-            BLOCKS_PER_EPOCH,
+            FixedEpocher::new(BLOCKS_PER_EPOCH),
         );
 
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(

@@ -61,7 +61,7 @@ fn main() {
             Arg::new("message-size")
                 .long("message-size")
                 .required(true)
-                .value_parser(value_parser!(usize)),
+                .value_parser(value_parser!(u32)),
         )
         .arg(
             Arg::new("message-backlog")
@@ -137,7 +137,7 @@ fn main() {
     let storage_size = *matches.get_one::<i32>("storage_size").unwrap();
     let storage_class = matches.get_one::<String>("storage_class").unwrap();
     let worker_threads = *matches.get_one::<usize>("worker-threads").unwrap();
-    let message_size = *matches.get_one::<usize>("message-size").unwrap();
+    let message_size = *matches.get_one::<u32>("message-size").unwrap();
     let message_backlog = *matches.get_one::<usize>("message-backlog").unwrap();
     let mailbox_size = *matches.get_one::<usize>("mailbox-size").unwrap();
     let instrument = *matches.get_one::<bool>("instrument").unwrap();

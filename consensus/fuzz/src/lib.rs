@@ -186,7 +186,7 @@ fn run<P: Simplex>(input: FuzzInput) {
         for i in 0..f as usize {
             let scheme = schemes[i].clone();
             let validator = participants[i].clone();
-            let context = context.with_label(&format!("validator-{validator}"));
+            let context = context.with_label(&format!("validator_{validator}"));
 
             let (vote_network, certificate_network, _) = registrations.remove(&validator).unwrap();
             let disrupter = Disrupter::<_, _>::new(
@@ -205,7 +205,7 @@ fn run<P: Simplex>(input: FuzzInput) {
 
         for i in (f as usize)..(n as usize) {
             let validator = participants[i].clone();
-            let context = context.with_label(&format!("validator-{validator}"));
+            let context = context.with_label(&format!("validator_{validator}"));
             let elector = P::Elector::default();
             let reporter_cfg = reporter::Config {
                 namespace: namespace.clone(),
