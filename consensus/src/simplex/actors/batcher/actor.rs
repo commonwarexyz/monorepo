@@ -439,7 +439,30 @@ impl<
                     selected = Some((view, voters, failed));
                 }
             }
-            let Some((view, voters, failed)) = selected else {
+
+            // Process batch verification results (if any)
+            if let Some((view, voters, failed)) = selected {
+                timer.observe();
+
+                let batch = voters.len() + failed.len();
+                trace!(%view, batch, "batch verified votes");
+                self.verified.inc_by(batch as u64);
+                self.batch_size.observe(batch as f64);
+
+                // Block invalid signers
+                for invalid in failed {
+                    if let Some(signer) = self.participants.key(invalid) {
+                        warn!(?signer, "blocking peer for invalid signature");
+                        self.blocker.block(signer.clone()).await;
+                    }
+                }
+
+                // Store verified votes for certificate construction
+                let round = work.get_mut(&view).expect("round must exist");
+                for valid in voters {
+                    round.add_verified(valid);
+                }
+            } else {
                 timer.cancel();
                 trace!(
                     %current,
@@ -447,57 +470,40 @@ impl<
                     waiting = work.len(),
                     "no verifier ready"
                 );
-                continue;
-            };
-            timer.observe();
+            }
 
-            // Process verified votes
-            let batch = voters.len() + failed.len();
-            trace!(%view, batch, "batch verified votes");
-            self.verified.inc_by(batch as u64);
-            self.batch_size.observe(batch as f64);
-
-            // Block invalid signers
-            for invalid in failed {
-                if let Some(signer) = self.participants.key(invalid) {
-                    warn!(?signer, "blocking peer for invalid signature");
-                    self.blocker.block(signer.clone()).await;
+            // Try to construct and forward certificates for the current view.
+            // This runs regardless of whether batch verification happened above,
+            // which is necessary for single-validator (quorum=1) where our own
+            // pre-verified vote is sufficient.
+            if let Some(round) = work.get_mut(&current) {
+                if let Some(notarization) = self
+                    .recover_latency
+                    .time_some(|| round.try_construct_notarization(&self.scheme))
+                {
+                    debug!(view = %current, "constructed notarization, forwarding to voter");
+                    voter
+                        .recovered(Certificate::Notarization(notarization))
+                        .await;
                 }
-            }
-
-            // Store verified votes for certificate construction
-            let round = work.get_mut(&view).expect("round must exist");
-            for valid in voters {
-                round.add_verified(valid);
-            }
-
-            // Try to construct and forward certificates
-            if let Some(notarization) = self
-                .recover_latency
-                .time_some(|| round.try_construct_notarization(&self.scheme))
-            {
-                debug!(%view, "constructed notarization, forwarding to voter");
-                voter
-                    .recovered(Certificate::Notarization(notarization))
-                    .await;
-            }
-            if let Some(nullification) = self
-                .recover_latency
-                .time_some(|| round.try_construct_nullification(&self.scheme))
-            {
-                debug!(%view, "constructed nullification, forwarding to voter");
-                voter
-                    .recovered(Certificate::Nullification(nullification))
-                    .await;
-            }
-            if let Some(finalization) = self
-                .recover_latency
-                .time_some(|| round.try_construct_finalization(&self.scheme))
-            {
-                debug!(%view, "constructed finalization, forwarding to voter");
-                voter
-                    .recovered(Certificate::Finalization(finalization))
-                    .await;
+                if let Some(nullification) = self
+                    .recover_latency
+                    .time_some(|| round.try_construct_nullification(&self.scheme))
+                {
+                    debug!(view = %current, "constructed nullification, forwarding to voter");
+                    voter
+                        .recovered(Certificate::Nullification(nullification))
+                        .await;
+                }
+                if let Some(finalization) = self
+                    .recover_latency
+                    .time_some(|| round.try_construct_finalization(&self.scheme))
+                {
+                    debug!(view = %current, "constructed finalization, forwarding to voter");
+                    voter
+                        .recovered(Certificate::Finalization(finalization))
+                        .await;
+                }
             }
 
             // Drop any rounds that are no longer interesting
