@@ -18,7 +18,7 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{signal::Stopper, supervision::Tree, Panicker},
-    Clock, Error, Execution, Handle, SinkOf, StreamOf, METRICS_PREFIX,
+    validate_label, Clock, Error, Execution, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use futures::{future::BoxFuture, FutureExt};
@@ -517,17 +517,10 @@ impl crate::Spawner for Context {
 
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
-        // Validate label matches Prometheus metric name format: [a-zA-Z][a-zA-Z0-9_]*
-        // with the first character being an ASCII letter.
-        let mut chars = label.chars();
-        assert!(
-            chars.next().is_some_and(|c| c.is_ascii_alphabetic()),
-            "label must start with [a-zA-Z]: {label}"
-        );
-        assert!(
-            chars.all(|c| c.is_ascii_alphanumeric() || c == '_'),
-            "label must only contain [a-zA-Z0-9_]: {label}"
-        );
+        // Ensure the label is well-formatted
+        validate_label(label);
+
+        // Construct the full label name
         let name = {
             let prefix = self.name.clone();
             if prefix.is_empty() {

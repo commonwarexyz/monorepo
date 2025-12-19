@@ -224,6 +224,24 @@ impl ArcWake for Blocker {
     }
 }
 
+/// Validates that a label matches Prometheus metric name format: `[a-zA-Z][a-zA-Z0-9_]*`.
+///
+/// # Panics
+///
+/// Panics if the label is empty, starts with a non-alphabetic character,
+/// or contains characters other than `[a-zA-Z0-9_]`.
+pub fn validate_label(label: &str) {
+    let mut chars = label.chars();
+    assert!(
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic()),
+        "label must start with [a-zA-Z]: {label}"
+    );
+    assert!(
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "label must only contain [a-zA-Z0-9_]: {label}"
+    );
+}
+
 #[cfg(test)]
 async fn task(i: usize) -> usize {
     for _ in 0..5 {
