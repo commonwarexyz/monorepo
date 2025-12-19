@@ -55,9 +55,9 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     /// Handle a new certificate and update the [Resolver] accordingly.
     ///
-    /// The `request_view` parameter is the view that was originally requested
+    /// The `request` parameter is the view that was originally requested
     /// when this certificate was fetched. If the certificate is a notarization
-    /// at a higher view, we track that the request_view was "satisfied by" this
+    /// at a higher view, we track that the request was "satisfied by" this
     /// notarization so we can re-request on certification failure.
     pub async fn handle(
         &mut self,
