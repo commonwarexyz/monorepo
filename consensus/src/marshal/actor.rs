@@ -436,7 +436,7 @@ where
                             let finalization = self.get_finalization_by_height(height).await;
                             let _ = response.send(finalization);
                         }
-                        Message::EnsureFinalization { height, targets } => {
+                        Message::HintFinalized { height, targets } => {
                             // Skip if height is at or below the floor
                             if height <= self.last_processed_height {
                                 continue;

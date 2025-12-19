@@ -85,18 +85,17 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// A channel to send the retrieved finalization.
         response: oneshot::Sender<Option<Finalization<S, B::Commitment>>>,
     },
-    /// A request to ensure a finalization is available for a given height.
+    /// A hint that a finalized block may be available at a given height.
     ///
-    /// Unlike [Self::GetFinalization] which only checks local storage, this triggers
-    /// a network fetch if the finalization is not available locally. This is
-    /// fire-and-forget, the finalization will be stored in marshal and delivered
-    /// via the normal finalization flow when available.
+    /// This triggers a network fetch if the finalization is not available locally.
+    /// This is fire-and-forget: the finalization will be stored in marshal and
+    /// delivered via the normal finalization flow when available.
     ///
     /// Targets are required because this is typically called when a peer claims to
     /// be ahead. If a target returns invalid data, the resolver will block them.
     /// Sending this message multiple times with different targets adds to the
     /// target set.
-    EnsureFinalization {
+    HintFinalized {
         /// The height of the finalization to fetch.
         height: u64,
         /// Target peers to fetch from. Added to any existing targets for this height.
@@ -237,11 +236,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         })
     }
 
-    /// Ensures a finalization is available for the given height.
+    /// Hints that a finalized block may be available at the given height.
     ///
-    /// Unlike [get_finalization](Self::get_finalization) which only checks local storage,
-    /// this method will request the finalization from the network via the resolver if it
-    /// is not available locally.
+    /// This method will request the finalization from the network via the resolver
+    /// if it is not available locally.
     ///
     /// Targets are required because this is typically called when a peer claims to be
     /// ahead. By targeting only those peers, we limit who we ask. If a target returns
@@ -251,16 +249,16 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     /// Calling this multiple times for the same height with different targets will
     /// add to the target set if there is an ongoing fetch, allowing more peers to be tried.
     ///
-    /// This is fire-and-forget, the finalization will be stored in marshal and delivered
+    /// This is fire-and-forget: the finalization will be stored in marshal and delivered
     /// via the normal finalization flow when available.
-    pub async fn ensure_finalization(&mut self, height: u64, targets: NonEmptyVec<S::PublicKey>) {
+    pub async fn hint_finalized(&mut self, height: u64, targets: NonEmptyVec<S::PublicKey>) {
         if self
             .sender
-            .send(Message::EnsureFinalization { height, targets })
+            .send(Message::HintFinalized { height, targets })
             .await
             .is_err()
         {
-            error!("failed to send ensure finalization message to actor: receiver dropped");
+            error!("failed to send hint finalized message to actor: receiver dropped");
         }
     }
 

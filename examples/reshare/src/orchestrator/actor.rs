@@ -219,7 +219,7 @@ where
                     boundary_height,
                     "received backup message from future epoch, ensuring boundary finalization"
                 );
-                self.marshal.ensure_finalization(boundary_height, NonEmptyVec::new(from)).await;
+                self.marshal.hint_finalized(boundary_height, NonEmptyVec::new(from)).await;
             },
             transition = self.mailbox.next() => {
                 let Some(transition) = transition else {
