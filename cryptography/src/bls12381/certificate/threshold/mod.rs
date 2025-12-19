@@ -210,9 +210,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     {
         let share = self.share()?;
 
-        let namespace = subject.namespace(self.namespace());
-        let message = subject.message();
-        let signature = partial_sign_message::<V>(share, Some(namespace), message.as_ref()).value;
+        let signature = partial_sign_message::<V>(
+            share,
+            Some(subject.namespace(self.namespace())),
+            &subject.message(),
+        )
+        .value;
 
         Some(Attestation {
             signer: share.index,
@@ -235,12 +238,10 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             return false;
         };
 
-        let namespace = subject.namespace(self.namespace());
-        let message = subject.message();
         verify_message::<V>(
             &evaluated,
-            Some(namespace),
-            message.as_ref(),
+            Some(subject.namespace(self.namespace())),
+            &subject.message(),
             &attestation.signature,
         )
         .is_ok()
@@ -270,12 +271,10 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .collect();
 
         let polynomial = self.polynomial();
-        let namespace = subject.namespace(self.namespace());
-        let message = subject.message();
         if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
             polynomial,
-            Some(namespace),
-            message.as_ref(),
+            Some(subject.namespace(self.namespace())),
+            &subject.message(),
             partials.iter(),
         ) {
             for partial in errs {
@@ -330,10 +329,13 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: Rng + CryptoRng,
         D: Digest,
     {
-        let identity = self.identity();
-        let namespace = subject.namespace(self.namespace());
-        let message = subject.message();
-        verify_message::<V>(identity, Some(namespace), message.as_ref(), certificate).is_ok()
+        verify_message::<V>(
+            self.identity(),
+            Some(subject.namespace(self.namespace())),
+            &subject.message(),
+            certificate,
+        )
+        .is_ok()
     }
 
     /// Verifies multiple certificates in a batch.
@@ -345,8 +347,6 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a V::Signature)>,
     {
-        let identity = self.identity();
-
         let mut messages = Vec::new();
         let mut signatures = Vec::new();
 
@@ -363,7 +363,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         let signature = aggregate_signatures::<V, _>(signatures.iter());
         aggregate_verify_multiple_messages::<V, _>(
-            identity,
+            self.identity(),
             &messages
                 .iter()
                 .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
@@ -445,9 +445,10 @@ mod macros {
                 generic: $crate::bls12381::certificate::threshold::Generic<P, V, $namespace>,
             }
 
-            impl<P: $crate::PublicKey, V: $crate::bls12381::primitives::variant::Variant>
-                Scheme<P, V>
-            {
+            impl<
+                P: $crate::PublicKey,
+                V: $crate::bls12381::primitives::variant::Variant,
+            > Scheme<P, V> {
                 /// Creates a new signer instance with a private share and evaluated public polynomial.
                 pub fn signer(
                     namespace: &[u8],
@@ -483,10 +484,10 @@ mod macros {
                 /// Creates a lightweight verifier that only checks recovered certificates.
                 pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
                     Self {
-                        generic:
-                            $crate::bls12381::certificate::threshold::Generic::certificate_verifier(
-                                namespace, identity,
-                            ),
+                        generic: $crate::bls12381::certificate::threshold::Generic::certificate_verifier(
+                            namespace,
+                            identity,
+                        ),
                     }
                 }
 
@@ -502,10 +503,9 @@ mod macros {
             }
 
             impl<
-                    P: $crate::PublicKey,
-                    V: $crate::bls12381::primitives::variant::Variant + Send + Sync,
-                > $crate::certificate::Scheme for Scheme<P, V>
-            {
+                P: $crate::PublicKey,
+                V: $crate::bls12381::primitives::variant::Variant + Send + Sync,
+            > $crate::certificate::Scheme for Scheme<P, V> {
                 type Subject<'a, D: $crate::Digest> = $subject;
                 type PublicKey = P;
                 type Signature = V::Signature;
