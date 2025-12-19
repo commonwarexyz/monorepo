@@ -600,7 +600,6 @@ where
                                 },
                                 Request::Finalized { height } => {
                                     let Some(bounds) = self.epocher.containing(height) else {
-                                        error!(height, "no epoch mapping for height");
                                         let _ = response.send(false);
                                         continue;
                                     };
