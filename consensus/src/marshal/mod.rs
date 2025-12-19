@@ -735,7 +735,7 @@ mod tests {
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor, _) = setup_validator(
+                let (_application, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
@@ -790,7 +790,7 @@ mod tests {
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor, _) = setup_validator(
+                let (_application, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
@@ -866,7 +866,7 @@ mod tests {
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor, _) = setup_validator(
+                let (_application, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
@@ -934,7 +934,7 @@ mod tests {
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor, _) = setup_validator(
+                let (_application, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
@@ -1045,7 +1045,7 @@ mod tests {
 
             // Single validator actor
             let me = participants[0].clone();
-            let (_application, mut actor, _) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
@@ -1105,7 +1105,7 @@ mod tests {
 
             // Single validator actor
             let me = participants[0].clone();
-            let (_application, mut actor, _) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
@@ -1186,7 +1186,7 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (application, mut actor, _) = setup_validator(
+            let (application, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
@@ -1245,7 +1245,7 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_application, mut actor, _) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
@@ -1303,7 +1303,7 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_application, mut actor, _) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
@@ -1357,7 +1357,7 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_application, mut actor, _) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me,
@@ -1442,7 +1442,7 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_base_app, marshal, _) = setup_validator(
+            let (_base_app, marshal, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 me.clone(),
