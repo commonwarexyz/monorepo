@@ -60,13 +60,6 @@
 //! method to produce a stream of all items in the `Journal` in order of their `section` and
 //! `offset`.
 //!
-//! # Exact Reads
-//!
-//! To allow for items to be fetched in a single disk operation, `Journal` allows callers to specify
-//! an `exact` parameter to the `get` method. This `exact` parameter must be cached by the caller
-//! (provided during `replay`) and usage of an incorrect `exact` value will result in undefined
-//! behavior.
-//!
 //! # Compression
 //!
 //! `Journal` supports optional compression using `zstd`. This can be enabled by setting the
@@ -357,58 +350,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok((aligned_offset, current_pos, size as u32, item))
     }
 
-    /// Reads an item from the blob at the given offset and of a given size.
-    async fn read_exact(
-        compressed: bool,
-        cfg: &V::Cfg,
-        blob: &Append<E::Blob>,
-        offset: u32,
-        len: u32,
-    ) -> Result<V, Error> {
-        // Calculate varint size for the expected length
-        let varint_len = UInt(len).encode_size();
-
-        // Read buffer: varint + data + checksum
-        let offset = offset as u64 * ITEM_ALIGNMENT;
-        let entry_size = varint_len + len as usize + 4;
-        let buf = blob.read_at(vec![0u8; entry_size], offset).await?;
-
-        // Check size
-        let mut hasher = crc32fast::Hasher::new();
-        let mut varint_slice = &buf.as_ref()[..varint_len];
-        let disk_size = UInt::<u32>::read(&mut varint_slice)
-            .map_err(Error::Codec)?
-            .0;
-        hasher.update(&buf.as_ref()[..varint_len]);
-        if disk_size != len {
-            return Err(Error::UnexpectedSize(disk_size, len));
-        }
-
-        // Verify integrity
-        let item = &buf.as_ref()[varint_len..varint_len + len as usize];
-        hasher.update(item);
-        let checksum = hasher.finalize();
-        let stored_checksum = u32::from_be_bytes(
-            buf.as_ref()[varint_len + len as usize..]
-                .try_into()
-                .unwrap(),
-        );
-        if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
-        }
-
-        // Decompress item
-        let item = if compressed {
-            decode_all(Cursor::new(item)).map_err(|_| Error::DecompressionFailed)?
-        } else {
-            item.to_vec()
-        };
-
-        // Return item
-        let item = V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?;
-        Ok(item)
-    }
-
     /// Returns an ordered stream of all items in the journal starting with the item at the given
     /// `start_section` and `offset` into that section. Each item is returned as a tuple of
     /// (section, offset, size, item).
@@ -658,26 +599,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             &self.cfg.codec_config,
             blob,
             offset,
-        )
-        .await?;
-        Ok(item)
-    }
-
-    /// Retrieves an item from `Journal` at a given `section` and `offset` with a given size.
-    pub async fn get_exact(&self, section: u64, offset: u32, size: u32) -> Result<V, Error> {
-        self.prune_guard(section)?;
-        let blob = match self.blobs.get(&section) {
-            Some(blob) => blob,
-            None => return Err(Error::SectionOutOfRange(section)),
-        };
-
-        // Perform a multi-op read.
-        let item = Self::read_exact(
-            self.cfg.compression.is_some(),
-            &self.cfg.codec_config,
-            blob,
-            offset,
-            size,
         )
         .await?;
         Ok(item)
@@ -1175,12 +1096,6 @@ mod tests {
 
             // Test get on pruned section
             match journal.get(1, 0).await {
-                Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
-            }
-
-            // Test get_exact on pruned section
-            match journal.get_exact(2, 0, 12).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }

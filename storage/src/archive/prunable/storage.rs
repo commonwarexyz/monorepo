@@ -17,7 +17,6 @@ use tracing::debug;
 /// Location of a record in `Journal`.
 struct Location {
     offset: u32,
-    len: u32,
 }
 
 /// Record stored in the `Archive`.
@@ -132,10 +131,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
-                let (_, offset, len, data) = result?;
+                let (_, offset, _, data) = result?;
 
                 // Store index
-                indices.insert(data.index, Location { offset, len });
+                indices.insert(data.index, Location { offset });
 
                 // Store index in keys
                 keys.insert(&data.key, data.index);
@@ -203,10 +202,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Fetch item from disk
         let section = self.section(index);
-        let record = self
-            .journal
-            .get_exact(section, location.offset, location.len)
-            .await?;
+        let record = self.journal.get(section, location.offset).await?;
         Ok(Some(record.value))
     }
 
@@ -226,10 +222,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             // Fetch item from disk
             let location = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
             let section = self.section(*index);
-            let record = self
-                .journal
-                .get_exact(section, location.offset, location.len)
-                .await?;
+            let record = self.journal.get(section, location.offset).await?;
 
             // Get key from item
             if record.key.as_ref() == key.as_ref() {
@@ -321,10 +314,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
         // Store item in journal
         let record = Record::new(index, key.clone(), data);
         let section = self.section(index);
-        let (offset, len) = self.journal.append(section, record).await?;
+        let (offset, _) = self.journal.append(section, record).await?;
 
         // Store index
-        self.indices.insert(index, Location { offset, len });
+        self.indices.insert(index, Location { offset });
 
         // Store interval
         self.intervals.insert(index);
