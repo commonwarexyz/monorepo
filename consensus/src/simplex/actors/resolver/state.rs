@@ -1,14 +1,11 @@
 use crate::{
-    simplex::{
-        actors::resolver::ingress::{PREFIX_ANY, PREFIX_NULLIFICATION_ONLY},
-        types::{Certificate, Notarization},
-    },
+    simplex::types::{Certificate, Notarization},
     types::View,
     Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::Resolver;
-use commonware_utils::sequence::{prefixed_u64::U64 as PrefixedU64, U64};
+use commonware_utils::sequence::U64;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Tracks all known certificates from the last
@@ -65,7 +62,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     pub async fn handle(
         &mut self,
         certificate: Certificate<S, D>,
-        request: View,
+        request: Option<View>,
         resolver: &mut impl Resolver<Key = U64>,
     ) {
         match certificate {
@@ -82,7 +79,9 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 let view = notarization.view();
                 if self.encounter_view(view) {
                     self.notarizations.insert(view, notarization);
-                    self.satisfied_by.entry(view).or_default().insert(request);
+                    if let Some(request) = request {
+                        self.satisfied_by.entry(view).or_default().insert(request);
+                    }
                 }
             }
             Certificate::Finalization(finalization) => {
@@ -103,7 +102,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &mut self,
         view: View,
         success: bool,
-        resolver: &mut impl Resolver<Key = PrefixedU64>,
+        resolver: &mut impl Resolver<Key = U64>,
     ) {
         if success {
             // Certification passed - set floor to notarization if we have it
@@ -121,18 +120,14 @@ impl<S: Scheme, D: Digest> State<S, D> {
             self.failed_views.insert(view);
 
             // Request nullification for this view
-            resolver
-                .fetch(PrefixedU64::new(PREFIX_NULLIFICATION_ONLY, view.get()))
-                .await;
+            resolver.fetch(view.into()).await;
 
             // Re-request any lower views this notarization had satisfied
             if let Some(satisfied_views) = self.satisfied_by.remove(&view) {
                 let floor = self.floor_view();
                 for v in satisfied_views {
                     if v > floor {
-                        resolver
-                            .fetch(PrefixedU64::new(PREFIX_NULLIFICATION_ONLY, v.get()))
-                            .await;
+                        resolver.fetch(v.into()).await;
                     }
                 }
             }
@@ -227,34 +222,34 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct MockResolver {
-        outstanding: Arc<Mutex<BTreeSet<PrefixedU64>>>,
+        outstanding: Arc<Mutex<BTreeSet<U64>>>,
     }
 
     impl MockResolver {
-        fn outstanding(&self) -> Vec<(u8, u64)> {
+        fn outstanding(&self) -> Vec<u64> {
             self.outstanding
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|key| (key.prefix(), key.value()))
+                .map(|key| key.into())
                 .collect()
         }
     }
 
     impl Resolver for MockResolver {
-        type Key = PrefixedU64;
+        type Key = U64;
 
-        async fn fetch(&mut self, key: PrefixedU64) {
+        async fn fetch(&mut self, key: U64) {
             self.outstanding.lock().unwrap().insert(key);
         }
 
-        async fn fetch_all(&mut self, keys: Vec<PrefixedU64>) {
+        async fn fetch_all(&mut self, keys: Vec<U64>) {
             for key in keys {
                 self.outstanding.lock().unwrap().insert(key);
             }
         }
 
-        async fn cancel(&mut self, key: PrefixedU64) {
+        async fn cancel(&mut self, key: U64) {
             self.outstanding.lock().unwrap().remove(&key);
         }
 
