@@ -100,9 +100,9 @@ impl<
                     return;
                 }
                 Activity::Notarization(_)
+                | Activity::Certification(_)
                 | Activity::Nullification(_)
-                | Activity::Finalization(_)
-                | Activity::Certification(_) => {
+                | Activity::Finalization(_) => {
                     // Always report certificates
                 }
             }
