@@ -17,6 +17,7 @@ use rand::Rng;
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
     net::IpAddr,
+    time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
 
@@ -33,6 +34,9 @@ pub struct Config {
 
     /// The rate limit for allowing reservations per-peer.
     pub rate_limit: Quota,
+
+    /// Duration after which blocked peers are automatically unblocked.
+    pub block_duration: Duration,
 }
 
 /// Represents a collection of records for all peers.
@@ -47,6 +51,9 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Whether DNS-based ingress addresses are allowed.
     allow_dns: bool,
 
+    /// Duration after which blocked peers are automatically unblocked.
+    block_duration: Duration,
+
     // ---------- State ----------
     /// The records of all peers.
     peers: HashMap<C, Record>,
@@ -56,6 +63,9 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
 
     /// Rate limiter for connection attempts.
     rate_limiter: KeyedRateLimiter<C, E>,
+
+    /// Context for getting current time.
+    context: E,
 
     // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
@@ -76,16 +86,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // Other initialization.
         let rate_limiter = KeyedRateLimiter::hashmap_with_clock(cfg.rate_limit, context.clone());
 
-        let metrics = Metrics::init(context);
+        let metrics = Metrics::init(context.clone());
         let _ = metrics.tracked.try_set(peers.len() - 1); // Exclude self
 
         Self {
             max_sets: cfg.max_sets,
             allow_private_ips: cfg.allow_private_ips,
             allow_dns: cfg.allow_dns,
+            block_duration: cfg.block_duration,
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
+            context,
             releaser,
             metrics,
         }
@@ -132,11 +144,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Create and store new peer set (all peers are tracked regardless of address validity)
+        let now = self.context.current();
         for (peer, addr) in &peers {
             let record = match self.peers.entry(peer.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
-                    entry.update(addr.clone());
+                    entry.update(now, addr.clone());
                     entry
                 }
                 Entry::Vacant(entry) => {
@@ -196,7 +209,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Attempt to block a peer, updating the metrics accordingly.
     pub fn block(&mut self, peer: &C) {
-        if self.peers.get_mut(peer).is_some_and(|r| r.block()) {
+        let blocked_until = self.context.current() + self.block_duration;
+        if self
+            .peers
+            .get_mut(peer)
+            .is_some_and(|r| r.block(blocked_until))
+        {
             self.metrics.blocked.inc();
         }
     }
@@ -215,11 +233,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns true if the peer is eligible for connection.
     ///
-    /// A peer is eligible if it is in a peer set, not blocked, and not ourselves.
+    /// A peer is eligible if it is in a peer set, not blocked (unless expired), and not ourselves.
     /// This does NOT check IP validity - that is done separately for dialing (ingress)
     /// and accepting (egress).
     pub fn eligible(&self, peer: &C) -> bool {
-        self.peers.get(peer).is_some_and(|r| r.eligible())
+        let now = self.context.current();
+        self.peers.get(peer).is_some_and(|r| r.eligible(now))
     }
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
@@ -239,22 +258,36 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Checks eligibility (peer set membership), egress IP match, and connection status.
     pub fn acceptable(&self, peer: &C, source_ip: IpAddr) -> bool {
+        let now = self.context.current();
         self.peers
             .get(peer)
-            .is_some_and(|r| r.acceptable(source_ip))
+            .is_some_and(|r| r.acceptable(now, source_ip))
     }
 
     /// Return egress IPs we should listen for (accept incoming connections from).
     ///
     /// Only includes IPs from peers that are:
-    /// - Eligible (in a peer set, not blocked, not ourselves)
+    /// - Eligible (in a peer set, not blocked unless expired, not ourselves)
     /// - Have a valid egress IP (global, or private IPs are allowed)
     pub fn listenable(&self) -> HashSet<IpAddr> {
+        let now = self.context.current();
         self.peers
             .values()
-            .filter(|r| r.eligible())
+            .filter(|r| r.eligible(now))
             .filter_map(|r| r.egress_ip())
             .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
+            .collect()
+    }
+
+    /// Return blocked peer IPs with their expiry times.
+    ///
+    /// Used by the listener to distinguish blocked peers from unknown peers.
+    pub fn blocked_ips(&self) -> HashMap<IpAddr, SystemTime> {
+        let now = self.context.current();
+        self.peers
+            .values()
+            .filter(|r| r.blocked(now))
+            .filter_map(|r| r.egress_ip().zip(r.blocked_until()))
             .collect()
     }
 
@@ -287,7 +320,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Reserve
-        if record.reserve() {
+        let now = self.context.current();
+        if record.reserve(now) {
             self.metrics.reserved.inc();
             return Some(Reservation::new(metadata, self.releaser.clone()));
         }
@@ -304,7 +338,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         if !record.deletable() {
             return false;
         }
-        if record.blocked() {
+        let now = self.context.current();
+        if record.blocked(now) {
             self.metrics.blocked.dec();
         }
         self.peers.remove(peer);
@@ -321,9 +356,12 @@ mod tests {
         Ingress,
     };
     use commonware_cryptography::{ed25519, Signer};
-    use commonware_runtime::{deterministic, Quota, Runner};
+    use commonware_runtime::{deterministic, Clock, Quota, Runner};
     use commonware_utils::{hostname, NZU32};
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
 
     fn addr(socket: SocketAddr) -> Address {
         Address::Symmetric(socket)
@@ -340,6 +378,7 @@ mod tests {
             allow_dns: true,
             max_sets: 1,
             rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(3600),
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -401,6 +440,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(3600),
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -488,6 +528,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(3600),
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -495,13 +536,14 @@ mod tests {
         let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2235);
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+            let mut directory = Directory::init(context.clone(), my_pk.clone(), config, releaser);
+            let now = context.current();
 
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             directory.block(&pk_1);
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(
-                record.blocked(),
+                record.blocked(now),
                 "Peer should be blocked after call to block"
             );
             assert!(
@@ -512,7 +554,7 @@ mod tests {
             directory.add_set(1, [(pk_1.clone(), addr(addr_2))].try_into().unwrap());
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(
-                record.blocked(),
+                record.blocked(now),
                 "Blocked peer should remain blocked after update"
             );
             assert!(
@@ -533,6 +575,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(3600),
         };
 
         // Create asymmetric address where ingress differs from egress
@@ -631,6 +674,7 @@ mod tests {
             allow_dns: false,
             max_sets: 3,
             rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(3600),
         };
 
         // Create peers with different address types
@@ -695,6 +739,7 @@ mod tests {
             allow_dns: true,
             max_sets: 3,
             rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(3600),
         };
 
         // Create peer with public egress IP

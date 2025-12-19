@@ -1,5 +1,5 @@
 use crate::types::{self, Ingress};
-use std::net::IpAddr;
+use std::{net::IpAddr, time::SystemTime};
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
@@ -10,9 +10,8 @@ pub enum Address {
     /// Address is provided when peer is registered.
     Known(types::Address),
 
-    /// Peer is blocked.
-    /// We don't care to track its information.
-    Blocked,
+    /// Peer is blocked until the given time.
+    Blocked(SystemTime),
 }
 
 /// Represents the connection status of a peer.
@@ -73,22 +72,27 @@ impl Record {
     // ---------- Setters ----------
 
     /// Update the record with a new address.
-    pub fn update(&mut self, addr: types::Address) {
-        if matches!(self.address, Address::Myself | Address::Blocked) {
-            return;
+    ///
+    /// Updates are allowed for non-blocked records, or for blocked records whose
+    /// block has expired.
+    pub fn update(&mut self, now: SystemTime, addr: types::Address) {
+        match &self.address {
+            Address::Myself => return,
+            Address::Blocked(until) if now < *until => return,
+            _ => {}
         }
         self.address = Address::Known(addr);
     }
 
-    /// Attempt to mark the peer as blocked.
+    /// Attempt to mark the peer as blocked until the given time.
     ///
     /// Returns `true` if the peer was newly blocked.
     /// Returns `false` if the peer was already blocked or is the local node (unblockable).
-    pub fn block(&mut self) -> bool {
-        if matches!(self.address, Address::Blocked | Address::Myself) {
+    pub fn block(&mut self, blocked_until: SystemTime) -> bool {
+        if matches!(self.address, Address::Blocked(_) | Address::Myself) {
             return false;
         }
-        self.address = Address::Blocked;
+        self.address = Address::Blocked(blocked_until);
         self.persistent = false;
         true
     }
@@ -110,9 +114,14 @@ impl Record {
     /// Attempt to reserve the peer for connection.
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
-    pub const fn reserve(&mut self) -> bool {
-        if matches!(self.address, Address::Blocked | Address::Myself) {
+    pub fn reserve(&mut self, now: SystemTime) -> bool {
+        if matches!(self.address, Address::Myself) {
             return false;
+        }
+        if let Address::Blocked(until) = self.address {
+            if now < until {
+                return false;
+            }
         }
         if matches!(self.status, Status::Inert) {
             self.status = Status::Reserved;
@@ -137,9 +146,17 @@ impl Record {
 
     // ---------- Getters ----------
 
-    /// Returns `true` if the record is blocked.
-    pub const fn blocked(&self) -> bool {
-        matches!(self.address, Address::Blocked)
+    /// Returns `true` if the record is currently blocked (block has not expired).
+    pub fn blocked(&self, now: SystemTime) -> bool {
+        matches!(self.address, Address::Blocked(until) if now < until)
+    }
+
+    /// Returns the time until which this peer is blocked, if blocked.
+    pub const fn blocked_until(&self) -> Option<SystemTime> {
+        match self.address {
+            Address::Blocked(until) => Some(until),
+            _ => None,
+        }
     }
 
     /// Returns the number of peer sets this peer is part of.
@@ -154,6 +171,10 @@ impl Record {
     /// - It is not ourselves or blocked
     /// - We are not already connected or reserved
     /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
+    ///
+    /// Note: Blocked peers are never dialable regardless of expiry since we don't retain
+    /// their address info. Once a block expires and the peer is re-added to a peer set,
+    /// they will become dialable again via the normal update path.
     pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         if self.status != Status::Inert {
             return false;
@@ -168,11 +189,11 @@ impl Record {
     /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
     ///
     /// A peer is acceptable if:
-    /// - The peer is eligible (in a peer set, not blocked, not ourselves)
+    /// - The peer is eligible (in a peer set, not blocked unless expired, not ourselves)
     /// - The source IP matches the expected egress IP for this peer
     /// - We are not already connected or reserved
-    pub fn acceptable(&self, source_ip: IpAddr) -> bool {
-        if !self.eligible() || self.status != Status::Inert {
+    pub fn acceptable(&self, now: SystemTime, source_ip: IpAddr) -> bool {
+        if !self.eligible(now) || self.status != Status::Inert {
             return false;
         }
         match &self.address {
@@ -186,7 +207,7 @@ impl Record {
         match &self.address {
             Address::Myself => None,
             Address::Known(addr) => Some(addr.ingress()),
-            Address::Blocked => None,
+            Address::Blocked(_) => None,
         }
     }
 
@@ -195,7 +216,7 @@ impl Record {
         match &self.address {
             Address::Myself => None,
             Address::Known(addr) => Some(addr.egress_ip()),
-            Address::Blocked => None,
+            Address::Blocked(_) => None,
         }
     }
 
@@ -213,15 +234,23 @@ impl Record {
     /// Returns `true` if this peer is eligible for connection.
     ///
     /// A peer is eligible if:
-    /// - It is not blocked or ourselves
+    /// - It is not blocked (unless the block has expired) or ourselves
     /// - It is part of at least one peer set (or is persistent)
     ///
     /// This is the base check for reserving a connection. IP validity is checked
     /// separately: ingress validity for dialing (in `dialable()`), egress validity
     /// for the IP filter (in `Directory::eligible_egress_ips()`).
-    pub const fn eligible(&self) -> bool {
+    pub fn eligible(&self, now: SystemTime) -> bool {
         match &self.address {
-            Address::Blocked | Address::Myself => false,
+            Address::Blocked(until) => {
+                // Blocked but expired - treat as eligible if in a peer set
+                if now >= *until {
+                    self.sets > 0 || self.persistent
+                } else {
+                    false
+                }
+            }
+            Address::Myself => false,
             Address::Known(_) => self.sets > 0 || self.persistent,
         }
     }
@@ -229,7 +258,7 @@ impl Record {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
+    use std::{net::SocketAddr, time::Duration};
 
     fn test_socket() -> SocketAddr {
         SocketAddr::from(([54, 12, 1, 9], 8080))
@@ -237,6 +266,14 @@ mod tests {
 
     fn test_address() -> types::Address {
         types::Address::Symmetric(test_socket())
+    }
+
+    fn now() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1000)
+    }
+
+    fn future_time() -> SystemTime {
+        now() + Duration::from_secs(3600)
     }
 
     #[test]
@@ -247,17 +284,17 @@ mod tests {
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
         assert!(record.ingress().is_none());
-        assert!(!record.blocked());
+        assert!(!record.blocked(now()));
         assert!(!record.reserved());
         assert!(!record.deletable());
-        assert!(!record.eligible());
+        assert!(!record.eligible(now()));
     }
 
     #[test]
     fn test_myself_blocked_to_known() {
         let mut record = Record::myself();
-        record.block();
-        assert!(!record.blocked(), "Can't block myself");
+        record.block(future_time());
+        assert!(!record.blocked(now()), "Can't block myself");
     }
 
     #[test]
@@ -289,36 +326,36 @@ mod tests {
     fn test_block_behavior_and_persistence() {
         let mut record_known = Record::known(test_address());
         assert!(!record_known.persistent);
-        assert!(record_known.block());
-        assert!(record_known.blocked());
-        assert!(matches!(record_known.address, Address::Blocked));
+        assert!(record_known.block(future_time()));
+        assert!(record_known.blocked(now()));
+        assert!(matches!(record_known.address, Address::Blocked(_)));
         assert!(!record_known.persistent);
 
         let mut record_reserved = Record::known(test_address());
-        assert!(record_reserved.reserve());
-        assert!(record_reserved.block());
+        assert!(record_reserved.reserve(now()));
+        assert!(record_reserved.block(future_time()));
         assert_eq!(record_reserved.status, Status::Reserved);
 
         let mut record_active = Record::known(test_address());
-        assert!(record_active.reserve());
+        assert!(record_active.reserve(now()));
         record_active.connect();
-        assert!(record_active.block());
+        assert!(record_active.block(future_time()));
         assert_eq!(record_active.status, Status::Active);
     }
 
     #[test]
     fn test_block_myself_and_already_blocked() {
         let mut record_myself = Record::myself();
-        assert!(!record_myself.block(), "Cannot block myself");
+        assert!(!record_myself.block(future_time()), "Cannot block myself");
         assert!(matches!(&record_myself.address, Address::Myself));
 
         let mut record_to_be_blocked = Record::known(test_address());
-        assert!(record_to_be_blocked.block());
+        assert!(record_to_be_blocked.block(future_time()));
         assert!(
-            !record_to_be_blocked.block(),
+            !record_to_be_blocked.block(future_time()),
             "Cannot block already blocked peer"
         );
-        assert!(matches!(record_to_be_blocked.address, Address::Blocked));
+        assert!(matches!(record_to_be_blocked.address, Address::Blocked(_)));
     }
 
     #[test]
@@ -326,25 +363,25 @@ mod tests {
         let mut record = Record::known(test_address());
 
         assert_eq!(record.status, Status::Inert);
-        assert!(record.reserve());
+        assert!(record.reserve(now()));
         assert_eq!(record.status, Status::Reserved);
         assert!(record.reserved());
 
-        assert!(!record.reserve(), "Cannot re-reserve when Reserved");
+        assert!(!record.reserve(now()), "Cannot re-reserve when Reserved");
         assert_eq!(record.status, Status::Reserved);
 
         record.connect();
         assert_eq!(record.status, Status::Active);
         assert!(record.reserved());
 
-        assert!(!record.reserve(), "Cannot reserve when Active");
+        assert!(!record.reserve(now()), "Cannot reserve when Active");
         assert_eq!(record.status, Status::Active);
 
         record.release();
         assert_eq!(record.status, Status::Inert);
         assert!(!record.reserved());
 
-        assert!(record.reserve());
+        assert!(record.reserve(now()));
         assert_eq!(record.status, Status::Reserved);
         record.release();
         assert_eq!(record.status, Status::Inert);
@@ -361,7 +398,7 @@ mod tests {
     #[should_panic]
     fn test_connect_when_active_panics() {
         let mut record = Record::known(test_address());
-        assert!(record.reserve());
+        assert!(record.reserve(now()));
         record.connect();
         record.connect();
     }
@@ -377,7 +414,7 @@ mod tests {
     fn test_reserved_status_check() {
         let mut record = Record::known(test_address());
         assert!(!record.reserved());
-        assert!(record.reserve());
+        assert!(record.reserve(now()));
         assert!(record.reserved());
         record.connect();
         assert!(record.reserved());
@@ -397,7 +434,7 @@ mod tests {
         record.increment();
         assert!(!record.deletable());
 
-        assert!(record.reserve());
+        assert!(record.reserve(now()));
         assert!(!record.deletable());
 
         record.connect();
@@ -412,19 +449,40 @@ mod tests {
 
     #[test]
     fn test_eligible_logic() {
-        // Blocked and Myself are never eligible
+        // Blocked and Myself are never eligible (while block is active)
         let mut record_blocked = Record::known(test_address());
-        record_blocked.block();
-        assert!(!record_blocked.eligible());
-        assert!(!Record::myself().eligible());
+        record_blocked.block(future_time());
+        assert!(!record_blocked.eligible(now()));
+        assert!(!Record::myself().eligible(now()));
 
         // Known records are only eligible when in a peer set
         let mut record_known = Record::known(test_address());
-        assert!(!record_known.eligible(), "Not eligible when sets=0");
+        assert!(!record_known.eligible(now()), "Not eligible when sets=0");
         record_known.increment();
-        assert!(record_known.eligible(), "Eligible when sets>0");
+        assert!(record_known.eligible(now()), "Eligible when sets>0");
         record_known.decrement();
-        assert!(!record_known.eligible(), "Not eligible when sets=0 again");
+        assert!(
+            !record_known.eligible(now()),
+            "Not eligible when sets=0 again"
+        );
+    }
+
+    #[test]
+    fn test_block_expiry() {
+        let mut record = Record::known(test_address());
+        record.increment();
+
+        // Block the peer
+        assert!(record.block(future_time()));
+
+        // Currently blocked
+        assert!(record.blocked(now()));
+        assert!(!record.eligible(now()));
+
+        // After expiry time, no longer blocked
+        let after_expiry = future_time() + Duration::from_secs(1);
+        assert!(!record.blocked(after_expiry));
+        assert!(record.eligible(after_expiry));
     }
 
     #[test]
@@ -439,48 +497,48 @@ mod tests {
         let mut record = Record::known(types::Address::Symmetric(public_socket));
         record.increment();
         assert!(
-            record.acceptable(egress_ip),
+            record.acceptable(now(), egress_ip),
             "Eligible, Inert, correct IP is acceptable"
         );
 
         // Correct everything but wrong IP - not acceptable
         assert!(
-            !record.acceptable(wrong_ip),
+            !record.acceptable(now(), wrong_ip),
             "Not acceptable when IP doesn't match"
         );
 
         // Not eligible (sets=0) - not acceptable
         let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
         assert!(
-            !record_not_eligible.acceptable(egress_ip),
+            !record_not_eligible.acceptable(now(), egress_ip),
             "Not acceptable when not eligible"
         );
 
         // Already reserved - not acceptable
         let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
         record_reserved.increment();
-        record_reserved.reserve();
+        record_reserved.reserve(now());
         assert!(
-            !record_reserved.acceptable(egress_ip),
+            !record_reserved.acceptable(now(), egress_ip),
             "Not acceptable when reserved"
         );
 
         // Already connected - not acceptable
         let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
         record_connected.increment();
-        record_connected.reserve();
+        record_connected.reserve(now());
         record_connected.connect();
         assert!(
-            !record_connected.acceptable(egress_ip),
+            !record_connected.acceptable(now(), egress_ip),
             "Not acceptable when connected"
         );
 
         // Blocked - not acceptable
         let mut record_blocked = Record::known(types::Address::Symmetric(public_socket));
         record_blocked.increment();
-        record_blocked.block();
+        record_blocked.block(future_time());
         assert!(
-            !record_blocked.acceptable(egress_ip),
+            !record_blocked.acceptable(now(), egress_ip),
             "Not acceptable when blocked"
         );
     }

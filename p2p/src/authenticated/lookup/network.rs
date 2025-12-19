@@ -19,7 +19,6 @@ use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
 use futures::channel::mpsc;
 use rand::{CryptoRng, Rng};
-use std::{collections::HashSet, net::IpAddr};
 use tracing::{debug, info};
 
 /// Unique suffix for all messages signed in a stream.
@@ -35,7 +34,7 @@ pub struct Network<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Metrics, C:
     tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
-    listener: mpsc::Receiver<HashSet<IpAddr>>,
+    listener: mpsc::Receiver<tracker::ListenerFilter>,
 }
 
 impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Signer>
@@ -52,7 +51,8 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
-        let (listener_mailbox, listener) = Mailbox::<HashSet<IpAddr>>::new(cfg.mailbox_size);
+        let (listener_mailbox, listener) =
+            Mailbox::<tracker::ListenerFilter>::new(cfg.mailbox_size);
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {
@@ -61,6 +61,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 allow_private_ips: cfg.allow_private_ips,
                 allow_dns: cfg.allow_dns,
+                block_duration: cfg.block_duration,
                 listener: listener_mailbox,
             },
         );

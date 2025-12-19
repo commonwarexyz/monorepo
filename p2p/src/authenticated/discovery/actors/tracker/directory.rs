@@ -17,6 +17,7 @@ use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
     ops::Deref,
+    time::Duration,
 };
 use tracing::{debug, warn};
 
@@ -37,6 +38,9 @@ pub struct Config {
 
     /// The rate limit for allowing reservations per-peer.
     pub rate_limit: Quota,
+
+    /// Duration after which blocked peers are automatically unblocked.
+    pub block_duration: Duration,
 }
 
 /// Represents a collection of records for all peers.
@@ -56,6 +60,9 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// The minimum number of times we should fail to dial a peer before attempting to ask other
     /// peers for its peer info again.
     dial_fail_limit: usize,
+
+    /// Duration after which blocked peers are automatically unblocked.
+    block_duration: Duration,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -107,6 +114,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             allow_dns: cfg.allow_dns,
             max_sets: cfg.max_sets,
             dial_fail_limit: cfg.dial_fail_limit,
+            block_duration: cfg.block_duration,
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
@@ -131,7 +139,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             record.dial_failure(ingress);
         }
 
-        let want = record.want(self.dial_fail_limit);
+        let now = self.context.current();
+        let want = record.want(now, self.dial_fail_limit);
         for set in self.sets.values_mut() {
             set.update(peer, !want);
         }
@@ -152,7 +161,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         record.connect();
 
         // We may have to update the sets.
-        let want = record.want(self.dial_fail_limit);
+        let now = self.context.current();
+        let want = record.want(now, self.dial_fail_limit);
         for set in self.sets.values_mut() {
             set.update(peer, !want);
         }
@@ -160,6 +170,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Using a list of (already-validated) peer information, update the records.
     pub fn update_peers(&mut self, infos: Vec<types::Info<C>>) {
+        let now = self.context.current();
         for info in infos {
             // Update peer address
             //
@@ -170,7 +181,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             let Some(record) = self.peers.get_mut(&peer) else {
                 continue;
             };
-            if !record.update(info) {
+            if !record.update(now, info) {
                 continue;
             }
             self.metrics
@@ -179,7 +190,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 .inc();
 
             // We may have to update the sets.
-            let want = record.want(self.dial_fail_limit);
+            let want = record.want(now, self.dial_fail_limit);
             for set in self.sets.values_mut() {
                 set.update(&peer, !want);
             }
@@ -204,6 +215,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Create and store new peer set
+        let now = self.context.current();
         let mut set = Set::new(peers.clone());
         for peer in peers.iter() {
             let record = self.peers.entry(peer.clone()).or_insert_with(|| {
@@ -211,7 +223,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 Record::unknown()
             });
             record.increment();
-            set.update(peer, !record.want(self.dial_fail_limit));
+            set.update(peer, !record.want(now, self.dial_fail_limit));
         }
         self.sets.insert(index, set);
 
@@ -268,7 +280,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Attempt to block a peer, updating the metrics accordingly.
     pub fn block(&mut self, peer: &C) {
-        if self.peers.get_mut(peer).is_some_and(|r| r.block()) {
+        let blocked_until = self.context.current() + self.block_duration;
+        if self
+            .peers
+            .get_mut(peer)
+            .is_some_and(|r| r.block(blocked_until))
+        {
             self.metrics.blocked.inc();
         }
     }
@@ -334,25 +351,39 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// A peer is eligible if it is in a peer set (or is persistent), not blocked, and not ourselves.
     pub fn eligible(&self, peer: &C) -> bool {
-        self.peers.get(peer).is_some_and(|r| r.eligible())
+        let now = self.context.current();
+        self.peers.get(peer).is_some_and(|r| r.eligible(now))
     }
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have an ingress.
     pub fn dialable(&self) -> Vec<C> {
         // Collect peers with known addresses
+        let now = self.context.current();
         let mut result: Vec<_> = self
             .peers
             .iter()
-            .filter(|&(_, r)| r.dialable(self.allow_private_ips, self.allow_dns))
+            .filter(|&(_, r)| r.dialable(now, self.allow_private_ips, self.allow_dns))
             .map(|(peer, _)| peer.clone())
             .collect();
         result.sort();
         result
     }
 
-    /// Returns true if this peer is acceptable (can accept an incoming connection from them).
-    pub fn acceptable(&self, peer: &C) -> bool {
-        self.peers.get(peer).is_some_and(|r| r.acceptable())
+    /// Returns the acceptance status for a peer.
+    pub fn acceptable(&self, peer: &C) -> super::ingress::Acceptable {
+        use super::ingress::Acceptable;
+        let now = self.context.current();
+        let Some(record) = self.peers.get(peer) else {
+            return Acceptable::Unknown;
+        };
+        if record.blocked(now) {
+            return Acceptable::Blocked;
+        }
+        if record.acceptable(now) {
+            Acceptable::Yes
+        } else {
+            Acceptable::Unknown
+        }
     }
 
     // --------- Helpers ----------
@@ -384,7 +415,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Reserve
-        if record.reserve() {
+        let now = self.context.current();
+        if record.reserve(now) {
             self.metrics.reserved.inc();
             return Some(Reservation::new(metadata, self.releaser.clone()));
         }
@@ -401,7 +433,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         if !record.deletable() {
             return false;
         }
-        if record.blocked() {
+        let now = self.context.current();
+        if record.blocked(now) {
             self.metrics.blocked.dec();
         }
         self.peers.remove(peer);
