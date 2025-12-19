@@ -16,7 +16,7 @@
     <meta property="og:url" content="https://commonware.xyz/blogs/conformance.html" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
-    <meta property="og:image" content="https://commonware.xyz/imgs/conformance-cover.jpg" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/conformance.jpg" />
     <meta property="og:title" content="Change is the Only Constant" />
     <meta property="og:description" content="Picture this: Your team is scrambling to get the latest release of a project out, and in one of several hasty PR reviews, your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack." />
     <meta property="article:author" content="https://x.com/vex_0x" />
@@ -28,7 +28,7 @@
     <meta property="twitter:url" content="https://commonware.xyz/blogs/conformance.html" />
     <meta property="twitter:title" content="Change is the Only Constant" />
     <meta property="twitter:description" content="Picture this: Your team is scrambling to get the latest release of a project out, and in one of several hasty PR reviews, your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack." />
-    <meta property="twitter:image" content="https://commonware.xyz/imgs/conformance-cover.jpg" />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/conformance.jpg" />
     <meta property="twitter:site" content="@commonwarexyz" />
     <meta property="twitter:creator" content="@vex_0x" />
 
@@ -88,7 +88,7 @@
         <p>To some degree, we've all been there. Whether it be a change to the order of fields in a type's wire format or a difference in message order within a handshake, silent breakage of functionality can consume days of your time and hurt the reputation of the project.</p>
 
         <h2><code>conformance</code></h2>
-        <p>Detecting as many of these breaking changes as possible <i>before</i> they arrive in the hands of our users unannounced is critical, and at the same time, we don't trust ourselves to protect every nuanced change with manual review (nor do we expect our users to.) By defining a set of tests that validate the behavior of an implementation against a known-good reference, CI can catch breaking changes before they make it into the trunk branch. Our code is constantly evolving, but we need to make sure that some things stay in-place.</p>
+        <p>Detecting as many of these breaking changes as possible <i>before</i> they arrive in the hands of our users unannounced is critical, and at the same time, we don't trust ourselves to protect every nuanced change with manual review (nor do we expect our users to). By defining a set of tests that validate the behavior of an implementation against a known-good reference, CI can catch breaking changes before they make it into the trunk branch. Our code is constantly evolving, but we need to make sure that some things stay in-place.</p>
 
         <p>We've introduced a new primitive, <code>conformance</code>, to offer an easy path to define and run "conformance tests." Manually creating cases for every mechanism in a project is both difficult and brittle - <code>conformance</code> opts for automation. All that it takes is implementing the following trait on types that you'd like to constrain:</p>
         <pre>
@@ -102,11 +102,11 @@ pub trait Conformance: Send + Sync {
 }
             </code>
         </pre>
-        <p>Any type that implements <code>Conformance</code> can then use the <code>conformance_tests!</code> macro to generate a test that commits to a configurable number of generated cases. These commitments are then written to a file that can be checked into the repository. For example, if we want to assert the stability of a type's wire format, we can use the <a href="https://github.com/commonwarexyz/monorepo/blob/66c2f637029774652e976b10e81449d0c17a863f/codec/src/conformance.rs#L39-L55"><code>CodecConformance</code></a> wrapper that delegates <code>Conformance::commit</code> to an <code>Arbitrary</code> implementation:</p>
+        <p>Any type that implements <code>Conformance</code> can then use the <a href="https://github.com/commonwarexyz/monorepo/blob/99799d61e2ae3742944d1a6c71017a4cd81cca2a/conformance/macros/src/lib.rs#L89-L112"><code>conformance_tests!</code></a> macro to generate a test that commits to a configurable number of generated cases. These commitments are then written to a file that can be checked into the repository. For example, if we want to assert the stability of a type's wire format, we can use the <a href="https://github.com/commonwarexyz/monorepo/blob/66c2f637029774652e976b10e81449d0c17a863f/codec/src/conformance.rs#L39-L55"><code>CodecConformance</code></a> wrapper that delegates <code>Conformance::commit</code> to an <code>Arbitrary</code> implementation:</p>
         <pre>
             <code class="language-rust">
-use commonware_codec::{conformance::CodecConformance, Write, FixedSize};
 use bytes::BufMut;
+use commonware_codec::{conformance::CodecConformance, Write, FixedSize};
 use commonware_conformance::conformance_tests;
 
 #[derive(arbitrary::Arbitrary)]
@@ -222,7 +222,7 @@ conformance_tests! {
         </pre>
 
         <h2>A Multi-Layered Approach to Stability</h2>
-        <p>Commonware is coming up on its first stable release. By adopting conformance testing as a standard practice, we add another layer of protection to our development and release process.</p>
+        <p>Commonware is coming up on its first <a href="https://github.com/commonwarexyz/monorepo/milestone/15">long-term support release</a>. By adopting conformance testing as a standard practice, we add another layer of protection to our development and release process.</p>
         <p>In our codebase today, <code>conformance</code> covers:</p>
         <ul>
             <li>Wire formats (<code>codec</code>)</li>
