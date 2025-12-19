@@ -444,6 +444,7 @@ impl<
             if let Some((view, voters, failed)) = selected {
                 timer.observe();
 
+                // Process verified votes
                 let batch = voters.len() + failed.len();
                 trace!(%view, batch, "batch verified votes");
                 self.verified.inc_by(batch as u64);
