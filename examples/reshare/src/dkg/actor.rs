@@ -403,8 +403,7 @@ where
                         MailboxMessage::Finalized { block, response } => {
                             let block_epoch = epocher.containing(block.height).expect("block height covered by epoch strategy");
                             let phase = epocher.phase_at(block.height).expect("block height covered by epoch strategy");
-                            let first_height = epocher.first(block_epoch);
-                            let relative_height = block.height - first_height;
+                            let relative_height = epocher.relative(block.height).expect("block height covered by epoch strategy");
                             info!(epoch = %block_epoch, relative_height, "processing finalized block");
 
                             // Skip blocks from previous epochs (can happen on restart if we

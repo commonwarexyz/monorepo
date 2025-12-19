@@ -360,14 +360,24 @@ pub trait Epocher: Clone + Send + Sync + 'static {
     /// Returns `None` if the height is not covered by this epoch strategy.
     fn length_at(&self, height: u64) -> Option<u64>;
 
+    /// Returns the relative position of a height within its epoch.
+    ///
+    /// The relative position is the offset from the first block in the epoch.
+    /// For example, if an epoch starts at height 100, then height 105 has
+    /// relative position 5.
+    ///
+    /// Returns `None` if the height is not covered by this epoch strategy.
+    fn relative(&self, height: u64) -> Option<u64> {
+        let epoch = self.containing(height)?;
+        Some(height - self.first(epoch))
+    }
+
     /// Returns the phase of the given height within its epoch.
     ///
     /// Returns `None` if the height is not covered by this epoch strategy.
     fn phase_at(&self, height: u64) -> Option<EpochPhase> {
-        let epoch = self.containing(height)?;
+        let relative = self.relative(height)?;
         let length = self.length_at(height)?;
-        let first = self.first(epoch);
-        let relative = height - first;
         let midpoint = length / 2;
 
         Some(if relative < midpoint {
@@ -862,6 +872,26 @@ mod tests {
         // Test epoch boundaries
         assert_eq!(strategy.first(Epoch::new(1)), 100);
         assert_eq!(strategy.last(Epoch::new(1)), 199);
+    }
+
+    #[test]
+    fn test_relative_height() {
+        let epocher = FixedEpocher::new(NZU64!(100));
+
+        // Epoch 0: heights 0-99
+        assert_eq!(epocher.relative(0), Some(0));
+        assert_eq!(epocher.relative(50), Some(50));
+        assert_eq!(epocher.relative(99), Some(99));
+
+        // Epoch 1: heights 100-199
+        assert_eq!(epocher.relative(100), Some(0));
+        assert_eq!(epocher.relative(150), Some(50));
+        assert_eq!(epocher.relative(199), Some(99));
+
+        // Epoch 5: heights 500-599
+        assert_eq!(epocher.relative(500), Some(0));
+        assert_eq!(epocher.relative(567), Some(67));
+        assert_eq!(epocher.relative(599), Some(99));
     }
 
     #[test]
