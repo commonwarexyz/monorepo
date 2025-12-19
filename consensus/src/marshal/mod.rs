@@ -431,7 +431,7 @@ mod tests {
                 .update(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate() {
-                let (application, actor, _) = setup_validator(
+                let (application, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
@@ -577,7 +577,7 @@ mod tests {
                 .update(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate().skip(1) {
-                let (application, actor, _) = setup_validator(
+                let (application, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
@@ -665,7 +665,7 @@ mod tests {
 
             // Create the first validator now that all blocks have been finalized by the others.
             let validator = participants.first().unwrap();
-            let (app, mut actor, _) = setup_validator(
+            let (app, mut actor, _processed_height) = setup_validator(
                 context.with_label("validator-0"),
                 &mut oracle,
                 validator.clone(),
@@ -1570,7 +1570,7 @@ mod tests {
             // Set up two validators
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate().take(2) {
-                let (_app, actor, _) = setup_validator(
+                let (_app, actor, _processed_height) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     validator.clone(),
