@@ -456,8 +456,8 @@ impl FixedEpocher {
 impl Epocher for FixedEpocher {
     fn containing(&self, height: u64) -> Option<EpochInfo> {
         let epoch = Epoch::new(height / self.0);
-        let (first, _) = self.bounds(epoch)?;
-        Some(EpochInfo::new(epoch, height, first, self.0))
+        let (first, last) = self.bounds(epoch)?;
+        Some(EpochInfo::new(epoch, height, first, last))
     }
 
     fn first(&self, epoch: Epoch) -> Option<u64> {
