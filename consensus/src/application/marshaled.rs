@@ -152,8 +152,7 @@ where
         }
 
         let epocher = &self.epocher;
-        let height =
-            epocher.last_height_in_epoch(epoch.previous().expect("checked to be non-zero above"));
+        let height = epocher.last(epoch.previous().expect("checked to be non-zero above"));
         let Some(block) = self.marshal.get_block(height).await else {
             // A new consensus engine will never be started without having the genesis block
             // of the new epoch (the last block of the previous epoch) already stored.
@@ -222,7 +221,7 @@ where
                 // re-propose it as to not produce any blocks that will be cut out
                 // by the epoch transition.
                 let epocher = &epocher;
-                let last_in_epoch = epocher.last_height_in_epoch(consensus_context.epoch());
+                let last_in_epoch = epocher.last(consensus_context.epoch());
                 if parent.height() == last_in_epoch {
                     let digest = parent.commitment();
                     {
@@ -348,7 +347,7 @@ where
                 // You can only re-propose the same block if it's the last height in the epoch.
                 if parent.commitment() == block.commitment() {
                     let epocher = &epocher;
-                    let last_in_epoch = epocher.last_height_in_epoch(context.epoch());
+                    let last_in_epoch = epocher.last(context.epoch());
                     if block.height() == last_in_epoch {
                         marshal.verified(context.round, block).await;
                         let _ = tx.send(true);
@@ -360,7 +359,7 @@ where
 
                 // Blocks are invalid if they are not within the current epoch and they aren't
                 // a re-proposal of the boundary block.
-                if epocher.epoch_for_height(block.height()).unwrap() != context.epoch() {
+                if epocher.containing(block.height()).unwrap() != context.epoch() {
                     let _ = tx.send(false);
                     return;
                 }

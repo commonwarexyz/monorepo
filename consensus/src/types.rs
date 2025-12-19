@@ -349,31 +349,31 @@ pub enum EpochPhase {
 ///
 /// These operations must be consistent with each other and deterministic.
 pub trait Epocher: Clone + Send + Sync + 'static {
-    /// Returns the epoch that the given block height belongs to.
+    /// Returns the epoch containing the given block height.
     ///
     /// Returns `None` if the height is not covered by this epoch strategy.
-    fn epoch_for_height(&self, height: u64) -> Option<Epoch>;
+    fn containing(&self, height: u64) -> Option<Epoch>;
 
-    /// Returns the epoch length applicable at the given block height.
+    /// Returns the epoch length at the given block height.
     ///
     /// Returns `None` if the height is not covered by this epoch strategy.
-    fn epoch_length_at(&self, height: u64) -> Option<u64>;
+    fn length_at(&self, height: u64) -> Option<u64>;
 
     /// Returns the first block height in the given epoch.
-    fn first_height_in_epoch(&self, epoch: Epoch) -> u64;
+    fn first(&self, epoch: Epoch) -> u64;
 
     /// Returns the last block height in the given epoch.
-    fn last_height_in_epoch(&self, epoch: Epoch) -> u64;
+    fn last(&self, epoch: Epoch) -> u64;
 
     /// Returns the phase of the given height within its epoch.
     ///
     /// Returns `None` if the height is not covered by this epoch strategy.
     fn phase_at(&self, height: u64) -> Option<EpochPhase> {
-        let epoch = self.epoch_for_height(height)?;
-        let epoch_length = self.epoch_length_at(height)?;
-        let first = self.first_height_in_epoch(epoch);
+        let epoch = self.containing(height)?;
+        let length = self.length_at(height)?;
+        let first = self.first(epoch);
         let relative = height - first;
-        let midpoint = epoch_length / 2;
+        let midpoint = length / 2;
 
         Some(if relative < midpoint {
             EpochPhase::Early
@@ -419,20 +419,20 @@ impl FixedEpocher {
 }
 
 impl Epocher for FixedEpocher {
-    fn epoch_for_height(&self, height: u64) -> Option<Epoch> {
+    fn containing(&self, height: u64) -> Option<Epoch> {
         Some(Epoch::new(height / self.epoch_length))
     }
 
-    fn epoch_length_at(&self, _height: u64) -> Option<u64> {
+    fn length_at(&self, _height: u64) -> Option<u64> {
         Some(self.epoch_length)
     }
 
-    fn first_height_in_epoch(&self, epoch: Epoch) -> u64 {
+    fn first(&self, epoch: Epoch) -> u64 {
         epoch.get() * self.epoch_length
     }
 
-    fn last_height_in_epoch(&self, epoch: Epoch) -> u64 {
-        self.first_height_in_epoch(epoch) + self.epoch_length - 1
+    fn last(&self, epoch: Epoch) -> u64 {
+        self.first(epoch) + self.epoch_length - 1
     }
 }
 
@@ -482,8 +482,8 @@ impl VariableEpocher {
 }
 
 impl Epocher for VariableEpocher {
-    fn epoch_for_height(&self, height: u64) -> Option<Epoch> {
-        let _epoch_length = self.epoch_length_at(height)?;
+    fn containing(&self, height: u64) -> Option<Epoch> {
+        let _epoch_length = self.length_at(height)?;
 
         // Calculate cumulative epochs across ranges
         let mut cumulative_epoch = 0;
@@ -518,7 +518,7 @@ impl Epocher for VariableEpocher {
         None
     }
 
-    fn epoch_length_at(&self, height: u64) -> Option<u64> {
+    fn length_at(&self, height: u64) -> Option<u64> {
         for i in 0..self.ranges.len() {
             let (start, length) = self.ranges[i];
             if height >= start {
@@ -531,13 +531,13 @@ impl Epocher for VariableEpocher {
         None
     }
 
-    fn first_height_in_epoch(&self, epoch: Epoch) -> u64 {
+    fn first(&self, epoch: Epoch) -> u64 {
         let (first_height, _) = self.epoch_info(epoch);
         first_height
     }
 
-    fn last_height_in_epoch(&self, epoch: Epoch) -> u64 {
-        self.first_height_in_epoch(epoch) + self.epoch_length_for_epoch(epoch) - 1
+    fn last(&self, epoch: Epoch) -> u64 {
+        self.first(epoch) + self.epoch_length_for_epoch(epoch) - 1
     }
 }
 
@@ -1020,19 +1020,19 @@ mod tests {
         .expect("valid configuration");
 
         // Verify epoch lengths adapt to maintain consistent real-world duration
-        assert_eq!(config.epoch_length_at(50_000), Some(60_480));
-        assert_eq!(config.epoch_length_at(200_000), Some(604_800));
+        assert_eq!(config.length_at(50_000), Some(60_480));
+        assert_eq!(config.length_at(200_000), Some(604_800));
 
         // Verify epoch progression across transitions
-        assert_eq!(config.epoch_for_height(0), Some(Epoch::new(0)));
-        assert_eq!(config.epoch_for_height(60_479), Some(Epoch::new(0)));
-        assert_eq!(config.epoch_for_height(60_480), Some(Epoch::new(1)));
-        assert_eq!(config.epoch_for_height(100_000), Some(Epoch::new(1)));
-        assert_eq!(config.epoch_for_height(704_800), Some(Epoch::new(2)));
+        assert_eq!(config.containing(0), Some(Epoch::new(0)));
+        assert_eq!(config.containing(60_479), Some(Epoch::new(0)));
+        assert_eq!(config.containing(60_480), Some(Epoch::new(1)));
+        assert_eq!(config.containing(100_000), Some(Epoch::new(1)));
+        assert_eq!(config.containing(704_800), Some(Epoch::new(2)));
 
         // Test edge case: u64::MAX height
         assert_eq!(
-            config.epoch_for_height(u64::MAX),
+            config.containing(u64::MAX),
             Some(Epoch::new((u64::MAX - 100_000) / 604_800 + 1))
         );
     }
@@ -1042,17 +1042,17 @@ mod tests {
         let strategy = FixedEpocher::new(100);
 
         // Test basic epoch calculation
-        assert_eq!(strategy.epoch_for_height(0), Some(Epoch::new(0)));
-        assert_eq!(strategy.epoch_for_height(99), Some(Epoch::new(0)));
-        assert_eq!(strategy.epoch_for_height(100), Some(Epoch::new(1)));
+        assert_eq!(strategy.containing(0), Some(Epoch::new(0)));
+        assert_eq!(strategy.containing(99), Some(Epoch::new(0)));
+        assert_eq!(strategy.containing(100), Some(Epoch::new(1)));
 
         // Test epoch length is constant
-        assert_eq!(strategy.epoch_length_at(0), Some(100));
-        assert_eq!(strategy.epoch_length_at(999), Some(100));
+        assert_eq!(strategy.length_at(0), Some(100));
+        assert_eq!(strategy.length_at(999), Some(100));
 
         // Test epoch boundaries
-        assert_eq!(strategy.first_height_in_epoch(Epoch::new(1)), 100);
-        assert_eq!(strategy.last_height_in_epoch(Epoch::new(1)), 199);
+        assert_eq!(strategy.first(Epoch::new(1)), 100);
+        assert_eq!(strategy.last(Epoch::new(1)), 199);
     }
 
     #[test]
@@ -1070,18 +1070,18 @@ mod tests {
         .expect("valid strategy");
 
         // Test range transitions
-        assert_eq!(strategy.epoch_for_height(9), Some(Epoch::new(0))); // First range
-        assert_eq!(strategy.epoch_for_height(39), Some(Epoch::new(3))); // End of first range
-        assert_eq!(strategy.epoch_for_height(40), Some(Epoch::new(4))); // Start of second range
-        assert_eq!(strategy.epoch_for_height(60), Some(Epoch::new(5))); // Second range
+        assert_eq!(strategy.containing(9), Some(Epoch::new(0))); // First range
+        assert_eq!(strategy.containing(39), Some(Epoch::new(3))); // End of first range
+        assert_eq!(strategy.containing(40), Some(Epoch::new(4))); // Start of second range
+        assert_eq!(strategy.containing(60), Some(Epoch::new(5))); // Second range
 
         // Test epoch lengths change at transition
-        assert_eq!(strategy.epoch_length_at(30), Some(10)); // First range
-        assert_eq!(strategy.epoch_length_at(50), Some(20)); // Second range
+        assert_eq!(strategy.length_at(30), Some(10)); // First range
+        assert_eq!(strategy.length_at(50), Some(20)); // Second range
 
         // Test epoch boundaries across transition
-        assert_eq!(strategy.first_height_in_epoch(Epoch::new(3)), 30); // Last epoch of first range
-        assert_eq!(strategy.first_height_in_epoch(Epoch::new(4)), 40); // First epoch of second range
+        assert_eq!(strategy.first(Epoch::new(3)), 30); // Last epoch of first range
+        assert_eq!(strategy.first(Epoch::new(4)), 40); // First epoch of second range
     }
 
     #[test]
@@ -1106,10 +1106,10 @@ mod tests {
     fn test_epocher_trait_usage() {
         // Test that both strategies can be used through the trait
         fn test_strategy_behavior<S: Epocher>(strategy: &S) {
-            let epoch = strategy.epoch_for_height(50).expect("valid height");
-            let length = strategy.epoch_length_at(50).expect("valid height");
-            let first = strategy.first_height_in_epoch(epoch);
-            let last = strategy.last_height_in_epoch(epoch);
+            let epoch = strategy.containing(50).expect("valid height");
+            let length = strategy.length_at(50).expect("valid height");
+            let first = strategy.first(epoch);
+            let last = strategy.last(epoch);
 
             assert!(first <= 50);
             assert!(50 <= last);

@@ -599,7 +599,7 @@ where
                                     let _ = response.send(true);
                                 },
                                 Request::Finalized { height } => {
-                                    let Some(epoch) = self.epocher.epoch_for_height(height) else {
+                                    let Some(epoch) = self.epocher.containing(height) else {
                                         error!(height, "no epoch mapping for height");
                                         let _ = response.send(false);
                                         continue;

@@ -401,9 +401,9 @@ where
                             }
                         }
                         MailboxMessage::Finalized { block, response } => {
-                            let block_epoch = epocher.epoch_for_height(block.height).unwrap();
+                            let block_epoch = epocher.containing(block.height).unwrap();
                             let phase = epocher.phase_at(block.height).unwrap();
-                            let first_height = epocher.first_height_in_epoch(block_epoch);
+                            let first_height = epocher.first(block_epoch);
                             let relative_height = block.height - first_height;
                             info!(epoch = %block_epoch, relative_height, "processing finalized block");
 
@@ -459,7 +459,7 @@ where
                             }
 
                             // Continue if not the last block in the epoch
-                            let last_height = epocher.last_height_in_epoch(block_epoch);
+                            let last_height = epocher.last(block_epoch);
                             if block.height != last_height {
                                 // Acknowledge block processing
                                 response.acknowledge();

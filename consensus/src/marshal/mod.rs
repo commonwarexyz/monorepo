@@ -463,7 +463,7 @@ mod tests {
                 assert!(height > 0, "genesis block should not have been generated");
 
                 // Calculate the epoch and round for the block
-                let epoch = epocher.epoch_for_height(height).unwrap();
+                let epoch = epocher.containing(height).unwrap();
                 let round = Round::new(epoch, View::new(height));
 
                 // Broadcast block by one validator
@@ -502,7 +502,7 @@ mod tests {
                     {
                         if (do_finalize && i < QUORUM as usize)
                             || height == NUM_BLOCKS
-                            || height == epocher.last_height_in_epoch(epoch)
+                            || height == epocher.last(epoch)
                         {
                             actor.report(Activity::Finalization(fin.clone())).await;
                         }
@@ -513,7 +513,7 @@ mod tests {
                     for actor in actors.iter_mut() {
                         if context.gen_bool(0.2)
                             || height == NUM_BLOCKS
-                            || height == epocher.last_height_in_epoch(epoch)
+                            || height == epocher.last(epoch)
                         {
                             actor.report(Activity::Finalization(fin.clone())).await;
                         }
@@ -610,7 +610,7 @@ mod tests {
                 assert!(height > 0, "genesis block should not have been generated");
 
                 // Calculate the epoch and round for the block
-                let epoch = epocher.epoch_for_height(height).unwrap();
+                let epoch = epocher.containing(height).unwrap();
                 let round = Round::new(epoch, View::new(height));
 
                 // Broadcast block by one validator
