@@ -85,7 +85,7 @@
             <div class="date">December 19, 2025</div>
         </div>
         <p>Picture this: Your team is scrambling to get the latest release of a project out, and in one of several hasty PR reviews, your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack.</p>
-        <p>To some degree, we've all been there. Whether it be a change to the order of fields in a type's wire format or a difference in message order within a handshake, silent breakage of functionality can consume days of your time and hurt the reputation of the project.</p>
+        <p>To some degree, we've all been there. Whether it be a change to the order of fields in a type's wire format or a subtle tweak to the back-and-forth of a handshake, silent breakage of functionality can consume days of your time and hurt the reputation of the project.</p>
 
         <h2><code>conformance</code></h2>
         <p>Detecting as many of these breaking changes as possible <i>before</i> they arrive in the hands of our users unannounced is critical, and at the same time, we don't trust ourselves to protect every nuanced change with manual review (nor do we expect our users to). By defining a set of tests that validate the behavior of an implementation against a known-good reference, CI can catch breaking changes before they make it into the trunk branch. Our code is constantly evolving, but we need to make sure that some things stay in-place.</p>
@@ -221,16 +221,16 @@ conformance_tests! {
             </code>
         </pre>
 
-        <h2>A Multi-Layered Approach to Stability</h2>
+        <h2>A Multi-Layered Approach to Reliability</h2>
         <p>Commonware is coming up on its first <a href="https://github.com/commonwarexyz/monorepo/milestone/15">long-term support release</a>. By adopting conformance testing as a standard practice, we add another layer of protection to our development and release process.</p>
         <p>In our codebase today, <code>conformance</code> covers:</p>
         <ul>
             <li>Wire formats (<code>codec</code>)</li>
-            <li>Database operations (on-disk contents, read/write order, etc.) (<code>storage</code>)</li>
-            <li>Cryptographic schemes (operation order, input/output consistency, etc.) (<code>cryptography</code>)</li>
+            <li>Database operations (<code>storage</code>)</li>
+            <li>Cryptographic schemes (<code>cryptography</code>)</li>
         </ul>
         <p>With more primitives to follow suit. Each time a breaking change to the conformance specification is introduced, our CI fails, and we are forced to explicitly acknowledge the change by updating the conformance commitments and adding a "<a href="https://github.com/commonwarexyz/monorepo/pulls?q=is%3Aopen+is%3Apr+label%3Abreaking-format">breaking-format</a>" or "<a href="https://github.com/commonwarexyz/monorepo/pulls?q=is%3Aopen+is%3Apr+label%3Abreaking-api">breaking-api</a>" label to the change. This process not only helps us catch silent changes early but also serves as a trail of breadcrumbs for us to use while authoring releases that include intentional breakages.</p>
-        <p>Alongside our other testing strategies (<a href="https://commonware.xyz/blogs/commonware-runtime"><code>runtime</code> for deterministic simulations</a>, <a href="https://github.com/commonwarexyz/monorepo/blob/HEAD/FUZZING.md">prolonged fuzzing campaigns</a>, <a href="https://alto.commonware.xyz">persistent devnets</a>, and <a href="https://github.com/commonwarexyz/monorepo/actions/workflows/slow.yml">an extensive suite of unit + integration tests</a>), conformance testing is a powerful tool in our arsenal to ensure that our libraries stay reliable as we continue to evolve them.</p>
+        <p>Alongside our other testing strategies (<a href="https://commonware.xyz/blogs/commonware-runtime"><code>runtime</code> for deterministic simulations</a>, <a href="https://github.com/commonwarexyz/monorepo/blob/HEAD/FUZZING.md">prolonged fuzzing campaigns</a>, <a href="https://alto.commonware.xyz">persistent devnets</a>, and <a href="https://github.com/commonwarexyz/monorepo/actions/workflows/slow.yml">an extensive suite of unit + integration tests</a>), conformance testing is a powerful tool in our arsenal to ensure that our libraries stay reliable as they continue to evolve.</p>
     </div>
 
     <div id="footer-placeholder"></div>
