@@ -7,7 +7,7 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Change is the Only Constant</title>
-    <meta name="description" content="Picture this: You and your team are scrambling to get the latest release of your project out, and in one of several hasty PR reviews, you and your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack.">
+    <meta name="description" content="Picture this: Your team is scrambling to get the latest release of a project out, and in one of several hasty PR reviews, your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack.">
     <meta name="author" content="Ben Clabby">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -18,7 +18,7 @@
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/conformance-cover.jpg" />
     <meta property="og:title" content="Change is the Only Constant" />
-    <meta property="og:description" content="Picture this: You and your team are scrambling to get the latest release of your project out, and in one of several hasty PR reviews, you and your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack." />
+    <meta property="og:description" content="Picture this: Your team is scrambling to get the latest release of a project out, and in one of several hasty PR reviews, your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack." />
     <meta property="article:author" content="https://x.com/vex_0x" />
     <meta property="article:published_time" content="2025-12-19T00:00:00Z" />
     <meta property="article:modified_time" content="2025-12-19T00:00:00Z" />
@@ -27,7 +27,7 @@
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/conformance.html" />
     <meta property="twitter:title" content="Change is the Only Constant" />
-    <meta property="twitter:description" content="Picture this: You and your team are scrambling to get the latest release of your project out, and in one of several hasty PR reviews, you and your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack." />
+    <meta property="twitter:description" content="Picture this: Your team is scrambling to get the latest release of a project out, and in one of several hasty PR reviews, your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/conformance-cover.jpg" />
     <meta property="twitter:site" content="@commonwarexyz" />
     <meta property="twitter:creator" content="@vex_0x" />
@@ -82,13 +82,13 @@
         <h1>Change is the Only Constant</h1>
         <div class="meta">
             <div class="author">By <a href="https://x.com/vex_0x">Ben Clabby</a></div>
-            <div class="date">December 17, 2025</div>
+            <div class="date">December 19, 2025</div>
         </div>
-        <p>Picture this: You and your team are scrambling to get the latest release of your project out, and in one of several hasty PR reviews, you and your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack.</p>
-        <p>To some degree, we've all been there. Whether it be a small diff to a type's wire format or a semantic difference in operation order within a mechanism, silent breakage of functionality can consume days of your time and hurt the reputation of your project.</p>
+        <p>Picture this: Your team is scrambling to get the latest release of a project out, and in one of several hasty PR reviews, your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack.</p>
+        <p>To some degree, we've all been there. Whether it be a change to the order of fields in a type's wire format or a difference in message order within a handshake, silent breakage of functionality can consume days of a team's time and hurt the reputation of the project.</p>
 
         <h2><code>conformance</code></h2>
-        <p>Detecting as many of these breaking changes as possible <i>before</i> they land in the hands of our users is critical, and at the same time, we don't trust ourselves to protect every nuanced change with manual review (nor do we expect our users to.) By defining a set of tests that validate the behavior of your implementation against a known-good reference, you can catch breaking changes before they make it into your trunk branch. Our code is constantly evolving, but we need to make sure that some things stay in-place.</p>
+        <p>Detecting as many of these breaking changes as possible <i>before</i> they arrive in the hands of our users unnanounced is critical, and at the same time, we don't trust ourselves to protect every nuanced change with manual review (nor do we expect our users to.) By defining a set of tests that validate the behavior of an implementation against a known-good reference, CI can catch breaking changes before they make it into the trunk branch. Our code is constantly evolving, but we need to make sure that some things stay in-place.</p>
 
         <p>We've introduced a new primitive, <code>conformance</code>, to offer an easy path to define and run "conformance tests." Manually creating cases for every mechanism in a project is both difficult and brittle - <code>conformance</code> opts for automation. All that it takes is implementing the following trait on types that you'd like to constrain:</p>
         <pre>
@@ -137,7 +137,7 @@ hash = "dd8bf4b8ca06978d565c0aef2c2b8823c7b3fdcb065a4d1c1b33fe76597c52c6"
             </code>
         </pre>
         <p>Any time we change the code, we can run the conformance tests to ensure that the generated commitments match what is expected. If they don't, we know that we've introduced a breaking change and can take steps to explicitly acknowledge or avoid it.</p>
-        <p><code>conformance</code> is also useful for validating the semantics of mechanisms. For example, we use this framework to <a href="https://github.com/commonwarexyz/monorepo/blob/66c2f637029774652e976b10e81449d0c17a863f/cryptography/src/handshake/conformance.rs">assert the stability of <code>cryptography</code>'s key exchange protocol</a>:</p>
+        <p><code>conformance</code> is also useful for validating the stability of mechanisms. For example, we use this framework to <a href="https://github.com/commonwarexyz/monorepo/blob/66c2f637029774652e976b10e81449d0c17a863f/cryptography/src/handshake/conformance.rs">assert the stability of <code>cryptography</code>'s key exchange protocol</a>:</p>
         <pre>
             <code class="language-rust">
 use commonware_cryptography::{
@@ -221,16 +221,16 @@ conformance_tests! {
             </code>
         </pre>
 
-        <h2>Commonware's Commitment to Stability</h2>
-        <p>Commonware is coming up on its first stable release, and we are committed to providing stable and reliable software for our users. By adopting conformance testing as a standard practice, we can ensure that our libraries' functionality remains robust and trustworthy, even as we continue to innovate on and evolve the underlying mechanisms.</p>
+        <h2>A Multi-Layered Approach to Stability</h2>
+        <p>Commonware is coming up on its first stable release, and we are committed to providing stable and reliable software for our users. By adopting conformance testing as a standard practice, we add another layer of protection to our development and release process.</p>
         <p>In our codebase today, <code>conformance</code> covers:</p>
         <ul>
             <li>Wire formats (<code>codec</code>)</li>
-            <li>Database operation semantics (on-disk contents, read/write order, etc.) (<code>storage</code>)</li>
-            <li>Cryptographic mechanism semantics (operation order, input/output consistency, etc.) (<code>cryptography</code>)</li>
+            <li>Database operations (on-disk contents, read/write order, etc.) (<code>storage</code>)</li>
+            <li>Cryptographic schemes (operation order, input/output consistency, etc.) (<code>cryptography</code>)</li>
         </ul>
-        <p>With more primitives to follow suit. Each time a breaking change to the conformance specification is introduced, our CI fails, and we are forced to explicitly acknowledge the change by updating the conformance commitments and adding a "<a href="https://github.com/commonwarexyz/monorepo/pulls?q=is%3Aopen+is%3Apr+label%3Abreaking-format">breaking-format</a>" or "<a href="https://github.com/commonwarexyz/monorepo/pulls?q=is%3Aopen+is%3Apr+label%3Abreaking-api">breaking-api</a>" label to the change. This process not only helps us catch bugs early but also serves as a trail of breadcrumbs for us to use while authoring releases that include intentional breakages.</p>
-        <p>Alongside our other testing strategies (<a href="https://commonware.xyz/blogs/commonware-runtime"><code>runtime</code> for deterministic simulations</a>, <a href="https://github.com/commonwarexyz/monorepo/blob/HEAD/FUZZING.md">prolonged fuzzing campaigns</a>, <a href="https://alto.commonware.xyz">persistent devnets</a>, and <a href="https://github.com/commonwarexyz/monorepo/actions/workflows/slow.yml">an extensive suite of unit + integration tests</a>), conformance testing is a powerful tool in our arsenal to ensure that we deliver high-quality software that meets the stability needs of our users.</p>
+        <p>With more primitives to follow suit. Each time a breaking change to the conformance specification is introduced, our CI fails, and we are forced to explicitly acknowledge the change by updating the conformance commitments and adding a "<a href="https://github.com/commonwarexyz/monorepo/pulls?q=is%3Aopen+is%3Apr+label%3Abreaking-format">breaking-format</a>" or "<a href="https://github.com/commonwarexyz/monorepo/pulls?q=is%3Aopen+is%3Apr+label%3Abreaking-api">breaking-api</a>" label to the change. This process not only helps us catch silent changes early but also serves as a trail of breadcrumbs for us to use while authoring releases that include intentional breakages.</p>
+        <p>Alongside our other testing strategies (<a href="https://commonware.xyz/blogs/commonware-runtime"><code>runtime</code> for deterministic simulations</a>, <a href="https://github.com/commonwarexyz/monorepo/blob/HEAD/FUZZING.md">prolonged fuzzing campaigns</a>, <a href="https://alto.commonware.xyz">persistent devnets</a>, and <a href="https://github.com/commonwarexyz/monorepo/actions/workflows/slow.yml">an extensive suite of unit + integration tests</a>), conformance testing is a powerful tool in our arsenal to ensure that our libraries stay reliable as we continue to evolve them.</p>
     </div>
 
     <div id="footer-placeholder"></div>

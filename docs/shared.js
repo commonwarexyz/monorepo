@@ -141,7 +141,6 @@ function trimCode() {
         if (pre && pre.tagName === 'PRE') {
             for (const child of [...pre.childNodes]) {
                 if (child.nodeType === Node.TEXT_NODE) {
-                    console.log(child);
                     pre.removeChild(child);
                 }
             }
