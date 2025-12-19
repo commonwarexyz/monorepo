@@ -7,7 +7,7 @@ mod state;
 use crate::{
     simplex::{elector::Config as Elector, types::Activity},
     types::{Epoch, ViewDelta},
-    Automaton, Relay, Reporter,
+    CertifiableAutomaton, Relay, Reporter,
 };
 pub use actor::Actor;
 use commonware_cryptography::{certificate::Scheme, Digest};
@@ -23,7 +23,7 @@ pub struct Config<
     L: Elector<S>,
     B: Blocker,
     D: Digest,
-    A: Automaton,
+    A: CertifiableAutomaton,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
 > {

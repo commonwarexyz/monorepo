@@ -203,7 +203,7 @@
 //! ## Certification
 //!
 //! After a payload is notarized, the application can optionally delay or prevent finalization via the
-//! [`Automaton::certify`](crate::Automaton::certify) method. This is particularly useful for systems that employ
+//! [`CertifiableAutomaton::certify`](crate::CertifiableAutomaton::certify) method. This is particularly useful for systems that employ
 //! erasure coding, where participants may want to wait until they have received enough shards to reconstruct
 //! and validate the full block before voting to finalize.
 //!

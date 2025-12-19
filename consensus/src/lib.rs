@@ -99,7 +99,14 @@ cfg_if::cfg_if! {
                 context: Self::Context,
                 payload: Self::Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+        }
 
+        /// CertifiableAutomaton extends [Automaton] with the ability to certify payloads before finalization.
+        ///
+        /// This trait is required by consensus implementations (like Simplex) that support a certification
+        /// phase between notarization and finalization. Applications that do not need custom certification
+        /// logic can use the default implementation which always certifies.
+        pub trait CertifiableAutomaton: Automaton {
             /// Determine whether a verified payload is safe to commit.
             ///
             /// If context is required during certify, it must be included in the

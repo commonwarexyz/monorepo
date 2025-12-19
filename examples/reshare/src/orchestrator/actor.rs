@@ -15,7 +15,7 @@ use commonware_consensus::{
         types::{Certificate, Context},
     },
     types::{Epoch, Epocher, FixedEpocher, ViewDelta},
-    Automaton, Relay,
+    CertifiableAutomaton, Relay,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, Signer,
@@ -41,7 +41,7 @@ where
     V: Variant,
     C: Signer,
     H: Hasher,
-    A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
+    A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
     L: Elector<S>,
@@ -68,7 +68,7 @@ where
     V: Variant,
     C: Signer,
     H: Hasher,
-    A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
+    A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
     L: Elector<S>,
@@ -96,7 +96,7 @@ where
     V: Variant,
     C: Signer,
     H: Hasher,
-    A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
+    A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,

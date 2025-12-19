@@ -5,7 +5,7 @@ use super::relay::Relay;
 use crate::{
     simplex::types::Context,
     types::{Epoch, Round},
-    Automaton as Au, Relay as Re,
+    Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
@@ -97,7 +97,9 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
             .expect("Failed to send verify");
         receiver
     }
+}
 
+impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
     async fn certify(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         self.sender

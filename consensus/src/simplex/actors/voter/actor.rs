@@ -16,7 +16,7 @@ use crate::{
         },
     },
     types::{Round as Rnd, View},
-    Automaton, Relay, Reporter, Viewable, LATENCY,
+    CertifiableAutomaton, Relay, Reporter, Viewable, LATENCY,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
@@ -97,7 +97,7 @@ pub struct Actor<
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
+    A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -129,7 +129,7 @@ impl<
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
+        A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
     > Actor<E, S, L, B, D, A, R, F>
