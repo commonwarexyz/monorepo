@@ -1,5 +1,5 @@
 use super::{
-    ingress::{Handler, Mailbox, Message},
+    ingress::{Handler, Mailbox, Message, Request},
     Config,
 };
 use crate::{
@@ -42,7 +42,7 @@ pub struct Actor<
 
     state: State<S, D>,
 
-    mailbox_receiver: mpsc::Receiver<Certificate<S, D>>,
+    mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 }
 
 impl<
@@ -128,7 +128,14 @@ impl<
                 let Some(message) = mailbox else {
                     break;
                 };
-                self.state.handle(message, &mut resolver).await;
+                match message {
+                    Message::Updated(certificate) => {
+                        self.state.handle(certificate, &mut resolver).await;
+                    }
+                    Message::Certified(view) => {
+                        self.state.certified(view, &mut resolver).await;
+                    }
+                }
             },
             handler = handler_rx.next() => {
                 let Some(message) = handler else {
@@ -213,12 +220,12 @@ impl<
     /// Handles a message from the [p2p::Engine].
     async fn handle_resolver(
         &mut self,
-        message: Message,
+        message: Request,
         voter: &mut voter::Mailbox<S, D>,
         resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
     ) {
         match message {
-            Message::Deliver {
+            Request::Deliver {
                 view,
                 data,
                 response,
@@ -238,7 +245,7 @@ impl<
                 // Process message
                 self.state.handle(parsed, resolver).await;
             }
-            Message::Produce { view, response } => {
+            Request::Produce { view, response } => {
                 // Produce message for view
                 let Some(voter) = self.state.get(view) else {
                     // If we drop the response channel, the resolver will automatically

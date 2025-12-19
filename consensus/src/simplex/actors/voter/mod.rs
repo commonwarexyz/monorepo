@@ -282,7 +282,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Finalization(finalization) => {
+                resolver::Message::Updated(Certificate::Finalization(finalization)) => {
                     assert_eq!(finalization.view(), View::new(100));
                 }
                 _ => panic!("unexpected resolver message"),
@@ -339,7 +339,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Finalization(finalization) => {
+                resolver::Message::Updated(Certificate::Finalization(finalization)) => {
                     assert_eq!(finalization.view(), View::new(300));
                 }
                 _ => panic!("unexpected resolver message"),
@@ -532,7 +532,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Finalization(finalization) => {
+                resolver::Message::Updated(Certificate::Finalization(finalization)) => {
                     assert_eq!(finalization.view(), View::new(50));
                 }
                 _ => panic!("unexpected resolver message"),
@@ -556,7 +556,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Notarization(notarization) => {
+                resolver::Message::Updated(Certificate::Notarization(notarization)) => {
                     assert_eq!(notarization.view(), journal_floor_target);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -584,7 +584,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Notarization(notarization) => {
+                resolver::Message::Updated(Certificate::Notarization(notarization)) => {
                     assert_eq!(notarization.view(), problematic_view);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -628,7 +628,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Finalization(finalization) => {
+                resolver::Message::Updated(Certificate::Finalization(finalization)) => {
                     assert_eq!(finalization.view(), View::new(100));
                 }
                 _ => panic!("unexpected resolver message"),
@@ -783,7 +783,7 @@ mod tests {
             let mut finalized_view = None;
             while let Some(message) = resolver_receiver.next().await {
                 match message {
-                    Certificate::Finalization(finalization) => {
+                    resolver::Message::Updated(Certificate::Finalization(finalization)) => {
                         finalized_view = Some(finalization.view());
                         break;
                     }
@@ -978,7 +978,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Notarization(notarization) => {
+                resolver::Message::Updated(Certificate::Notarization(notarization)) => {
                     assert_eq!(notarization.proposal, proposal_b);
                     assert_eq!(notarization, notarization_b);
                 }
@@ -1152,7 +1152,7 @@ mod tests {
             // Verify the certificate was accepted
             let msg = resolver_receiver.next().await.unwrap();
             match msg {
-                Certificate::Notarization(notarization) => {
+                resolver::Message::Updated(Certificate::Notarization(notarization)) => {
                     assert_eq!(notarization.proposal, proposal_a);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1333,7 +1333,7 @@ mod tests {
             // The certificate should verify the proposal immediately
             let msg = resolver_receiver.next().await.unwrap();
             match msg {
-                Certificate::Notarization(n) => {
+                resolver::Message::Updated(Certificate::Notarization(n)) => {
                     assert_eq!(n.proposal, proposal);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1742,7 +1742,7 @@ mod tests {
             // Wait for finalization to be sent to resolver
             let finalization = resolver_receiver.next().await.unwrap();
             match finalization {
-                Certificate::Finalization(finalization) => {
+                resolver::Message::Updated(Certificate::Finalization(finalization)) => {
                     assert_eq!(finalization, expected_finalization);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1819,7 +1819,7 @@ mod tests {
             // Wait for finalization to be sent to resolver
             let finalization = resolver_receiver.next().await.unwrap();
             match finalization {
-                Certificate::Finalization(finalization) => {
+                resolver::Message::Updated(Certificate::Finalization(finalization)) => {
                     assert_eq!(finalization, expected_finalization);
                 }
                 _ => panic!("unexpected resolver message"),

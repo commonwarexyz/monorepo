@@ -2,7 +2,7 @@ use crate::{simplex::types::Certificate, types::View, Viewable};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::Resolver;
 use commonware_utils::sequence::U64;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Tracks all known certificates from the last
 /// finalized view to the current view.
@@ -13,6 +13,8 @@ pub struct State<S: Scheme, D: Digest> {
     floor: Option<Certificate<S, D>>,
     /// Nullifications for any view greater than the floor.
     nullifications: BTreeMap<View, Certificate<S, D>>,
+    /// Views that were locally certified.
+    certified: BTreeSet<View>,
     /// Window of requests to send to the resolver.
     fetch_concurrent: usize,
     /// Next view to consider when fetching. Avoids re-scanning
@@ -27,6 +29,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             current_view: View::zero(),
             floor: None,
             nullifications: BTreeMap::new(),
+            certified: BTreeSet::new(),
             fetch_concurrent,
             fetch_floor: View::zero(),
         }
@@ -65,6 +68,15 @@ impl<S: Scheme, D: Digest> State<S, D> {
         self.fetch(resolver).await;
     }
 
+    /// Handle a view being locally certified. Cancels any pending fetch
+    /// and prevents future fetches for this view.
+    pub async fn certified(&mut self, view: View, resolver: &mut impl Resolver<Key = U64>) {
+        if self.encounter_view(view) {
+            self.certified.insert(view);
+            resolver.cancel(view.into()).await;
+        }
+    }
+
     /// Get the best certificate for a given view (or the floor
     /// if the view is below the floor).
     pub fn get(&self, view: View) -> Option<&Certificate<S, D>> {
@@ -101,7 +113,9 @@ impl<S: Scheme, D: Digest> State<S, D> {
         // so we don't need to worry about getting stuck. All requests will be resolved or pruned.
         let start = self.fetch_floor.max(self.floor_view().next());
         let views: Vec<_> = View::range(start, self.current_view)
-            .filter(|view| !self.nullifications.contains_key(view))
+            .filter(|view| {
+                !self.nullifications.contains_key(view) && !self.certified.contains(view)
+            })
             .take(self.fetch_concurrent)
             .collect();
 
@@ -119,6 +133,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     async fn prune(&mut self, resolver: &mut impl Resolver<Key = U64>) {
         let floor = self.floor_view();
         self.nullifications.retain(|view, _| *view > floor);
+        self.certified.retain(|view| *view > floor);
         resolver.retain(move |key| *key > floor.into()).await;
     }
 }

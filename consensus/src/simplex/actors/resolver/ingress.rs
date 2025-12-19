@@ -9,38 +9,53 @@ use futures::{
 };
 use tracing::error;
 
+/// Messages sent to the resolver actor from the voter.
+pub enum Message<S: Scheme, D: Digest> {
+    /// A new certificate was received.
+    Updated(Certificate<S, D>),
+    /// A view was locally certified.
+    Certified(View),
+}
+
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, D: Digest> {
-    sender: mpsc::Sender<Certificate<S, D>>,
+    sender: mpsc::Sender<Message<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Create a new mailbox.
-    pub const fn new(sender: mpsc::Sender<Certificate<S, D>>) -> Self {
+    pub const fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
     /// Send a certificate.
     pub async fn updated(&mut self, certificate: Certificate<S, D>) {
-        if let Err(err) = self.sender.send(certificate).await {
+        if let Err(err) = self.sender.send(Message::Updated(certificate)).await {
             error!(?err, "failed to send certificate message");
+        }
+    }
+
+    /// Notify that a view was locally certified.
+    pub async fn certified(&mut self, view: View) {
+        if let Err(err) = self.sender.send(Message::Certified(view)).await {
+            error!(?err, "failed to send certified message");
         }
     }
 }
 
 #[derive(Clone)]
 pub struct Handler {
-    sender: mpsc::Sender<Message>,
+    sender: mpsc::Sender<Request>,
 }
 
 impl Handler {
-    pub const fn new(sender: mpsc::Sender<Message>) -> Self {
+    pub const fn new(sender: mpsc::Sender<Request>) -> Self {
         Self { sender }
     }
 }
 
 #[derive(Debug)]
-pub enum Message {
+pub enum Request {
     Deliver {
         view: View,
         data: Bytes,
@@ -61,7 +76,7 @@ impl Consumer for Handler {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
-            .send(Message::Deliver {
+            .send(Request::Deliver {
                 view: View::new(key.into()),
                 data: value,
                 response,
@@ -87,7 +102,7 @@ impl Producer for Handler {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
-            .send(Message::Produce {
+            .send(Request::Produce {
                 view: View::new(key.into()),
                 response,
             })
