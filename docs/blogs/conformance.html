@@ -85,10 +85,10 @@
             <div class="date">December 19, 2025</div>
         </div>
         <p>Picture this: Your team is scrambling to get the latest release of a project out, and in one of several hasty PR reviews, your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack.</p>
-        <p>To some degree, we've all been there. Whether it be a change to the order of fields in a type's wire format or a difference in message order within a handshake, silent breakage of functionality can consume days of a team's time and hurt the reputation of the project.</p>
+        <p>To some degree, we've all been there. Whether it be a change to the order of fields in a type's wire format or a difference in message order within a handshake, silent breakage of functionality can consume days of your time and hurt the reputation of the project.</p>
 
         <h2><code>conformance</code></h2>
-        <p>Detecting as many of these breaking changes as possible <i>before</i> they arrive in the hands of our users unnanounced is critical, and at the same time, we don't trust ourselves to protect every nuanced change with manual review (nor do we expect our users to.) By defining a set of tests that validate the behavior of an implementation against a known-good reference, CI can catch breaking changes before they make it into the trunk branch. Our code is constantly evolving, but we need to make sure that some things stay in-place.</p>
+        <p>Detecting as many of these breaking changes as possible <i>before</i> they arrive in the hands of our users unannounced is critical, and at the same time, we don't trust ourselves to protect every nuanced change with manual review (nor do we expect our users to.) By defining a set of tests that validate the behavior of an implementation against a known-good reference, CI can catch breaking changes before they make it into the trunk branch. Our code is constantly evolving, but we need to make sure that some things stay in-place.</p>
 
         <p>We've introduced a new primitive, <code>conformance</code>, to offer an easy path to define and run "conformance tests." Manually creating cases for every mechanism in a project is both difficult and brittle - <code>conformance</code> opts for automation. All that it takes is implementing the following trait on types that you'd like to constrain:</p>
         <pre>
@@ -109,7 +109,7 @@ use commonware_codec::{conformance::CodecConformance, Write, FixedSize};
 use bytes::BufMut;
 use commonware_conformance::conformance_tests;
 
-#[derive(arbitrary::Arbitrary))]
+#[derive(arbitrary::Arbitrary)]
 struct MyType([u8; Self::SIZE]);
 
 impl Write for MyType {
@@ -128,7 +128,7 @@ conformance_tests! {
 }
             </code>
         </pre>
-        This test will generate a <code>conformace.toml</code> file in the crate root with the following contents:
+        <p>This test will generate a <code>conformance.toml</code> file in the crate root with the following contents:</p>
         <pre>
             <code class="language-toml">
 ["crate::CodecConformance&lt;MyType&gt;"]
@@ -136,7 +136,7 @@ n_cases = 1024
 hash = "dd8bf4b8ca06978d565c0aef2c2b8823c7b3fdcb065a4d1c1b33fe76597c52c6"
             </code>
         </pre>
-        <p>Any time we change the code, we can run the conformance tests to ensure that the generated commitments match what is expected. If they don't, we know that we've introduced a breaking change and can take steps to explicitly acknowledge or avoid it.</p>
+        <p>Any time we change the code, we can run the conformance tests to ensure that the generated commitments match what is expected. If they don't, we know that we've introduced a breaking change and can take steps to explicitly acknowledge or revert it.</p>
         <p><code>conformance</code> is also useful for validating the stability of mechanisms. For example, we use this framework to <a href="https://github.com/commonwarexyz/monorepo/blob/66c2f637029774652e976b10e81449d0c17a863f/cryptography/src/handshake/conformance.rs">assert the stability of <code>cryptography</code>'s key exchange protocol</a>:</p>
         <pre>
             <code class="language-rust">
@@ -222,7 +222,7 @@ conformance_tests! {
         </pre>
 
         <h2>A Multi-Layered Approach to Stability</h2>
-        <p>Commonware is coming up on its first stable release, and we are committed to providing stable and reliable software for our users. By adopting conformance testing as a standard practice, we add another layer of protection to our development and release process.</p>
+        <p>Commonware is coming up on its first stable release. By adopting conformance testing as a standard practice, we add another layer of protection to our development and release process.</p>
         <p>In our codebase today, <code>conformance</code> covers:</p>
         <ul>
             <li>Wire formats (<code>codec</code>)</li>
