@@ -191,12 +191,8 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
 
                 // Cleanup the rate limiters periodically
                 if accepted > CLEANUP_INTERVAL {
-                    // Clean up old entries and shrink the capacity of the rate limiters
-                    // to free up memory.
                     ip_rate_limiter.retain_recent();
-                    ip_rate_limiter.shrink_to_fit();
                     subnet_rate_limiter.retain_recent();
-                    subnet_rate_limiter.shrink_to_fit();
                     accepted = 0;
                 }
                 accepted += 1;
