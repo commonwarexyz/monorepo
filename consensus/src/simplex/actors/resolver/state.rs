@@ -19,6 +19,9 @@ pub struct State<S: Scheme, D: Digest> {
     nullifications: BTreeMap<View, Nullification<S>>,
     /// Window of requests to send to the resolver.
     fetch_concurrent: usize,
+    /// Next view to consider when fetching. Avoids re-scanning
+    /// views we've already requested or have nullifications for.
+    fetch_floor: View,
 }
 
 impl<S: Scheme, D: Digest> State<S, D> {
@@ -29,6 +32,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             floor: None,
             nullifications: BTreeMap::new(),
             fetch_concurrent,
+            fetch_floor: View::zero(),
         }
     }
 
@@ -101,11 +105,19 @@ impl<S: Scheme, D: Digest> State<S, D> {
     async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64>) {
         // We must either receive a nullification or a notarization (at the view or higher),
         // so we don't need to worry about getting stuck. All requests will be resolved or pruned.
-        let requests = View::range(self.floor_view().next(), self.current_view)
+        let start = self.fetch_floor.max(self.floor_view().next());
+        let views: Vec<_> = View::range(start, self.current_view)
             .filter(|view| !self.nullifications.contains_key(view))
             .take(self.fetch_concurrent)
-            .map(U64::from)
             .collect();
+
+        // Update the fetch floor to reduce duplicate iteration in the future.
+        if let Some(&last) = views.last() {
+            self.fetch_floor = last.next();
+        }
+
+        // Send the requests to the resolver.
+        let requests = views.into_iter().map(U64::from).collect();
         resolver.fetch_all(requests).await;
     }
 
