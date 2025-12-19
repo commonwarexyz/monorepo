@@ -116,7 +116,7 @@ fn main() {
         .expect("public keys are unique");
 
     // Configure networks
-    let mut namespaces: HashMap<G2, (Scheme, Vec<u8>)> = HashMap::new();
+    let mut verifiers: HashMap<G2, Scheme> = HashMap::new();
     let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
     let mut finalizations: HashMap<G2, BTreeMap<View, Finalization<Scheme, Sha256Digest>>> =
         HashMap::new();
@@ -131,10 +131,7 @@ fn main() {
         let public =
             <MinSig as Variant>::Public::decode(network.as_ref()).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        namespaces.insert(
-            public,
-            (Scheme::certificate_verifier(&namespace, public), namespace),
-        );
+        verifiers.insert(public, Scheme::certificate_verifier(&namespace, public));
         blocks.insert(public, HashMap::new());
         finalizations.insert(public, BTreeMap::new());
     }
@@ -186,7 +183,7 @@ fn main() {
                         };
 
                         // Verify signature
-                        let Some((verifier, _namespace)) = namespaces.get(&incoming.network) else {
+                        let Some(verifier) = verifiers.get(&incoming.network) else {
                             let _ = response.send(false);
                             continue;
                         };
