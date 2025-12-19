@@ -5,14 +5,13 @@ use crate::{
     orchestrator::{Mailbox, Message},
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
     simplex::{
         self,
         elector::Config as Elector,
         scheme,
-        types::{Certificate, Context},
+        types::{Context, Finalization},
     },
     types::{Epoch, Epocher, FixedEpocher, ViewDelta},
     Automaton, Relay,
@@ -23,16 +22,19 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
-    Blocker, CheckedSender, Receiver, Recipients, Sender,
+    Blocker, Receiver, Sender,
 };
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::NZUsize;
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{futures::OptionFuture, NZUsize};
+use futures::{channel::mpsc, future::BoxFuture, StreamExt};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
 use tracing::{debug, info, warn};
+
+/// A pending finalization fetch future.
+type FinalizationFetch<S, D> = OptionFuture<BoxFuture<'static, Option<Finalization<S, D>>>>;
 
 /// Configuration for the orchestrator.
 pub struct Config<B, V, C, H, A, S, L>
@@ -141,15 +143,8 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        orchestrator: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
     ) -> Handle<()> {
-        spawn_cell!(
-            self.context,
-            self.run(votes, certificates, resolver, orchestrator).await
-        )
+        spawn_cell!(self.context, self.run(votes, certificates, resolver,).await)
     }
 
     async fn run(
@@ -166,10 +161,6 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        (mut orchestrator_sender, mut orchestrator_receiver): (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
     ) {
         // Start muxers for each physical channel used by consensus
         let (mux, mut vote_mux, mut vote_backup) = Muxer::builder(
@@ -181,13 +172,12 @@ where
         .with_backup()
         .build();
         mux.start();
-        let (mux, mut certificate_mux, mut certificate_global_sender) = Muxer::builder(
+        let (mux, mut certificate_mux) = Muxer::builder(
             self.context.with_label("certificate_mux"),
             certificate_sender,
             certificate_receiver,
             self.muxer_size,
         )
-        .with_global_sender()
         .build();
         mux.start();
         let (mux, mut resolver_mux) = Muxer::new(
@@ -201,6 +191,11 @@ where
         // Wait for instructions to transition epochs.
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
         let mut engines = BTreeMap::new();
+
+        // Pending boundary finalization fetch (for catching up to future epochs)
+        let mut pending_boundary_fetch: FinalizationFetch<S, H::Digest> = None.into();
+        let mut pending_boundary_epoch: Option<Epoch> = None;
+
         select_loop! {
             self.context,
             on_stopped => {
@@ -223,81 +218,32 @@ where
                     continue;
                 }
 
-                let Ok(checked) = orchestrator_sender.check(Recipients::One(from.clone())).await else {
-                    debug!(%their_epoch, ?from, "recipient rate-limited, cannot respond yet.");
-                    continue;
-                };
-
                 // If we're not in the committee of the latest epoch we know about and we observe another
-                // participant that is ahead of us, send a message on the orchestrator channel to prompt
-                // them to send us the finalization of the epoch boundary block for our latest known epoch.
+                // participant that is ahead of us, fetch the boundary finalization from the network.
+                // Skip if we're already fetching a boundary finalization.
+                if pending_boundary_fetch.is_some() {
+                    continue;
+                }
                 let boundary_height = epocher.last(our_epoch).expect("our epoch should exist");
                 if self.marshal.get_finalization(boundary_height).await.is_some() {
                     // Only request the orchestrator if we don't already have it.
                     continue;
-                };
-                debug!(
-                    %their_epoch,
-                    ?from,
-                    "received backup message from future epoch, requesting orchestrator"
-                );
-
-                // Send the request to the orchestrator. This operation is best-effort.
-                if checked.send(
-                    our_epoch.encode().freeze(),
-                    true
-                ).await.is_err() {
-                    warn!("failed to send orchestrator request, shutting down orchestrator");
-                    break;
                 }
-            },
-            message = orchestrator_receiver.recv() => {
-                let Ok((from, bytes)) = message else {
-                    warn!("orchestrator channel closed, shutting down orchestrator");
-                    break;
-                };
-                let epoch = match Epoch::decode(bytes.as_ref()) {
-                    Ok(epoch) => epoch,
-                    Err(err) => {
-                        debug!(?err, ?from, "failed to decode epoch from orchestrator request");
-                        self.oracle.block(from).await;
-                        continue;
-                    }
-                };
-
-                // Fetch the finalization certificate for the last block within the subchannel's epoch.
-                // If the node is state synced, marshal may not have the finalization locally, and the
-                // peer will need to fetch it from another node on the network.
-                let Some(boundary_height) = epocher.last(epoch) else {
-                    debug!(%epoch, ?from, "epoch not known");
-                    continue;
-                };
-                let Some(finalization) = self.marshal.get_finalization(boundary_height).await else {
-                    debug!(%epoch, ?from, "missing finalization for old epoch");
-                    continue;
-                };
                 debug!(
-                    %epoch,
-                    boundary_height,
                     ?from,
-                    "received message on vote network from old epoch. forwarding orchestrator"
+                    %their_epoch,
+                    %our_epoch,
+                    boundary_height,
+                    "received backup message from future epoch, fetching boundary finalization"
                 );
 
-                // Forward the finalization to the sender. This operation is best-effort.
-                //
-                // TODO (#2032): Send back to orchestrator for direct insertion into marshal.
-                let message = Certificate::<S, H::Digest>::Finalization(finalization);
-                if certificate_global_sender
-                    .send(
-                        epoch.get(),
-                        Recipients::One(from),
-                        message.encode().freeze(),
-                        false,
-                    )
-                    .await.is_err() {
-                        warn!("failed to forward finalization, shutting down orchestrator");
-                        break;
-                    }
+                // Trigger a fetch via marshal's resolver
+                pending_boundary_fetch = {
+                    let mut marshal = self.marshal.clone();
+                    let fetch = async move { marshal.fetch_finalization(boundary_height).await };
+                    Some(fetch.boxed()).into()
+                };
+                pending_boundary_epoch = Some(our_epoch);
             },
             transition = self.mailbox.next() => {
                 let Some(transition) = transition else {
@@ -344,6 +290,21 @@ where
 
                         info!(%epoch, "exited epoch");
                     }
+                }
+            },
+            result = &mut pending_boundary_fetch => {
+                let epoch = pending_boundary_epoch.take().expect("epoch should be set");
+                pending_boundary_fetch = None.into();
+                if let Some(_) = result {
+                    // Finalization is already stored in marshal by the actor.
+                    // The application will be notified via the normal finalization flow.
+                    debug!(%epoch, "fetched boundary finalization");
+                } else {
+                    // Either:
+                    // - The height was pruned (set_floor advanced past it)
+                    // - The marshal actor shut down
+                    // We'll retry on the next backup message from a future epoch.
+                    warn!(%epoch, "failed to fetch boundary finalization");
                 }
             },
         }

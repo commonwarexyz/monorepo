@@ -302,10 +302,6 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        orchestrator: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
         marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
@@ -320,7 +316,6 @@ where
                 resolver,
                 broadcast,
                 dkg,
-                orchestrator,
                 marshal,
                 callback
             )
@@ -351,10 +346,6 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        orchestrator: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
         marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
@@ -372,9 +363,7 @@ where
         let marshal_handle = self
             .marshal
             .start(self.dkg_mailbox, self.buffered_mailbox, marshal);
-        let orchestrator_handle =
-            self.orchestrator
-                .start(votes, certificates, resolver, orchestrator);
+        let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,
