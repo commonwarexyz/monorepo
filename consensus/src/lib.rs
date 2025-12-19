@@ -102,6 +102,9 @@ cfg_if::cfg_if! {
 
             /// Determine whether a verified payload is safe to commit.
             ///
+            /// If context is required during certify, it must be included in the
+            /// data associated with the payload.
+            ///
             /// Applications that employ erasure coding can override this method to delay or prevent
             /// finalization until they have reconstructed and validated the full block (e.g. after
             /// receiving enough shards).
