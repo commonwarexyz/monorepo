@@ -2427,8 +2427,7 @@ mod tests {
     where
         F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
-        let mut rng = StdRng::seed_from_u64(seed);
-        fixture(NAMESPACE, &mut rng, n)
+        setup_seeded_ns(n, seed, NAMESPACE, fixture)
     }
 
     /// Generate a fixture using the provided generator function with a specific seed and namespace.

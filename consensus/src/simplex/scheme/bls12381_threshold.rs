@@ -211,7 +211,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         tle::encrypt(
             rng,
             *self.identity(),
-            (Some(self.namespace().seed.as_ref()), &target_message),
+            (Some(&self.namespace().seed), &target_message),
             &block,
         )
     }
