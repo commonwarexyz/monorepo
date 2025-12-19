@@ -120,7 +120,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
         let floor = self.floor_view();
         self.nullifications.retain(|view, _| *view > floor);
         resolver.retain(move |key| *key > floor.into()).await;
-        self.fetch_floor = floor;
     }
 }
 
