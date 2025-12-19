@@ -80,9 +80,7 @@ impl<N: Namespace> Generic<N> {
     {
         let (index, private_key) = self.signer.as_ref()?;
 
-        let namespace = subject.namespace(&self.namespace);
-        let message = subject.message();
-        let signature = private_key.sign(namespace, message.as_ref());
+        let signature = private_key.sign(subject.namespace(&self.namespace), &subject.message());
 
         Some(Attestation {
             signer: *index,
@@ -105,9 +103,11 @@ impl<N: Namespace> Generic<N> {
             return false;
         };
 
-        let namespace = subject.namespace(&self.namespace);
-        let message = subject.message();
-        public_key.verify(namespace, message.as_ref(), &attestation.signature)
+        public_key.verify(
+            subject.namespace(&self.namespace),
+            &subject.message(),
+            &attestation.signature,
+        )
     }
 
     /// Batch-verifies attestations and returns verified attestations and invalid signers.
@@ -138,20 +138,14 @@ impl<N: Namespace> Generic<N> {
                 continue;
             };
 
-            batch.add(
-                namespace,
-                message.as_ref(),
-                public_key,
-                &attestation.signature,
-            );
-
+            batch.add(namespace, &message, public_key, &attestation.signature);
             candidates.push((attestation, public_key));
         }
 
         if !candidates.is_empty() && !batch.verify(rng) {
             // Batch failed: fall back to per-signer verification to isolate faulty attestations.
             for (attestation, public_key) in &candidates {
-                if !public_key.verify(namespace, message.as_ref(), &attestation.signature) {
+                if !public_key.verify(namespace, &message, &attestation.signature) {
                     invalid.insert(attestation.signer);
                 }
             }
@@ -198,7 +192,7 @@ impl<N: Namespace> Generic<N> {
                 continue;
             };
 
-            if public_key.verify(namespace, message.as_ref(), &attestation.signature) {
+            if public_key.verify(namespace, &message, &attestation.signature) {
                 verified.push(attestation);
             } else {
                 invalid.insert(attestation.signer);
@@ -276,7 +270,7 @@ impl<N: Namespace> Generic<N> {
                 return false;
             };
 
-            batch.add(namespace, message.as_ref(), public_key, signature);
+            batch.add(namespace, &message, public_key, signature);
         }
 
         true
@@ -334,7 +328,7 @@ impl<N: Namespace> Generic<N> {
             let Some(public_key) = self.participants.key(signer) else {
                 return false;
             };
-            if !public_key.verify(namespace, message.as_ref(), signature) {
+            if !public_key.verify(namespace, &message, signature) {
                 return false;
             }
         }
