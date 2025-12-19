@@ -75,25 +75,6 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
             }
         }
     }
-
-    /// Requests that a payload is sent to a public key.
-    pub async fn request(&self, payload: D, public_key: P) {
-        let Some(data) = self.payloads.lock().unwrap().get(&payload).cloned() else {
-            return;
-        };
-        let listeners = self
-            .recipients
-            .lock()
-            .unwrap()
-            .get(&public_key)
-            .expect("unregistered recipient")
-            .clone();
-        for mut listener in listeners {
-            if let Err(e) = listener.send((payload, data.clone())).await {
-                error!(?e, ?public_key, "failed to send message to recipient");
-            }
-        }
-    }
 }
 
 impl<D: Digest, P: PublicKey> Default for Relay<D, P> {
