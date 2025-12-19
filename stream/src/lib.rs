@@ -67,8 +67,8 @@ use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
     handshake::{
-        dial_end, dial_start, listen_end, listen_start, Ack, Context, Error as HandshakeError,
-        RecvCipher, SendCipher, Syn, SynAck, CIPHERTEXT_OVERHEAD,
+        self, dial_end, dial_start, listen_end, listen_start, Ack, Context,
+        Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck,
     },
     transcript::Transcript,
     Signer,
@@ -79,6 +79,11 @@ use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
+
+const CIPHERTEXT_OVERHEAD: u32 = {
+    assert!(handshake::CIPHERTEXT_OVERHEAD <= u32::MAX as usize);
+    handshake::CIPHERTEXT_OVERHEAD as u32
+};
 
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
@@ -135,7 +140,7 @@ pub struct Config<S> {
     pub namespace: Vec<u8>,
 
     /// Maximum message size (in bytes). Prevents memory exhaustion DoS attacks.
-    pub max_message_size: usize,
+    pub max_message_size: u32,
 
     /// Maximum time drift allowed for future timestamps. Handles clock skew.
     pub synchrony_bound: Duration,
@@ -289,7 +294,7 @@ pub async fn listen<
 pub struct Sender<O> {
     cipher: SendCipher,
     sink: O,
-    max_message_size: usize,
+    max_message_size: u32,
 }
 
 impl<O: Sink> Sender<O> {
@@ -299,7 +304,7 @@ impl<O: Sink> Sender<O> {
         send_frame(
             &mut self.sink,
             &c,
-            self.max_message_size + CIPHERTEXT_OVERHEAD,
+            self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
         )
         .await?;
         Ok(())
@@ -310,7 +315,7 @@ impl<O: Sink> Sender<O> {
 pub struct Receiver<I> {
     cipher: RecvCipher,
     stream: I,
-    max_message_size: usize,
+    max_message_size: u32,
 }
 
 impl<I: Stream> Receiver<I> {
@@ -318,7 +323,7 @@ impl<I: Stream> Receiver<I> {
     pub async fn recv(&mut self) -> Result<Bytes, Error> {
         let c = recv_frame(
             &mut self.stream,
-            self.max_message_size + CIPHERTEXT_OVERHEAD,
+            self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
         )
         .await?;
         Ok(self.cipher.recv(&c)?.into())
@@ -332,7 +337,7 @@ mod test {
     use commonware_runtime::{deterministic, mocks, Runner as _, Spawner as _};
 
     const NAMESPACE: &[u8] = b"fuzz_transport";
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB buffer
+    const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
 
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Error> {

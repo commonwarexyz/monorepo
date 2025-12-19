@@ -28,7 +28,7 @@ pub enum Error {
 /// - 1: Payload enum value
 /// - 10: Channel varint
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
-pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 10 + 5;
+pub const MAX_PAYLOAD_DATA_OVERHEAD: u32 = 1 + 10 + 5;
 
 /// Prefix byte used to identify a [Payload] with variant Data.
 const DATA_PREFIX: u8 = 0;
@@ -565,7 +565,7 @@ mod tests {
         });
         assert_eq!(
             payload.encode_size(),
-            message_len + MAX_PAYLOAD_DATA_OVERHEAD
+            message_len + MAX_PAYLOAD_DATA_OVERHEAD as usize
         );
     }
 

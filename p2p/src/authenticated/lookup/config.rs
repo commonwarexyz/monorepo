@@ -38,7 +38,7 @@ pub struct Config<C: Signer> {
     ///
     /// The actual size of the network message will be higher due to overhead from the protocol;
     /// this may include additional metadata, data from the codec, and/or cryptographic signatures.
-    pub max_message_size: usize,
+    pub max_message_size: u32,
 
     /// Message backlog allowed for internal actors.
     ///
@@ -104,7 +104,7 @@ impl<C: Signer> Config<C> {
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
-        max_message_size: usize,
+        max_message_size: u32,
     ) -> Self {
         Self {
             crypto,
@@ -136,7 +136,7 @@ impl<C: Signer> Config<C> {
     /// # Warning
     ///
     /// It is not recommended to use this configuration in production.
-    pub fn local(crypto: C, namespace: &[u8], listen: SocketAddr, max_message_size: usize) -> Self {
+    pub fn local(crypto: C, namespace: &[u8], listen: SocketAddr, max_message_size: u32) -> Self {
         Self {
             crypto,
             namespace: namespace.to_vec(),
@@ -162,7 +162,7 @@ impl<C: Signer> Config<C> {
     }
 
     #[cfg(test)]
-    pub fn test(crypto: C, listen: SocketAddr, max_message_size: usize) -> Self {
+    pub fn test(crypto: C, listen: SocketAddr, max_message_size: u32) -> Self {
         Self {
             crypto,
             namespace: b"test_namespace".to_vec(),
