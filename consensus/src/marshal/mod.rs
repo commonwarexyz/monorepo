@@ -1822,7 +1822,7 @@ mod tests {
 
             let me = participants[0].clone();
             let (_base_app, marshal, _processed_height) = setup_validator(
-                context.with_label("validator-0"),
+                context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
