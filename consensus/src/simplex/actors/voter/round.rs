@@ -256,6 +256,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             "certification should not conflict"
         );
         self.certified = Some(is_success);
+        self.certify_handle = None;
     }
 
     pub const fn proposal(&self) -> Option<&Proposal<D>> {
