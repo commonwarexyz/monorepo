@@ -9,14 +9,14 @@
 //! Data stored in `Journal` is persisted in one of many Blobs within a caller-provided `partition`.
 //! The particular `Blob` in which data is stored is identified by a `section` number (`u64`).
 //! Within a `section`, data is appended as an `item` with the following format:
-//!
 //! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+
-//! | 0 | 1 | 2 | 3 |    ...    | 8 | 9 |10 |11 |
-//! +---+---+---+---+---+---+---+---+---+---+---+
-//! |   Size (u32)  |   Data    |    C(u32)     |
-//! +---+---+---+---+---+---+---+---+---+---+---+
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! |       0 ~ 4       |    ...    | 8 | 9 |10 |11 |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! | Size (varint u32) |   Data    |    C(u32)     |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
 //!
+//! Size = u32 as varint (1 to 5 bytes)
 //! C = CRC32(Size | Data)
 //! ```
 //!
@@ -101,8 +101,11 @@
 //! ```
 
 use crate::journal::Error;
-use bytes::BufMut;
-use commonware_codec::Codec;
+use bytes::{Buf, BufMut};
+use commonware_codec::{
+    varint::{Decoder, UInt},
+    Codec, EncodeSize, ReadExt, Write as CodecWrite,
+};
 use commonware_runtime::{
     buffer::{Append, PoolRef, Read},
     telemetry::metrics::status::GaugeExt,
@@ -239,13 +242,17 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         blob: &Append<E::Blob>,
         offset: u32,
     ) -> Result<(u32, u32, V), Error> {
-        // Read item size
+        // Read varint size (max 5 bytes for u32)
         let mut hasher = crc32fast::Hasher::new();
         let offset = offset as u64 * ITEM_ALIGNMENT;
-        let size = blob.read_at(vec![0; 4], offset).await?;
-        hasher.update(size.as_ref());
-        let size = u32::from_be_bytes(size.as_ref().try_into().unwrap()) as usize;
-        let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
+        let varint_buf = blob.read_at(vec![0; 5], offset).await?;
+        let mut varint = varint_buf.as_ref();
+        let size = UInt::<u32>::read(&mut varint).map_err(Error::Codec)?.0 as usize;
+        let varint_len = 5 - varint.remaining();
+        hasher.update(&varint_buf.as_ref()[..varint_len]);
+        let offset = offset
+            .checked_add(varint_len as u64)
+            .ok_or(Error::OffsetOverflow)?;
 
         // Read remaining
         let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
@@ -297,17 +304,26 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             reader.seek_to(file_offset).map_err(Error::Runtime)?;
         }
 
-        // Read item size (4 bytes)
+        // Read varint size byte-by-byte
         let mut hasher = crc32fast::Hasher::new();
-        let mut size_buf = [0u8; 4];
-        reader
-            .read_exact(&mut size_buf, 4)
-            .await
-            .map_err(Error::Runtime)?;
-        hasher.update(&size_buf);
+        let mut decoder = Decoder::<u32>::new();
+        let mut varint_buf = Vec::with_capacity(5);
+        let mut byte = [0u8; 1];
+        let size = loop {
+            reader
+                .read_exact(&mut byte, 1)
+                .await
+                .map_err(Error::Runtime)?;
+            varint_buf.push(byte[0]);
+            match decoder.feed(byte[0]) {
+                Ok(Some(size)) => break size as usize,
+                Ok(None) => continue,
+                Err(e) => return Err(Error::Codec(e)),
+            }
+        };
+        hasher.update(&varint_buf);
 
         // Read remaining
-        let size = u32::from_be_bytes(size_buf) as usize;
         let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
         let mut buf = vec![0u8; buf_size];
         reader
@@ -349,25 +365,34 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         offset: u32,
         len: u32,
     ) -> Result<V, Error> {
-        // Read buffer
+        // Calculate varint size for the expected length
+        let varint_len = UInt(len).encode_size();
+
+        // Read buffer: varint + data + checksum
         let offset = offset as u64 * ITEM_ALIGNMENT;
-        let entry_size = 4 + len as usize + 4;
+        let entry_size = varint_len + len as usize + 4;
         let buf = blob.read_at(vec![0u8; entry_size], offset).await?;
 
         // Check size
         let mut hasher = crc32fast::Hasher::new();
-        let disk_size = u32::from_be_bytes(buf.as_ref()[..4].try_into().unwrap());
-        hasher.update(&buf.as_ref()[..4]);
+        let mut varint_slice = &buf.as_ref()[..varint_len];
+        let disk_size = UInt::<u32>::read(&mut varint_slice)
+            .map_err(Error::Codec)?
+            .0;
+        hasher.update(&buf.as_ref()[..varint_len]);
         if disk_size != len {
             return Err(Error::UnexpectedSize(disk_size, len));
         }
 
         // Verify integrity
-        let item = &buf.as_ref()[4..4 + len as usize];
+        let item = &buf.as_ref()[varint_len..varint_len + len as usize];
         hasher.update(item);
         let checksum = hasher.finalize();
-        let stored_checksum =
-            u32::from_be_bytes(buf.as_ref()[4 + len as usize..].try_into().unwrap());
+        let stored_checksum = u32::from_be_bytes(
+            buf.as_ref()[varint_len + len as usize..]
+                .try_into()
+                .unwrap(),
+        );
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
@@ -555,11 +580,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Ensure item is not too large
         let item_len = encoded.len();
-        let entry_len = 4 + item_len + 4;
         let item_len = match item_len.try_into() {
             Ok(len) => len,
             Err(_) => return Err(Error::ItemTooLarge(item_len)),
         };
+        let size_len = UInt(item_len).encode_size();
+        let entry_len = size_len + item_len as usize + 4;
 
         // Get existing blob or create new one
         let blob = match self.blobs.entry(section) {
@@ -595,7 +621,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Add entry data
         let entry_start = buf.len();
-        buf.put_u32(item_len);
+        UInt(item_len).write(&mut buf);
         buf.put_slice(&encoded);
 
         // Calculate checksum only for the entry data (without padding)
@@ -1652,11 +1678,13 @@ mod tests {
             assert_eq!(items[2].1, data_items[1].1);
 
             // Confirm blob is expected length
+            // entry = 1 (varint for 4) + 4 (data) + 4 (checksum) = 9 bytes
+            // Item 2 ends at position 16 + 9 = 25
             let (_, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_size, 28);
+            assert_eq!(blob_size, 25);
 
             // Attempt to replay journal after truncation
             let mut journal = Journal::init(context.clone(), cfg.clone())
@@ -1700,11 +1728,13 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Confirm blob is expected length
+            // Items 1 and 2 at positions 0 and 16, item 3 (value 5) at position 32
+            // Item 3 = 1 (varint) + 4 (data) + 4 (checksum) = 9 bytes, ends at 41
             let (_, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_size, 44);
+            assert_eq!(blob_size, 41);
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context.clone(), cfg.clone())
@@ -1829,11 +1859,13 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Confirm blob is expected length
+            // entry = 1 (varint for 8) + 8 (u64 data) + 4 (checksum) = 13 bytes
+            // Items at positions 0, 16, 32; item 3 ends at 32 + 13 = 45
             let (_, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_size, 48);
+            assert_eq!(blob_size, 45);
 
             // Attempt to replay journal after truncation
             let journal = Journal::init(context, cfg)
@@ -2217,7 +2249,7 @@ mod tests {
             let digest = Sha256::hash(buf.as_ref());
             assert_eq!(
                 hex(&digest),
-                "ca3845fa7fabd4d2855ab72ed21226d1d6eb30cb895ea9ec5e5a14201f3f25d8",
+                "f55bf27a59118603466fcf6a507ab012eea4cb2d6bdd06ce8f515513729af847",
             );
         });
     }
