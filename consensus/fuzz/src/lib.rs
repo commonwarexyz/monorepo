@@ -12,6 +12,7 @@ use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
         config,
+        elector::Config as Elector,
         mocks::{application, relay, reporter},
         scheme::Scheme,
         Engine,
@@ -27,9 +28,8 @@ use commonware_cryptography::{
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::{max_faults, NZUsize, NZU32};
+use commonware_utils::{max_faults, NZUsize};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
-use governor::Quota;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{cell::RefCell, num::NonZeroUsize, panic, sync::Arc, time::Duration};
 
@@ -54,6 +54,7 @@ where
     <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
+    type Elector: Elector<Self::Scheme>;
     fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
 }
 
@@ -205,6 +206,7 @@ fn run<P: Simplex>(input: FuzzInput) {
         for i in (f as usize)..(n as usize) {
             let validator = participants[i].clone();
             let context = context.with_label(&format!("validator-{validator}"));
+            let elector = P::Elector::default();
             let reporter_cfg = reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants
@@ -212,6 +214,7 @@ fn run<P: Simplex>(input: FuzzInput) {
                     .try_into()
                     .expect("public keys are unique"),
                 scheme: schemes[i].clone(),
+                elector: elector.clone(),
             };
             let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
             reporters.push(reporter.clone());
@@ -233,6 +236,7 @@ fn run<P: Simplex>(input: FuzzInput) {
             let engine_cfg = config::Config {
                 blocker,
                 scheme: schemes[i].clone(),
+                elector,
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
@@ -246,7 +250,6 @@ fn run<P: Simplex>(input: FuzzInput) {
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: Delta::new(10),
                 skip_timeout: Delta::new(5),
-                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),

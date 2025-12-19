@@ -1,6 +1,6 @@
 use super::{
     config::Config,
-    fetcher::Fetcher,
+    fetcher::{Config as FetcherConfig, Fetcher},
     ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
@@ -26,7 +26,6 @@ use futures::{
     future::{self, Either},
     StreamExt,
 };
-use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, trace, warn};
@@ -41,7 +40,7 @@ struct Serve<E: Clock, P: PublicKey> {
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Engine<
-    E: Clock + GClock + Spawner + Rng + Metrics,
+    E: Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Manager<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -96,7 +95,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + GClock + Spawner + Rng + Metrics,
+        E: Clock + Spawner + Rng + Metrics,
         P: PublicKey,
         D: Manager<PublicKey = P>,
         B: Blocker<PublicKey = P>,
@@ -117,9 +116,13 @@ impl<
         let metrics = metrics::Metrics::init(context.clone());
         let fetcher = Fetcher::new(
             context.with_label("fetcher"),
-            cfg.requester_config,
-            cfg.fetch_retry_timeout,
-            cfg.priority_requests,
+            FetcherConfig {
+                me: cfg.me,
+                initial: cfg.initial,
+                timeout: cfg.timeout,
+                retry_timeout: cfg.fetch_retry_timeout,
+                priority_requests: cfg.priority_requests,
+            },
         );
         (
             Self {

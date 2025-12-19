@@ -1,6 +1,6 @@
 use commonware_cryptography::Signer;
+use commonware_runtime::Quota;
 use commonware_utils::NZU32;
-use governor::Quota;
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
 /// Configuration for the peer-to-peer instance.
@@ -24,6 +24,12 @@ pub struct Config<C: Signer> {
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
 
+    /// Whether or not to allow DNS-based ingress addresses.
+    ///
+    /// When dialing a DNS-based address, the hostname is resolved and a random IP
+    /// is selected from the results (shuffled for each dial attempt).
+    pub allow_dns: bool,
+
     /// Whether or not to attempt handshakes on incoming connections
     /// from unregistered IP addresses.
     pub attempt_unregistered_handshakes: bool,
@@ -32,7 +38,7 @@ pub struct Config<C: Signer> {
     ///
     /// The actual size of the network message will be higher due to overhead from the protocol;
     /// this may include additional metadata, data from the codec, and/or cryptographic signatures.
-    pub max_message_size: usize,
+    pub max_message_size: u32,
 
     /// Message backlog allowed for internal actors.
     ///
@@ -68,10 +74,10 @@ pub struct Config<C: Signer> {
     pub allowed_handshake_rate_per_subnet: Quota,
 
     /// Frequency at which we send ping messages to peers.
+    ///
+    /// This also determines the rate limit for incoming ping messages (one per half this
+    /// frequency to account for jitter).
     pub ping_frequency: Duration,
-
-    /// Quota for ping messages received from a peer.
-    pub allowed_ping_rate: Quota,
 
     /// Average frequency at which we make a single dial attempt across all peers.
     pub dial_frequency: Duration,
@@ -98,7 +104,7 @@ impl<C: Signer> Config<C> {
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
-        max_message_size: usize,
+        max_message_size: u32,
     ) -> Self {
         Self {
             crypto,
@@ -106,6 +112,7 @@ impl<C: Signer> Config<C> {
             listen,
 
             allow_private_ips: false,
+            allow_dns: true,
             attempt_unregistered_handshakes: false,
             max_message_size,
             mailbox_size: 1_000,
@@ -117,7 +124,6 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_ip: Quota::with_period(Duration::from_secs(5)).unwrap(), // 1 concurrent handshake per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(64)),
             ping_frequency: Duration::from_secs(50),
-            allowed_ping_rate: Quota::per_minute(NZU32!(2)),
             dial_frequency: Duration::from_secs(1),
             query_frequency: Duration::from_secs(60),
             tracked_peer_sets: 4,
@@ -130,13 +136,14 @@ impl<C: Signer> Config<C> {
     /// # Warning
     ///
     /// It is not recommended to use this configuration in production.
-    pub fn local(crypto: C, namespace: &[u8], listen: SocketAddr, max_message_size: usize) -> Self {
+    pub fn local(crypto: C, namespace: &[u8], listen: SocketAddr, max_message_size: u32) -> Self {
         Self {
             crypto,
             namespace: namespace.to_vec(),
             listen,
 
             allow_private_ips: true,
+            allow_dns: true,
             attempt_unregistered_handshakes: false,
             max_message_size,
             mailbox_size: 1_000,
@@ -148,7 +155,6 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(16)), // 80 concurrent handshakes per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(128)),
             ping_frequency: Duration::from_secs(5),
-            allowed_ping_rate: Quota::per_second(NZU32!(2)),
             dial_frequency: Duration::from_millis(500),
             query_frequency: Duration::from_secs(30),
             tracked_peer_sets: 4,
@@ -156,13 +162,14 @@ impl<C: Signer> Config<C> {
     }
 
     #[cfg(test)]
-    pub fn test(crypto: C, listen: SocketAddr, max_message_size: usize) -> Self {
+    pub fn test(crypto: C, listen: SocketAddr, max_message_size: u32) -> Self {
         Self {
             crypto,
             namespace: b"test_namespace".to_vec(),
             listen,
 
             allow_private_ips: true,
+            allow_dns: true,
             attempt_unregistered_handshakes: false,
             max_message_size,
             mailbox_size: 1_000,
@@ -174,7 +181,6 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(128)), // 640 concurrent handshakes per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(256)),
             ping_frequency: Duration::from_secs(1),
-            allowed_ping_rate: Quota::per_second(NZU32!(5)),
             dial_frequency: Duration::from_millis(200),
             query_frequency: Duration::from_secs(5),
             tracked_peer_sets: 4,

@@ -14,7 +14,7 @@ pub struct FuzzInput {
 
     // Configuration parameters
     namespace: Vec<u8>,
-    max_message_size: usize,
+    max_message_size: u32,
     synchrony_bound_secs: u64,
     max_handshake_age_secs: u64,
     handshake_timeout_secs: u64,
@@ -47,7 +47,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
         let num_messages_to_listener = u.int_in_range(0..=10)?; // Reasonable number of messages
         let mut messages_to_listener = Vec::new();
         for _ in 0..num_messages_to_listener {
-            let msg_len = u.int_in_range(0..=max_message_size)?;
+            let msg_len = u.int_in_range(0..=max_message_size as usize)?;
             let msg = (0..msg_len)
                 .map(|_| u8::arbitrary(u))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -57,7 +57,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
         let num_messages_to_dialer = u.int_in_range(0..=10)?;
         let mut messages_to_dialer = Vec::new();
         for _ in 0..num_messages_to_dialer {
-            let msg_len = u.int_in_range(0..=max_message_size)?;
+            let msg_len = u.int_in_range(0..=max_message_size as usize)?;
             let msg = (0..msg_len)
                 .map(|_| u8::arbitrary(u))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -139,7 +139,7 @@ fn fuzz(input: FuzzInput) {
 
         // Exchange messages from dialer to listener
         for (i, msg) in input.messages_to_listener.iter().enumerate() {
-            if msg.is_empty() || msg.len() > max_message_size {
+            if msg.is_empty() || msg.len() > max_message_size as usize {
                 continue;
             }
 
@@ -150,7 +150,7 @@ fn fuzz(input: FuzzInput) {
 
         // Exchange messages from listener to dialer
         for (i, msg) in input.messages_to_dialer.iter().enumerate() {
-            if msg.is_empty() || msg.len() > max_message_size {
+            if msg.is_empty() || msg.len() > max_message_size as usize {
                 continue;
             }
 

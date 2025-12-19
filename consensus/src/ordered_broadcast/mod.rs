@@ -86,11 +86,10 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
-        Clock, Metrics, Runner, Spawner,
+        Clock, Metrics, Quota, Runner, Spawner,
     };
     use commonware_utils::NZUsize;
     use futures::{channel::oneshot, future::join_all};
-    use governor::Quota;
     use std::{
         collections::{BTreeMap, HashMap},
         num::{NonZeroU32, NonZeroUsize},
@@ -102,10 +101,16 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-    type Registrations<P> = BTreeMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))>;
+    type Registrations<P> = BTreeMap<
+        P,
+        (
+            (Sender<P, deterministic::Context>, Receiver<P>),
+            (Sender<P, deterministic::Context>, Receiver<P>),
+        ),
+    >;
 
     async fn register_participants(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         participants: &[PublicKey],
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
@@ -125,7 +130,7 @@ mod tests {
     }
 
     async fn link_participants(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         participants: &[PublicKey],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
@@ -163,7 +168,10 @@ mod tests {
         context: Context,
         fixture: &Fixture<S>,
         link: Link,
-    ) -> (Oracle<PublicKey>, Registrations<PublicKey>) {
+    ) -> (
+        Oracle<PublicKey, deterministic::Context>,
+        Registrations<PublicKey>,
+    ) {
         let (network, mut oracle) = Network::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {

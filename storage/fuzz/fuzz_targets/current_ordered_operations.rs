@@ -5,7 +5,7 @@ use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     mmr::{hasher::Hasher as _, Location, StandardHasher as Standard},
-    qmdb::current::{ordered::Current, Config},
+    qmdb::current::{ordered::fixed::Db as Current, FixedConfig as Config},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -326,7 +326,7 @@ fn fuzz(data: FuzzInput) {
                             let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_exclusion_proof(
                                 hasher.inner(),
                                 &k,
-                                proof,
+                                &proof,
                                 &current_root,
                             );
                             assert!(verification_result, "Exclusion proof verification failed for key {key:?}");

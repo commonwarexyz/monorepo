@@ -207,6 +207,7 @@
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 
+pub mod elector;
 pub mod scheme;
 pub mod types;
 
@@ -224,9 +225,7 @@ cfg_if::cfg_if! {
 #[cfg(any(test, feature = "fuzz"))]
 pub mod mocks;
 
-use crate::types::{Round, View, ViewDelta};
-use commonware_codec::Encode;
-use scheme::SeededScheme;
+use crate::types::{View, ViewDelta};
 
 /// The minimum view we are tracking both in-memory and on-disk.
 pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
@@ -252,42 +251,12 @@ pub(crate) fn interesting(
     true
 }
 
-/// Selects the leader for a given round using scheme-provided randomness seed when available.
-///
-/// If the active [`SeededScheme`] exposes a seed (e.g. BLS threshold certificates), the seed is
-/// encoded and reduced modulo the number of participants. Otherwise we fall back to
-/// simple round-robin using the view number.
-///
-/// # Panics
-///
-/// Panics if `participants` is empty.
-pub fn select_leader<S>(
-    participants: &[S::PublicKey],
-    round: Round,
-    seed: Option<S::Seed>,
-) -> (S::PublicKey, u32)
-where
-    S: SeededScheme,
-    S::PublicKey: Clone,
-{
-    assert!(
-        !participants.is_empty(),
-        "no participants to select leader from"
-    );
-    let idx = seed.map_or_else(
-        || (round.epoch().get().wrapping_add(round.view().get()) as usize) % participants.len(),
-        |seed| commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize,
-    );
-    let leader = participants[idx].clone();
-
-    (leader, idx as u32)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         simplex::{
+            elector::{Config as Elector, Random, RoundRobin},
             mocks::twins::Strategy,
             scheme::{
                 bls12381_multisig, bls12381_threshold, bls12381_threshold::Seedable, ed25519,
@@ -303,7 +272,7 @@ mod tests {
         Monitor, Viewable,
     };
     use bytes::Bytes;
-    use commonware_codec::{Decode, DecodeExt};
+    use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         certificate::mocks::Fixture,
@@ -316,11 +285,12 @@ mod tests {
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin, SplitTarget},
         Recipients, Sender as _,
     };
-    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{max_faults, quorum, NZUsize, NZU32};
+    use commonware_runtime::{
+        buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner, Spawner,
+    };
+    use commonware_utils::{max_faults, quorum, NZUsize};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
-    use governor::Quota;
     use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -337,12 +307,21 @@ mod tests {
 
     /// Register a validator with the oracle.
     async fn register_validator(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         validator: PublicKey,
     ) -> (
-        (Sender<PublicKey>, Receiver<PublicKey>),
-        (Sender<PublicKey>, Receiver<PublicKey>),
-        (Sender<PublicKey>, Receiver<PublicKey>),
+        (
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        ),
+        (
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        ),
+        (
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        ),
     ) {
         let mut control = oracle.control(validator.clone());
         let (vote_sender, vote_receiver) = control.register(0, TEST_QUOTA).await.unwrap();
@@ -358,14 +337,23 @@ mod tests {
 
     /// Registers all validators using the oracle.
     async fn register_validators(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         validators: &[PublicKey],
     ) -> HashMap<
         PublicKey,
         (
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
         ),
     > {
         let mut registrations = HashMap::new();
@@ -389,7 +377,7 @@ mod tests {
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
     async fn link_validators(
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         validators: &[PublicKey],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
@@ -430,10 +418,11 @@ mod tests {
         }
     }
 
-    fn all_online<S, F>(mut fixture: F)
+    fn all_online<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -474,6 +463,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -486,6 +476,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -505,6 +496,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -519,7 +511,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -561,12 +552,12 @@ mod tests {
                     assert_eq!(*invalid, 0);
                 }
 
-                // Ensure seeds for all views
+                // Ensure certificates for all views
                 {
-                    let seeds = reporter.seeds.lock().unwrap();
+                    let certified = reporter.certified.lock().unwrap();
                     for view in View::range(View::new(1), latest_complete) {
-                        // Ensure seed for every view
-                        if !seeds.contains_key(&view) {
+                        // Ensure certificate for every view
+                        if !certified.contains(&view) {
                             panic!("view: {view}");
                         }
                     }
@@ -670,17 +661,18 @@ mod tests {
 
     #[test_traced]
     fn test_all_online() {
-        all_online(bls12381_threshold::fixture::<MinPk, _>);
-        all_online(bls12381_threshold::fixture::<MinSig, _>);
-        all_online(bls12381_multisig::fixture::<MinPk, _>);
-        all_online(bls12381_multisig::fixture::<MinSig, _>);
-        all_online(ed25519::fixture);
+        all_online::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        all_online::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        all_online::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        all_online::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        all_online::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    fn observer<S, F>(mut fixture: F)
+    fn observer<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n_active = 5;
@@ -730,6 +722,7 @@ mod tests {
             link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
 
@@ -749,6 +742,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: signing.clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -768,6 +762,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: signing.clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -782,7 +777,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -830,17 +824,18 @@ mod tests {
 
     #[test_traced]
     fn test_observer() {
-        observer(bls12381_threshold::fixture::<MinPk, _>);
-        observer(bls12381_threshold::fixture::<MinSig, _>);
-        observer(bls12381_multisig::fixture::<MinPk, _>);
-        observer(bls12381_multisig::fixture::<MinSig, _>);
-        observer(ed25519::fixture);
+        observer::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        observer::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        observer::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        observer::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        observer::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    fn unclean_shutdown<S, F>(mut fixture: F)
+    fn unclean_shutdown<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -896,6 +891,7 @@ mod tests {
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
                 // Create engines
+                let elector = L::default();
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut reporters = HashMap::new();
                 let mut engine_handlers = Vec::new();
@@ -908,6 +904,7 @@ mod tests {
                         namespace: namespace.clone(),
                         participants: participants.clone().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
+                        elector: elector.clone(),
                     };
                     let reporter = mocks::reporter::Reporter::new(rng.clone(), reporter_config);
                     reporters.insert(validator.clone(), reporter.clone());
@@ -926,6 +923,7 @@ mod tests {
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
+                        elector: elector.clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -940,7 +938,6 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -1019,17 +1016,18 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_unclean_shutdown() {
-        unclean_shutdown(bls12381_threshold::fixture::<MinPk, _>);
-        unclean_shutdown(bls12381_threshold::fixture::<MinSig, _>);
-        unclean_shutdown(bls12381_multisig::fixture::<MinPk, _>);
-        unclean_shutdown(bls12381_multisig::fixture::<MinSig, _>);
-        unclean_shutdown(ed25519::fixture);
+        unclean_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        unclean_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        unclean_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        unclean_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        unclean_shutdown::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    fn backfill<S, F>(mut fixture: F)
+    fn backfill<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -1075,6 +1073,7 @@ mod tests {
             .await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1092,6 +1091,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1111,6 +1111,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -1125,7 +1126,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(4)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -1210,6 +1210,7 @@ mod tests {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
             };
             let mut reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1229,6 +1230,7 @@ mod tests {
             let blocker = oracle.control(me.clone());
             let cfg = config::Config {
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
                 blocker,
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -1243,7 +1245,6 @@ mod tests {
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
-                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -1271,17 +1272,18 @@ mod tests {
 
     #[test_traced]
     fn test_backfill() {
-        backfill(bls12381_threshold::fixture::<MinPk, _>);
-        backfill(bls12381_threshold::fixture::<MinSig, _>);
-        backfill(bls12381_multisig::fixture::<MinPk, _>);
-        backfill(bls12381_multisig::fixture::<MinSig, _>);
-        backfill(ed25519::fixture);
+        backfill::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        backfill::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        backfill::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    fn one_offline<S, F>(mut fixture: F)
+    fn one_offline<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -1329,6 +1331,7 @@ mod tests {
             .await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1346,6 +1349,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1365,6 +1369,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -1379,7 +1384,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -1529,17 +1533,18 @@ mod tests {
 
     #[test_traced]
     fn test_one_offline() {
-        one_offline(bls12381_threshold::fixture::<MinPk, _>);
-        one_offline(bls12381_threshold::fixture::<MinSig, _>);
-        one_offline(bls12381_multisig::fixture::<MinPk, _>);
-        one_offline(bls12381_multisig::fixture::<MinSig, _>);
-        one_offline(ed25519::fixture);
+        one_offline::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        one_offline::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        one_offline::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        one_offline::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        one_offline::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    fn slow_validator<S, F>(mut fixture: F)
+    fn slow_validator<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -1579,6 +1584,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1591,6 +1597,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1620,6 +1627,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -1634,7 +1642,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -1711,17 +1718,18 @@ mod tests {
 
     #[test_traced]
     fn test_slow_validator() {
-        slow_validator(bls12381_threshold::fixture::<MinPk, _>);
-        slow_validator(bls12381_threshold::fixture::<MinSig, _>);
-        slow_validator(bls12381_multisig::fixture::<MinPk, _>);
-        slow_validator(bls12381_multisig::fixture::<MinSig, _>);
-        slow_validator(ed25519::fixture);
+        slow_validator::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        slow_validator::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        slow_validator::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        slow_validator::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        slow_validator::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    fn all_recovery<S, F>(mut fixture: F)
+    fn all_recovery<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -1761,6 +1769,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1773,6 +1782,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1792,6 +1802,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -1806,7 +1817,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -1918,17 +1928,18 @@ mod tests {
 
     #[test_traced]
     fn test_all_recovery() {
-        all_recovery(bls12381_threshold::fixture::<MinPk, _>);
-        all_recovery(bls12381_threshold::fixture::<MinSig, _>);
-        all_recovery(bls12381_multisig::fixture::<MinPk, _>);
-        all_recovery(bls12381_multisig::fixture::<MinSig, _>);
-        all_recovery(ed25519::fixture);
+        all_recovery::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        all_recovery::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        all_recovery::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        all_recovery::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        all_recovery::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    fn partition<S, F>(mut fixture: F)
+    fn partition<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 10;
@@ -1968,6 +1979,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1980,6 +1992,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1999,6 +2012,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -2013,7 +2027,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2115,17 +2128,18 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_partition() {
-        partition(bls12381_threshold::fixture::<MinPk, _>);
-        partition(bls12381_threshold::fixture::<MinSig, _>);
-        partition(bls12381_multisig::fixture::<MinPk, _>);
-        partition(bls12381_multisig::fixture::<MinSig, _>);
-        partition(ed25519::fixture);
+        partition::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        partition::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        partition::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        partition::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        partition::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    fn slow_and_lossy_links<S, F>(seed: u64, mut fixture: F) -> String
+    fn slow_and_lossy_links<S, F, L>(seed: u64, mut fixture: F) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -2174,6 +2188,7 @@ mod tests {
             .await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -2186,6 +2201,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -2205,6 +2221,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -2219,7 +2236,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2271,11 +2287,11 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links(0, bls12381_threshold::fixture::<MinPk, _>);
-        slow_and_lossy_links(0, bls12381_threshold::fixture::<MinSig, _>);
-        slow_and_lossy_links(0, bls12381_multisig::fixture::<MinPk, _>);
-        slow_and_lossy_links(0, bls12381_multisig::fixture::<MinSig, _>);
-        slow_and_lossy_links(0, ed25519::fixture);
+        slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold::fixture::<MinPk, _>);
+        slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold::fixture::<MinSig, _>);
+        slow_and_lossy_links::<_, _, RoundRobin>(0, bls12381_multisig::fixture::<MinPk, _>);
+        slow_and_lossy_links::<_, _, RoundRobin>(0, bls12381_multisig::fixture::<MinSig, _>);
+        slow_and_lossy_links::<_, _, RoundRobin>(0, ed25519::fixture);
     }
 
     #[test_group("slow")]
@@ -2284,28 +2300,44 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            let ts_pk_state_1 = slow_and_lossy_links(seed, bls12381_threshold::fixture::<MinPk, _>);
-            let ts_pk_state_2 = slow_and_lossy_links(seed, bls12381_threshold::fixture::<MinPk, _>);
+            let ts_pk_state_1 =
+                slow_and_lossy_links::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            let ts_pk_state_2 =
+                slow_and_lossy_links::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
             assert_eq!(ts_pk_state_1, ts_pk_state_2);
 
-            let ts_sig_state_1 =
-                slow_and_lossy_links(seed, bls12381_threshold::fixture::<MinSig, _>);
-            let ts_sig_state_2 =
-                slow_and_lossy_links(seed, bls12381_threshold::fixture::<MinSig, _>);
+            let ts_sig_state_1 = slow_and_lossy_links::<_, _, Random>(
+                seed,
+                bls12381_threshold::fixture::<MinSig, _>,
+            );
+            let ts_sig_state_2 = slow_and_lossy_links::<_, _, Random>(
+                seed,
+                bls12381_threshold::fixture::<MinSig, _>,
+            );
             assert_eq!(ts_sig_state_1, ts_sig_state_2);
 
-            let ms_pk_state_1 = slow_and_lossy_links(seed, bls12381_multisig::fixture::<MinPk, _>);
-            let ms_pk_state_2 = slow_and_lossy_links(seed, bls12381_multisig::fixture::<MinPk, _>);
+            let ms_pk_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(
+                seed,
+                bls12381_multisig::fixture::<MinPk, _>,
+            );
+            let ms_pk_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(
+                seed,
+                bls12381_multisig::fixture::<MinPk, _>,
+            );
             assert_eq!(ms_pk_state_1, ms_pk_state_2);
 
-            let ms_sig_state_1 =
-                slow_and_lossy_links(seed, bls12381_multisig::fixture::<MinSig, _>);
-            let ms_sig_state_2 =
-                slow_and_lossy_links(seed, bls12381_multisig::fixture::<MinSig, _>);
+            let ms_sig_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(
+                seed,
+                bls12381_multisig::fixture::<MinSig, _>,
+            );
+            let ms_sig_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(
+                seed,
+                bls12381_multisig::fixture::<MinSig, _>,
+            );
             assert_eq!(ms_sig_state_1, ms_sig_state_2);
 
-            let ed_state_1 = slow_and_lossy_links(seed, ed25519::fixture);
-            let ed_state_2 = slow_and_lossy_links(seed, ed25519::fixture);
+            let ed_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(seed, ed25519::fixture);
+            let ed_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(seed, ed25519::fixture);
             assert_eq!(ed_state_1, ed_state_2);
 
             let states = [
@@ -2327,10 +2359,11 @@ mod tests {
         }
     }
 
-    fn conflicter<S, F>(seed: u64, mut fixture: F)
+    fn conflicter<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -2373,6 +2406,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -2384,6 +2418,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -2419,6 +2454,7 @@ mod tests {
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
+                        elector: elector.clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -2433,7 +2469,6 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -2502,18 +2537,19 @@ mod tests {
     #[test_traced]
     fn test_conflicter() {
         for seed in 0..5 {
-            conflicter(seed, bls12381_threshold::fixture::<MinPk, _>);
-            conflicter(seed, bls12381_threshold::fixture::<MinSig, _>);
-            conflicter(seed, bls12381_multisig::fixture::<MinPk, _>);
-            conflicter(seed, bls12381_multisig::fixture::<MinSig, _>);
-            conflicter(seed, ed25519::fixture);
+            conflicter::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            conflicter::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            conflicter::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            conflicter::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            conflicter::<_, _, RoundRobin>(seed, ed25519::fixture);
         }
     }
 
-    fn invalid<S, F>(seed: u64, mut fixture: F)
+    fn invalid<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -2556,6 +2592,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -2573,6 +2610,7 @@ mod tests {
                     namespace: namespace.clone(), // Reporter always uses correct namespace
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -2593,6 +2631,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -2607,7 +2646,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2668,18 +2706,19 @@ mod tests {
     #[test_traced]
     fn test_invalid() {
         for seed in 0..5 {
-            invalid(seed, bls12381_threshold::fixture::<MinPk, _>);
-            invalid(seed, bls12381_threshold::fixture::<MinSig, _>);
-            invalid(seed, bls12381_multisig::fixture::<MinPk, _>);
-            invalid(seed, bls12381_multisig::fixture::<MinSig, _>);
-            invalid(seed, ed25519::fixture);
+            invalid::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            invalid::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            invalid::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            invalid::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            invalid::<_, _, RoundRobin>(seed, ed25519::fixture);
         }
     }
 
-    fn impersonator<S, F>(seed: u64, mut fixture: F)
+    fn impersonator<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -2722,6 +2761,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -2733,6 +2773,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -2768,6 +2809,7 @@ mod tests {
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
+                        elector: elector.clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -2782,7 +2824,6 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -2835,18 +2876,19 @@ mod tests {
     #[test_traced]
     fn test_impersonator() {
         for seed in 0..5 {
-            impersonator(seed, bls12381_threshold::fixture::<MinPk, _>);
-            impersonator(seed, bls12381_threshold::fixture::<MinSig, _>);
-            impersonator(seed, bls12381_multisig::fixture::<MinPk, _>);
-            impersonator(seed, bls12381_multisig::fixture::<MinSig, _>);
-            impersonator(seed, ed25519::fixture);
+            impersonator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            impersonator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            impersonator::<_, _, RoundRobin>(seed, ed25519::fixture);
         }
     }
 
-    fn equivocator<S, F>(seed: u64, mut fixture: F)
+    fn equivocator<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 7;
@@ -2889,6 +2931,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
+            let elector = L::default();
             let mut engines = Vec::new();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
@@ -2901,6 +2944,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -2915,13 +2959,13 @@ mod tests {
                         epoch: Epoch::new(333),
                         relay: relay.clone(),
                         hasher: Sha256::default(),
+                        elector: elector.clone(),
                     };
 
-                    let engine: mocks::equivocator::Equivocator<_, _, Sha256> =
-                        mocks::equivocator::Equivocator::new(
-                            context.with_label("byzantine_engine"),
-                            cfg,
-                        );
+                    let engine = mocks::equivocator::Equivocator::new(
+                        context.with_label("byzantine_engine"),
+                        cfg,
+                    );
                     engines.push(engine.start(pending, recovered));
                 } else {
                     let application_cfg = mocks::application::Config {
@@ -2939,6 +2983,7 @@ mod tests {
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
+                        elector: elector.clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -2953,7 +2998,6 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -3006,6 +3050,7 @@ mod tests {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[idx].clone(),
+                elector: elector.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -3027,6 +3072,7 @@ mod tests {
             let blocker = oracle.control(validator.clone());
             let cfg = config::Config {
                 scheme: schemes[idx].clone(),
+                elector: elector.clone(),
                 blocker,
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -3041,7 +3087,6 @@ mod tests {
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
-                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -3079,7 +3124,7 @@ mod tests {
     #[test_traced]
     fn test_equivocator_bls12381_threshold_min_pk() {
         for seed in 0..5 {
-            equivocator(seed, bls12381_threshold::fixture::<MinPk, _>);
+            equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
         }
     }
 
@@ -3087,7 +3132,7 @@ mod tests {
     #[test_traced]
     fn test_equivocator_bls12381_threshold_min_sig() {
         for seed in 0..5 {
-            equivocator(seed, bls12381_threshold::fixture::<MinSig, _>);
+            equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
         }
     }
 
@@ -3095,7 +3140,7 @@ mod tests {
     #[test_traced]
     fn test_equivocator_bls12381_multisig_min_pk() {
         for seed in 0..5 {
-            equivocator(seed, bls12381_multisig::fixture::<MinPk, _>);
+            equivocator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
         }
     }
 
@@ -3103,7 +3148,7 @@ mod tests {
     #[test_traced]
     fn test_equivocator_bls12381_multisig_min_sig() {
         for seed in 0..5 {
-            equivocator(seed, bls12381_multisig::fixture::<MinSig, _>);
+            equivocator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
         }
     }
 
@@ -3111,14 +3156,15 @@ mod tests {
     #[test_traced]
     fn test_equivocator_ed25519() {
         for seed in 0..5 {
-            equivocator(seed, ed25519::fixture);
+            equivocator::<_, _, RoundRobin>(seed, ed25519::fixture);
         }
     }
 
-    fn reconfigurer<S, F>(seed: u64, mut fixture: F)
+    fn reconfigurer<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -3161,6 +3207,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -3172,6 +3219,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -3206,6 +3254,7 @@ mod tests {
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
+                        elector: elector.clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -3220,7 +3269,6 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -3273,18 +3321,19 @@ mod tests {
     #[test_traced]
     fn test_reconfigurer() {
         for seed in 0..5 {
-            reconfigurer(seed, bls12381_threshold::fixture::<MinPk, _>);
-            reconfigurer(seed, bls12381_threshold::fixture::<MinSig, _>);
-            reconfigurer(seed, bls12381_multisig::fixture::<MinPk, _>);
-            reconfigurer(seed, bls12381_multisig::fixture::<MinSig, _>);
-            reconfigurer(seed, ed25519::fixture);
+            reconfigurer::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            reconfigurer::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            reconfigurer::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            reconfigurer::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            reconfigurer::<_, _, RoundRobin>(seed, ed25519::fixture);
         }
     }
 
-    fn nuller<S, F>(seed: u64, mut fixture: F)
+    fn nuller<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -3327,6 +3376,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -3338,6 +3388,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -3369,6 +3420,7 @@ mod tests {
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
+                        elector: elector.clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -3383,7 +3435,6 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -3449,18 +3500,19 @@ mod tests {
     #[test_traced]
     fn test_nuller() {
         for seed in 0..5 {
-            nuller(seed, bls12381_threshold::fixture::<MinPk, _>);
-            nuller(seed, bls12381_threshold::fixture::<MinSig, _>);
-            nuller(seed, bls12381_multisig::fixture::<MinPk, _>);
-            nuller(seed, bls12381_multisig::fixture::<MinSig, _>);
-            nuller(seed, ed25519::fixture);
+            nuller::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            nuller::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            nuller::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            nuller::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            nuller::<_, _, RoundRobin>(seed, ed25519::fixture);
         }
     }
 
-    fn outdated<S, F>(seed: u64, mut fixture: F)
+    fn outdated<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 4;
@@ -3503,6 +3555,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -3514,6 +3567,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -3546,6 +3600,7 @@ mod tests {
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
+                        elector: elector.clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -3560,7 +3615,6 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -3608,18 +3662,19 @@ mod tests {
     #[test_traced]
     fn test_outdated() {
         for seed in 0..5 {
-            outdated(seed, bls12381_threshold::fixture::<MinPk, _>);
-            outdated(seed, bls12381_threshold::fixture::<MinSig, _>);
-            outdated(seed, bls12381_multisig::fixture::<MinPk, _>);
-            outdated(seed, bls12381_multisig::fixture::<MinSig, _>);
-            outdated(seed, ed25519::fixture);
+            outdated::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            outdated::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            outdated::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            outdated::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            outdated::<_, _, RoundRobin>(seed, ed25519::fixture);
         }
     }
 
-    fn run_1k<S, F>(mut fixture: F)
+    fn run_1k<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 10;
@@ -3660,6 +3715,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -3672,6 +3728,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -3691,6 +3748,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -3705,7 +3763,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -3756,37 +3813,38 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_threshold_min_pk() {
-        run_1k(bls12381_threshold::fixture::<MinPk, _>);
+        run_1k::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_threshold_min_sig() {
-        run_1k(bls12381_threshold::fixture::<MinSig, _>);
+        run_1k::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_multisig_min_pk() {
-        run_1k(bls12381_multisig::fixture::<MinPk, _>);
+        run_1k::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_multisig_min_sig() {
-        run_1k(bls12381_multisig::fixture::<MinSig, _>);
+        run_1k::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_ed25519() {
-        run_1k(ed25519::fixture);
+        run_1k::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    fn engine_shutdown<S, F>(mut fixture: F, graceful: bool)
+    fn engine_shutdown<S, F, L>(mut fixture: F, graceful: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 1;
@@ -3823,10 +3881,12 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engine
+            let elector = L::default();
             let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -3846,6 +3906,7 @@ mod tests {
             let blocker = oracle.control(participants[0].clone());
             let cfg = config::Config {
                 scheme: schemes[0].clone(),
+                elector: elector.clone(),
                 blocker,
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -3860,7 +3921,6 @@ mod tests {
                 fetch_timeout: Duration::from_millis(50),
                 activity_timeout: ViewDelta::new(4),
                 skip_timeout: ViewDelta::new(2),
-                fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
@@ -3931,26 +3991,27 @@ mod tests {
 
     #[test_traced]
     fn test_children_shutdown_on_engine_abort() {
-        engine_shutdown(bls12381_threshold::fixture::<MinPk, _>, false);
-        engine_shutdown(bls12381_threshold::fixture::<MinSig, _>, false);
-        engine_shutdown(bls12381_multisig::fixture::<MinPk, _>, false);
-        engine_shutdown(bls12381_multisig::fixture::<MinSig, _>, false);
-        engine_shutdown(ed25519::fixture, false);
+        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>, false);
+        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>, false);
+        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>, false);
+        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>, false);
+        engine_shutdown::<_, _, RoundRobin>(ed25519::fixture, false);
     }
 
     #[test_traced]
     fn test_graceful_shutdown() {
-        engine_shutdown(bls12381_threshold::fixture::<MinPk, _>, true);
-        engine_shutdown(bls12381_threshold::fixture::<MinSig, _>, true);
-        engine_shutdown(bls12381_multisig::fixture::<MinPk, _>, true);
-        engine_shutdown(bls12381_multisig::fixture::<MinSig, _>, true);
-        engine_shutdown(ed25519::fixture, true);
+        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>, true);
+        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>, true);
+        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>, true);
+        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>, true);
+        engine_shutdown::<_, _, RoundRobin>(ed25519::fixture, true);
     }
 
-    fn attributable_reporter_filtering<S, F>(mut fixture: F)
+    fn attributable_reporter_filtering<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         let n = 3;
         let required_containers = View::new(10);
@@ -3987,6 +4048,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines with `AttributableReporter` wrapper
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -3996,6 +4058,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                 };
                 let mock_reporter = mocks::reporter::Reporter::new(
                     context.with_label("mock_reporter"),
@@ -4027,6 +4090,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -4041,7 +4105,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -4134,17 +4197,20 @@ mod tests {
 
     #[test_traced]
     fn test_attributable_reporter_filtering() {
-        attributable_reporter_filtering(bls12381_threshold::fixture::<MinPk, _>);
-        attributable_reporter_filtering(bls12381_threshold::fixture::<MinSig, _>);
-        attributable_reporter_filtering(bls12381_multisig::fixture::<MinPk, _>);
-        attributable_reporter_filtering(bls12381_multisig::fixture::<MinSig, _>);
-        attributable_reporter_filtering(ed25519::fixture);
+        attributable_reporter_filtering::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        attributable_reporter_filtering::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        attributable_reporter_filtering::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        attributable_reporter_filtering::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        attributable_reporter_filtering::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    fn split_views_no_lockup<S, F>(mut fixture: F)
+    fn split_views_no_lockup<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Scenario:
         // - View F: Finalization of B_1 seen by all participants.
@@ -4207,6 +4273,7 @@ mod tests {
             // Do not link validators yet; we will inject certificates first, then link everyone.
 
             // Create engines: 7 honest engines, 3 byzantine
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut honest_reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -4235,6 +4302,7 @@ mod tests {
                         namespace: namespace.clone(),
                         participants: participants.clone().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
+                        elector: elector.clone(),
                     };
                     let reporter = mocks::reporter::Reporter::new(
                         context.with_label(&format!("reporter-{}", *validator)),
@@ -4257,6 +4325,7 @@ mod tests {
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
+                        elector: elector.clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -4271,7 +4340,6 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -4503,14 +4571,18 @@ mod tests {
 
     #[test_traced]
     fn test_split_views_no_lockup() {
-        split_views_no_lockup(bls12381_threshold::fixture::<MinPk, _>);
-        split_views_no_lockup(bls12381_threshold::fixture::<MinSig, _>);
-        split_views_no_lockup(bls12381_multisig::fixture::<MinPk, _>);
-        split_views_no_lockup(bls12381_multisig::fixture::<MinSig, _>);
-        split_views_no_lockup(ed25519::fixture);
+        split_views_no_lockup::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        split_views_no_lockup::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
+        split_views_no_lockup::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    fn tle<V: Variant>() {
+    fn tle<V, L>()
+    where
+        V: Variant,
+        L: Elector<bls12381_threshold::Scheme<PublicKey, V>>,
+    {
         // Create context
         let n = 4;
         let namespace = b"consensus".to_vec();
@@ -4548,6 +4620,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines and reporters
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -4561,6 +4634,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -4585,6 +4659,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -4599,7 +4674,6 @@ mod tests {
                     fetch_timeout: Duration::from_millis(100),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -4648,14 +4722,20 @@ mod tests {
 
     #[test_traced]
     fn test_tle() {
-        tle::<MinPk>();
-        tle::<MinSig>();
+        tle::<MinPk, Random>();
+        tle::<MinSig, Random>();
     }
 
-    fn hailstorm<S, F>(seed: u64, shutdowns: usize, interval: ViewDelta, mut fixture: F) -> String
+    fn hailstorm<S, F, L>(
+        seed: u64,
+        shutdowns: usize,
+        interval: ViewDelta,
+        mut fixture: F,
+    ) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         // Create context
         let n = 5;
@@ -4695,6 +4775,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = BTreeMap::new();
             let mut engine_handlers = BTreeMap::new();
@@ -4707,6 +4788,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -4726,6 +4808,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -4740,7 +4823,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -4820,6 +4902,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -4834,7 +4917,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -4962,13 +5044,13 @@ mod tests {
     #[test_traced]
     fn test_hailstorm_bls12381_threshold_min_pk() {
         assert_eq!(
-            hailstorm(
+            hailstorm::<_, _, Random>(
                 0,
                 10,
                 ViewDelta::new(15),
                 bls12381_threshold::fixture::<MinPk, _>
             ),
-            hailstorm(
+            hailstorm::<_, _, Random>(
                 0,
                 10,
                 ViewDelta::new(15),
@@ -4981,13 +5063,13 @@ mod tests {
     #[test_traced]
     fn test_hailstorm_bls12381_threshold_min_sig() {
         assert_eq!(
-            hailstorm(
+            hailstorm::<_, _, Random>(
                 0,
                 10,
                 ViewDelta::new(15),
                 bls12381_threshold::fixture::<MinSig, _>
             ),
-            hailstorm(
+            hailstorm::<_, _, Random>(
                 0,
                 10,
                 ViewDelta::new(15),
@@ -5000,13 +5082,13 @@ mod tests {
     #[test_traced]
     fn test_hailstorm_bls12381_multisig_min_pk() {
         assert_eq!(
-            hailstorm(
+            hailstorm::<_, _, RoundRobin>(
                 0,
                 10,
                 ViewDelta::new(15),
                 bls12381_multisig::fixture::<MinPk, _>
             ),
-            hailstorm(
+            hailstorm::<_, _, RoundRobin>(
                 0,
                 10,
                 ViewDelta::new(15),
@@ -5019,13 +5101,13 @@ mod tests {
     #[test_traced]
     fn test_hailstorm_bls12381_multisig_min_sig() {
         assert_eq!(
-            hailstorm(
+            hailstorm::<_, _, RoundRobin>(
                 0,
                 10,
                 ViewDelta::new(15),
                 bls12381_multisig::fixture::<MinSig, _>
             ),
-            hailstorm(
+            hailstorm::<_, _, RoundRobin>(
                 0,
                 10,
                 ViewDelta::new(15),
@@ -5038,16 +5120,17 @@ mod tests {
     #[test_traced]
     fn test_hailstorm_ed25519() {
         assert_eq!(
-            hailstorm(0, 10, ViewDelta::new(15), ed25519::fixture),
-            hailstorm(0, 10, ViewDelta::new(15), ed25519::fixture)
+            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), ed25519::fixture),
+            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), ed25519::fixture)
         );
     }
 
     /// Implementation of [Twins: BFT Systems Made Robust](https://arxiv.org/abs/2004.10617).
-    fn twins<S, F>(seed: u64, n: u32, strategy: Strategy, link: Link, mut fixture: F)
+    fn twins<S, F, L>(seed: u64, n: u32, strategy: Strategy, link: Link, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         let faults = max_faults(n);
         let required_containers = View::new(100);
@@ -5080,6 +5163,7 @@ mod tests {
 
             // We don't apply partitioning to the relay explicitly, however, a participant will only query the relay by digest
             // after receiving a vote (implicitly respecting the partitioning)
+            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -5190,6 +5274,7 @@ mod tests {
                         namespace: namespace.clone(),
                         participants: participants.as_ref().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
+                        elector: elector.clone(),
                     };
                     let reporter = mocks::reporter::Reporter::new(
                         context.with_label("reporter"),
@@ -5213,6 +5298,7 @@ mod tests {
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
+                        elector: elector.clone(),
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
@@ -5227,7 +5313,6 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_rate_per_peer: Quota::per_hour(NZU32!(1)), // resolver networking is disabled, so let's prevent unnecessary task polling
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -5247,6 +5332,7 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: participants.as_ref().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -5268,6 +5354,7 @@ mod tests {
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
@@ -5282,7 +5369,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -5355,10 +5441,11 @@ mod tests {
         });
     }
 
-    fn test_twins<S, F>(mut fixture: F)
+    fn test_twins<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: Elector<S>,
     {
         for strategy in [
             Strategy::View,
@@ -5379,7 +5466,7 @@ mod tests {
                     success_rate: 0.75,
                 },
             ] {
-                twins(0, 5, strategy, link, |context, n| fixture(context, n));
+                twins::<S, _, L>(0, 5, strategy, link, |context, n| fixture(context, n));
             }
         }
     }
@@ -5387,37 +5474,37 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_multisig_min_pk() {
-        test_twins(bls12381_multisig::fixture::<MinPk, _>);
+        test_twins::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_multisig_min_sig() {
-        test_twins(bls12381_multisig::fixture::<MinSig, _>);
+        test_twins::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_threshold_min_pk() {
-        test_twins(bls12381_threshold::fixture::<MinPk, _>);
+        test_twins::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_threshold_min_sig() {
-        test_twins(bls12381_threshold::fixture::<MinSig, _>);
+        test_twins::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_ed25519() {
-        test_twins(ed25519::fixture);
+        test_twins::<_, _, RoundRobin>(ed25519::fixture);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_large_view() {
-        twins(
+        twins::<_, _, Random>(
             0,
             10,
             Strategy::View,
@@ -5433,7 +5520,7 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_large_shuffle() {
-        twins(
+        twins::<_, _, Random>(
             0,
             10,
             Strategy::Shuffle,

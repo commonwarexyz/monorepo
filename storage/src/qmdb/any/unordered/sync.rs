@@ -1,15 +1,10 @@
+use super::fixed::{Db, Operation};
 use crate::{
     index::unordered::Index,
     journal::{authenticated, contiguous::fixed},
     mmr::{mem::Clean, Location, Position, StandardHasher},
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
-    qmdb::{
-        self,
-        any::{
-            unordered::{fixed::Any, FixedOperation as Operation},
-            FixedValue,
-        },
-    },
+    qmdb::{self, any::FixedValue},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
@@ -22,7 +17,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
 use tracing::debug;
 
-impl<E, K, V, H, T> qmdb::sync::Database for Any<E, K, V, H, T>
+impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -267,14 +262,11 @@ mod tests {
         qmdb::{
             self,
             any::unordered::{
-                fixed::{
-                    test::{
-                        any_db_config, apply_ops, create_test_config, create_test_db,
-                        create_test_ops, AnyTest,
-                    },
-                    Any,
+                fixed::test::{
+                    any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
+                    AnyTest,
                 },
-                FixedOperation as Operation,
+                Update,
             },
             operation::Operation as _,
             store::CleanStore as _,
@@ -350,7 +342,7 @@ mod tests {
             let mut deleted_keys = HashSet::new();
             for op in &target_db_ops {
                 match op {
-                    Operation::Update(key, _) => {
+                    Operation::Update(Update(key, _)) => {
                         if let Some((op, loc)) = target_db.get_with_loc(key).await.unwrap() {
                             expected_kvs.insert(*key, (op, loc));
                             deleted_keys.remove(key);
@@ -409,7 +401,7 @@ mod tests {
             for _ in 0..expected_kvs.len() {
                 let key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                new_ops.push(Operation::Update(key, value));
+                new_ops.push(Operation::Update(Update(key, value)));
                 new_kvs.insert(key, value);
             }
             apply_ops(&mut got_db, new_ops.clone()).await;
@@ -655,7 +647,7 @@ mod tests {
             }
             // Verify the last operation is present
             let (last_key, last_value) = match last_op[0] {
-                Operation::Update(key, value) => (key, value),
+                Operation::Update(Update(key, value)) => (key, value),
                 _ => unreachable!("last operation is not an update"),
             };
             assert_eq!(sync_db.get(&last_key).await.unwrap(), Some(last_value));
@@ -1411,7 +1403,7 @@ mod tests {
             }
 
             let db =
-                <Any<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
+                <Db<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
                     context.clone(),
                     any_db_config("sync_basic"),
                     log,
@@ -1435,7 +1427,7 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &ops {
-                if let Operation::Update(key, value) = op {
+                if let Operation::Update(Update(key, value)) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
                 } else if let Operation::Delete(key) = op {
@@ -1468,7 +1460,7 @@ mod tests {
             // Create and populate two databases.
             let mut target_db = create_test_db(context.clone()).await;
             let sync_db_config = create_test_config(context.next_u64());
-            let mut sync_db: AnyTest = Any::init(context.clone(), sync_db_config.clone())
+            let mut sync_db: AnyTest = Db::init(context.clone(), sync_db_config.clone())
                 .await
                 .unwrap();
             let original_ops = create_test_ops(NUM_OPS);
@@ -1514,7 +1506,7 @@ mod tests {
 
             // Re-open `sync_db`
             let sync_db =
-                <Any<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
+                <Db<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
                     context.clone(),
                     sync_db_config,
                     journal,
@@ -1542,7 +1534,7 @@ mod tests {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &original_ops {
-                if let Operation::Update(key, value) = op {
+                if let Operation::Update(Update(key, value)) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
                 } else if let Operation::Delete(key) = op {
@@ -1570,7 +1562,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let db_config = create_test_config(context.next_u64());
-            let mut db = Any::init(context.clone(), db_config.clone()).await.unwrap();
+            let mut db = Db::init(context.clone(), db_config.clone()).await.unwrap();
             let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
             db.commit(None).await.unwrap();
@@ -1599,7 +1591,7 @@ mod tests {
             mmr.close().await.unwrap();
 
             let sync_db: AnyTest =
-                <Any<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
+                <Db<_, Digest, Digest, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
                     context.clone(),
                     db_config,
                     journal,

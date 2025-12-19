@@ -1,5 +1,6 @@
 use crate::{
     authenticated::{data::Data, discovery::channels::Channels, relay::Relay, Mailbox},
+    utils::limited::Connected,
     Channel, Recipients,
 };
 use bytes::Bytes;
@@ -55,8 +56,8 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     }
 }
 
-#[derive(Clone, Debug)]
 /// Sends messages containing content to the router to send to peers.
+#[derive(Clone, Debug)]
 pub struct Messenger<P: PublicKey> {
     sender: Mailbox<Message<P>>,
 }
@@ -89,9 +90,12 @@ impl<P: PublicKey> Messenger<P> {
             .unwrap();
         receiver.await.unwrap()
     }
+}
 
-    /// Returns a subscription channel for the peers known to the router.
-    pub async fn subscribe_peers(&mut self) -> ring::Receiver<Vec<P>> {
+impl<P: PublicKey> Connected for Messenger<P> {
+    type PublicKey = P;
+
+    async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::SubscribePeers { response: sender })
