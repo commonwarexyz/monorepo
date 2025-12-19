@@ -885,7 +885,7 @@ mod test {
 
     #[test_group("slow")]
     #[test_traced("DEBUG")]
-    fn reshare_single_participant_single_epoch() {
+    fn reshare_single_participant_two_epochs() {
         Plan {
             seed: 0,
             total: 1,
@@ -895,7 +895,7 @@ mod test {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             },
-            mode: Mode::Reshare(1),
+            mode: Mode::Reshare(2),
             crash: None,
             failures: HashSet::new(),
         }

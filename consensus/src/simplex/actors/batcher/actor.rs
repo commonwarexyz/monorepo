@@ -169,7 +169,7 @@ impl<
         let mut shutdown = self.context.stopped();
         loop {
             // Track which view was modified (if any) for certificate construction
-            let updated_view: Option<View>;
+            let updated_view;
 
             // Handle next message
             select! {
@@ -204,7 +204,7 @@ impl<
                             active.send(is_active).unwrap();
 
                             // Setting leader may enable batch verification
-                            updated_view = Some(current);
+                            updated_view = current;
                         }
                         Some(Message::Constructed(message)) => {
                             // If the view isn't interesting, we can skip
@@ -225,7 +225,7 @@ impl<
                                 .add_constructed(message)
                                 .await;
                             self.added.inc();
-                            updated_view = Some(view);
+                            updated_view = view;
                         }
                         None => {
                             break;
@@ -409,9 +409,13 @@ impl<
                         .await {
                             self.added.inc();
                         }
-                    updated_view = Some(view);
+                    updated_view = view;
                 },
             }
+            assert!(
+                updated_view != View::zero(),
+                "updated view must be greater than zero"
+            );
 
             // Forward leader's proposal to voter (if we're not the leader and haven't already)
             if let Some(round) = work.get_mut(&current) {
@@ -423,10 +427,7 @@ impl<
             }
 
             // Process the updated view (if any)
-            let Some(view) = updated_view else {
-                continue;
-            };
-            let Some(round) = work.get_mut(&view) else {
+            let Some(round) = work.get_mut(&updated_view) else {
                 continue;
             };
 
@@ -448,7 +449,7 @@ impl<
 
                 // Process verified votes
                 let batch = voters.len() + failed.len();
-                trace!(%view, batch, "batch verified votes");
+                trace!(view = %updated_view, batch, "batch verified votes");
                 self.verified.inc_by(batch as u64);
                 self.batch_size.observe(batch as f64);
 
@@ -478,7 +479,7 @@ impl<
                 .recover_latency
                 .time_some(|| round.try_construct_notarization(&self.scheme))
             {
-                debug!(%view, "constructed notarization, forwarding to voter");
+                debug!(view = %updated_view, "constructed notarization, forwarding to voter");
                 voter
                     .recovered(Certificate::Notarization(notarization))
                     .await;
@@ -487,7 +488,7 @@ impl<
                 .recover_latency
                 .time_some(|| round.try_construct_nullification(&self.scheme))
             {
-                debug!(%view, "constructed nullification, forwarding to voter");
+                debug!(view = %updated_view, "constructed nullification, forwarding to voter");
                 voter
                     .recovered(Certificate::Nullification(nullification))
                     .await;
@@ -496,7 +497,7 @@ impl<
                 .recover_latency
                 .time_some(|| round.try_construct_finalization(&self.scheme))
             {
-                debug!(%view, "constructed finalization, forwarding to voter");
+                debug!(view = %updated_view, "constructed finalization, forwarding to voter");
                 voter
                     .recovered(Certificate::Finalization(finalization))
                     .await;
