@@ -26,7 +26,6 @@ pub type EdScheme = simplex::scheme::ed25519::Scheme;
 #[derive(Clone)]
 pub struct Provider<S: Scheme, C: Signer> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
-    /// An epoch-independent certificate verifier.
     certificate_verifier: Option<Arc<S>>,
     signer: C,
 }
@@ -87,7 +86,7 @@ pub trait EpochProvider {
     /// Creates an epoch-independent certificate verifier from the DKG output.
     ///
     /// Returns `None` for schemes that don't support epoch-independent verification
-    /// (e.g., Ed25519 where certificates require the full participant list).
+    /// (Ed25519 during the initial DKG requires the full participant list to verify certificates).
     fn certificate_verifier(
         output: &dkg::Output<Self::Variant, Self::PublicKey>,
     ) -> Option<Self::Scheme>;
