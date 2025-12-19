@@ -76,7 +76,7 @@ hash = "731c5d3dfb09b6e6f1cf50136ba82f036fffab855ec953be59877bb95a48e1dd"
 
 ["commonware_cryptography::certificate::tests::conformance::CodecConformance<Attestation<Scheme>>"]
 n_cases = 65536
-hash = "dcbe92d97768657dc0c779e2058b44669a985dd8a1dbbf94427237f0fb4b78d2"
+hash = "42867052b1619b912d08f0a6bf5f964f587897a0eed8612732fd27813f6c03bd"
 
 ["commonware_cryptography::certificate::tests::conformance::CodecConformance<Signers>"]
 n_cases = 65536
