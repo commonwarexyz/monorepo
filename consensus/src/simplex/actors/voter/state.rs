@@ -211,8 +211,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
         }
 
         // Get the certificate for the previous view. Prefer finalizations since they are the
-        // strongest proof available. Prefer nullifications over notarizations since they do not
-        // require certification to move to the next view.
+        // strongest proof available. Prefer nullifications over notarizations because a
+        // nullification overwrites an uncertified notarization (if we only heard of notarizations,
+        // we may never exit a view with an uncertifiable notarization).
         #[allow(clippy::option_if_let_else)]
         let cert = if let Some(finalization) = self.finalization(entry_view).cloned() {
             Some(Certificate::Finalization(finalization))
