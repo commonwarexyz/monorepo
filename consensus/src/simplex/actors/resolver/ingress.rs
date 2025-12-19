@@ -2,17 +2,12 @@ use crate::{simplex::types::Certificate, types::View};
 use bytes::Bytes;
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
-use commonware_utils::sequence::prefixed_u64::U64 as PrefixedU64;
+use commonware_utils::sequence::U64;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 use tracing::error;
-
-/// Prefix for regular certificate requests (any certificate type accepted).
-pub const PREFIX_ANY: u8 = 0;
-/// Prefix for nullification-only requests (only nullification or finalization accepted).
-pub const PREFIX_NULLIFICATION_ONLY: u8 = 1;
 
 /// Messages sent to the resolver actor from the voter.
 pub enum MailboxMessage<S: Scheme, D: Digest> {
@@ -56,45 +51,41 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 }
 
-#[derive(Clone)]
-pub struct Handler {
-    sender: mpsc::Sender<Message>,
-}
-
-impl Handler {
-    pub const fn new(sender: mpsc::Sender<Message>) -> Self {
-        Self { sender }
-    }
-}
-
 #[derive(Debug)]
-pub enum Message {
+pub enum HandlerMessage {
     Deliver {
         view: View,
-        nullification_only: bool,
         data: Bytes,
         response: oneshot::Sender<bool>,
     },
     Produce {
         view: View,
-        nullification_only: bool,
         response: oneshot::Sender<Bytes>,
     },
 }
 
+#[derive(Clone)]
+pub struct Handler {
+    sender: mpsc::Sender<HandlerMessage>,
+}
+
+impl Handler {
+    pub const fn new(sender: mpsc::Sender<HandlerMessage>) -> Self {
+        Self { sender }
+    }
+}
+
 impl Consumer for Handler {
-    type Key = PrefixedU64;
+    type Key = U64;
     type Value = Bytes;
     type Failure = ();
 
     async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
         let (response, receiver) = oneshot::channel();
-        let nullification_only = key.prefix() == PREFIX_NULLIFICATION_ONLY;
         if self
             .sender
-            .send(Message::Deliver {
-                view: View::new(key.value()),
-                nullification_only,
+            .send(HandlerMessage::Deliver {
+                view: View::new(key.into()),
                 data: value,
                 response,
             })
@@ -113,16 +104,14 @@ impl Consumer for Handler {
 }
 
 impl Producer for Handler {
-    type Key = PrefixedU64;
+    type Key = U64;
 
     async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
-        let nullification_only = key.prefix() == PREFIX_NULLIFICATION_ONLY;
         if self
             .sender
-            .send(Message::Produce {
-                view: View::new(key.value()),
-                nullification_only,
+            .send(HandlerMessage::Produce {
+                view: View::new(key.into()),
                 response,
             })
             .await

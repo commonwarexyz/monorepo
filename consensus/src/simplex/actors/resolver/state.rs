@@ -8,7 +8,7 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::Resolver;
-use commonware_utils::sequence::prefixed_u64::U64 as PrefixedU64;
+use commonware_utils::sequence::{prefixed_u64::U64 as PrefixedU64, U64};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Tracks all known certificates from the last
@@ -65,8 +65,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
     pub async fn handle(
         &mut self,
         certificate: Certificate<S, D>,
-        request_view: Option<View>,
-        resolver: &mut impl Resolver<Key = PrefixedU64>,
+        request: View,
+        resolver: &mut impl Resolver<Key = U64>,
     ) {
         match certificate {
             Certificate::Nullification(nullification) => {
@@ -74,28 +74,15 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 if self.encounter_view(view) {
                     self.nullifications
                         .insert(view, Certificate::Nullification(nullification));
-                    // Cancel both regular and nullification-only requests for this view
-                    resolver
-                        .cancel(PrefixedU64::new(PREFIX_ANY, view.get()))
-                        .await;
-                    resolver
-                        .cancel(PrefixedU64::new(PREFIX_NULLIFICATION_ONLY, view.get()))
-                        .await;
+                    resolver.cancel(view.into()).await;
                 }
             }
             Certificate::Notarization(notarization) => {
                 // Store as pending (waiting for certification result).
-                // Do NOT cancel fetch - we need to wait for certification.
                 let view = notarization.view();
                 if self.encounter_view(view) {
                     self.notarizations.insert(view, notarization);
-
-                    // Track if this notarization satisfied a lower-view request
-                    if let Some(req_view) = request_view {
-                        if req_view < view {
-                            self.satisfied_by.entry(view).or_default().insert(req_view);
-                        }
-                    }
+                    self.satisfied_by.entry(view).or_default().insert(request);
                 }
             }
             Certificate::Finalization(finalization) => {
@@ -183,10 +170,9 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Inform the [Resolver] of any missing nullifications.
-    async fn fetch(&mut self, resolver: &mut impl Resolver<Key = PrefixedU64>) {
-        // We must either receive a nullification or a certified notarization (at the view or higher),
-        // so we don't need to worry about getting stuck. All requests will be resolved or pruned.
-        // If certification fails for a view, we force-request the nullification.
+    async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64>) {
+        // We must either receive a nullification at the current view or a notarization/finalization at the current
+        // view or higher, so we don't need to worry about getting stuck (where peers cannot resolve our requests).
         let start = self.fetch_floor.max(self.floor_view().next());
         let views: Vec<_> = View::range(start, self.current_view)
             .filter(|view| !self.nullifications.contains_key(view))
@@ -198,23 +184,19 @@ impl<S: Scheme, D: Digest> State<S, D> {
             self.fetch_floor = last.next();
         }
 
-        // Send the requests to the resolver (regular requests accept any certificate type).
-        let requests = views
-            .into_iter()
-            .map(|v| PrefixedU64::new(PREFIX_ANY, v.get()))
-            .collect();
+        // Send the requests to the resolver.
+        let requests = views.into_iter().map(U64::from).collect();
         resolver.fetch_all(requests).await;
     }
 
     /// Prune stored certificates and requests that are not higher than the floor.
-    async fn prune(&mut self, resolver: &mut impl Resolver<Key = PrefixedU64>) {
+    async fn prune(&mut self, resolver: &mut impl Resolver<Key = U64>) {
         let floor = self.floor_view();
         self.notarizations.retain(|view, _| *view > floor);
         self.nullifications.retain(|view, _| *view > floor);
         self.satisfied_by.retain(|view, _| *view > floor);
         self.failed_views.retain(|view| *view > floor);
-        // Retain only requests for views above the floor (check value, ignore prefix)
-        resolver.retain(move |key| key.value() > floor.get()).await;
+        resolver.retain(move |key| *key > floor.into()).await;
     }
 }
 
@@ -407,7 +389,11 @@ mod tests {
         for view in 4..=6 {
             let nullification = build_nullification(&schemes, &verifier, View::new(view));
             state
-                .handle(Certificate::Nullification(nullification), None, &mut resolver)
+                .handle(
+                    Certificate::Nullification(nullification),
+                    None,
+                    &mut resolver,
+                )
                 .await;
         }
         assert_eq!(state.current_view, View::new(6));

@@ -1,5 +1,5 @@
 use super::{
-    ingress::{Handler, Mailbox, MailboxMessage, Message},
+    ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage},
     Config,
 };
 use crate::{
@@ -152,12 +152,7 @@ impl<
     /// If `nullification_only` is true, only nullifications and finalizations are accepted.
     /// Notarizations are rejected without signature verification in this case.
     /// Notarizations at views known to have failed certification are also rejected.
-    fn validate(
-        &mut self,
-        view: View,
-        nullification_only: bool,
-        data: Bytes,
-    ) -> Option<Certificate<S, D>> {
+    fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
         // Decode message
         let incoming =
             Certificate::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config()).ok()?;
@@ -165,10 +160,6 @@ impl<
         // Validate message
         match incoming {
             Certificate::Notarization(notarization) => {
-                if nullification_only {
-                    debug!(%view, "rejecting notarization for nullification-only request");
-                    return None;
-                }
                 // Reject notarizations at views we know failed certification
                 if self.state.is_failed(notarization.view()) {
                     debug!(
@@ -242,19 +233,18 @@ impl<
     /// Handles a message from the [p2p::Engine].
     async fn handle_resolver(
         &mut self,
-        message: Message,
+        message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
         resolver: &mut p2p::Mailbox<PrefixedU64, S::PublicKey>,
     ) {
         match message {
-            Message::Deliver {
+            HandlerMessage::Deliver {
                 view,
-                nullification_only,
                 data,
                 response,
             } => {
                 // Validate incoming message
-                let Some(parsed) = self.validate(view, nullification_only, data) else {
+                let Some(parsed) = self.validate(view, data) else {
                     // Resolver will block any peers that send invalid responses, so
                     // we don't need to do again here
                     let _ = response.send(false);
@@ -268,11 +258,7 @@ impl<
                 // Process message with the request view for tracking
                 self.state.handle(parsed, Some(view), resolver).await;
             }
-            Message::Produce {
-                view,
-                nullification_only,
-                response,
-            } => {
+            HandlerMessage::Produce { view, response } => {
                 // Produce message for view
                 let Some(certificate) = self.state.get(view) else {
                     // If we drop the response channel, the resolver will automatically
@@ -280,12 +266,6 @@ impl<
                     // the full timeout)
                     return;
                 };
-
-                // If nullification_only, only produce nullifications or finalizations
-                if nullification_only && matches!(certificate, Certificate::Notarization(_)) {
-                    return;
-                }
-
                 let _ = response.send(certificate.encode().into());
             }
         }
