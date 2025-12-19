@@ -168,6 +168,9 @@ impl<
         let mut work = BTreeMap::new();
         let mut shutdown = self.context.stopped();
         loop {
+            // Track which view was modified (if any) for certificate construction
+            let updated_view: Option<View>;
+
             // Handle next message
             select! {
                 _ = &mut shutdown => {
@@ -199,6 +202,9 @@ impl<
                                 // Leader active in at least one recent round
                                 || work.iter().rev().take(skip_timeout).any(|(_, round)| round.is_active(leader));
                             active.send(is_active).unwrap();
+
+                            // Setting leader may enable batch verification
+                            updated_view = Some(current);
                         }
                         Some(Message::Constructed(message)) => {
                             // If the view isn't interesting, we can skip
@@ -219,6 +225,7 @@ impl<
                                 .add_constructed(message)
                                 .await;
                             self.added.inc();
+                            updated_view = Some(view);
                         }
                         None => {
                             break;
@@ -349,6 +356,9 @@ impl<
                                 .await;
                         }
                     }
+
+                    // Certificates are already forwarded to voter, no need for construction
+                    continue;
                 },
                 // Handle votes from the network
                 message = vote_receiver.recv() => {
@@ -399,6 +409,7 @@ impl<
                         .await {
                             self.added.inc();
                         }
+                    updated_view = Some(view);
                 },
             }
 
@@ -411,37 +422,28 @@ impl<
                 }
             }
 
-            // Look for a ready verifier (prioritizing the current view)
-            let mut timer = self.verify_latency.timer();
-            let mut selected = None;
-            if let Some(round) = work.get_mut(&current) {
-                if round.ready_notarizes() {
-                    let (voters, failed) =
-                        round.verify_notarizes(&mut self.context, &self.namespace);
-                    selected = Some((current, voters, failed));
-                } else if round.ready_nullifies() {
-                    let (voters, failed) =
-                        round.verify_nullifies(&mut self.context, &self.namespace);
-                    selected = Some((current, voters, failed));
-                }
-            }
-            if selected.is_none() {
-                let potential = work
-                    .iter_mut()
-                    .rev()
-                    .find(|(view, round)| {
-                        **view != current && **view >= finalized && round.ready_finalizes()
-                    })
-                    .map(|(view, round)| (*view, round));
-                if let Some((view, round)) = potential {
-                    let (voters, failed) =
-                        round.verify_finalizes(&mut self.context, &self.namespace);
-                    selected = Some((view, voters, failed));
-                }
-            }
+            // Process the updated view (if any)
+            let Some(view) = updated_view else {
+                continue;
+            };
+            let Some(round) = work.get_mut(&view) else {
+                continue;
+            };
 
-            // Process batch verification results (if any)
-            let verified_view = if let Some((view, voters, failed)) = selected {
+            // Batch verify votes if ready
+            let mut timer = self.verify_latency.timer();
+            let verified = if round.ready_notarizes() {
+                Some(round.verify_notarizes(&mut self.context, &self.namespace))
+            } else if round.ready_nullifies() {
+                Some(round.verify_nullifies(&mut self.context, &self.namespace))
+            } else if round.ready_finalizes() {
+                Some(round.verify_finalizes(&mut self.context, &self.namespace))
+            } else {
+                None
+            };
+
+            // Process batch verification results
+            if let Some((voters, failed)) = verified {
                 timer.observe();
 
                 // Process verified votes
@@ -459,60 +461,45 @@ impl<
                 }
 
                 // Store verified votes for certificate construction
-                let round = work.get_mut(&view).expect("round must exist");
                 for valid in voters {
                     round.add_verified(valid);
                 }
-                Some(view)
             } else {
                 timer.cancel();
                 trace!(
                     %current,
                     %finalized,
-                    waiting = work.len(),
                     "no verifier ready"
                 );
-                None
-            };
+            }
 
-            // Try to construct and forward certificates.
-            // We always try for the current view (because the last vote processed
-            // may have come from us), and also for the batch-verified view if different.
-            let views_to_check = match verified_view {
-                Some(v) if v != current => [Some(current), Some(v)],
-                _ => [Some(current), None],
-            };
-            for view in views_to_check.into_iter().flatten() {
-                let Some(round) = work.get_mut(&view) else {
-                    continue;
-                };
-                if let Some(notarization) = self
-                    .recover_latency
-                    .time_some(|| round.try_construct_notarization(&self.scheme))
-                {
-                    debug!(%view, "constructed notarization, forwarding to voter");
-                    voter
-                        .recovered(Certificate::Notarization(notarization))
-                        .await;
-                }
-                if let Some(nullification) = self
-                    .recover_latency
-                    .time_some(|| round.try_construct_nullification(&self.scheme))
-                {
-                    debug!(%view, "constructed nullification, forwarding to voter");
-                    voter
-                        .recovered(Certificate::Nullification(nullification))
-                        .await;
-                }
-                if let Some(finalization) = self
-                    .recover_latency
-                    .time_some(|| round.try_construct_finalization(&self.scheme))
-                {
-                    debug!(%view, "constructed finalization, forwarding to voter");
-                    voter
-                        .recovered(Certificate::Finalization(finalization))
-                        .await;
-                }
+            // Try to construct and forward certificates
+            if let Some(notarization) = self
+                .recover_latency
+                .time_some(|| round.try_construct_notarization(&self.scheme))
+            {
+                debug!(%view, "constructed notarization, forwarding to voter");
+                voter
+                    .recovered(Certificate::Notarization(notarization))
+                    .await;
+            }
+            if let Some(nullification) = self
+                .recover_latency
+                .time_some(|| round.try_construct_nullification(&self.scheme))
+            {
+                debug!(%view, "constructed nullification, forwarding to voter");
+                voter
+                    .recovered(Certificate::Nullification(nullification))
+                    .await;
+            }
+            if let Some(finalization) = self
+                .recover_latency
+                .time_some(|| round.try_construct_finalization(&self.scheme))
+            {
+                debug!(%view, "constructed finalization, forwarding to voter");
+                voter
+                    .recovered(Certificate::Finalization(finalization))
+                    .await;
             }
 
             // Drop any rounds that are no longer interesting
