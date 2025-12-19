@@ -350,17 +350,17 @@ pub struct EpochInfo {
     epoch: Epoch,
     height: u64,
     first: u64,
-    length: u64,
+    last: u64,
 }
 
 impl EpochInfo {
     /// Creates a new [`EpochInfo`].
-    pub const fn new(epoch: Epoch, height: u64, first: u64, length: u64) -> Self {
+    pub const fn new(epoch: Epoch, height: u64, first: u64, last: u64) -> Self {
         Self {
             epoch,
             height,
             first,
-            length,
+            last,
         }
     }
 
@@ -381,15 +381,12 @@ impl EpochInfo {
 
     /// Returns the last block height in this epoch.
     pub const fn last(&self) -> u64 {
-        // Compute as first + (length - 1) to avoid intermediate overflow
-        // when first + length would overflow but first + length - 1 wouldn't.
-        // This is safe because length is always >= 1 for valid epochs.
-        self.first + (self.length - 1)
+        self.last
     }
 
     /// Returns the length of this epoch.
     pub const fn length(&self) -> u64 {
-        self.length
+        self.last - self.first + 1
     }
 
     /// Returns the relative position of the queried height within this epoch.
@@ -400,7 +397,7 @@ impl EpochInfo {
     /// Returns the phase of the queried height within this epoch.
     pub const fn phase(&self) -> EpochPhase {
         let relative = self.relative();
-        let midpoint = self.length / 2;
+        let midpoint = self.length() / 2;
 
         if relative < midpoint {
             EpochPhase::Early
@@ -446,30 +443,29 @@ impl FixedEpocher {
     pub const fn new(length: NonZeroU64) -> Self {
         Self(length.get())
     }
+
+    /// Computes the first and last block height for an epoch, returning `None` if
+    /// either would overflow.
+    fn bounds(&self, epoch: Epoch) -> Option<(u64, u64)> {
+        let first = epoch.get().checked_mul(self.0)?;
+        let last = first.checked_add(self.0 - 1)?;
+        Some((first, last))
+    }
 }
 
 impl Epocher for FixedEpocher {
     fn containing(&self, height: u64) -> Option<EpochInfo> {
         let epoch = Epoch::new(height / self.0);
-        let first = epoch.get().checked_mul(self.0)?;
-        // Ensure last() (first + length - 1) won't overflow
-        first.checked_add(self.0 - 1)?;
+        let (first, _) = self.bounds(epoch)?;
         Some(EpochInfo::new(epoch, height, first, self.0))
     }
 
     fn first(&self, epoch: Epoch) -> Option<u64> {
-        let first = epoch.get().checked_mul(self.0)?;
-        // Ensure last() (first + length - 1) won't overflow
-        first.checked_add(self.0 - 1)?;
-        Some(first)
+        self.bounds(epoch).map(|(first, _)| first)
     }
 
     fn last(&self, epoch: Epoch) -> Option<u64> {
-        epoch
-            .get()
-            .checked_add(1)?
-            .checked_mul(self.0)?
-            .checked_sub(1)
+        self.bounds(epoch).map(|(_, last)| last)
     }
 }
 
