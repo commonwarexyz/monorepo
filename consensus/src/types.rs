@@ -359,16 +359,6 @@ pub trait Epocher: Clone + Send + Sync + 'static {
     /// Returns `None` if the height is not covered by this epoch strategy.
     fn length_at(&self, height: u64) -> Option<u64>;
 
-    /// Returns the first block height in the given epoch.
-    ///
-    /// The epoch should be obtained from [`containing`](Self::containing) to ensure validity.
-    fn first(&self, epoch: Epoch) -> u64;
-
-    /// Returns the last block height in the given epoch.
-    ///
-    /// The epoch should be obtained from [`containing`](Self::containing) to ensure validity.
-    fn last(&self, epoch: Epoch) -> u64;
-
     /// Returns the phase of the given height within its epoch.
     ///
     /// Returns `None` if the height is not covered by this epoch strategy.
@@ -387,16 +377,16 @@ pub trait Epocher: Clone + Send + Sync + 'static {
             EpochPhase::Late
         })
     }
-}
 
-/// Configuration for variable epoch lengths across block height ranges.
-///
-/// Enables networks to change block times while maintaining consistent epoch durations.
-/// For example, a network might start with 10-second blocks and later upgrade to 1-second blocks.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VariableEpocher {
-    /// Sorted ranges of (start_height, epoch_length) defining epoch transitions.
-    ranges: Vec<(u64, u64)>,
+    /// Returns the first block height in the given epoch.
+    ///
+    /// The epoch should be obtained from [`containing`](Self::containing) to ensure validity.
+    fn first(&self, epoch: Epoch) -> u64;
+
+    /// Returns the last block height in the given epoch.
+    ///
+    /// The epoch should be obtained from [`containing`](Self::containing) to ensure validity.
+    fn last(&self, epoch: Epoch) -> u64;
 }
 
 /// Configuration for fixed epoch lengths.
@@ -437,163 +427,6 @@ impl Epocher for FixedEpocher {
 
     fn last(&self, epoch: Epoch) -> u64 {
         self.first(epoch) + self.epoch_length - 1
-    }
-}
-
-impl VariableEpocher {
-    /// Creates a variable epoch strategy from height ranges.
-    ///
-    /// Ranges must cover all heights starting from 0 with no gaps.
-    ///
-    /// # Example  
-    /// ```rust
-    /// # use commonware_consensus::types::VariableEpocher;
-    /// let strategy = VariableEpocher::new(vec![
-    ///     (0, 60_480),        // Initial phase: 60,480 blocks per epoch
-    ///     (100_000, 604_800), // Later phase: 604,800 blocks per epoch
-    /// ]).expect("valid configuration");
-    /// ```
-    pub fn new(ranges: Vec<(u64, u64)>) -> Result<Self, &'static str> {
-        if ranges.is_empty() {
-            return Err("ranges cannot be empty");
-        }
-
-        let mut sorted_ranges = ranges;
-        sorted_ranges.sort_by_key(|(start, _)| *start);
-
-        // Validate ranges start at 0 and have no duplicates
-        if sorted_ranges[0].0 != 0 {
-            return Err("first range must start at height 0");
-        }
-
-        // Check for duplicate start heights
-        for i in 1..sorted_ranges.len() {
-            if sorted_ranges[i].0 == sorted_ranges[i - 1].0 {
-                return Err("duplicate start heights not allowed");
-            }
-        }
-
-        for (_, length) in sorted_ranges.iter() {
-            if *length == 0 {
-                return Err("epoch length must be positive");
-            }
-        }
-
-        Ok(Self {
-            ranges: sorted_ranges,
-        })
-    }
-}
-
-impl Epocher for VariableEpocher {
-    fn containing(&self, height: u64) -> Option<Epoch> {
-        let _epoch_length = self.length_at(height)?;
-
-        // Calculate cumulative epochs across ranges
-        let mut cumulative_epoch = 0;
-
-        for (range_start, range_epoch_length) in &self.ranges {
-            if height >= *range_start {
-                let next_range_start = self
-                    .ranges
-                    .iter()
-                    .find(|(start, _)| *start > *range_start)
-                    .map(|(start, _)| *start);
-
-                if let Some(next_start) = next_range_start {
-                    if height < next_start {
-                        let offset_in_range = height - range_start;
-                        let epoch_offset = offset_in_range / range_epoch_length;
-                        return Some(Epoch::new(cumulative_epoch + epoch_offset));
-                    } else {
-                        let range_size = next_start - range_start;
-                        let complete_epochs_in_range = range_size / range_epoch_length;
-                        cumulative_epoch += complete_epochs_in_range;
-                    }
-                } else {
-                    // This is the last range, height belongs here
-                    let offset_in_range = height - range_start;
-                    let epoch_offset = offset_in_range / range_epoch_length;
-                    return Some(Epoch::new(cumulative_epoch + epoch_offset));
-                }
-            }
-        }
-
-        None
-    }
-
-    fn length_at(&self, height: u64) -> Option<u64> {
-        for i in 0..self.ranges.len() {
-            let (start, length) = self.ranges[i];
-            if height >= start {
-                let next_start = self.ranges.get(i + 1).map(|(start, _)| *start);
-                if next_start.is_none_or(|next| height < next) {
-                    return Some(length);
-                }
-            }
-        }
-        None
-    }
-
-    fn first(&self, epoch: Epoch) -> u64 {
-        let (first_height, _) = self.epoch_info(epoch);
-        first_height
-    }
-
-    fn last(&self, epoch: Epoch) -> u64 {
-        self.first(epoch) + self.epoch_length_for_epoch(epoch) - 1
-    }
-}
-
-impl VariableEpocher {
-    /// Returns the epoch length for the given epoch number.
-    fn epoch_length_for_epoch(&self, epoch: Epoch) -> u64 {
-        let (_, epoch_length) = self.epoch_info(epoch);
-        epoch_length
-    }
-
-    /// Returns both the first height and epoch length for the given epoch.
-    fn epoch_info(&self, epoch: Epoch) -> (u64, u64) {
-        let mut current_height = 0;
-        let mut current_epoch = 0;
-
-        for &(range_start, epoch_length) in &self.ranges {
-            // Skip if we haven't reached this range yet
-            if current_height < range_start {
-                current_height = range_start;
-            }
-
-            // For the last range, extend indefinitely
-            let is_last_range = range_start == self.ranges.last().unwrap().0;
-            if is_last_range {
-                let epochs_needed = epoch.get() - current_epoch;
-                let first_height = current_height + epochs_needed * epoch_length;
-                return (first_height, epoch_length);
-            }
-
-            // Find the next range to determine this range's extent
-            let next_range_start = self
-                .ranges
-                .iter()
-                .find(|(start, _)| *start > range_start)
-                .map(|(start, _)| *start)
-                .unwrap_or(u64::MAX);
-
-            let epochs_in_range = (next_range_start - current_height) / epoch_length;
-
-            if epoch.get() < current_epoch + epochs_in_range {
-                let epoch_offset = epoch.get() - current_epoch;
-                let first_height = current_height + epoch_offset * epoch_length;
-                return (first_height, epoch_length);
-            }
-
-            current_epoch += epochs_in_range;
-            current_height = next_range_start;
-        }
-
-        // Fallback (should not reach here with proper validation)
-        let fallback_height = epoch.get() * self.ranges[0].1;
-        (fallback_height, self.ranges[0].1)
     }
 }
 
@@ -1015,33 +848,6 @@ mod tests {
     }
 
     #[test]
-    fn test_variable_epoch_block_time_transition() {
-        // Test maintaining consistent epoch duration across block time changes
-        let config = VariableEpocher::new(vec![
-            (0, 60_480),        // Initial phase: 60,480 blocks per epoch
-            (100_000, 604_800), // Later phase: 604,800 blocks per epoch
-        ])
-        .expect("valid configuration");
-
-        // Verify epoch lengths adapt to maintain consistent real-world duration
-        assert_eq!(config.length_at(50_000), Some(60_480));
-        assert_eq!(config.length_at(200_000), Some(604_800));
-
-        // Verify epoch progression across transitions
-        assert_eq!(config.containing(0), Some(Epoch::new(0)));
-        assert_eq!(config.containing(60_479), Some(Epoch::new(0)));
-        assert_eq!(config.containing(60_480), Some(Epoch::new(1)));
-        assert_eq!(config.containing(100_000), Some(Epoch::new(1)));
-        assert_eq!(config.containing(704_800), Some(Epoch::new(2)));
-
-        // Test edge case: u64::MAX height
-        assert_eq!(
-            config.containing(u64::MAX),
-            Some(Epoch::new((u64::MAX - 100_000) / 604_800 + 1))
-        );
-    }
-
-    #[test]
     fn test_fixed_epoch_strategy() {
         let strategy = FixedEpocher::new(100);
 
@@ -1063,68 +869,6 @@ mod tests {
     #[should_panic(expected = "epoch length must be positive")]
     fn test_fixed_epoch_strategy_zero_length() {
         FixedEpocher::new(0);
-    }
-
-    #[test]
-    fn test_variable_epoch_strategy() {
-        let strategy = VariableEpocher::new(vec![
-            (0, 10),  // Epochs 0-3: 10 blocks each (heights 0-39)
-            (40, 20), // Epochs 4+: 20 blocks each (heights 40+)
-        ])
-        .expect("valid strategy");
-
-        // Test range transitions
-        assert_eq!(strategy.containing(9), Some(Epoch::new(0))); // First range
-        assert_eq!(strategy.containing(39), Some(Epoch::new(3))); // End of first range
-        assert_eq!(strategy.containing(40), Some(Epoch::new(4))); // Start of second range
-        assert_eq!(strategy.containing(60), Some(Epoch::new(5))); // Second range
-
-        // Test epoch lengths change at transition
-        assert_eq!(strategy.length_at(30), Some(10)); // First range
-        assert_eq!(strategy.length_at(50), Some(20)); // Second range
-
-        // Test epoch boundaries across transition
-        assert_eq!(strategy.first(Epoch::new(3)), 30); // Last epoch of first range
-        assert_eq!(strategy.first(Epoch::new(4)), 40); // First epoch of second range
-    }
-
-    #[test]
-    fn test_variable_epoch_strategy_validation() {
-        // Empty ranges
-        assert!(VariableEpocher::new(vec![]).is_err());
-
-        // Must start at height 0
-        assert!(VariableEpocher::new(vec![(10, 5)]).is_err());
-
-        // Zero epoch length
-        assert!(VariableEpocher::new(vec![(0, 0)]).is_err());
-
-        // Duplicate start heights
-        assert!(VariableEpocher::new(vec![(0, 5), (0, 10)]).is_err());
-
-        // Valid configuration
-        assert!(VariableEpocher::new(vec![(0, 10), (100, 20)]).is_ok());
-    }
-
-    #[test]
-    fn test_epocher_trait_usage() {
-        // Test that both strategies can be used through the trait
-        fn test_strategy_behavior<S: Epocher>(strategy: &S) {
-            let epoch = strategy.containing(50).expect("valid height");
-            let length = strategy.length_at(50).expect("valid height");
-            let first = strategy.first(epoch);
-            let last = strategy.last(epoch);
-
-            assert!(first <= 50);
-            assert!(50 <= last);
-            assert_eq!(last - first + 1, length);
-        }
-
-        let fixed = FixedEpocher::new(100);
-        let variable = VariableEpocher::new(vec![(0, 50), (100, 200)]).expect("valid strategy");
-
-        test_strategy_behavior(&fixed);
-        test_strategy_behavior(&variable);
     }
 
     #[test]
