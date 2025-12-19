@@ -430,6 +430,9 @@ impl<
             return;
         };
 
+        // Remove from candidates since certification is complete
+        self.certification_candidates.remove(&view);
+
         // Persist certification result for recovery
         let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
         self.append_journal(view, artifact.clone()).await;
@@ -458,6 +461,13 @@ impl<
             self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
+
+        // Prune certification candidates that are no longer needed. This also
+        // bounds the size of certification_candidates during replay (views are
+        // added when notarizations are replayed, then removed here when
+        // finalizations are replayed).
+        let last_finalized = self.state.last_finalized();
+        self.certification_candidates.retain(|v| *v > last_finalized);
     }
 
     /// Build, persist, and broadcast a notarize vote when this view is ready.
@@ -827,11 +837,7 @@ impl<
             }
 
             // Attempt to certify any views that we have notarizations for
-            let candidates = take(&mut self.certification_candidates)
-                .range(self.state.last_finalized().next()..)
-                .copied()
-                .collect::<Vec<_>>();
-            for v in candidates {
+            for v in take(&mut self.certification_candidates) {
                 debug!(%v, "taking certification candidate");
                 if let Some(Request(ctx, receiver)) = self.try_certify(v).await {
                     let view = ctx.view();
