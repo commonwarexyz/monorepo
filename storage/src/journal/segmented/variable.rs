@@ -94,7 +94,7 @@
 //! });
 //! ```
 
-use crate::journal::Error;
+use crate::{journal::Error, Crc32};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
@@ -239,7 +239,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         offset: u32,
     ) -> Result<(u32, u32, V), Error> {
         // Read varint size (max 5 bytes for u32)
-        let mut hasher = crc32fast::Hasher::new();
+        let mut hasher = Crc32::new();
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let varint_buf = blob.read_at(vec![0; MIN_ITEM_SIZE], offset).await?;
         let mut varint = varint_buf.as_ref();
@@ -301,7 +301,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         }
 
         // Read varint size (max 5 bytes for u32, and min item size is 5 bytes)
-        let mut hasher = crc32fast::Hasher::new();
+        let mut hasher = Crc32::new();
         let mut varint_buf = [0u8; MIN_ITEM_SIZE];
         reader
             .read_exact(&mut varint_buf, MIN_ITEM_SIZE)
@@ -566,7 +566,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         buf.put_slice(&encoded);
 
         // Calculate checksum only for the entry data (without padding)
-        let checksum = crc32fast::hash(&buf[entry_start..]);
+        let checksum = Crc32::checksum(&buf[entry_start..]);
         buf.put_u32(checksum);
         assert_eq!(buf[entry_start..].len(), entry_len);
 

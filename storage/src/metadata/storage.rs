@@ -1,4 +1,5 @@
 use super::{Config, Error};
+use crate::Crc32;
 use bytes::BufMut;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_runtime::{
@@ -168,7 +169,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         let checksum_index = buf.len() - 4;
         let stored_checksum =
             u32::from_be_bytes(buf.as_ref()[checksum_index..].try_into().unwrap());
-        let computed_checksum = crc32fast::hash(&buf.as_ref()[..checksum_index]);
+        let computed_checksum = Crc32::checksum(&buf.as_ref()[..checksum_index]);
         if stored_checksum != computed_checksum {
             // Truncate and return none
             warn!(
@@ -372,7 +373,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
 
             // Update checksum
             let checksum_index = target.data.len() - 4;
-            let checksum = crc32fast::hash(&target.data[..checksum_index]).to_be_bytes();
+            let checksum = Crc32::checksum(&target.data[..checksum_index]).to_be_bytes();
             target.data[checksum_index..].copy_from_slice(&checksum);
             writes.push(
                 target
@@ -402,7 +403,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
             value.write(&mut next_data);
             lengths.insert(key.clone(), Info::new(start, value.encode_size()));
         }
-        next_data.put_u32(crc32fast::hash(&next_data[..]));
+        next_data.put_u32(Crc32::checksum(&next_data[..]));
 
         // Persist changes
         target.blob.write_at(next_data.clone(), 0).await?;

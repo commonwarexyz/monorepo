@@ -55,9 +55,12 @@
 //!
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
-use crate::journal::{
-    contiguous::{MutableContiguous, PersistableContiguous},
-    Error,
+use crate::{
+    journal::{
+        contiguous::{MutableContiguous, PersistableContiguous},
+        Error,
+    },
+    Crc32,
 };
 use bytes::BufMut;
 use commonware_codec::{CodecFixed, DecodeExt as _, FixedSize};
@@ -334,7 +337,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         assert_eq!(size % Self::CHUNK_SIZE_U64, 0);
         let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
         let item = item.encode();
-        let checksum = crc32fast::hash(&item);
+        let checksum = Crc32::checksum(&item);
         buf.extend_from_slice(&item);
         buf.put_u32(checksum);
 
@@ -469,7 +472,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     ///  Error::Codec likely indicates a logic error rather than a corruption issue.
     fn verify_integrity(buf: &[u8]) -> Result<A, Error> {
         let stored_checksum = u32::from_be_bytes(buf[A::SIZE..].try_into().unwrap());
-        let checksum = crc32fast::hash(&buf[..A::SIZE]);
+        let checksum = Crc32::checksum(&buf[..A::SIZE]);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }

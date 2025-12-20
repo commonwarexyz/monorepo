@@ -1,5 +1,5 @@
 use super::{Config, Error};
-use crate::rmap::RMap;
+use crate::{rmap::RMap, Crc32};
 use bytes::{Buf, BufMut};
 use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
@@ -25,12 +25,12 @@ struct Record<V: CodecFixed<Cfg = ()>> {
 
 impl<V: CodecFixed<Cfg = ()>> Record<V> {
     fn new(value: V) -> Self {
-        let crc = crc32fast::hash(&value.encode());
+        let crc = Crc32::checksum(&value.encode());
         Self { value, crc }
     }
 
     fn is_valid(&self) -> bool {
-        self.crc == crc32fast::hash(&self.value.encode())
+        self.crc == Crc32::checksum(&self.value.encode())
     }
 }
 

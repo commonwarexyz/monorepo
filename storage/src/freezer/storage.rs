@@ -1,5 +1,8 @@
 use super::{Config, Error, Identifier};
-use crate::journal::segmented::variable::{Config as JournalConfig, Journal};
+use crate::{
+    journal::segmented::variable::{Config as JournalConfig, Journal},
+    Crc32,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
@@ -184,7 +187,7 @@ impl Entry {
 
     /// Compute a checksum for [Entry].
     fn compute_crc(epoch: u64, section: u64, offset: u32, added: u8) -> u32 {
-        let mut hasher = crc32fast::Hasher::new();
+        let mut hasher = Crc32::new();
         hasher.update(&epoch.to_be_bytes());
         hasher.update(&section.to_be_bytes());
         hasher.update(&offset.to_be_bytes());
@@ -718,7 +721,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     ///
     /// To determine the appropriate entry, we AND the key's hash with the current table size.
     fn table_index(&self, key: &K) -> u32 {
-        let hash = crc32fast::hash(key.as_ref());
+        let hash = Crc32::checksum(key.as_ref());
         hash & (self.table_size - 1)
     }
 
