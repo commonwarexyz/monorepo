@@ -1322,13 +1322,9 @@ mod tests {
             let active = batcher_mailbox.update(view1, leader, View::zero()).await;
             assert!(active);
 
-            // Build proposals for both views
+            // Part 1: Send NOTARIZE votes for view 1 (above finalized=0, should succeed)
             let round1 = Round::new(epoch, view1);
             let proposal1 = Proposal::new(round1, View::zero(), Sha256::hash(b"payload1"));
-            let round2 = Round::new(epoch, view2);
-            let proposal2 = Proposal::new(round2, view1, Sha256::hash(b"payload2"));
-
-            // Part 1: Send NOTARIZE votes for view 1 (above finalized=0, should succeed)
             for i in 1..quorum_size {
                 let vote = Notarize::sign(&schemes[i], &namespace, proposal1.clone()).unwrap();
                 if let Some(ref mut sender) = participant_senders[i] {
@@ -1348,9 +1344,6 @@ mod tests {
             batcher_mailbox
                 .constructed(Vote::Notarize(our_notarize))
                 .await;
-
-            // Wait for network delivery and processing
-            context.sleep(Duration::from_millis(100)).await;
 
             // Should receive a notarization certificate (view 1 is above finalized=0)
             loop {
@@ -1376,6 +1369,8 @@ mod tests {
             assert!(active);
 
             // Send NOTARIZE votes for view 2 (now at finalized=2, should NOT succeed)
+            let round2 = Round::new(epoch, view2);
+            let proposal2 = Proposal::new(round2, view1, Sha256::hash(b"payload2"));
             for i in 1..quorum_size {
                 let vote = Notarize::sign(&schemes[i], &namespace, proposal2.clone()).unwrap();
                 if let Some(ref mut sender) = participant_senders[i] {
