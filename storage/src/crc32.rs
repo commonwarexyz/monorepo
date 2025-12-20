@@ -3,10 +3,12 @@
 /// Size of a CRC32 checksum in bytes.
 pub const SIZE: usize = 4;
 
+/// The CRC32 algorithm used (CRC32C).
+const ALGORITHM: crc_fast::CrcAlgorithm = crc_fast::CrcAlgorithm::Crc32Iscsi;
+
 /// Incremental CRC32 hasher for computing checksums over multiple data chunks.
-#[derive(Default)]
 pub struct Crc32 {
-    inner: crc32fast::Hasher,
+    inner: crc_fast::Digest,
 }
 
 impl Crc32 {
@@ -14,7 +16,7 @@ impl Crc32 {
     #[inline]
     pub fn new() -> Self {
         Self {
-            inner: crc32fast::Hasher::new(),
+            inner: crc_fast::Digest::new(ALGORITHM),
         }
     }
 
@@ -27,12 +29,12 @@ impl Crc32 {
     /// Finalize and return the checksum.
     #[inline]
     pub fn finalize(self) -> u32 {
-        self.inner.finalize()
+        self.inner.finalize() as u32
     }
 
     /// Compute a CRC32 checksum of the given data.
     #[inline]
     pub fn checksum(data: &[u8]) -> u32 {
-        crc32fast::hash(data)
+        crc_fast::checksum(ALGORITHM, data) as u32
     }
 }

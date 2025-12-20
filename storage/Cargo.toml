@@ -23,7 +23,7 @@ commonware-cryptography = { workspace = true, default-features = false }
 commonware-macros.workspace = true
 commonware-runtime = { workspace = true, optional = true }
 commonware-utils = { workspace = true, default-features = false }
-crc32fast = { workspace = true, optional = true }
+crc-fast = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 prometheus-client = { workspace = true, optional = true }
@@ -50,7 +50,7 @@ std = [
 	"commonware-cryptography/std",
 	"commonware-runtime",
 	"commonware-utils/std",
-	"crc32fast/std",
+	"crc-fast/std",
 	"futures",
 	"futures-util",
 	"prometheus-client",
