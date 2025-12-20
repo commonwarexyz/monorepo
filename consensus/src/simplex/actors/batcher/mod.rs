@@ -1216,9 +1216,9 @@ mod tests {
         leader_activity_detection(ed25519::fixture);
     }
 
-    /// Test that notarize/nullify votes above finalized trigger verification/construction,
-    /// but votes at or below finalized do not. Finalize votes always work.
-    fn notarize_nullify_respects_finalized<S, F>(mut fixture: F)
+    /// Test that votes above finalized trigger verification/construction,
+    /// but votes at or below finalized do not.
+    fn votes_skipped_for_finalized_views<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -1355,12 +1355,8 @@ mod tests {
                 }
             }
 
-            // Part 2: Advance to view 2 with view 1 finalized
-            // Now test NOTARIZE votes for view 2 which should NOT be processed (at finalized=1)
-            let active = batcher_mailbox.update(view2, leader, view1).await;
-            assert!(active);
-
-            // But first, update finalized to view 2 so that view 2 is at finalized level
+            // Part 2: Advance finalized to view 2
+            // Now test NOTARIZE votes for view 2 which should NOT be processed (at finalized=2)
             let view3 = View::new(3);
             let active = batcher_mailbox.update(view3, leader, view2).await;
             assert!(active);
@@ -1386,62 +1382,28 @@ mod tests {
                 .constructed(Vote::Notarize(our_notarize2))
                 .await;
 
-            // Should NOT receive a notarization certificate for the finalized view
+            // Should NOT receive any certificate for the finalized view
             select! {
                 msg = voter_receiver.next() => {
-                    if matches!(msg, Some(voter::Message::Verified(Certificate::Notarization(n), _)) if n.view() == view2) {
-                        panic!("should not receive a notarization certificate for the finalized view");
+                    match msg {
+                        Some(voter::Message::Proposal(_)) => {},
+                        Some(voter::Message::Verified(cert, _)) if cert.view() == view2 => {
+                            panic!("should not receive any certificate for the finalized view");
+                        },
+                        _ => {},
                     }
                 },
                 _ = context.sleep(Duration::from_millis(200)) => { },
             };
-
-            // Part 3: Test that FINALIZE votes in finalized views DO produce certificates
-            // Send quorum of FINALIZE votes for view 2 (finalized view)
-            for i in 1..quorum_size {
-                let vote = Finalize::sign(&schemes[i], &namespace, proposal2.clone()).unwrap();
-                if let Some(ref mut sender) = participant_senders[i] {
-                    sender
-                        .send(
-                            Recipients::One(me.clone()),
-                            Vote::Finalize(vote).encode().into(),
-                            true,
-                        )
-                        .await
-                        .unwrap();
-                }
-            }
-
-            // Send our own finalize vote for view 2
-            let our_finalize = Finalize::sign(&schemes[0], &namespace, proposal2.clone()).unwrap();
-            batcher_mailbox
-                .constructed(Vote::Finalize(our_finalize))
-                .await;
-
-            // Give network time to deliver and batcher time to process
-            context.sleep(Duration::from_millis(100)).await;
-
-            // Should receive a finalization certificate - finalize IS allowed in finalized views
-            loop {
-                let output = voter_receiver.next().await.unwrap();
-                match output {
-                    voter::Message::Proposal(_) => continue,
-                    voter::Message::Verified(Certificate::Finalization(f), _) => {
-                        assert_eq!(f.view(), view2, "Should construct finalization from votes in finalized view");
-                        break;
-                    }
-                    _ => panic!("Unexpected message type"),
-                }
-            }
         });
     }
 
     #[test_traced]
-    fn test_notarize_nullify_respects_finalized() {
-        notarize_nullify_respects_finalized(bls12381_threshold::fixture::<MinPk, _>);
-        notarize_nullify_respects_finalized(bls12381_threshold::fixture::<MinSig, _>);
-        notarize_nullify_respects_finalized(bls12381_multisig::fixture::<MinPk, _>);
-        notarize_nullify_respects_finalized(bls12381_multisig::fixture::<MinSig, _>);
-        notarize_nullify_respects_finalized(ed25519::fixture);
+    fn test_votes_skipped_for_finalized_views() {
+        votes_skipped_for_finalized_views(bls12381_threshold::fixture::<MinPk, _>);
+        votes_skipped_for_finalized_views(bls12381_threshold::fixture::<MinSig, _>);
+        votes_skipped_for_finalized_views(bls12381_multisig::fixture::<MinPk, _>);
+        votes_skipped_for_finalized_views(bls12381_multisig::fixture::<MinSig, _>);
+        votes_skipped_for_finalized_views(ed25519::fixture);
     }
 }
