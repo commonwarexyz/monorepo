@@ -170,16 +170,16 @@ impl crate::Listener for Listener {
         }
 
         // Return the sink and stream
-        let (read_half, write_half) = stream.into_split();
+        let (stream, sink) = stream.into_split();
         Ok((
             addr,
             Sink {
                 write_timeout: self.cfg.write_timeout,
-                sink: write_half,
+                sink,
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
-                stream: read_half,
+                stream,
                 buffer: vec![0u8; self.cfg.read_buffer_size],
                 start: 0,
                 end: 0,
@@ -322,15 +322,15 @@ impl crate::Network for Network {
         }
 
         // Return the sink and stream
-        let (read_half, write_half) = stream.into_split();
+        let (stream, sink) = stream.into_split();
         Ok((
             Sink {
                 write_timeout: self.cfg.write_timeout,
-                sink: write_half,
+                sink,
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
-                stream: read_half,
+                stream,
                 buffer: vec![0u8; self.cfg.read_buffer_size],
                 start: 0,
                 end: 0,
