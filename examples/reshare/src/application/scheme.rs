@@ -4,7 +4,10 @@
 use crate::orchestrator::EpochTransition;
 use commonware_consensus::{simplex, types::Epoch};
 use commonware_cryptography::{
-    bls12381::primitives::variant::{MinSig, Variant},
+    bls12381::{
+        dkg,
+        primitives::variant::{MinSig, Variant},
+    },
     certificate::{self, Scheme},
     ed25519, PublicKey, Signer,
 };
@@ -23,13 +26,15 @@ pub type EdScheme = simplex::scheme::ed25519::Scheme;
 #[derive(Clone)]
 pub struct Provider<S: Scheme, C: Signer> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
+    certificate_verifier: Option<Arc<S>>,
     signer: C,
 }
 
 impl<S: Scheme, C: Signer> Provider<S, C> {
-    pub fn new(signer: C) -> Self {
+    pub fn new(signer: C, certificate_verifier: Option<S>) -> Self {
         Self {
             schemes: Arc::new(Mutex::new(HashMap::new())),
+            certificate_verifier: certificate_verifier.map(Arc::new),
             signer,
         }
     }
@@ -61,6 +66,10 @@ impl<S: Scheme, C: Signer> certificate::Provider for Provider<S, C> {
         let schemes = self.schemes.lock().unwrap();
         schemes.get(&epoch).cloned()
     }
+
+    fn all(&self) -> Option<Arc<S>> {
+        self.certificate_verifier.clone()
+    }
 }
 
 pub trait EpochProvider {
@@ -73,6 +82,14 @@ pub trait EpochProvider {
         &self,
         transition: &EpochTransition<Self::Variant, Self::PublicKey>,
     ) -> Self::Scheme;
+
+    /// Creates an epoch-independent certificate verifier from the DKG output.
+    ///
+    /// Returns `None` for schemes that don't support epoch-independent verification
+    /// (Ed25519 during the initial DKG requires the full participant list to verify certificates).
+    fn certificate_verifier(
+        output: &dkg::Output<Self::Variant, Self::PublicKey>,
+    ) -> Option<Self::Scheme>;
 }
 
 impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::PrivateKey> {
@@ -107,6 +124,14 @@ impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::Private
             },
         )
     }
+
+    fn certificate_verifier(
+        output: &dkg::Output<Self::Variant, Self::PublicKey>,
+    ) -> Option<Self::Scheme> {
+        Some(ThresholdScheme::certificate_verifier(
+            *output.public().public(),
+        ))
+    }
 }
 
 impl EpochProvider for Provider<EdScheme, ed25519::PrivateKey> {
@@ -120,5 +145,13 @@ impl EpochProvider for Provider<EdScheme, ed25519::PrivateKey> {
     ) -> Self::Scheme {
         EdScheme::signer(transition.dealers.clone(), self.signer.clone())
             .unwrap_or_else(|| EdScheme::verifier(transition.dealers.clone()))
+    }
+
+    fn certificate_verifier(
+        _output: &dkg::Output<Self::Variant, Self::PublicKey>,
+    ) -> Option<Self::Scheme> {
+        // Ed25519 doesn't support epoch-independent certificate verification
+        // since certificates require the full participant list which changes per epoch.
+        None
     }
 }

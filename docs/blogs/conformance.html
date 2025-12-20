@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Change is the Only Constant</title>
+    <meta name="description" content="Picture this: Your team is scrambling to get the latest release of a project out, and in one of several hasty PR reviews, your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack.">
+    <meta name="author" content="Ben Clabby">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <link rel="canonical" href="https://commonware.xyz/blogs/conformance.html" />
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/conformance.html" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/conformance.jpg" />
+    <meta property="og:title" content="Change is the Only Constant" />
+    <meta property="og:description" content="Picture this: Your team is scrambling to get the latest release of a project out, and in one of several hasty PR reviews, your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack." />
+    <meta property="article:author" content="https://x.com/vex_0x" />
+    <meta property="article:published_time" content="2025-12-19T00:00:00Z" />
+    <meta property="article:modified_time" content="2025-12-19T00:00:00Z" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/conformance.html" />
+    <meta property="twitter:title" content="Change is the Only Constant" />
+    <meta property="twitter:description" content="Picture this: Your team is scrambling to get the latest release of a project out, and in one of several hasty PR reviews, your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/conformance.jpg" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    <meta property="twitter:creator" content="@vex_0x" />
+
+    <link rel="stylesheet" type="text/css" href="/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Change is the Only Constant</h1>
+        <div class="meta">
+            <div class="author">By <a href="https://x.com/vex_0x">Ben Clabby</a></div>
+            <div class="date">December 19, 2025</div>
+        </div>
+        <p>Picture this: Your team is scrambling to get the latest release of a project out, and in one of several hasty PR reviews, your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack.</p>
+        <p>To some degree, we've all been there. Whether it be a change to the order of fields in a type's wire format or a subtle tweak to the back-and-forth of a handshake, silent breakage of functionality can consume days of your time and hurt the reputation of the project.</p>
+
+        <h2><code>conformance</code></h2>
+        <p>Detecting as many of these breaking changes as possible <i>before</i> they arrive in the hands of our users unannounced is critical, and at the same time, we don't trust ourselves to protect every nuanced change with manual review (nor do we expect our users to). By defining a set of tests that validate the behavior of an implementation against a known-good reference, CI can catch breaking changes before they make it into the trunk branch. Our code is constantly evolving, but we need to make sure that some things stay in-place.</p>
+
+        <p>We've introduced a new primitive, <code>conformance</code>, to offer an easy path to define and run "conformance tests." Manually creating cases for every mechanism in a project is both difficult and brittle - <code>conformance</code> opts for automation. All that it takes is implementing the following trait on types that you'd like to constrain:</p>
+        <pre>
+            <code class="language-rust">
+pub trait Conformance: Send + Sync {
+    /// Produce deterministic bytes from a seed for conformance testing.
+    ///
+    /// The implementation should use the seed to generate deterministic
+    /// test data and return a byte vector representing the commitment.
+    fn commit(seed: u64) -> impl Future&lt;Output = Vec&lt;u8&gt;&gt; + Send;
+}
+            </code>
+        </pre>
+        <p>Any type that implements <code>Conformance</code> can then use the <a href="https://github.com/commonwarexyz/monorepo/blob/99799d61e2ae3742944d1a6c71017a4cd81cca2a/conformance/macros/src/lib.rs#L89-L112"><code>conformance_tests!</code></a> macro to generate a test that commits to a configurable number of generated cases. These commitments are then written to a file that can be checked into the repository. For example, if we want to assert the stability of a type's wire format, we can use the <a href="https://github.com/commonwarexyz/monorepo/blob/66c2f637029774652e976b10e81449d0c17a863f/codec/src/conformance.rs#L39-L55"><code>CodecConformance</code></a> wrapper that delegates <code>Conformance::commit</code> to an <code>Arbitrary</code> implementation:</p>
+        <pre>
+            <code class="language-rust">
+use bytes::BufMut;
+use commonware_codec::{conformance::CodecConformance, Write, FixedSize};
+use commonware_conformance::conformance_tests;
+
+#[derive(arbitrary::Arbitrary)]
+struct MyType([u8; Self::SIZE]);
+
+impl Write for MyType {
+    fn write(&amp;self, buf: &amp;mut impl BufMut) {
+        buf.put_slice(&amp;self.0);
+    }
+}
+
+impl FixedSize for MyType {
+    const SIZE: usize = 8;
+}
+
+conformance_tests! {
+    // Generate 1024 test cases for MyType using seeds 0..1024
+    CodecConformance&lt;MyType&gt; =&gt; 1024
+}
+            </code>
+        </pre>
+        <p>This test will generate a <code>conformance.toml</code> file in the crate root with the following contents:</p>
+        <pre>
+            <code class="language-toml">
+["crate::CodecConformance&lt;MyType&gt;"]
+n_cases = 1024
+hash = "dd8bf4b8ca06978d565c0aef2c2b8823c7b3fdcb065a4d1c1b33fe76597c52c6"
+            </code>
+        </pre>
+        <p>Any time we change the code, we can run the conformance tests to ensure that the generated commitments match what is expected. If they don't, we know that we've introduced a breaking change and can take steps to explicitly acknowledge or revert it.</p>
+        <p><code>conformance</code> is also useful for validating the stability of mechanisms. For example, we use this framework to <a href="https://github.com/commonwarexyz/monorepo/blob/66c2f637029774652e976b10e81449d0c17a863f/cryptography/src/handshake/conformance.rs">assert the stability of <code>cryptography</code>'s key exchange protocol</a>:</p>
+        <pre>
+            <code class="language-rust">
+use commonware_cryptography::{
+    ed25519::PrivateKey,
+    handshake::{dial_end, dial_start, listen_end, listen_start, Context},
+    transcript::Transcript,
+    Signer,
+};
+use commonware_codec::Encode;
+use commonware_conformance::{conformance_tests, Conformance};
+use commonware_math::algebra::Random;
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+
+const NAMESPACE: &[u8] = b"_COMMONWARE_HANDSHAKE_CONFORMANCE_TESTS";
+
+struct Handshake;
+
+impl Conformance for Handshake {
+    async fn commit(seed: u64) -&gt; Vec&lt;u8&gt; {
+        let mut log = Vec::new();
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+        let dialer_key = PrivateKey::random(&mut rng);
+        let listener_key = PrivateKey::random(&mut rng);
+
+        let (dialer_state, dialer_greeting) = dial_start(
+            &mut rng,
+            Context::new(
+                &Transcript::new(NAMESPACE),
+                0,
+                0..1,
+                dialer_key.clone(),
+                listener_key.public_key(),
+            ),
+        );
+        log.extend(dialer_greeting.encode());
+
+        let (listener_state, listener_greeting_ack) = listen_start(
+            &mut rng,
+            Context::new(
+                &Transcript::new(NAMESPACE),
+                0,
+                0..1,
+                listener_key,
+                dialer_key.public_key(),
+            ),
+            dialer_greeting,
+        )
+        .unwrap();
+        log.extend(listener_greeting_ack.encode());
+
+        let (dialer_ack, mut dialer_tx, mut dialer_rx) =
+            dial_end(dialer_state, listener_greeting_ack).unwrap();
+        log.extend(dialer_ack.encode());
+
+        let (mut listener_tx, mut listener_rx) = listen_end(listener_state, dialer_ack).unwrap();
+
+        // Generate a random message to send to the listener from the dialer.
+        let mut random_msg = vec![0u8; rng.gen_range(0..256)];
+        rng.fill(&mut random_msg[..]);
+        log.extend(random_msg.encode());
+
+        let dialer_ciphertext = dialer_tx.send(random_msg.as_slice()).unwrap();
+        assert_ne!(dialer_ciphertext, random_msg);
+        log.extend(dialer_ciphertext.encode());
+
+        let received_msg = listener_rx.recv(&dialer_ciphertext).unwrap();
+        assert_eq!(received_msg, random_msg);
+        log.extend(received_msg.encode());
+
+        // -- snip --
+
+        log
+    }
+}
+
+conformance_tests! {
+    Handshake =&gt; 4096,
+}
+            </code>
+        </pre>
+
+        <h2>A Multi-Layered Approach to Reliability</h2>
+        <p>Commonware is coming up on its first <a href="https://github.com/commonwarexyz/monorepo/milestone/15">long-term support release</a>. By adopting conformance testing as a standard practice, we add another layer of protection to our development and release process.</p>
+        <p>In our codebase today, <code>conformance</code> covers:</p>
+        <ul>
+            <li>Wire formats (<code>codec</code>)</li>
+            <li>Database operations (<code>storage</code>)</li>
+            <li>Cryptographic schemes (<code>cryptography</code>)</li>
+        </ul>
+        <p>With more primitives to follow suit. Each time a breaking change to the conformance specification is introduced, our CI fails, and we are forced to explicitly acknowledge the change by updating the conformance commitments and adding a "<a href="https://github.com/commonwarexyz/monorepo/pulls?q=is%3Aopen+is%3Apr+label%3Abreaking-format">breaking-format</a>" or "<a href="https://github.com/commonwarexyz/monorepo/pulls?q=is%3Aopen+is%3Apr+label%3Abreaking-api">breaking-api</a>" label to the change. This process not only helps us catch silent changes early but also serves as a trail of breadcrumbs for us to use while authoring releases that include intentional breakages.</p>
+        <p>Alongside our other testing strategies (<a href="https://commonware.xyz/blogs/commonware-runtime"><code>runtime</code> for deterministic simulations</a>, <a href="https://github.com/commonwarexyz/monorepo/blob/HEAD/FUZZING.md">prolonged fuzzing campaigns</a>, <a href="https://alto.commonware.xyz">persistent devnets</a>, and <a href="https://github.com/commonwarexyz/monorepo/actions/workflows/slow.yml">an extensive suite of unit + integration tests</a>), conformance testing is a powerful tool in our arsenal to ensure that our libraries stay reliable as they continue to evolve.</p>
+    </div>
+
+    <div id="footer-placeholder"></div>
+    <script src="/shared.js"></script>
+</body>
+
+</html>

@@ -47,6 +47,7 @@ impl<K, P> Mailbox<K, P> {
 
 impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     type Key = K;
+    type PublicKey = P;
 
     /// Send a fetch request to the peer actor.
     ///
@@ -76,6 +77,34 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
             ))
             .await
             .expect("Failed to send fetch_all");
+    }
+
+    async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
+        self.sender
+            .send(Message::Fetch(vec![FetchRequest {
+                key,
+                targets: Some(targets),
+            }]))
+            .await
+            .expect("Failed to send fetch_targeted");
+    }
+
+    async fn fetch_all_targeted(
+        &mut self,
+        requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
+    ) {
+        self.sender
+            .send(Message::Fetch(
+                requests
+                    .into_iter()
+                    .map(|(key, targets)| FetchRequest {
+                        key,
+                        targets: Some(targets),
+                    })
+                    .collect(),
+            ))
+            .await
+            .expect("Failed to send fetch_all_targeted");
     }
 
     /// Send a cancel request to the peer actor.
@@ -108,48 +137,5 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
             .send(Message::Clear)
             .await
             .expect("Failed to send cancel_all");
-    }
-}
-
-impl<K: Span, P: PublicKey> Mailbox<K, P> {
-    /// Send a fetch request restricted to specific target peers.
-    ///
-    /// Only target peers are tried, there is no fallback to other peers. Targets
-    /// persist through transient failures (timeout, "no data" response, send failure)
-    /// since the peer might be slow or might receive the data later.
-    ///
-    /// If a fetch is already in progress for this key, the new targets are added
-    /// to the existing target set. To clear targeting and fall back to any peer,
-    /// call [`fetch`](Self::fetch) instead.
-    ///
-    /// Targets are automatically cleared when the fetch succeeds or is canceled.
-    /// When a peer is blocked (sent invalid data), only that peer is removed
-    /// from the target set.
-    pub async fn fetch_targeted(&mut self, key: K, targets: NonEmptyVec<P>) {
-        self.sender
-            .send(Message::Fetch(vec![FetchRequest {
-                key,
-                targets: Some(targets),
-            }]))
-            .await
-            .expect("Failed to send fetch_targeted");
-    }
-
-    /// Send fetch requests for multiple keys, each with their own targets.
-    ///
-    /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
-    pub async fn fetch_all_targeted(&mut self, requests: Vec<(K, NonEmptyVec<P>)>) {
-        self.sender
-            .send(Message::Fetch(
-                requests
-                    .into_iter()
-                    .map(|(key, targets)| FetchRequest {
-                        key,
-                        targets: Some(targets),
-                    })
-                    .collect(),
-            ))
-            .await
-            .expect("Failed to send fetch_all_targeted");
     }
 }

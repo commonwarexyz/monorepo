@@ -2,7 +2,7 @@ use crate::Scheme;
 use commonware_consensus::{
     simplex::types::{Activity, Context},
     types::{Epoch, Round},
-    Automaton as Au, Relay as Re, Reporter,
+    Automaton as Au, CertifiableAutomaton as CAu, Relay as Re, Reporter,
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
 use futures::{
@@ -85,6 +85,10 @@ impl<D: Digest> Au for Mailbox<D> {
             .expect("Failed to send verify");
         receiver
     }
+}
+
+impl<D: Digest> CAu for Mailbox<D> {
+    // Uses default certify implementation which always returns true
 }
 
 impl<D: Digest> Re for Mailbox<D> {

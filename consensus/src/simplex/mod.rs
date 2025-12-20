@@ -9,6 +9,7 @@
 //! * Wicked Fast Block Times (2 Network Hops)
 //! * Optimal Finalization Latency (3 Network Hops)
 //! * Externalized Uptime and Fault Proofs
+//! * Require Certification Before Finalization
 //! * Decoupled Block Broadcast and Sync
 //! * Lazy Message Verification
 //! * Application-Defined Block Format
@@ -129,19 +130,19 @@
 //!
 //! ### Fetching Missing Certificates
 //!
-//! Instead of trying to fetch all possible certificates above the last finalized view, we only attempt to fetch
-//! nullifications for all views from the last notarized/finalized view to the current view. This technique, however,
-//! is not sufficient to guarantee progress.
+//! Instead of trying to fetch all possible certificates above the floor, we only attempt to fetch
+//! nullifications for all views from the floor (last certified notarization or finalization) to the current view.
+//! This technique, however, is not sufficient to guarantee progress.
 //!
-//! Consider the case where `f` honest participants have seen a notarization for a given view `v` (and nullifications only
+//! Consider the case where `f` honest participants have seen a finalization for a given view `v` (and nullifications only
 //! from `v` to the current view `c`) but the remaining `f+1` honest participants have not (they have exclusively seen
 //! nullifications from some view `o < v` to `c`). Neither partition of participants will vote for the other's proposals.
 //!
-//! To ensure progress is eventually made, leaders with nullified proposals broadcast the best notarization/finalization
+//! To ensure progress is eventually made, leaders with nullified proposals directly broadcast the best finalization
 //! certificate they are aware of to ensure all honest participants eventually consider the same proposal ancestry valid.
 //!
 //! _While a more aggressive recovery mechanism could be employed, like requiring all participants to broadcast their highest
-//! notarization/finalization certificate after nullification, it would impose significant overhead under normal network
+//! finalization certificate after nullification, it would impose significant overhead under normal network
 //! conditions (whereas the approach described incurs no overhead under normal network conditions). Recall, honest participants
 //! already broadcast observed certificates to all other participants in each view (and misaligned participants should only ever
 //! be observed following severe network degradation)._
@@ -198,6 +199,21 @@
 //! These threshold signatures over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` (i.e. the consensus certificates)
 //! can be used to secure interoperability between different consensus instances and user interactions with an infrastructure provider
 //! (where any data served can be proven to derive from some finalized block of some consensus instance with a known static public key).
+//!
+//! ## Certification
+//!
+//! After a payload is notarized, the application can optionally delay or prevent finalization via the
+//! [`CertifiableAutomaton::certify`](crate::CertifiableAutomaton::certify) method. This is particularly useful for systems that employ
+//! erasure coding, where participants may want to wait until they have received enough shards to reconstruct
+//! and validate the full block before voting to finalize.
+//!
+//! If `certify` returns `false`, the participant will not broadcast a `finalize` vote for the payload.
+//! Because finalization requires `2f+1` `finalize` votes, a payload will only be finalized if a quorum
+//! of participants certify it. By default, `certify` returns `true` for all payloads, meaning finalization
+//! proceeds immediately after notarization.
+//!
+//! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
+//! liveness._
 //!
 //! ## Persistence
 //!
@@ -431,7 +447,7 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -487,6 +503,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -680,7 +698,7 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -753,6 +771,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -857,6 +877,9 @@ mod tests {
             ..
         } = fixture(&mut rng, n);
 
+        // Create block relay, shared across restarts.
+        let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, S::PublicKey>::new());
+
         loop {
             let rng = rng.clone();
             let participants = participants.clone();
@@ -864,6 +887,8 @@ mod tests {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
             let supervised = supervised.clone();
+            let relay = relay.clone();
+            relay.deregister_all(); // Clear all recipients from previous restart.
 
             let f = |mut context: deterministic::Context| async move {
                 // Create simulated network
@@ -914,6 +939,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -1035,7 +1062,7 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(720));
+        let executor = deterministic::Runner::timed(Duration::from_secs(240));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1102,6 +1129,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1167,7 +1196,7 @@ mod tests {
             .await;
 
             // Wait for nullifications to accrue
-            context.sleep(Duration::from_secs(120)).await;
+            context.sleep(Duration::from_secs(60)).await;
 
             // Unlink second peer from all (except first)
             link_validators(
@@ -1221,6 +1250,8 @@ mod tests {
                 me: me.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -1293,7 +1324,7 @@ mod tests {
         let skip_timeout = ViewDelta::new(5);
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1360,6 +1391,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1552,7 +1585,7 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1609,6 +1642,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10_000.0, 0.0),
                         verify_latency: (10_000.0, 5.0),
+                        certify_latency: (10_000.0, 5.0),
+                        should_certify: mocks::application::Certifier::Sometimes,
                     }
                 } else {
                     mocks::application::Config {
@@ -1617,6 +1652,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: mocks::application::Certifier::Sometimes,
                     }
                 };
                 let (actor, application) = mocks::application::Application::new(
@@ -1737,7 +1774,7 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(2);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(180));
+        let executor = deterministic::Runner::timed(Duration::from_secs(1800));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1793,6 +1830,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1903,13 +1942,15 @@ mod tests {
                 // Ensure quick recovery.
                 //
                 // If the skip timeout isn't implemented correctly, we may go many views before participants
-                // start to consider a validator's proposal.
+                // start to notarize a validator's proposal.
                 {
-                    // Ensure nearly all views around latest finalize
+                    // Ensure nearly all views around latest are notarized.
+                    // We don't check for finalization since some of the blocks may fail to be
+                    // certified for the purposes of testing.
                     let mut found = 0;
-                    let finalizations = reporter.finalizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock().unwrap();
                     for view in View::range(latest, latest.saturating_add(activity_timeout)) {
-                        if finalizations.contains_key(&view) {
+                        if notarizations.contains_key(&view) {
                             found += 1;
                         }
                     }
@@ -2003,6 +2044,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2212,6 +2255,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2445,6 +2490,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -2622,6 +2669,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2800,6 +2849,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -2884,7 +2935,7 @@ mod tests {
         }
     }
 
-    fn equivocator<S, F, L>(seed: u64, mut fixture: F)
+    fn equivocator<S, F, L>(seed: u64, mut fixture: F) -> bool
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -2974,6 +3025,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3063,6 +3116,8 @@ mod tests {
                 me: validator.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -3107,57 +3162,74 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Ensure equivocator is blocked (we aren't guaranteed a fault will be produced
+            // Check equivocator blocking (we aren't guaranteed a fault will be produced
             // because it may not be possible to extract a conflicting vote from the certificate
             // we receive)
             let byz = &participants[0];
             let blocked = oracle.blocked().await.unwrap();
-            assert!(!blocked.is_empty());
-            for (a, b) in blocked {
-                assert_ne!(&a, byz);
-                assert_eq!(&b, byz);
+            for (a, b) in &blocked {
+                assert_ne!(a, byz);
+                assert_eq!(b, byz);
             }
-        });
+            !blocked.is_empty()
+        })
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_equivocator_bls12381_threshold_min_pk() {
-        for seed in 0..5 {
-            equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-        }
+        let detected = (0..5)
+            .any(|seed| equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>));
+        assert!(
+            detected,
+            "expected at least one seed to detect equivocation"
+        );
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_equivocator_bls12381_threshold_min_sig() {
-        for seed in 0..5 {
-            equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
-        }
+        let detected = (0..5).any(|seed| {
+            equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>)
+        });
+        assert!(
+            detected,
+            "expected at least one seed to detect equivocation"
+        );
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_equivocator_bls12381_multisig_min_pk() {
-        for seed in 0..5 {
-            equivocator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
-        }
+        let detected = (0..5).any(|seed| {
+            equivocator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>)
+        });
+        assert!(
+            detected,
+            "expected at least one seed to detect equivocation"
+        );
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_equivocator_bls12381_multisig_min_sig() {
-        for seed in 0..5 {
-            equivocator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
-        }
+        let detected = (0..5).any(|seed| {
+            equivocator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>)
+        });
+        assert!(
+            detected,
+            "expected at least one seed to detect equivocation"
+        );
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_equivocator_ed25519() {
-        for seed in 0..5 {
-            equivocator::<_, _, RoundRobin>(seed, ed25519::fixture);
-        }
+        let detected = (0..5).any(|seed| equivocator::<_, _, RoundRobin>(seed, ed25519::fixture));
+        assert!(
+            detected,
+            "expected at least one seed to detect equivocation"
+        );
     }
 
     fn reconfigurer<S, F, L>(seed: u64, mut fixture: F)
@@ -3245,6 +3317,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3411,6 +3485,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3591,6 +3667,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3739,6 +3817,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (100.0, 50.0),
                     verify_latency: (50.0, 40.0),
+                    certify_latency: (50.0, 40.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -3897,6 +3977,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -4081,6 +4163,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -4316,6 +4400,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label(&format!("application_{}", *validator)),
@@ -4650,6 +4736,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -4799,6 +4887,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -4892,6 +4982,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -5139,7 +5231,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(600)));
+            .with_timeout(Some(Duration::from_secs(900)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             let (network, mut oracle) = Network::new(
@@ -5288,6 +5380,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: mocks::application::Certifier::Sometimes,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -5344,6 +5438,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),

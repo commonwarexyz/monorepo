@@ -2,20 +2,14 @@
 
 use crate::{
     application::{Block, EpochProvider, Provider},
-    orchestrator::{Mailbox, Message},
+    orchestrator::{ingress::Message, Mailbox},
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
-    simplex::{
-        self,
-        elector::Config as Elector,
-        scheme,
-        types::{Certificate, Context},
-    },
+    simplex::{self, elector::Config as Elector, scheme, types::Context},
     types::{Epoch, Epocher, FixedEpocher, ViewDelta},
-    Automaton, Relay,
+    CertifiableAutomaton, Relay,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, Signer,
@@ -23,12 +17,12 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
-    Blocker, CheckedSender, Receiver, Recipients, Sender,
+    Blocker, Receiver, Sender,
 };
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::NZUsize;
+use commonware_utils::{vec::NonEmptyVec, NZUsize};
 use futures::{channel::mpsc, StreamExt};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
@@ -41,7 +35,7 @@ where
     V: Variant,
     C: Signer,
     H: Hasher,
-    A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
+    A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
     L: Elector<S>,
@@ -68,7 +62,7 @@ where
     V: Variant,
     C: Signer,
     H: Hasher,
-    A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
+    A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: Scheme,
     L: Elector<S>,
@@ -96,7 +90,7 @@ where
     V: Variant,
     C: Signer,
     H: Hasher,
-    A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
+    A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
@@ -141,15 +135,8 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        orchestrator: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
     ) -> Handle<()> {
-        spawn_cell!(
-            self.context,
-            self.run(votes, certificates, resolver, orchestrator).await
-        )
+        spawn_cell!(self.context, self.run(votes, certificates, resolver,).await)
     }
 
     async fn run(
@@ -166,10 +153,6 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        (mut orchestrator_sender, mut orchestrator_receiver): (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
     ) {
         // Start muxers for each physical channel used by consensus
         let (mux, mut vote_mux, mut vote_backup) = Muxer::builder(
@@ -181,13 +164,12 @@ where
         .with_backup()
         .build();
         mux.start();
-        let (mux, mut certificate_mux, mut certificate_global_sender) = Muxer::builder(
+        let (mux, mut certificate_mux) = Muxer::builder(
             self.context.with_label("certificate_mux"),
             certificate_sender,
             certificate_receiver,
             self.muxer_size,
         )
-        .with_global_sender()
         .build();
         mux.start();
         let (mux, mut resolver_mux) = Muxer::new(
@@ -201,6 +183,7 @@ where
         // Wait for instructions to transition epochs.
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
         let mut engines = BTreeMap::new();
+
         select_loop! {
             self.context,
             on_stopped => {
@@ -208,7 +191,7 @@ where
             },
             message = vote_backup.next() => {
                 // If a message is received in an unregistered sub-channel in the vote network,
-                // attempt to forward the orchestrator for the epoch.
+                // ensure we have the boundary finalization.
                 let Some((their_epoch, (from, _))) = message else {
                     warn!("vote mux backup channel closed, shutting down orchestrator");
                     break;
@@ -223,81 +206,20 @@ where
                     continue;
                 }
 
-                let Ok(checked) = orchestrator_sender.check(Recipients::One(from.clone())).await else {
-                    debug!(%their_epoch, ?from, "recipient rate-limited, cannot respond yet.");
-                    continue;
-                };
-
-                // If we're not in the committee of the latest epoch we know about and we observe another
-                // participant that is ahead of us, send a message on the orchestrator channel to prompt
-                // them to send us the finalization of the epoch boundary block for our latest known epoch.
+                // If we're not in the committee of the latest epoch we know about and we observe
+                // another participant that is ahead of us, ensure we have the boundary finalization.
+                // We target only the peer who claims to be ahead. If we receive messages from
+                // multiple peers claiming to be ahead, each call adds them to the target set,
+                // giving us more peers to try fetching from.
                 let boundary_height = epocher.last(our_epoch).expect("our epoch should exist");
-                if self.marshal.get_finalization(boundary_height).await.is_some() {
-                    // Only request the orchestrator if we don't already have it.
-                    continue;
-                };
                 debug!(
+                    ?from,
                     %their_epoch,
-                    ?from,
-                    "received backup message from future epoch, requesting orchestrator"
-                );
-
-                // Send the request to the orchestrator. This operation is best-effort.
-                if checked.send(
-                    our_epoch.encode().freeze(),
-                    true
-                ).await.is_err() {
-                    warn!("failed to send orchestrator request, shutting down orchestrator");
-                    break;
-                }
-            },
-            message = orchestrator_receiver.recv() => {
-                let Ok((from, bytes)) = message else {
-                    warn!("orchestrator channel closed, shutting down orchestrator");
-                    break;
-                };
-                let epoch = match Epoch::decode(bytes.as_ref()) {
-                    Ok(epoch) => epoch,
-                    Err(err) => {
-                        debug!(?err, ?from, "failed to decode epoch from orchestrator request");
-                        self.oracle.block(from).await;
-                        continue;
-                    }
-                };
-
-                // Fetch the finalization certificate for the last block within the subchannel's epoch.
-                // If the node is state synced, marshal may not have the finalization locally, and the
-                // peer will need to fetch it from another node on the network.
-                let Some(boundary_height) = epocher.last(epoch) else {
-                    debug!(%epoch, ?from, "epoch not known");
-                    continue;
-                };
-                let Some(finalization) = self.marshal.get_finalization(boundary_height).await else {
-                    debug!(%epoch, ?from, "missing finalization for old epoch");
-                    continue;
-                };
-                debug!(
-                    %epoch,
+                    %our_epoch,
                     boundary_height,
-                    ?from,
-                    "received message on vote network from old epoch. forwarding orchestrator"
+                    "received backup message from future epoch, ensuring boundary finalization"
                 );
-
-                // Forward the finalization to the sender. This operation is best-effort.
-                //
-                // TODO (#2032): Send back to orchestrator for direct insertion into marshal.
-                let message = Certificate::<S, H::Digest>::Finalization(finalization);
-                if certificate_global_sender
-                    .send(
-                        epoch.get(),
-                        Recipients::One(from),
-                        message.encode().freeze(),
-                        false,
-                    )
-                    .await.is_err() {
-                        warn!("failed to forward finalization, shutting down orchestrator");
-                        break;
-                    }
+                self.marshal.hint_finalized(boundary_height, NonEmptyVec::new(from)).await;
             },
             transition = self.mailbox.next() => {
                 let Some(transition) = transition else {

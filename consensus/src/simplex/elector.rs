@@ -161,6 +161,25 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 #[derive(Clone, Debug, Default)]
 pub struct Random;
 
+impl Random {
+    /// Returns the selected leader index for the given round and seed signature.
+    pub fn select_leader<V: Variant>(
+        round: Round,
+        n: usize,
+        seed_signature: Option<V::Signature>,
+    ) -> u32 {
+        assert!(seed_signature.is_some() || round.view() == View::new(1));
+
+        let Some(seed_signature) = seed_signature else {
+            // Standard round-robin for view 1
+            return (round.epoch().get().wrapping_add(round.view().get()) as usize % n) as u32;
+        };
+
+        // Use the seed signature as a source of randomness
+        modulo(seed_signature.encode().as_ref(), n as u64) as u32
+    }
+}
+
 impl<P, V> Config<bls12381_threshold::Scheme<P, V>> for Random
 where
     P: PublicKey,
@@ -193,16 +212,7 @@ where
     V: Variant + Send + Sync + 'static,
 {
     fn elect(&self, round: Round, certificate: Option<&bls12381_threshold::Signature<V>>) -> u32 {
-        assert!(certificate.is_some() || round.view() == View::new(1));
-
-        let Some(certificate) = certificate else {
-            // Standard round-robin for view 1
-            return (round.epoch().get().wrapping_add(round.view().get()) as usize % self.n) as u32;
-        };
-
-        // Use the seed signature as a source of randomness
-        let seed = certificate.seed_signature.encode();
-        modulo(seed.as_ref(), self.n as u64) as u32
+        Random::select_leader::<V>(round, self.n, certificate.map(|c| c.seed_signature))
     }
 }
 

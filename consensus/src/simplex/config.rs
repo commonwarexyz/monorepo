@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     types::{Epoch, ViewDelta},
-    Automaton, Relay, Reporter,
+    CertifiableAutomaton, Relay, Reporter,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
@@ -17,7 +17,7 @@ pub struct Config<
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: Automaton<Context = Context<D, S::PublicKey>>,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -115,7 +115,7 @@ impl<
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        A: Automaton<Context = Context<D, S::PublicKey>>,
+        A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
     > Config<S, L, B, D, A, R, F>

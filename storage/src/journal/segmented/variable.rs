@@ -11,12 +11,13 @@
 //! Within a `section`, data is appended as an `item` with the following format:
 //!
 //! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+
-//! | 0 | 1 | 2 | 3 |    ...    | 8 | 9 |10 |11 |
-//! +---+---+---+---+---+---+---+---+---+---+---+
-//! |   Size (u32)  |   Data    |    C(u32)     |
-//! +---+---+---+---+---+---+---+---+---+---+---+
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! |       0 ~ 4       |    ...    | 8 | 9 |10 |11 |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! | Size (varint u32) |   Data    |    C(u32)     |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
 //!
+//! Size = u32 as varint (1 to 5 bytes)
 //! C = CRC32(Size | Data)
 //! ```
 //!
@@ -60,13 +61,6 @@
 //! method to produce a stream of all items in the `Journal` in order of their `section` and
 //! `offset`.
 //!
-//! # Exact Reads
-//!
-//! To allow for items to be fetched in a single disk operation, `Journal` allows callers to specify
-//! an `exact` parameter to the `get` method. This `exact` parameter must be cached by the caller
-//! (provided during `replay`) and usage of an incorrect `exact` value will result in undefined
-//! behavior.
-//!
 //! # Compression
 //!
 //! `Journal` supports optional compression using `zstd`. This can be enabled by setting the
@@ -101,8 +95,8 @@
 //! ```
 
 use crate::journal::Error;
-use bytes::BufMut;
-use commonware_codec::Codec;
+use bytes::{Buf, BufMut};
+use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
     buffer::{Append, PoolRef, Read},
     telemetry::metrics::status::GaugeExt,
@@ -141,6 +135,11 @@ pub struct Config<C> {
 }
 
 pub(crate) const ITEM_ALIGNMENT: u64 = 16;
+
+/// Minimum size of any item: 1 byte varint (size=0) + 0 bytes data + 4 bytes checksum.
+/// This is also the max varint size for u32, so we can always read this many bytes
+/// at the start of an item to get the complete varint.
+const MIN_ITEM_SIZE: usize = 5;
 
 /// Computes the next offset for an item using the underlying `u64`
 /// offset of `Blob`.
@@ -239,13 +238,17 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         blob: &Append<E::Blob>,
         offset: u32,
     ) -> Result<(u32, u32, V), Error> {
-        // Read item size
+        // Read varint size (max 5 bytes for u32)
         let mut hasher = crc32fast::Hasher::new();
         let offset = offset as u64 * ITEM_ALIGNMENT;
-        let size = blob.read_at(vec![0; 4], offset).await?;
-        hasher.update(size.as_ref());
-        let size = u32::from_be_bytes(size.as_ref().try_into().unwrap()) as usize;
-        let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
+        let varint_buf = blob.read_at(vec![0; MIN_ITEM_SIZE], offset).await?;
+        let mut varint = varint_buf.as_ref();
+        let size = UInt::<u32>::read(&mut varint).map_err(Error::Codec)?.0 as usize;
+        let varint_len = MIN_ITEM_SIZE - varint.remaining();
+        hasher.update(&varint_buf.as_ref()[..varint_len]);
+        let offset = offset
+            .checked_add(varint_len as u64)
+            .ok_or(Error::OffsetOverflow)?;
 
         // Read remaining
         let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
@@ -297,23 +300,29 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             reader.seek_to(file_offset).map_err(Error::Runtime)?;
         }
 
-        // Read item size (4 bytes)
+        // Read varint size (max 5 bytes for u32, and min item size is 5 bytes)
         let mut hasher = crc32fast::Hasher::new();
-        let mut size_buf = [0u8; 4];
+        let mut varint_buf = [0u8; MIN_ITEM_SIZE];
         reader
-            .read_exact(&mut size_buf, 4)
+            .read_exact(&mut varint_buf, MIN_ITEM_SIZE)
             .await
             .map_err(Error::Runtime)?;
-        hasher.update(&size_buf);
+        let mut varint = varint_buf.as_ref();
+        let size = UInt::<u32>::read(&mut varint).map_err(Error::Codec)?.0 as usize;
+        let varint_len = MIN_ITEM_SIZE - varint.remaining();
+        hasher.update(&varint_buf[..varint_len]);
 
-        // Read remaining
-        let size = u32::from_be_bytes(size_buf) as usize;
+        // Read remaining data+checksum (we already have some bytes from the varint read)
         let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
+        let already_read = MIN_ITEM_SIZE - varint_len;
         let mut buf = vec![0u8; buf_size];
-        reader
-            .read_exact(&mut buf, buf_size)
-            .await
-            .map_err(Error::Runtime)?;
+        buf[..already_read].copy_from_slice(&varint_buf[varint_len..]);
+        if buf_size > already_read {
+            reader
+                .read_exact(&mut buf[already_read..], buf_size - already_read)
+                .await
+                .map_err(Error::Runtime)?;
+        }
 
         // Read item
         let item = &buf[..size];
@@ -339,49 +348,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let current_pos = reader.position();
         let aligned_offset = compute_next_offset(current_pos)?;
         Ok((aligned_offset, current_pos, size as u32, item))
-    }
-
-    /// Reads an item from the blob at the given offset and of a given size.
-    async fn read_exact(
-        compressed: bool,
-        cfg: &V::Cfg,
-        blob: &Append<E::Blob>,
-        offset: u32,
-        len: u32,
-    ) -> Result<V, Error> {
-        // Read buffer
-        let offset = offset as u64 * ITEM_ALIGNMENT;
-        let entry_size = 4 + len as usize + 4;
-        let buf = blob.read_at(vec![0u8; entry_size], offset).await?;
-
-        // Check size
-        let mut hasher = crc32fast::Hasher::new();
-        let disk_size = u32::from_be_bytes(buf.as_ref()[..4].try_into().unwrap());
-        hasher.update(&buf.as_ref()[..4]);
-        if disk_size != len {
-            return Err(Error::UnexpectedSize(disk_size, len));
-        }
-
-        // Verify integrity
-        let item = &buf.as_ref()[4..4 + len as usize];
-        hasher.update(item);
-        let checksum = hasher.finalize();
-        let stored_checksum =
-            u32::from_be_bytes(buf.as_ref()[4 + len as usize..].try_into().unwrap());
-        if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
-        }
-
-        // Decompress item
-        let item = if compressed {
-            decode_all(Cursor::new(item)).map_err(|_| Error::DecompressionFailed)?
-        } else {
-            item.to_vec()
-        };
-
-        // Return item
-        let item = V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?;
-        Ok(item)
     }
 
     /// Returns an ordered stream of all items in the journal starting with the item at the given
@@ -555,11 +521,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Ensure item is not too large
         let item_len = encoded.len();
-        let entry_len = 4 + item_len + 4;
         let item_len = match item_len.try_into() {
             Ok(len) => len,
             Err(_) => return Err(Error::ItemTooLarge(item_len)),
         };
+        let size_len = UInt(item_len).encode_size();
+        let entry_len = size_len + item_len as usize + 4;
 
         // Get existing blob or create new one
         let blob = match self.blobs.entry(section) {
@@ -595,7 +562,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Add entry data
         let entry_start = buf.len();
-        buf.put_u32(item_len);
+        UInt(item_len).write(&mut buf);
         buf.put_slice(&encoded);
 
         // Calculate checksum only for the entry data (without padding)
@@ -632,26 +599,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             &self.cfg.codec_config,
             blob,
             offset,
-        )
-        .await?;
-        Ok(item)
-    }
-
-    /// Retrieves an item from `Journal` at a given `section` and `offset` with a given size.
-    pub async fn get_exact(&self, section: u64, offset: u32, size: u32) -> Result<V, Error> {
-        self.prune_guard(section)?;
-        let blob = match self.blobs.get(&section) {
-            Some(blob) => blob,
-            None => return Err(Error::SectionOutOfRange(section)),
-        };
-
-        // Perform a multi-op read.
-        let item = Self::read_exact(
-            self.cfg.compression.is_some(),
-            &self.cfg.codec_config,
-            blob,
-            offset,
-            size,
         )
         .await?;
         Ok(item)
@@ -1153,12 +1100,6 @@ mod tests {
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
-            // Test get_exact on pruned section
-            match journal.get_exact(2, 0, 12).await {
-                Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
-            }
-
             // Test size on pruned section
             match journal.size(1).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
@@ -1339,8 +1280,10 @@ mod tests {
                 .await
                 .expect("Failed to create blob");
 
-            // Write incomplete size data (less than 4 bytes)
-            let incomplete_data = vec![0x00, 0x01]; // Less than 4 bytes
+            // Write incomplete varint by encoding u32::MAX (5 bytes) and truncating to 1 byte
+            let mut incomplete_data = Vec::new();
+            UInt(u32::MAX).write(&mut incomplete_data);
+            incomplete_data.truncate(1);
             blob.write_at(incomplete_data, 0)
                 .await
                 .expect("Failed to write incomplete data");
@@ -1392,15 +1335,15 @@ mod tests {
                 .await
                 .expect("Failed to create blob");
 
-            // Write size but no item data
-            let item_size: u32 = 10; // Size of the item
+            // Write size but incomplete item data
+            let item_size: u32 = 10; // Size indicates 10 bytes of data
             let mut buf = Vec::new();
-            buf.put_u32(item_size);
-            let data = [2u8; 5];
+            UInt(item_size).write(&mut buf); // Varint encoding
+            let data = [2u8; 5]; // Only 5 bytes, not 10 + 4 (checksum)
             BufMut::put_slice(&mut buf, &data);
             blob.write_at(buf, 0)
                 .await
-                .expect("Failed to write item size");
+                .expect("Failed to write incomplete item");
             blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
@@ -1453,18 +1396,13 @@ mod tests {
             let item_data = b"Test data";
             let item_size = item_data.len() as u32;
 
-            // Write size
-            let mut offset = 0;
-            blob.write_at(item_size.to_be_bytes().to_vec(), offset)
+            // Write size (varint) and data, but no checksum
+            let mut buf = Vec::new();
+            UInt(item_size).write(&mut buf);
+            BufMut::put_slice(&mut buf, item_data);
+            blob.write_at(buf, 0)
                 .await
-                .expect("Failed to write item size");
-            offset += 4;
-
-            // Write item data
-            blob.write_at(item_data.to_vec(), offset)
-                .await
-                .expect("Failed to write item data");
-            // Do not write checksum (omit it)
+                .expect("Failed to write item without checksum");
 
             blob.sync().await.expect("Failed to sync blob");
 
@@ -1521,23 +1459,14 @@ mod tests {
             let item_size = item_data.len() as u32;
             let incorrect_checksum: u32 = 0xDEADBEEF;
 
-            // Write size
-            let mut offset = 0;
-            blob.write_at(item_size.to_be_bytes().to_vec(), offset)
+            // Write size (varint), data, and incorrect checksum
+            let mut buf = Vec::new();
+            UInt(item_size).write(&mut buf);
+            BufMut::put_slice(&mut buf, item_data);
+            buf.put_u32(incorrect_checksum);
+            blob.write_at(buf, 0)
                 .await
-                .expect("Failed to write item size");
-            offset += 4;
-
-            // Write item data
-            blob.write_at(item_data.to_vec(), offset)
-                .await
-                .expect("Failed to write item data");
-            offset += item_data.len() as u64;
-
-            // Write incorrect checksum
-            blob.write_at(incorrect_checksum.to_be_bytes().to_vec(), offset)
-                .await
-                .expect("Failed to write incorrect checksum");
+                .expect("Failed to write item with bad checksum");
 
             blob.sync().await.expect("Failed to sync blob");
 
@@ -1652,11 +1581,13 @@ mod tests {
             assert_eq!(items[2].1, data_items[1].1);
 
             // Confirm blob is expected length
+            // entry = 1 (varint for 4) + 4 (data) + 4 (checksum) = 9 bytes
+            // Item 2 ends at position 16 + 9 = 25
             let (_, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_size, 28);
+            assert_eq!(blob_size, 25);
 
             // Attempt to replay journal after truncation
             let mut journal = Journal::init(context.clone(), cfg.clone())
@@ -1700,11 +1631,13 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Confirm blob is expected length
+            // Items 1 and 2 at positions 0 and 16, item 3 (value 5) at position 32
+            // Item 3 = 1 (varint) + 4 (data) + 4 (checksum) = 9 bytes, ends at 41
             let (_, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_size, 44);
+            assert_eq!(blob_size, 41);
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context.clone(), cfg.clone())
@@ -1829,11 +1762,13 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Confirm blob is expected length
+            // entry = 1 (varint for 8) + 8 (u64 data) + 4 (checksum) = 13 bytes
+            // Items at positions 0, 16, 32; item 3 ends at 32 + 13 = 45
             let (_, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_size, 48);
+            assert_eq!(blob_size, 45);
 
             // Attempt to replay journal after truncation
             let journal = Journal::init(context, cfg)
@@ -2217,7 +2152,7 @@ mod tests {
             let digest = Sha256::hash(buf.as_ref());
             assert_eq!(
                 hex(&digest),
-                "ca3845fa7fabd4d2855ab72ed21226d1d6eb30cb895ea9ec5e5a14201f3f25d8",
+                "f55bf27a59118603466fcf6a507ab012eea4cb2d6bdd06ce8f515513729af847",
             );
         });
     }

@@ -139,7 +139,7 @@ where
                     .or_default()
                     .insert(public_key);
             }
-            Activity::Notarization(notarization) => {
+            Activity::Notarization(notarization) | Activity::Certification(notarization) => {
                 // Verify notarization
                 let view = notarization.view();
                 if !self.scheme.verify_certificate::<_, D>(

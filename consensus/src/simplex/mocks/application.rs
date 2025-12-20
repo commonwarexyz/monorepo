@@ -5,7 +5,7 @@ use super::relay::Relay;
 use crate::{
     simplex::types::Context,
     types::{Epoch, Round},
-    Automaton as Au, Relay as Re,
+    Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
@@ -36,6 +36,10 @@ pub enum Message<D: Digest, P: PublicKey> {
     },
     Verify {
         context: Context<D, P>,
+        payload: D,
+        response: oneshot::Sender<bool>,
+    },
+    Certify {
         payload: D,
         response: oneshot::Sender<bool>,
     },
@@ -95,6 +99,20 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     }
 }
 
+impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
+    async fn certify(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(Message::Certify {
+                payload,
+                response: tx,
+            })
+            .await
+            .expect("Failed to send certify");
+        rx
+    }
+}
+
 impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
     type Digest = D;
 
@@ -110,6 +128,18 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
+/// Predicate to determine whether a payload should be certified.
+/// Returning true means certify, false means reject.
+pub enum Certifier<D: Digest> {
+    /// Always certify.
+    Always,
+    /// Certify sometimes, but not always. The behavior is to certify pseudorandomly
+    /// (but deterministically) 82% of the time, depending on the last byte of the payload.
+    Sometimes,
+    /// A custom predicate function.
+    Custom(Box<dyn Fn(D) -> bool + Send + 'static>),
+}
+
 pub struct Config<H: Hasher, P: PublicKey> {
     pub hasher: H,
 
@@ -123,6 +153,11 @@ pub struct Config<H: Hasher, P: PublicKey> {
 
     pub propose_latency: Latency,
     pub verify_latency: Latency,
+    pub certify_latency: Latency,
+
+    /// Predicate to determine whether a payload should be certified.
+    /// Returning true means certify, false means reject.
+    pub should_certify: Certifier<H::Digest>,
 }
 
 pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
@@ -137,7 +172,10 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
 
     propose_latency: Normal<f64>,
     verify_latency: Normal<f64>,
+    certify_latency: Normal<f64>,
+
     fail_verification: bool,
+    should_certify: Certifier<H::Digest>,
 
     pending: HashMap<H::Digest, Bytes>,
 
@@ -152,6 +190,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
         let verify_latency = Normal::new(cfg.verify_latency.0, cfg.verify_latency.1).unwrap();
+        let certify_latency = Normal::new(cfg.certify_latency.0, cfg.certify_latency.1).unwrap();
 
         // Return constructed application
         let (sender, receiver) = mpsc::channel(1024);
@@ -168,10 +207,12 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
                 propose_latency,
                 verify_latency,
+                certify_latency,
+
                 fail_verification: false,
+                should_certify: cfg.should_certify,
 
                 pending: HashMap::new(),
-
                 verified: HashSet::new(),
             },
             Mailbox::new(sender),
@@ -254,6 +295,21 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         true
     }
 
+    async fn certify(&mut self, payload: H::Digest, _contents: Bytes) -> bool {
+        // Simulate the certify latency
+        let duration = self.certify_latency.sample(&mut self.context);
+        self.context
+            .sleep(Duration::from_millis(duration as u64))
+            .await;
+
+        // Use configured predicate to determine certification
+        match &self.should_certify {
+            Certifier::Always => true,
+            Certifier::Sometimes => (payload.as_ref().last().copied().unwrap_or(0) % 11) < 9,
+            Certifier::Custom(func) => func(payload),
+        }
+    }
+
     async fn broadcast(&mut self, payload: H::Digest) {
         let contents = self.pending.remove(&payload).expect("missing payload");
         self.relay.broadcast(&self.me, (payload, contents)).await;
@@ -279,7 +335,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 debug!("context shutdown, stopping application");
             },
             message = self.mailbox.next() => {
-                let message =match message {
+                let message = match message {
                     Some(message) => message,
                     None => break,
                 };
@@ -301,8 +357,12 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                                 .entry(payload)
                                 .or_default()
                                 .push((context, response));
-                            continue;
                         }
+                    }
+                    Message::Certify { payload, response } => {
+                        let contents = seen.get(&payload).cloned().unwrap_or_default();
+                        let certified = self.certify(payload, contents).await;
+                        let _ = response.send(certified);
                     }
                     Message::Broadcast { payload } => {
                         self.broadcast(payload).await;

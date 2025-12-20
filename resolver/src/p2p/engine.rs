@@ -238,9 +238,16 @@ impl<
                                 // Check if the fetch is already in progress
                                 let is_new = !self.fetch_timers.contains_key(&key);
 
-                                // Update targets (even for existing fetches)
+                                // Update targets
                                 match targets {
-                                    Some(targets) => self.fetcher.add_targets(key.clone(), targets),
+                                    Some(targets) => {
+                                        // Only add targets if this is a new fetch OR the existing
+                                        // fetch already has targets. Don't restrict an "all" fetch
+                                        // (no targets) to specific targets.
+                                        if is_new || self.fetcher.has_targets(&key) {
+                                            self.fetcher.add_targets(key.clone(), targets);
+                                        }
+                                    }
                                     None => self.fetcher.clear_targets(&key),
                                 }
 
