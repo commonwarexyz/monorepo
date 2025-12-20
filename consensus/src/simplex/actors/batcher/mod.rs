@@ -1276,10 +1276,16 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Register all participants on the network and set up links
             let link = Link {
@@ -1293,7 +1299,11 @@ mod tests {
                     participant_senders.push(None);
                     continue;
                 }
-                let (sender, _receiver) = oracle.control(pk.clone()).register(0, TEST_QUOTA).await.unwrap();
+                let (sender, _receiver) = oracle
+                    .control(pk.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
                 oracle
                     .add_link(pk.clone(), me.clone(), link.clone())
                     .await
@@ -1348,7 +1358,11 @@ mod tests {
                 match output {
                     voter::Message::Proposal(_) => continue,
                     voter::Message::Verified(Certificate::Notarization(n), _) => {
-                        assert_eq!(n.view(), view1, "Should construct notarization for view above finalized");
+                        assert_eq!(
+                            n.view(),
+                            view1,
+                            "Should construct notarization for view above finalized"
+                        );
                         break;
                     }
                     _ => panic!("Unexpected message type"),
