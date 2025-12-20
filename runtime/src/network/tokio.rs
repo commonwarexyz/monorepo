@@ -51,21 +51,29 @@ impl Stream {
         self.end - self.start
     }
 
+    /// Moves any remaining data to the front of the buffer.
+    #[inline]
+    fn compact(&mut self) {
+        if self.start > 0 {
+            let remaining = self.end - self.start;
+            if remaining > 0 {
+                self.buffer.copy_within(self.start..self.end, 0);
+            }
+            self.start = 0;
+            self.end = remaining;
+        }
+    }
+
     /// Reads at least `min_bytes` into the internal buffer, up to available capacity.
     /// Returns the total number of bytes read, or an error.
-    ///
-    /// Precondition: buffer must be empty (start == end == 0). This is ensured
-    /// by copy_from_buffer resetting the indices when the buffer becomes empty.
     async fn fill_buffer(&mut self, min_bytes: usize) -> Result<usize, Error> {
-        debug_assert_eq!(self.start, 0);
-        debug_assert_eq!(self.end, 0);
+        // Compact first to maximize space for reading
+        self.compact();
 
-        if min_bytes == 0 {
-            return Ok(0);
-        }
+        let target = self.end + min_bytes;
 
-        // Read at least min_bytes, up to buffer capacity
-        while self.end < min_bytes {
+        // Read at least min_bytes more, up to buffer capacity
+        while self.end < target {
             let bytes_read = timeout(
                 self.read_timeout,
                 self.stream.read(&mut self.buffer[self.end..]),
@@ -81,7 +89,7 @@ impl Stream {
             self.end += bytes_read;
         }
 
-        Ok(self.end)
+        Ok(self.end - self.start)
     }
 
     /// Copies bytes from the internal buffer to the output.
@@ -91,11 +99,6 @@ impl Stream {
         let to_copy = output.len().min(self.buffered());
         output[..to_copy].copy_from_slice(&self.buffer[self.start..self.start + to_copy]);
         self.start += to_copy;
-        // Reset when empty to maximize space for next fill
-        if self.start == self.end {
-            self.start = 0;
-            self.end = 0;
-        }
         to_copy
     }
 }
