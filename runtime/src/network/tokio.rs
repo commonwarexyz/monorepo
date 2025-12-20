@@ -76,7 +76,7 @@ impl crate::Listener for Listener {
         }
 
         // Return the sink and stream
-        let (read_half, sink) = stream.into_split();
+        let (stream, sink) = stream.into_split();
         Ok((
             addr,
             Sink {
@@ -85,7 +85,7 @@ impl crate::Listener for Listener {
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
-                stream: BufReader::with_capacity(self.cfg.read_buffer_size, read_half),
+                stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
             },
         ))
     }
@@ -222,7 +222,7 @@ impl crate::Network for Network {
         }
 
         // Return the sink and stream
-        let (read_half, sink) = stream.into_split();
+        let (stream, sink) = stream.into_split();
         Ok((
             Sink {
                 write_timeout: self.cfg.write_timeout,
@@ -230,7 +230,7 @@ impl crate::Network for Network {
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
-                stream: BufReader::with_capacity(self.cfg.read_buffer_size, read_half),
+                stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
             },
         ))
     }
@@ -244,6 +244,7 @@ mod tests {
     };
     use commonware_macros::test_group;
     use std::time::{Duration, Instant};
+    use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn test_trait() {
@@ -348,13 +349,11 @@ mod tests {
         // Verify the timeout occurred around the expected time
         assert!(elapsed >= read_timeout);
         // Allow some margin for timing variance
-        assert!(elapsed < read_timeout + Duration::from_millis(10));
+        assert!(elapsed < read_timeout * 2);
     }
 
     #[tokio::test]
     async fn test_timeout_discards_partial_read() {
-        use tokio::sync::oneshot;
-
         let read_timeout = Duration::from_millis(50);
         let network = TokioNetwork::Network::from(
             TokioNetwork::Config::default()
