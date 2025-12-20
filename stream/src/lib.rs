@@ -98,6 +98,8 @@ pub enum Error {
     RecvFailed(RuntimeError),
     #[error("recv too large: {0} bytes")]
     RecvTooLarge(usize),
+    #[error("invalid varint length prefix")]
+    InvalidVarint,
     #[error("send failed")]
     SendFailed(RuntimeError),
     #[error("send zero size")]
