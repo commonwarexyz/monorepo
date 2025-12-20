@@ -1,6 +1,6 @@
 use crate::Error;
 use commonware_utils::StableBuf;
-use std::{net::SocketAddr, time::Duration};
+use std::{collections::VecDeque, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{
@@ -36,57 +36,63 @@ impl crate::Sink for Sink {
 pub struct Stream {
     read_timeout: Duration,
     stream: OwnedReadHalf,
-    /// Internal buffer for batching reads.
-    buffer: Vec<u8>,
-    /// Start position of valid data in the buffer.
-    buffer_pos: usize,
-    /// Amount of valid data in the buffer (from buffer_pos).
-    buffer_len: usize,
+    /// Internal buffer for batching reads. Uses VecDeque for efficient
+    /// push-to-back and pop-from-front without shifting bytes.
+    buffer: VecDeque<u8>,
+    /// Maximum capacity for the buffer.
+    buffer_capacity: usize,
+    /// Temporary buffer for reading from the stream.
+    temp_read_buf: Vec<u8>,
 }
 
 impl Stream {
-    /// Reads data from the network into the internal buffer.
-    /// Returns the number of bytes read, or an error.
-    async fn fill_buffer(&mut self) -> Result<usize, Error> {
-        // Compact buffer: move remaining data to the front
-        if self.buffer_pos > 0 {
-            self.buffer
-                .copy_within(self.buffer_pos..self.buffer_pos + self.buffer_len, 0);
-            self.buffer_pos = 0;
+    /// Reads at least `min_bytes` into the internal buffer, up to available capacity.
+    /// Returns the total number of bytes read, or an error.
+    async fn fill_buffer(&mut self, min_bytes: usize) -> Result<usize, Error> {
+        // Calculate how much space is available in the buffer
+        let available = self.buffer_capacity.saturating_sub(self.buffer.len());
+        if available == 0 || min_bytes == 0 {
+            return Ok(0);
         }
 
-        // Read into the remaining space in the buffer
-        let read_start = self.buffer_len;
-        let bytes_read = timeout(
-            self.read_timeout,
-            self.stream.read(&mut self.buffer[read_start..]),
-        )
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::RecvFailed)?;
+        let max_read = self.temp_read_buf.len().min(available);
+        let mut total_read = 0;
 
-        if bytes_read == 0 {
-            return Err(Error::RecvFailed); // EOF
+        // Read at least min_bytes, up to max_read
+        while total_read < min_bytes {
+            let bytes_read = timeout(
+                self.read_timeout,
+                self.stream.read(&mut self.temp_read_buf[total_read..max_read]),
+            )
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::RecvFailed)?;
+
+            if bytes_read == 0 {
+                return Err(Error::RecvFailed); // EOF
+            }
+
+            total_read += bytes_read;
         }
 
-        self.buffer_len += bytes_read;
-        Ok(bytes_read)
+        self.buffer.extend(&self.temp_read_buf[..total_read]);
+        Ok(total_read)
     }
 
     /// Returns the number of buffered bytes available.
     #[inline]
-    const fn buffered(&self) -> usize {
-        self.buffer_len
+    fn buffered(&self) -> usize {
+        self.buffer.len()
     }
 
     /// Copies bytes from the internal buffer to the output.
     /// Returns the number of bytes copied.
     #[inline]
     fn copy_from_buffer(&mut self, output: &mut [u8]) -> usize {
-        let to_copy = output.len().min(self.buffer_len);
-        output[..to_copy].copy_from_slice(&self.buffer[self.buffer_pos..self.buffer_pos + to_copy]);
-        self.buffer_pos += to_copy;
-        self.buffer_len -= to_copy;
+        let to_copy = output.len().min(self.buffer.len());
+        for (i, byte) in self.buffer.drain(..to_copy).enumerate() {
+            output[i] = byte;
+        }
         to_copy
     }
 }
@@ -112,7 +118,7 @@ impl crate::Stream for Stream {
         // Need more data. If the remaining request is large (>= buffer capacity),
         // read directly into the output buffer to avoid extra copies.
         let remaining = needed - filled;
-        if remaining >= self.buffer.len() {
+        if remaining >= self.buffer_capacity {
             // Read directly into output buffer
             timeout(
                 self.read_timeout,
@@ -124,11 +130,11 @@ impl crate::Stream for Stream {
             return Ok(buf);
         }
 
-        // For smaller remaining requests, fill the buffer and copy out
-        while filled < needed {
-            self.fill_buffer().await?;
-            filled += self.copy_from_buffer(&mut buf.as_mut()[filled..needed]);
-        }
+        // For smaller remaining requests, fill the buffer with at least
+        // the remaining bytes needed (but opportunistically read more),
+        // then copy out what we need.
+        self.fill_buffer(remaining).await?;
+        self.copy_from_buffer(&mut buf.as_mut()[filled..needed]);
 
         Ok(buf)
     }
@@ -166,9 +172,9 @@ impl crate::Listener for Listener {
             Stream {
                 read_timeout: self.cfg.read_timeout,
                 stream: read_half,
-                buffer: vec![0u8; self.cfg.read_buffer_size],
-                buffer_pos: 0,
-                buffer_len: 0,
+                buffer: VecDeque::new(),
+                buffer_capacity: self.cfg.read_buffer_size,
+                temp_read_buf: vec![0u8; self.cfg.read_buffer_size],
             },
         ))
     }
@@ -317,9 +323,9 @@ impl crate::Network for Network {
             Stream {
                 read_timeout: self.cfg.read_timeout,
                 stream: read_half,
-                buffer: vec![0u8; self.cfg.read_buffer_size],
-                buffer_pos: 0,
-                buffer_len: 0,
+                buffer: VecDeque::new(),
+                buffer_capacity: self.cfg.read_buffer_size,
+                temp_read_buf: vec![0u8; self.cfg.read_buffer_size],
             },
         ))
     }
