@@ -11,6 +11,12 @@ pub struct Crc32 {
     inner: crc_fast::Digest,
 }
 
+impl Default for Crc32 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Crc32 {
     /// Create a new incremental hasher.
     #[inline]

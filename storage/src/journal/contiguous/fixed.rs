@@ -64,7 +64,7 @@ use crate::{
     Crc32,
 };
 use bytes::BufMut;
-use commonware_codec::{CodecFixed, DecodeExt as _, FixedSize};
+use commonware_codec::{CodecFixed, DecodeExt as _};
 use commonware_runtime::{
     buffer::{Append, PoolRef, Read},
     telemetry::metrics::status::GaugeExt,
@@ -713,6 +713,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> PersistableContiguous for Jo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
