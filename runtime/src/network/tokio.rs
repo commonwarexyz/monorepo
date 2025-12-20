@@ -30,7 +30,9 @@ impl crate::Sink for Sink {
 
 /// Implementation of [crate::Stream] for the [tokio] runtime.
 ///
-/// This stream uses an internal read buffer to reduce syscall overhead.
+/// # Buffering
+///
+/// This stream uses a read buffer to reduce syscall overhead.
 /// Multiple small reads can be satisfied from the buffer without
 /// additional network operations.
 pub struct Stream {
@@ -54,14 +56,16 @@ impl Stream {
     /// Moves any remaining data to the front of the buffer.
     #[inline]
     fn compact(&mut self) {
-        if self.start > 0 {
-            let remaining = self.end - self.start;
-            if remaining > 0 {
-                self.buffer.copy_within(self.start..self.end, 0);
-            }
-            self.start = 0;
-            self.end = remaining;
+        if self.start == 0 {
+            return;
         }
+
+        let remaining = self.end - self.start;
+        if remaining > 0 {
+            self.buffer.copy_within(self.start..self.end, 0);
+        }
+        self.start = 0;
+        self.end = remaining;
     }
 
     /// Reads at least `min_bytes` into the internal buffer, up to available capacity.
@@ -70,9 +74,8 @@ impl Stream {
         // Compact first to maximize space for reading
         self.compact();
 
-        let target = self.end + min_bytes;
-
         // Read at least min_bytes more, up to buffer capacity
+        let target = self.end + min_bytes;
         while self.end < target {
             let bytes_read = timeout(
                 self.read_timeout,
@@ -110,7 +113,6 @@ impl crate::Stream for Stream {
         if needed == 0 {
             return Ok(buf);
         }
-
         let mut filled = 0;
 
         // First, drain any buffered data
