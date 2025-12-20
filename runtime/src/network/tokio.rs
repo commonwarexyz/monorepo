@@ -350,4 +350,73 @@ mod tests {
         // Allow some margin for timing variance
         assert!(elapsed < read_timeout + Duration::from_millis(10));
     }
+
+    #[tokio::test]
+    async fn test_timeout_discards_partial_read() {
+        use tokio::sync::oneshot;
+
+        let read_timeout = Duration::from_millis(50);
+        let network = TokioNetwork::Network::from(
+            TokioNetwork::Config::default()
+                .with_read_timeout(read_timeout)
+                .with_write_timeout(Duration::from_secs(5)),
+        );
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Channel to coordinate between sender and receiver
+        let (first_msg_sent_tx, first_msg_sent_rx) = oneshot::channel::<()>();
+        let (timeout_occurred_tx, timeout_occurred_rx) = oneshot::channel::<()>();
+
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+
+            // Wait for first message to be sent
+            first_msg_sent_rx.await.unwrap();
+
+            // Give time for the data to arrive and be buffered
+            tokio::time::sleep(Duration::from_millis(10)).await;
+
+            // Try to read 100 bytes, but only 5 were sent - this will timeout.
+            // The 5 bytes that were partially read are discarded.
+            let result = stream.recv(vec![0u8; 100]).await;
+            assert!(result.is_err()); // Should timeout
+
+            // Signal that timeout occurred
+            timeout_occurred_tx.send(()).unwrap();
+
+            // Read the second message - the first message's bytes are gone
+            let result = stream.recv(vec![0u8; 5]).await;
+
+            (stream, result)
+        });
+
+        // Connect and send first message
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let first_msg = vec![b'A'; 5];
+        sink.send(first_msg.clone()).await.unwrap();
+        first_msg_sent_tx.send(()).unwrap();
+
+        // Wait for the timeout to occur
+        timeout_occurred_rx.await.unwrap();
+
+        // Send second message
+        let second_msg = vec![b'B'; 5];
+        sink.send(second_msg.clone()).await.unwrap();
+
+        // Get results
+        let (_stream, result) = reader.await.unwrap();
+        let received = result.expect("second read should succeed");
+
+        // The first message was discarded due to timeout - we get the second.
+        // This is correct: after a timeout, the stream is in an undefined state
+        // and should be closed. Continuing to read is undefined behavior.
+        assert_eq!(received.as_ref(), &second_msg[..], "Should have lost data");
+        assert_ne!(
+            received.as_ref(),
+            &first_msg[..],
+            "Should not have received the first message"
+        );
+    }
 }
