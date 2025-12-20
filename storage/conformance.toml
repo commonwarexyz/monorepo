@@ -44,7 +44,7 @@ hash = "9cd764e31b5dbc0bd78cd0908851ba1d645f083884beacd2c8a63f66de0fb9db"
 
 ["commonware_storage::journal::conformance::VariableJournal"]
 n_cases = 512
-hash = "dd8b09a6db193093b30f00bfcece47afd7a4c6f08002331872e45749c4c40a3e"
+hash = "c0af6899248693a3262f31b9a8554cd64c014d9b59f2514840c8828ad74ddf85"
 
 ["commonware_storage::mmr::proof::tests::conformance::CodecConformance<Proof<Sha256Digest>>"]
 n_cases = 65536

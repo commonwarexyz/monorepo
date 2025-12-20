@@ -22,7 +22,7 @@ use crate::{
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
-    certificate::{Provider, Scheme as _},
+    certificate::{Provider, Scheme as CertificateScheme},
     PublicKey,
 };
 use commonware_macros::select;
@@ -256,7 +256,10 @@ where
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
     ) -> Handle<()>
     where
-        R: Resolver<Key = handler::Request<B>>,
+        R: Resolver<
+            Key = handler::Request<B>,
+            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+        >,
         K: PublicKey,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver).await)
@@ -269,7 +272,10 @@ where
         mut buffer: buffered::Mailbox<K, B>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
     ) where
-        R: Resolver<Key = handler::Request<B>>,
+        R: Resolver<
+            Key = handler::Request<B>,
+            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+        >,
         K: PublicKey,
     {
         // Create a local pool for waiter futures.
@@ -429,6 +435,21 @@ where
                         Message::GetFinalization { height, response } => {
                             let finalization = self.get_finalization_by_height(height).await;
                             let _ = response.send(finalization);
+                        }
+                        Message::HintFinalized { height, targets } => {
+                            // Skip if height is at or below the floor
+                            if height <= self.last_processed_height {
+                                continue;
+                            }
+
+                            // Skip if finalization is already available locally
+                            if self.get_finalization_by_height(height).await.is_some() {
+                                continue;
+                            }
+
+                            // Trigger a targeted fetch via the resolver
+                            let request = Request::<B>::Finalized { height };
+                            resolver.fetch_targeted(request, targets).await;
                         }
                         Message::Subscribe { round, commitment, response } => {
                             // Check for block locally

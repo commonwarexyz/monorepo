@@ -130,7 +130,7 @@ mod tests {
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_storage::archive::immutable;
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU64};
     use futures::StreamExt;
     use rand::{
         seq::{IteratorRandom, SliceRandom},
@@ -1342,6 +1342,92 @@ mod tests {
             assert_eq!(finalization.proposal.payload, commitment);
 
             assert!(actor.get_finalization(2).await.is_none());
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_hint_finalized_triggers_fetch() {
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_seed(42)
+                .with_timeout(Some(Duration::from_secs(60))),
+        );
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), Some(3));
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+
+            // Register the initial peer set
+            let mut manager = oracle.manager();
+            manager
+                .update(0, participants.clone().try_into().unwrap())
+                .await;
+
+            // Set up two validators
+            let (app0, mut actor0, _) = setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let (_app1, mut actor1, _) = setup_validator(
+                context.with_label("validator_1"),
+                &mut oracle,
+                participants[1].clone(),
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await;
+
+            // Add links between validators
+            setup_network_links(&mut oracle, &participants[..2], LINK).await;
+
+            // Validator 0: Create and finalize blocks 1-5
+            let mut parent = Sha256::hash(b"");
+            for i in 1..=5u64 {
+                let block = B::new::<Sha256>(parent, i, i);
+                let commitment = block.digest();
+                let round = Round::new(Epoch::new(0), View::new(i));
+
+                actor0.verified(round, block.clone()).await;
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i - 1),
+                    payload: commitment,
+                };
+                let finalization = make_finalization(proposal, &schemes, QUORUM);
+                actor0.report(Activity::Finalization(finalization)).await;
+
+                parent = commitment;
+            }
+
+            // Wait for validator 0 to process all blocks
+            while app0.blocks().len() < 5 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Validator 1 should not have block 5 yet
+            assert!(actor1.get_finalization(5).await.is_none());
+
+            // Validator 1: hint that block 5 is finalized, targeting validator 0
+            actor1
+                .hint_finalized(5, NonEmptyVec::new(participants[0].clone()))
+                .await;
+
+            // Wait for the fetch to complete
+            while actor1.get_finalization(5).await.is_none() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Verify validator 1 now has the finalization
+            let finalization = actor1
+                .get_finalization(5)
+                .await
+                .expect("finalization should be fetched");
+            assert_eq!(finalization.proposal.round.view(), View::new(5));
         })
     }
 

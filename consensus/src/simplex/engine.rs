@@ -4,7 +4,7 @@ use super::{
     elector::Config as Elector,
     types::{Activity, Context},
 };
-use crate::{simplex::scheme::Scheme, Automaton, Relay, Reporter};
+use crate::{simplex::scheme::Scheme, CertifiableAutomaton, Relay, Reporter};
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
@@ -19,7 +19,7 @@ pub struct Engine<
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -41,7 +41,7 @@ impl<
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
+        A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
     > Engine<E, S, L, B, D, A, R, F>

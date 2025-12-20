@@ -7,7 +7,7 @@ mod state;
 use crate::{
     simplex::{elector::Config as Elector, types::Activity},
     types::{Epoch, ViewDelta},
-    Automaton, Relay, Reporter,
+    CertifiableAutomaton, Relay, Reporter,
 };
 pub use actor::Actor;
 use commonware_cryptography::{certificate::Scheme, Digest};
@@ -23,7 +23,7 @@ pub struct Config<
     L: Elector<S>,
     B: Blocker,
     D: Digest,
-    A: Automaton,
+    A: CertifiableAutomaton,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -52,7 +52,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            actors::{batcher, resolver},
+            actors::{batcher, resolver, resolver::MailboxMessage},
             elector::{Config as ElectorConfig, Elector, Random, RoundRobin, RoundRobinElector},
             mocks,
             scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
@@ -74,7 +74,11 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, FutureExt, StreamExt};
-    use std::{num::NonZeroU32, sync::Arc, time::Duration};
+    use std::{
+        num::NonZeroU32,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -171,6 +175,8 @@ mod tests {
                 me: me.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -199,7 +205,7 @@ mod tests {
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
             // Create a dummy resolver mailbox
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(1);
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
             let resolver = resolver::Mailbox::new(resolver_sender);
 
             // Create a dummy batcher mailbox
@@ -276,7 +282,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Finalization(finalization) => {
+                MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
                     assert_eq!(finalization.view(), View::new(100));
                 }
                 _ => panic!("unexpected resolver message"),
@@ -333,7 +339,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Finalization(finalization) => {
+                MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
                     assert_eq!(finalization.view(), View::new(300));
                 }
                 _ => panic!("unexpected resolver message"),
@@ -408,6 +414,8 @@ mod tests {
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_config);
@@ -434,7 +442,7 @@ mod tests {
             let (actor, mut mailbox) = Actor::new(context.clone(), voter_config);
 
             // Create a dummy resolver mailbox
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(1);
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
 
             // Create a dummy batcher mailbox
@@ -524,7 +532,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Finalization(finalization) => {
+                MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
                     assert_eq!(finalization.view(), View::new(50));
                 }
                 _ => panic!("unexpected resolver message"),
@@ -548,7 +556,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Notarization(notarization) => {
+                MailboxMessage::Certificate(Certificate::Notarization(notarization)) => {
                     assert_eq!(notarization.view(), journal_floor_target);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -576,7 +584,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Notarization(notarization) => {
+                MailboxMessage::Certificate(Certificate::Notarization(notarization)) => {
                     assert_eq!(notarization.view(), problematic_view);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -620,7 +628,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Finalization(finalization) => {
+                MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
                     assert_eq!(finalization.view(), View::new(100));
                 }
                 _ => panic!("unexpected resolver message"),
@@ -684,6 +692,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -773,7 +783,7 @@ mod tests {
             let mut finalized_view = None;
             while let Some(message) = resolver_receiver.next().await {
                 match message {
-                    Certificate::Finalization(finalization) => {
+                    MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
                         finalized_view = Some(finalization.view());
                         break;
                     }
@@ -866,6 +876,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -930,7 +942,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(finalized, View::new(0));
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -966,7 +978,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                Certificate::Notarization(notarization) => {
+                MailboxMessage::Certificate(Certificate::Notarization(notarization)) => {
                     assert_eq!(notarization.proposal, proposal_b);
                     assert_eq!(notarization, notarization_b);
                 }
@@ -1058,6 +1070,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1138,7 +1152,7 @@ mod tests {
             // Verify the certificate was accepted
             let msg = resolver_receiver.next().await.unwrap();
             match msg {
-                Certificate::Notarization(notarization) => {
+                MailboxMessage::Certificate(Certificate::Notarization(notarization)) => {
                     assert_eq!(notarization.proposal, proposal_a);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1236,6 +1250,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (100_000.0, 0.0), // Very slow verification
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1317,7 +1333,7 @@ mod tests {
             // The certificate should verify the proposal immediately
             let msg = resolver_receiver.next().await.unwrap();
             match msg {
-                Certificate::Notarization(n) => {
+                MailboxMessage::Certificate(Certificate::Notarization(n)) => {
                     assert_eq!(n.proposal, proposal);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1420,6 +1436,8 @@ mod tests {
                 me: leader.clone(),
                 propose_latency: (50.0, 10.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1634,6 +1652,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1698,7 +1718,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(finalized, View::new(0));
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -1722,7 +1742,7 @@ mod tests {
             // Wait for finalization to be sent to resolver
             let finalization = resolver_receiver.next().await.unwrap();
             match finalization {
-                Certificate::Finalization(finalization) => {
+                MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
                     assert_eq!(finalization, expected_finalization);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1799,7 +1819,7 @@ mod tests {
             // Wait for finalization to be sent to resolver
             let finalization = resolver_receiver.next().await.unwrap();
             match finalization {
-                Certificate::Finalization(finalization) => {
+                MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
                     assert_eq!(finalization, expected_finalization);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1864,6 +1884,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1928,7 +1950,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(finalized, View::new(0));
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -2025,6 +2047,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Sometimes,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -2089,7 +2113,7 @@ mod tests {
                     active,
                 } => {
                     assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(finalized, View::new(0));
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -2201,6 +2225,8 @@ mod tests {
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (10.0, 0.0), // 10ms verification latency
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
             };
             let (mut actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -2367,5 +2393,275 @@ mod tests {
             bls12381_multisig::fixture::<MinSig, _>,
         );
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(ed25519::fixture);
+    }
+
+    /// Tests that after replay, we do not re-certify views that have already
+    /// been certified or finalized. Tests both scenarios in the same journal:
+    /// 1. Finalization at view 2 (certify never called)
+    /// 2. Notarization at view 3 with certification (certify called once)
+    ///
+    /// After restart, certify should not be called for either view.
+    fn no_recertification_after_replay<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        L: ElectorConfig<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"no_recertification_after_replay".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Track certify calls across restarts
+            let certify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));
+            let tracker = certify_calls.clone();
+
+            let elector = L::default();
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let me = participants[0].clone();
+
+            // Create application with certify tracking
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Custom(Box::new(move |d| {
+                    tracker.lock().unwrap().push(d);
+                    true
+                })),
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_cfg);
+            actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "no_recertification_after_replay".to_string(),
+                epoch: Epoch::new(333),
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_secs(1000),
+                nullify_retry: Duration::from_secs(1000),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            let (resolver_sender, _) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let handle = voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            // Wait for initial batcher notification
+            if let batcher::Message::Update { active, .. } = batcher_receiver.next().await.unwrap()
+            {
+                active.send(true).unwrap();
+            }
+
+            // Step 1: Send finalization for view 2 (certify should NOT be called)
+            let view2 = View::new(2);
+            let proposal2 = Proposal::new(
+                Round::new(Epoch::new(333), view2),
+                View::new(1),
+                Sha256::hash(b"finalized_payload"),
+            );
+            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal2, quorum);
+            mailbox
+                .recovered(Certificate::Finalization(finalization))
+                .await;
+
+            // Wait for finalization
+            loop {
+                if let batcher::Message::Update {
+                    finalized, active, ..
+                } = batcher_receiver.next().await.unwrap()
+                {
+                    active.send(true).unwrap();
+                    if finalized >= view2 {
+                        break;
+                    }
+                }
+            }
+
+            assert_eq!(
+                certify_calls.lock().unwrap().len(),
+                0,
+                "certify should not be called for finalization"
+            );
+
+            // Step 2: Send notarization for view 3 (certify SHOULD be called)
+            let view3 = View::new(3);
+            let digest3 = Sha256::hash(b"payload_for_certification");
+            let proposal3 = Proposal::new(Round::new(Epoch::new(333), view3), view2, digest3);
+
+            // Broadcast payload and send proposal
+            let contents = (proposal3.round, proposal2.payload, 0u64).encode();
+            relay.broadcast(&me, (digest3, contents.into())).await;
+            mailbox.proposal(proposal3.clone()).await;
+
+            // Send notarization
+            let (_, notarization) = build_notarization(&schemes, &namespace, &proposal3, quorum);
+            mailbox
+                .recovered(Certificate::Notarization(notarization))
+                .await;
+
+            // Wait for view advancement (certification complete)
+            loop {
+                if let batcher::Message::Update {
+                    current, active, ..
+                } = batcher_receiver.next().await.unwrap()
+                {
+                    active.send(true).unwrap();
+                    if current > view3 {
+                        break;
+                    }
+                }
+            }
+
+            assert_eq!(
+                certify_calls.lock().unwrap().len(),
+                1,
+                "certify should be called once for notarization"
+            );
+
+            // Restart voter
+            handle.abort();
+
+            // Create new application with same tracker
+            let tracker = certify_calls.clone();
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Custom(Box::new(move |d| {
+                    tracker.lock().unwrap().push(d);
+                    true
+                })),
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app2"), app_cfg);
+            actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "no_recertification_after_replay".to_string(),
+                epoch: Epoch::new(333),
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_secs(1000),
+                nullify_retry: Duration::from_secs(1000),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, _) = Actor::new(context.clone(), voter_cfg);
+
+            let (resolver_sender, _) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            // Wait for replay to complete
+            if let batcher::Message::Update { active, .. } = batcher_receiver.next().await.unwrap()
+            {
+                active.send(true).unwrap();
+            }
+
+            // Give time for any erroneous certification attempts
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify no additional certify calls after replay
+            assert_eq!(
+                certify_calls.lock().unwrap().len(),
+                1,
+                "certify should not be called again after replay"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_no_recertification_after_replay() {
+        no_recertification_after_replay::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        no_recertification_after_replay::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        no_recertification_after_replay::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        no_recertification_after_replay::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        no_recertification_after_replay::<_, _, RoundRobin>(ed25519::fixture);
     }
 }

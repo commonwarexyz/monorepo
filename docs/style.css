@@ -273,6 +273,10 @@ pre code {
     padding: 0;
 }
 
+code.hljs {
+    background-color: transparent;
+}
+
 ol {
     margin: 10px 0;
     padding-left: 30px;
