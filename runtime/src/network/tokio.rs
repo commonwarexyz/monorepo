@@ -74,17 +74,26 @@ impl Stream {
         // Compact first to maximize space for reading
         self.compact();
 
-        // Read at least min_bytes more, up to buffer capacity
+        // Use a single deadline for the entire operation to prevent slow-drip attacks
+        let deadline = tokio::time::Instant::now() + self.read_timeout;
         let target = self.end + min_bytes;
+
+        // Read at least min_bytes more, up to buffer capacity
         while self.end < target {
+            // Compute the remaining time and check if we've timed out
+            let remaining_time = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining_time.is_zero() {
+                return Err(Error::Timeout);
+            }
+
+            // Read up to the remaining time
             let bytes_read = timeout(
-                self.read_timeout,
+                remaining_time,
                 self.stream.read(&mut self.buffer[self.end..]),
             )
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::RecvFailed)?;
-
             if bytes_read == 0 {
                 return Err(Error::RecvFailed); // EOF
             }
