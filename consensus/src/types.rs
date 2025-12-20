@@ -29,6 +29,7 @@
 //! from raw integers. Implicit conversions via, e.g. `From<u64>` are intentionally not provided
 //! to prevent accidental type misuse.
 
+use crate::{Epochable, Viewable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::sequence::U64;
@@ -315,6 +316,18 @@ impl Round {
 
     /// Returns the view of this round.
     pub const fn view(self) -> View {
+        self.view
+    }
+}
+
+impl Epochable for Round {
+    fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+}
+
+impl Viewable for Round {
+    fn view(&self) -> View {
         self.view
     }
 }

@@ -480,6 +480,8 @@ pub enum Artifact<S: Scheme, D: Digest> {
     Notarize(Notarize<S, D>),
     /// A recovered certificate for a notarization.
     Notarization(Notarization<S, D>),
+    /// A notarization was locally certified.
+    Certification(Round, bool),
     /// A validator's nullify vote used to skip the current view.
     Nullify(Nullify<S>),
     /// A recovered certificate for a nullification.
@@ -501,20 +503,25 @@ impl<S: Scheme, D: Digest> Write for Artifact<S, D> {
                 1u8.write(writer);
                 v.write(writer);
             }
-            Self::Nullify(v) => {
+            Self::Certification(r, b) => {
                 2u8.write(writer);
-                v.write(writer);
+                r.write(writer);
+                b.write(writer);
             }
-            Self::Nullification(v) => {
+            Self::Nullify(v) => {
                 3u8.write(writer);
                 v.write(writer);
             }
-            Self::Finalize(v) => {
+            Self::Nullification(v) => {
                 4u8.write(writer);
                 v.write(writer);
             }
-            Self::Finalization(v) => {
+            Self::Finalize(v) => {
                 5u8.write(writer);
+                v.write(writer);
+            }
+            Self::Finalization(v) => {
+                6u8.write(writer);
                 v.write(writer);
             }
         }
@@ -526,6 +533,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Artifact<S, D> {
         1 + match self {
             Self::Notarize(v) => v.encode_size(),
             Self::Notarization(v) => v.encode_size(),
+            Self::Certification(r, b) => r.encode_size() + b.encode_size(),
             Self::Nullify(v) => v.encode_size(),
             Self::Nullification(v) => v.encode_size(),
             Self::Finalize(v) => v.encode_size(),
@@ -549,18 +557,23 @@ impl<S: Scheme, D: Digest> Read for Artifact<S, D> {
                 Ok(Self::Notarization(v))
             }
             2 => {
+                let r = Round::read(reader)?;
+                let b = bool::read(reader)?;
+                Ok(Self::Certification(r, b))
+            }
+            3 => {
                 let v = Nullify::read(reader)?;
                 Ok(Self::Nullify(v))
             }
-            3 => {
+            4 => {
                 let v = Nullification::read_cfg(reader, cfg)?;
                 Ok(Self::Nullification(v))
             }
-            4 => {
+            5 => {
                 let v = Finalize::read(reader)?;
                 Ok(Self::Finalize(v))
             }
-            5 => {
+            6 => {
                 let v = Finalization::read_cfg(reader, cfg)?;
                 Ok(Self::Finalization(v))
             }
@@ -577,6 +590,7 @@ impl<S: Scheme, D: Digest> Epochable for Artifact<S, D> {
         match self {
             Self::Notarize(v) => v.epoch(),
             Self::Notarization(v) => v.epoch(),
+            Self::Certification(r, _) => r.epoch(),
             Self::Nullify(v) => v.epoch(),
             Self::Nullification(v) => v.epoch(),
             Self::Finalize(v) => v.epoch(),
@@ -590,6 +604,7 @@ impl<S: Scheme, D: Digest> Viewable for Artifact<S, D> {
         match self {
             Self::Notarize(v) => v.view(),
             Self::Notarization(v) => v.view(),
+            Self::Certification(r, _) => r.view(),
             Self::Nullify(v) => v.view(),
             Self::Nullification(v) => v.view(),
             Self::Finalize(v) => v.view(),
@@ -626,7 +641,7 @@ where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let tag = u.int_in_range(0..=5)?;
+        let tag = u.int_in_range(0..=6)?;
         match tag {
             0 => {
                 let v = Notarize::arbitrary(u)?;
@@ -637,18 +652,23 @@ where
                 Ok(Self::Notarization(v))
             }
             2 => {
+                let r = Round::arbitrary(u)?;
+                let b = bool::arbitrary(u)?;
+                Ok(Self::Certification(r, b))
+            }
+            3 => {
                 let v = Nullify::arbitrary(u)?;
                 Ok(Self::Nullify(v))
             }
-            3 => {
+            4 => {
                 let v = Nullification::arbitrary(u)?;
                 Ok(Self::Nullification(v))
             }
-            4 => {
+            5 => {
                 let v = Finalize::arbitrary(u)?;
                 Ok(Self::Finalize(v))
             }
-            5 => {
+            6 => {
                 let v = Finalization::arbitrary(u)?;
                 Ok(Self::Finalization(v))
             }
@@ -1767,6 +1787,8 @@ pub enum Activity<S: Scheme, D: Digest> {
     Notarize(Notarize<S, D>),
     /// A recovered certificate for a notarization (scheme-specific).
     Notarization(Notarization<S, D>),
+    /// A notarization was locally certified.
+    Certification(Notarization<S, D>),
     /// A validator's nullify vote used to skip the current view.
     Nullify(Nullify<S>),
     /// A recovered certificate for a nullification (scheme-specific).
@@ -1788,6 +1810,7 @@ impl<S: Scheme, D: Digest> PartialEq for Activity<S, D> {
         match (self, other) {
             (Self::Notarize(a), Self::Notarize(b)) => a == b,
             (Self::Notarization(a), Self::Notarization(b)) => a == b,
+            (Self::Certification(a), Self::Certification(b)) => a == b,
             (Self::Nullify(a), Self::Nullify(b)) => a == b,
             (Self::Nullification(a), Self::Nullification(b)) => a == b,
             (Self::Finalize(a), Self::Finalize(b)) => a == b,
@@ -1813,32 +1836,36 @@ impl<S: Scheme, D: Digest> Hash for Activity<S, D> {
                 1u8.hash(state);
                 v.hash(state);
             }
-            Self::Nullify(v) => {
+            Self::Certification(v) => {
                 2u8.hash(state);
                 v.hash(state);
             }
-            Self::Nullification(v) => {
+            Self::Nullify(v) => {
                 3u8.hash(state);
                 v.hash(state);
             }
-            Self::Finalize(v) => {
+            Self::Nullification(v) => {
                 4u8.hash(state);
                 v.hash(state);
             }
-            Self::Finalization(v) => {
+            Self::Finalize(v) => {
                 5u8.hash(state);
                 v.hash(state);
             }
-            Self::ConflictingNotarize(v) => {
+            Self::Finalization(v) => {
                 6u8.hash(state);
                 v.hash(state);
             }
-            Self::ConflictingFinalize(v) => {
+            Self::ConflictingNotarize(v) => {
                 7u8.hash(state);
                 v.hash(state);
             }
-            Self::NullifyFinalize(v) => {
+            Self::ConflictingFinalize(v) => {
                 8u8.hash(state);
+                v.hash(state);
+            }
+            Self::NullifyFinalize(v) => {
+                9u8.hash(state);
                 v.hash(state);
             }
         }
@@ -1851,6 +1878,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
         match self {
             Self::Notarize(_) => false,
             Self::Notarization(_) => true,
+            Self::Certification(_) => false,
             Self::Nullify(_) => false,
             Self::Nullification(_) => true,
             Self::Finalize(_) => false,
@@ -1873,6 +1901,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
         match self {
             Self::Notarize(n) => n.verify(scheme, namespace),
             Self::Notarization(n) => n.verify(rng, scheme, namespace),
+            Self::Certification(n) => n.verify(rng, scheme, namespace),
             Self::Nullify(n) => n.verify(scheme, namespace),
             Self::Nullification(n) => n.verify(rng, scheme, namespace),
             Self::Finalize(f) => f.verify(scheme, namespace),
@@ -1895,32 +1924,36 @@ impl<S: Scheme, D: Digest> Write for Activity<S, D> {
                 1u8.write(writer);
                 v.write(writer);
             }
-            Self::Nullify(v) => {
+            Self::Certification(v) => {
                 2u8.write(writer);
                 v.write(writer);
             }
-            Self::Nullification(v) => {
+            Self::Nullify(v) => {
                 3u8.write(writer);
                 v.write(writer);
             }
-            Self::Finalize(v) => {
+            Self::Nullification(v) => {
                 4u8.write(writer);
                 v.write(writer);
             }
-            Self::Finalization(v) => {
+            Self::Finalize(v) => {
                 5u8.write(writer);
                 v.write(writer);
             }
-            Self::ConflictingNotarize(v) => {
+            Self::Finalization(v) => {
                 6u8.write(writer);
                 v.write(writer);
             }
-            Self::ConflictingFinalize(v) => {
+            Self::ConflictingNotarize(v) => {
                 7u8.write(writer);
                 v.write(writer);
             }
-            Self::NullifyFinalize(v) => {
+            Self::ConflictingFinalize(v) => {
                 8u8.write(writer);
+                v.write(writer);
+            }
+            Self::NullifyFinalize(v) => {
+                9u8.write(writer);
                 v.write(writer);
             }
         }
@@ -1932,6 +1965,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
         1 + match self {
             Self::Notarize(v) => v.encode_size(),
             Self::Notarization(v) => v.encode_size(),
+            Self::Certification(v) => v.encode_size(),
             Self::Nullify(v) => v.encode_size(),
             Self::Nullification(v) => v.encode_size(),
             Self::Finalize(v) => v.encode_size(),
@@ -1958,30 +1992,34 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
                 Ok(Self::Notarization(v))
             }
             2 => {
+                let v = Notarization::<S, D>::read_cfg(reader, cfg)?;
+                Ok(Self::Certification(v))
+            }
+            3 => {
                 let v = Nullify::<S>::read(reader)?;
                 Ok(Self::Nullify(v))
             }
-            3 => {
+            4 => {
                 let v = Nullification::<S>::read_cfg(reader, cfg)?;
                 Ok(Self::Nullification(v))
             }
-            4 => {
+            5 => {
                 let v = Finalize::<S, D>::read(reader)?;
                 Ok(Self::Finalize(v))
             }
-            5 => {
+            6 => {
                 let v = Finalization::<S, D>::read_cfg(reader, cfg)?;
                 Ok(Self::Finalization(v))
             }
-            6 => {
+            7 => {
                 let v = ConflictingNotarize::<S, D>::read(reader)?;
                 Ok(Self::ConflictingNotarize(v))
             }
-            7 => {
+            8 => {
                 let v = ConflictingFinalize::<S, D>::read(reader)?;
                 Ok(Self::ConflictingFinalize(v))
             }
-            8 => {
+            9 => {
                 let v = NullifyFinalize::<S, D>::read(reader)?;
                 Ok(Self::NullifyFinalize(v))
             }
@@ -1998,6 +2036,7 @@ impl<S: Scheme, D: Digest> Epochable for Activity<S, D> {
         match self {
             Self::Notarize(v) => v.epoch(),
             Self::Notarization(v) => v.epoch(),
+            Self::Certification(v) => v.epoch(),
             Self::Nullify(v) => v.epoch(),
             Self::Nullification(v) => v.epoch(),
             Self::Finalize(v) => v.epoch(),
@@ -2014,6 +2053,7 @@ impl<S: Scheme, D: Digest> Viewable for Activity<S, D> {
         match self {
             Self::Notarize(v) => v.view(),
             Self::Notarization(v) => v.view(),
+            Self::Certification(v) => v.view(),
             Self::Nullify(v) => v.view(),
             Self::Nullification(v) => v.view(),
             Self::Finalize(v) => v.view(),
@@ -2033,7 +2073,7 @@ where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let tag = u.int_in_range(0..=8)?;
+        let tag = u.int_in_range(0..=9)?;
         match tag {
             0 => {
                 let v = Notarize::<S, D>::arbitrary(u)?;
@@ -2044,30 +2084,34 @@ where
                 Ok(Self::Notarization(v))
             }
             2 => {
+                let v = Notarization::<S, D>::arbitrary(u)?;
+                Ok(Self::Certification(v))
+            }
+            3 => {
                 let v = Nullify::<S>::arbitrary(u)?;
                 Ok(Self::Nullify(v))
             }
-            3 => {
+            4 => {
                 let v = Nullification::<S>::arbitrary(u)?;
                 Ok(Self::Nullification(v))
             }
-            4 => {
+            5 => {
                 let v = Finalize::<S, D>::arbitrary(u)?;
                 Ok(Self::Finalize(v))
             }
-            5 => {
+            6 => {
                 let v = Finalization::<S, D>::arbitrary(u)?;
                 Ok(Self::Finalization(v))
             }
-            6 => {
+            7 => {
                 let v = ConflictingNotarize::<S, D>::arbitrary(u)?;
                 Ok(Self::ConflictingNotarize(v))
             }
-            7 => {
+            8 => {
                 let v = ConflictingFinalize::<S, D>::arbitrary(u)?;
                 Ok(Self::ConflictingFinalize(v))
             }
-            8 => {
+            9 => {
                 let v = NullifyFinalize::<S, D>::arbitrary(u)?;
                 Ok(Self::NullifyFinalize(v))
             }
