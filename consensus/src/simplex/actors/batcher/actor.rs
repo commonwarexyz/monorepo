@@ -426,7 +426,11 @@ impl<
                 }
             }
 
-            // Skip verification and construction for views at or below finalized
+            // Skip verification and construction for views at or below finalized.
+            //
+            // We still use interesting() for filtering votes because we want to
+            // notify the reporter of all votes within the activity timeout (even
+            // if we don't need them in the voter).
             if updated_view <= finalized {
                 continue;
             }
