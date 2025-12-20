@@ -1218,7 +1218,6 @@ mod tests {
 
     /// Test that notarize/nullify votes in old views don't trigger verification/construction,
     /// while finalize votes in old views DO trigger verification/construction.
-    /// This is a regression test for PR #2583 fix.
     fn no_verification_for_old_view_notarize_nullify<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -1344,20 +1343,13 @@ mod tests {
                 .constructed(Vote::Notarize(our_notarize))
                 .await;
 
-            // Give network time to deliver and batcher time to process
-            context.sleep(Duration::from_millis(100)).await;
-
             // Note: We should NOT receive a proposal for view 1 because proposal forwarding
             // only happens for the current view (view 2). The key assertion is that we
             // should NOT receive a notarization certificate for the old view.
-            let got_anything = select! {
-                _output = voter_receiver.next() => { true },
-                _ = context.sleep(Duration::from_millis(200)) => { false },
+            select! {
+                _ = voter_receiver.next() => { panic!("should not receive a notarization certificate for the old view") },
+                _ = context.sleep(Duration::from_millis(200)) => { },
             };
-            assert!(
-                !got_anything,
-                "Should NOT construct notarization from votes in old view"
-            );
 
             // Now test that FINALIZE votes in old views DO produce certificates
             // First, we need to inject a notarization for view 1 so finalize can proceed
