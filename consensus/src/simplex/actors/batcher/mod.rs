@@ -1216,9 +1216,9 @@ mod tests {
         leader_activity_detection(ed25519::fixture);
     }
 
-    /// Test that notarize/nullify votes in old views don't trigger verification/construction,
-    /// while finalize votes in old views DO trigger verification/construction.
-    fn no_verification_for_old_view_notarize_nullify<S, F>(mut fixture: F)
+    /// Test that notarize/nullify votes above finalized trigger verification/construction,
+    /// but votes at or below finalized do not. Finalize votes always work.
+    fn notarize_nullify_respects_finalized<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -1304,25 +1304,21 @@ mod tests {
             // Start the batcher
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
-            // Initialize batcher at VIEW 1 first, then advance to VIEW 2
-            // This creates an "old" view (view 1) that we'll send votes to
+            // Start with finalized=0, current=1 (view 1 is above finalized)
             let view1 = View::new(1);
             let view2 = View::new(2);
             let leader = 1u32;
 
-            // Set up view 1 first (so the round exists)
             let active = batcher_mailbox.update(view1, leader, View::zero()).await;
             assert!(active);
 
-            // Advance to view 2 (view 1 is now "old")
-            let active = batcher_mailbox.update(view2, leader, View::zero()).await;
-            assert!(active);
-
-            // Build proposal for view 1 (old view)
+            // Build proposals for both views
             let round1 = Round::new(epoch, view1);
-            let proposal1 = Proposal::new(round1, View::zero(), Sha256::hash(b"old_payload"));
+            let proposal1 = Proposal::new(round1, View::zero(), Sha256::hash(b"payload1"));
+            let round2 = Round::new(epoch, view2);
+            let proposal2 = Proposal::new(round2, view1, Sha256::hash(b"payload2"));
 
-            // Send quorum of NOTARIZE votes for view 1 (old view) from participants 1..quorum_size
+            // Part 1: Send NOTARIZE votes for view 1 (above finalized=0, should succeed)
             for i in 1..quorum_size {
                 let vote = Notarize::sign(&schemes[i], &namespace, proposal1.clone()).unwrap();
                 if let Some(ref mut sender) = participant_senders[i] {
@@ -1343,48 +1339,67 @@ mod tests {
                 .constructed(Vote::Notarize(our_notarize))
                 .await;
 
-            // Note: We should NOT receive a proposal for view 1 because proposal forwarding
-            // only happens for the current view (view 2). The key assertion is that we
-            // should NOT receive a notarization certificate for the old view.
+            // Wait for network delivery and processing
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Should receive a notarization certificate (view 1 is above finalized=0)
+            loop {
+                let output = voter_receiver.next().await.unwrap();
+                match output {
+                    voter::Message::Proposal(_) => continue,
+                    voter::Message::Verified(Certificate::Notarization(n), _) => {
+                        assert_eq!(n.view(), view1, "Should construct notarization for view above finalized");
+                        break;
+                    }
+                    _ => panic!("Unexpected message type"),
+                }
+            }
+
+            // Part 2: Advance to view 2 with view 1 finalized
+            // Now test NOTARIZE votes for view 2 which should NOT be processed (at finalized=1)
+            let active = batcher_mailbox.update(view2, leader, view1).await;
+            assert!(active);
+
+            // But first, update finalized to view 2 so that view 2 is at finalized level
+            let view3 = View::new(3);
+            let active = batcher_mailbox.update(view3, leader, view2).await;
+            assert!(active);
+
+            // Send NOTARIZE votes for view 2 (now at finalized=2, should NOT succeed)
+            for i in 1..quorum_size {
+                let vote = Notarize::sign(&schemes[i], &namespace, proposal2.clone()).unwrap();
+                if let Some(ref mut sender) = participant_senders[i] {
+                    sender
+                        .send(
+                            Recipients::One(me.clone()),
+                            Vote::Notarize(vote).encode().into(),
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            // Send our own notarize vote for view 2 via constructed
+            let our_notarize2 = Notarize::sign(&schemes[0], &namespace, proposal2.clone()).unwrap();
+            batcher_mailbox
+                .constructed(Vote::Notarize(our_notarize2))
+                .await;
+
+            // Should NOT receive a notarization certificate for the finalized view
             select! {
-                _ = voter_receiver.next() => { panic!("should not receive a notarization certificate for the old view") },
+                msg = voter_receiver.next() => {
+                    if matches!(msg, Some(voter::Message::Verified(Certificate::Notarization(n), _)) if n.view() == view2) {
+                        panic!("should not receive a notarization certificate for the finalized view");
+                    }
+                },
                 _ = context.sleep(Duration::from_millis(200)) => { },
             };
 
-            // Now test that FINALIZE votes in old views DO produce certificates
-            // First, we need to inject a notarization for view 1 so finalize can proceed
-            let notarization = build_notarization(&schemes, &namespace, &proposal1, quorum_size);
-
-            // Create an injector peer to send certificates (on channel 1)
-            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
-            let (mut injector_sender, _injector_receiver) = oracle
-                .control(injector_pk.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
-            oracle
-                .add_link(injector_pk.clone(), me.clone(), link.clone())
-                .await
-                .unwrap();
-
-            // Send the notarization so finalize votes can be processed
-            injector_sender
-                .send(
-                    Recipients::One(me.clone()),
-                    Certificate::Notarization(notarization).encode().into(),
-                    true,
-                )
-                .await
-                .unwrap();
-
-            // Wait for notarization to be forwarded
-            context.sleep(Duration::from_millis(50)).await;
-            let output = voter_receiver.next().await.unwrap();
-            assert!(matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view1));
-
-            // Send quorum of FINALIZE votes for view 1 (old view)
+            // Part 3: Test that FINALIZE votes in finalized views DO produce certificates
+            // Send quorum of FINALIZE votes for view 2 (finalized view)
             for i in 1..quorum_size {
-                let vote = Finalize::sign(&schemes[i], &namespace, proposal1.clone()).unwrap();
+                let vote = Finalize::sign(&schemes[i], &namespace, proposal2.clone()).unwrap();
                 if let Some(ref mut sender) = participant_senders[i] {
                     sender
                         .send(
@@ -1397,8 +1412,8 @@ mod tests {
                 }
             }
 
-            // Send our own finalize vote for view 1
-            let our_finalize = Finalize::sign(&schemes[0], &namespace, proposal1.clone()).unwrap();
+            // Send our own finalize vote for view 2
+            let our_finalize = Finalize::sign(&schemes[0], &namespace, proposal2.clone()).unwrap();
             batcher_mailbox
                 .constructed(Vote::Finalize(our_finalize))
                 .await;
@@ -1406,21 +1421,27 @@ mod tests {
             // Give network time to deliver and batcher time to process
             context.sleep(Duration::from_millis(100)).await;
 
-            // Should receive a finalization certificate - finalize IS allowed in old views
-            let output = voter_receiver.next().await.unwrap();
-            assert!(
-                matches!(output, voter::Message::Verified(Certificate::Finalization(f), _) if f.view() == view1),
-                "Should construct finalization from votes in old view"
-            );
+            // Should receive a finalization certificate - finalize IS allowed in finalized views
+            loop {
+                let output = voter_receiver.next().await.unwrap();
+                match output {
+                    voter::Message::Proposal(_) => continue,
+                    voter::Message::Verified(Certificate::Finalization(f), _) => {
+                        assert_eq!(f.view(), view2, "Should construct finalization from votes in finalized view");
+                        break;
+                    }
+                    _ => panic!("Unexpected message type"),
+                }
+            }
         });
     }
 
     #[test_traced]
-    fn test_no_verification_for_old_view_notarize_nullify() {
-        no_verification_for_old_view_notarize_nullify(bls12381_threshold::fixture::<MinPk, _>);
-        no_verification_for_old_view_notarize_nullify(bls12381_threshold::fixture::<MinSig, _>);
-        no_verification_for_old_view_notarize_nullify(bls12381_multisig::fixture::<MinPk, _>);
-        no_verification_for_old_view_notarize_nullify(bls12381_multisig::fixture::<MinSig, _>);
-        no_verification_for_old_view_notarize_nullify(ed25519::fixture);
+    fn test_notarize_nullify_respects_finalized() {
+        notarize_nullify_respects_finalized(bls12381_threshold::fixture::<MinPk, _>);
+        notarize_nullify_respects_finalized(bls12381_threshold::fixture::<MinSig, _>);
+        notarize_nullify_respects_finalized(bls12381_multisig::fixture::<MinPk, _>);
+        notarize_nullify_respects_finalized(bls12381_multisig::fixture::<MinSig, _>);
+        notarize_nullify_respects_finalized(ed25519::fixture);
     }
 }

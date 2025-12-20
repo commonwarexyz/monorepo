@@ -418,8 +418,8 @@ impl<
             );
 
             // Verifying/constructing notarizations and nullifications is only useful
-            // for advancing the current view, however, finalizations are useful for all tracked views.
-            let is_current_view = updated_view == current;
+            // for views above finalized, however, finalizations are useful for all tracked views.
+            let is_above_finalized = updated_view > finalized;
 
             // Forward leader's proposal to voter (if we're not the leader and haven't already)
             if let Some(round) = work.get_mut(&current) {
@@ -437,9 +437,9 @@ impl<
 
             // Batch verify votes if ready
             let mut timer = self.verify_latency.timer();
-            let verified = if is_current_view && round.ready_notarizes() {
+            let verified = if is_above_finalized && round.ready_notarizes() {
                 Some(round.verify_notarizes(&mut self.context, &self.namespace))
-            } else if is_current_view && round.ready_nullifies() {
+            } else if is_above_finalized && round.ready_nullifies() {
                 Some(round.verify_nullifies(&mut self.context, &self.namespace))
             } else if round.ready_finalizes() {
                 Some(round.verify_finalizes(&mut self.context, &self.namespace))
@@ -479,7 +479,7 @@ impl<
             }
 
             // Try to construct and forward certificates
-            if is_current_view {
+            if is_above_finalized {
                 if let Some(notarization) = self
                     .recover_latency
                     .time_some(|| round.try_construct_notarization(&self.scheme))
