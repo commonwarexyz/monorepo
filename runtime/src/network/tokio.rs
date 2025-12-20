@@ -62,7 +62,8 @@ impl Stream {
         while total_read < min_bytes {
             let bytes_read = timeout(
                 self.read_timeout,
-                self.stream.read(&mut self.temp_read_buf[total_read..max_read]),
+                self.stream
+                    .read(&mut self.temp_read_buf[total_read..max_read]),
             )
             .await
             .map_err(|_| Error::Timeout)?
@@ -333,9 +334,12 @@ impl crate::Network for Network {
 
 #[cfg(test)]
 mod tests {
-    use crate::network::{tests, tokio as TokioNetwork};
+    use crate::{
+        network::{tests, tokio as TokioNetwork},
+        Listener as _, Network as _, Sink as _, Stream as _,
+    };
     use commonware_macros::test_group;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn test_trait() {
@@ -360,5 +364,47 @@ mod tests {
             )
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_small_send_read_quickly() {
+        // Use a long read timeout to ensure we're not just waiting for timeout
+        let read_timeout = Duration::from_secs(30);
+        let network = TokioNetwork::Network::from(
+            TokioNetwork::Config::default()
+                .with_read_timeout(read_timeout)
+                .with_write_timeout(Duration::from_secs(5)),
+        );
+
+        // Bind a listener
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn a task to accept and read
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+
+            // Read a small message (much smaller than the 64KB buffer)
+            let start = Instant::now();
+            let buf = stream.recv(vec![0u8; 10]).await.unwrap();
+            let elapsed = start.elapsed();
+
+            (buf, elapsed)
+        });
+
+        // Connect and send a small message
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        sink.send(msg.clone()).await.unwrap();
+
+        // Wait for the reader to complete
+        let (received, elapsed) = reader.await.unwrap();
+
+        // Verify we got the right data
+        assert_eq!(received.as_ref(), &msg[..]);
+
+        // Verify it completed quickly (well under the read timeout)
+        // Should complete in milliseconds, not seconds
+        assert!(elapsed < read_timeout);
     }
 }
