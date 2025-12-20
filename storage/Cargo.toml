@@ -37,6 +37,7 @@ commonware-conformance.workspace = true
 commonware-math.workspace = true
 commonware-storage = { path = ".", features = ["std"] }
 crc.workspace = true
+crc32c.workspace = true
 criterion.workspace = true
 rand.workspace = true
 rstest.workspace = true

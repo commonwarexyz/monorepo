@@ -2,7 +2,7 @@ use crc::{Crc, CRC_32_ISCSI};
 use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-/// CRC-32/ISCSI implementation from the `crc` crate.
+/// CRC-32/ISCSI implementation from the `crc` crate (software/table-based).
 const CRC_ISCSI: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 fn benchmark_crc32_hash(c: &mut Criterion) {
@@ -50,9 +50,18 @@ fn benchmark_crc32_hash(c: &mut Criterion) {
             },
         );
 
-        // Benchmark crc crate with CRC_32_ISCSI
+        // Benchmark crc32c crate (hardware-accelerated)
         group.bench_with_input(
-            BenchmarkId::new("crc_iscsi", size),
+            BenchmarkId::new("crc32c", size),
+            &data,
+            |b, data| {
+                b.iter(|| crc32c::crc32c(data));
+            },
+        );
+
+        // Benchmark crc crate with CRC_32_ISCSI (software/table-based)
+        group.bench_with_input(
+            BenchmarkId::new("crc_soft", size),
             &data,
             |b, data| {
                 b.iter(|| CRC_ISCSI.checksum(data));
@@ -96,9 +105,24 @@ fn benchmark_crc32_incremental(c: &mut Criterion) {
             },
         );
 
-        // Benchmark crc crate with CRC_32_ISCSI using digest API
+        // Benchmark crc32c crate with multiple updates (hardware-accelerated)
         group.bench_with_input(
-            BenchmarkId::new("crc_iscsi_digest", format!("{}x{}", num_chunks, chunk_size)),
+            BenchmarkId::new("crc32c", format!("{}x{}", num_chunks, chunk_size)),
+            &chunks,
+            |b, chunks| {
+                b.iter(|| {
+                    let mut crc = 0u32;
+                    for chunk in chunks.iter() {
+                        crc = crc32c::crc32c_append(crc, chunk);
+                    }
+                    crc
+                });
+            },
+        );
+
+        // Benchmark crc crate with CRC_32_ISCSI using digest API (software)
+        group.bench_with_input(
+            BenchmarkId::new("crc_soft_digest", format!("{}x{}", num_chunks, chunk_size)),
             &chunks,
             |b, chunks| {
                 b.iter(|| {
