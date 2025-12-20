@@ -471,6 +471,10 @@ pub trait Listener: Sync + Send + 'static {
 /// messages over a network connection.
 pub trait Sink: Sync + Send + 'static {
     /// Send a message to the sink.
+    ///
+    /// # Warning
+    ///
+    /// If the sink returns an error, part of the message may still be delivered.
     fn send(
         &mut self,
         msg: impl Into<StableBuf> + Send,
@@ -482,6 +486,10 @@ pub trait Sink: Sync + Send + 'static {
 pub trait Stream: Sync + Send + 'static {
     /// Receive a message from the stream, storing it in the given buffer.
     /// Reads exactly the number of bytes that fit in the buffer.
+    ///
+    /// # Warning
+    ///
+    /// If the stream returns an error, partially read data may be discarded.
     fn recv(
         &mut self,
         buf: impl Into<StableBuf> + Send,
