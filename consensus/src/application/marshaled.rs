@@ -37,7 +37,8 @@ use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
     simplex::types::Context,
     types::{Epoch, Epocher, Round},
-    Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
+    Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
+    VerifyingApplication,
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
@@ -425,6 +426,22 @@ where
             });
         rx
     }
+}
+
+impl<E, S, A, B, ES> CertifiableAutomaton for Marshaled<E, S, A, B, ES>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    S: Scheme,
+    A: VerifyingApplication<
+        E,
+        Block = B,
+        SigningScheme = S,
+        Context = Context<B::Commitment, S::PublicKey>,
+    >,
+    B: Block,
+    ES: Epocher,
+{
+    // Uses default certify implementation which always returns true
 }
 
 impl<E, S, A, B, ES> Relay for Marshaled<E, S, A, B, ES>

@@ -63,7 +63,7 @@ use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{varint::UInt, Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::{bitmap::BitMap, ordered::Set};
 use core::{fmt::Debug, hash::Hash};
 use rand::{CryptoRng, Rng};
@@ -96,14 +96,14 @@ impl<S: Scheme> Hash for Attestation<S> {
 
 impl<S: Scheme> Write for Attestation<S> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.signer.write(writer);
+        UInt(self.signer).write(writer);
         self.signature.write(writer);
     }
 }
 
 impl<S: Scheme> EncodeSize for Attestation<S> {
     fn encode_size(&self) -> usize {
-        self.signer.encode_size() + self.signature.encode_size()
+        UInt(self.signer).encode_size() + self.signature.encode_size()
     }
 }
 
@@ -111,7 +111,7 @@ impl<S: Scheme> Read for Attestation<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let signer = u32::read(reader)?;
+        let signer = UInt::read(reader)?.into();
         let signature = S::Signature::read(reader)?;
 
         Ok(Self { signer, signature })

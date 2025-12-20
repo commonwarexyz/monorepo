@@ -218,7 +218,17 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let provider = Provider::new(consensus_namespace.clone(), config.signer.clone());
+        // Create the certificate verifier from the initial output (if available).
+        // This allows epoch-independent certificate verification after the DKG is complete.
+        let certificate_verifier = config.output.as_ref().and_then(|output| {
+            <Provider<S, C> as EpochProvider>::certificate_verifier(&consensus_namespace, output)
+        });
+        let provider = Provider::new(
+            consensus_namespace.clone(),
+            config.signer.clone(),
+            certificate_verifier,
+        );
+
         let (marshal, marshal_mailbox, _processed_height) = marshal::Actor::init(
             context.with_label("marshal"),
             finalizations_by_height,
@@ -300,10 +310,6 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        orchestrator: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
         marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
@@ -318,7 +324,6 @@ where
                 resolver,
                 broadcast,
                 dkg,
-                orchestrator,
                 marshal,
                 callback
             )
@@ -349,10 +354,6 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        orchestrator: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
         marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
@@ -370,9 +371,7 @@ where
         let marshal_handle = self
             .marshal
             .start(self.dkg_mailbox, self.buffered_mailbox, marshal);
-        let orchestrator_handle =
-            self.orchestrator
-                .start(votes, certificates, resolver, orchestrator);
+        let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,

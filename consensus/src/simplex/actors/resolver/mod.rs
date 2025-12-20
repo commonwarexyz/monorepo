@@ -7,6 +7,8 @@ pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
 pub use ingress::Mailbox;
+#[cfg(test)]
+pub use ingress::MailboxMessage;
 use std::time::Duration;
 
 pub struct Config<S: Scheme, B: Blocker> {

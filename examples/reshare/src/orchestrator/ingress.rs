@@ -1,6 +1,6 @@
 //! Inbound communication channel for epoch transitions.
 
-use commonware_consensus::{types::Epoch, Reporter};
+use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     bls12381::primitives::{group, sharing::Sharing, variant::Variant},
     PublicKey,
@@ -38,14 +38,16 @@ impl<V: Variant, P: PublicKey> Mailbox<V, P> {
     pub const fn new(sender: mpsc::Sender<Message<V, P>>) -> Self {
         Self { sender }
     }
-}
 
-impl<V: Variant, P: PublicKey> Reporter for Mailbox<V, P> {
-    type Activity = Message<V, P>;
-
-    async fn report(&mut self, activity: Self::Activity) {
-        if let Err(err) = self.sender.send(activity).await {
+    pub async fn enter(&mut self, transition: EpochTransition<V, P>) {
+        if let Err(err) = self.sender.send(Message::Enter(transition)).await {
             error!(?err, "failed to send epoch transition");
+        }
+    }
+
+    pub async fn exit(&mut self, epoch: Epoch) {
+        if let Err(err) = self.sender.send(Message::Exit(epoch)).await {
+            error!(?err, "failed to send epoch exit");
         }
     }
 }

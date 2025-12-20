@@ -29,7 +29,6 @@ const RESOLVER_CHANNEL: u64 = 2;
 const BROADCASTER_CHANNEL: u64 = 3;
 const MARSHAL_CHANNEL: u64 = 4;
 const DKG_CHANNEL: u64 = 5;
-const ORCHESTRATOR_CHANNEL: u64 = 6;
 
 const MAILBOX_SIZE: usize = 10;
 const MESSAGE_BACKLOG: usize = 10;
@@ -100,9 +99,6 @@ pub async fn run<S, L>(
     let marshal_limit = Quota::per_second(NZU32!(8));
     let marshal = network.register(MARSHAL_CHANNEL, marshal_limit, MESSAGE_BACKLOG);
 
-    let orchestrator_limit = Quota::per_second(NZU32!(1));
-    let orchestrator = network.register(ORCHESTRATOR_CHANNEL, orchestrator_limit, MESSAGE_BACKLOG);
-
     let dkg_limit = Quota::per_second(NZU32!(128));
     let dkg = network.register(DKG_CHANNEL, dkg_limit, MESSAGE_BACKLOG);
 
@@ -143,7 +139,6 @@ pub async fn run<S, L>(
         resolver,
         broadcaster,
         dkg,
-        orchestrator,
         marshal,
         callback,
     );
@@ -366,10 +361,6 @@ mod test {
                     failures: self.failures.clone(),
                 },
             );
-            let orchestrator = control
-                .register(ORCHESTRATOR_CHANNEL, TEST_QUOTA)
-                .await
-                .unwrap();
 
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),
@@ -405,7 +396,6 @@ mod test {
                 resolver,
                 broadcast,
                 dkg,
-                orchestrator,
                 marshal,
                 UpdateHandler::boxed(pk.clone(), updates.clone()),
             );
@@ -856,6 +846,46 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
+            crash: None,
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("DEBUG")]
+    fn dkg_single_participant_single_epoch() {
+        Plan {
+            seed: 0,
+            total: 1,
+            per_round: vec![1],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Dkg,
+            crash: None,
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("DEBUG")]
+    fn reshare_single_participant_two_epochs() {
+        Plan {
+            seed: 0,
+            total: 1,
+            per_round: vec![1],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(2),
             crash: None,
             failures: HashSet::new(),
         }
