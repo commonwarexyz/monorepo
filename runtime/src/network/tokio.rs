@@ -192,9 +192,6 @@ impl crate::Listener for Listener {
     }
 }
 
-/// Default read buffer size (64 KB).
-const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
-
 /// Configuration for the tokio [Network] implementation of the [crate::Network] trait.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -269,7 +266,7 @@ impl Default for Config {
             tcp_nodelay: None,
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
-            read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
+            read_buffer_size: 64 * 1024, // 64 KB
         }
     }
 }
