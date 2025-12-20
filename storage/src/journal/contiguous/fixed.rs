@@ -56,6 +56,7 @@
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
 use crate::{
+    crc32,
     journal::{
         contiguous::{MutableContiguous, PersistableContiguous},
         Error,
@@ -140,7 +141,7 @@ pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
 }
 
 impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
-    pub(crate) const CHUNK_SIZE: usize = u32::SIZE + A::SIZE;
+    pub(crate) const CHUNK_SIZE: usize = crc32::SIZE + A::SIZE;
     pub(crate) const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
     /// Initialize a new `Journal` instance.
@@ -985,7 +986,7 @@ mod tests {
 
             // Corrupt one of the checksums and make sure it's detected.
             let checksum_offset = Digest::SIZE as u64
-                + (ITEMS_PER_BLOB.get() / 2) * (Digest::SIZE + u32::SIZE) as u64;
+                + (ITEMS_PER_BLOB.get() / 2) * (Digest::SIZE + crc32::SIZE) as u64;
             let (blob, _) = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
@@ -1122,7 +1123,7 @@ mod tests {
 
             // Write incorrect checksum into the second item in the blob, which should result in the
             // second item being trimmed.
-            let checksum_offset = Digest::SIZE + u32::SIZE + Digest::SIZE;
+            let checksum_offset = Digest::SIZE + crc32::SIZE + Digest::SIZE;
 
             let bad_checksum = 123456789u32;
             blob.write_at(bad_checksum.to_be_bytes().to_vec(), checksum_offset as u64)

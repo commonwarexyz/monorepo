@@ -94,7 +94,7 @@
 //! });
 //! ```
 
-use crate::{journal::Error, Crc32};
+use crate::{crc32, journal::Error, Crc32};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
@@ -136,10 +136,10 @@ pub struct Config<C> {
 
 pub(crate) const ITEM_ALIGNMENT: u64 = 16;
 
-/// Minimum size of any item: 1 byte varint (size=0) + 0 bytes data + 4 bytes checksum.
+/// Minimum size of any item: 1 byte varint (size=0) + 0 bytes data + crc32::SIZE bytes checksum.
 /// This is also the max varint size for u32, so we can always read this many bytes
 /// at the start of an item to get the complete varint.
-const MIN_ITEM_SIZE: usize = 5;
+const MIN_ITEM_SIZE: usize = 1 + crc32::SIZE;
 
 /// Computes the next offset for an item using the underlying `u64`
 /// offset of `Blob`.
@@ -251,7 +251,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             .ok_or(Error::OffsetOverflow)?;
 
         // Read remaining
-        let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
+        let buf_size = size.checked_add(crc32::SIZE).ok_or(Error::OffsetOverflow)?;
         let buf = blob.read_at(vec![0u8; buf_size], offset).await?;
         let buf = buf.as_ref();
         let offset = offset
@@ -526,7 +526,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Err(_) => return Err(Error::ItemTooLarge(item_len)),
         };
         let size_len = UInt(item_len).encode_size();
-        let entry_len = size_len + item_len as usize + 4;
+        let entry_len = size_len + item_len as usize + crc32::SIZE;
 
         // Get existing blob or create new one
         let blob = match self.blobs.entry(section) {

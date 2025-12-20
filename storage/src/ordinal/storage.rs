@@ -1,5 +1,5 @@
 use super::{Config, Error};
-use crate::{rmap::RMap, Crc32};
+use crate::{crc32, rmap::RMap, Crc32};
 use bytes::{Buf, BufMut};
 use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
@@ -35,7 +35,7 @@ impl<V: CodecFixed<Cfg = ()>> Record<V> {
 }
 
 impl<V: CodecFixed<Cfg = ()>> FixedSize for Record<V> {
-    const SIZE: usize = V::SIZE + u32::SIZE;
+    const SIZE: usize = V::SIZE + crc32::SIZE;
 }
 
 impl<V: CodecFixed<Cfg = ()>> CodecWrite for Record<V> {

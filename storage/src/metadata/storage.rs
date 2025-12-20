@@ -1,5 +1,5 @@
 use super::{Config, Error};
-use crate::Crc32;
+use crate::{crc32, Crc32};
 use bytes::BufMut;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_runtime::{
@@ -152,8 +152,8 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
 
         // Verify integrity.
         //
-        // 8 bytes for version + 4 bytes for checksum.
-        if buf.len() < 12 {
+        // 8 bytes for version + crc32::SIZE bytes for checksum.
+        if buf.len() < 8 + crc32::SIZE {
             // Truncate and return none
             warn!(
                 blob = index,
@@ -166,7 +166,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         }
 
         // Extract checksum
-        let checksum_index = buf.len() - 4;
+        let checksum_index = buf.len() - crc32::SIZE;
         let stored_checksum =
             u32::from_be_bytes(buf.as_ref()[checksum_index..].try_into().unwrap());
         let computed_checksum = Crc32::checksum(&buf.as_ref()[..checksum_index]);
@@ -372,7 +372,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
             writes.push(target.blob.write_at(version.as_slice().into(), 0));
 
             // Update checksum
-            let checksum_index = target.data.len() - 4;
+            let checksum_index = target.data.len() - crc32::SIZE;
             let checksum = Crc32::checksum(&target.data[..checksum_index]).to_be_bytes();
             target.data[checksum_index..].copy_from_slice(&checksum);
             writes.push(

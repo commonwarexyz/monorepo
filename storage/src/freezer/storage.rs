@@ -1,5 +1,6 @@
 use super::{Config, Error, Identifier};
 use crate::{
+    crc32,
     journal::segmented::variable::{Config as JournalConfig, Journal},
     Crc32,
 };
@@ -218,7 +219,7 @@ impl Entry {
 }
 
 impl FixedSize for Entry {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE + u8::SIZE + u32::SIZE;
+    const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE + u8::SIZE + crc32::SIZE;
 }
 
 impl CodecWrite for Entry {
