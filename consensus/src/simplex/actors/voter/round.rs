@@ -112,8 +112,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
-    #[allow(clippy::type_complexity)]
     /// Returns the leader key and proposal when the view is ready for verification.
+    #[allow(clippy::type_complexity)]
     pub fn should_verify(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
         let leader = self.verify_ready()?;
         let proposal = self.proposal.proposal().cloned()?;
