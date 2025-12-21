@@ -112,8 +112,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
-    #[allow(clippy::type_complexity)]
     /// Returns the leader key and proposal when the view is ready for verification.
+    #[allow(clippy::type_complexity)]
     pub fn should_verify(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
         let leader = self.verify_ready()?;
         let proposal = self.proposal.proposal().cloned()?;
@@ -130,6 +130,14 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Attempt to certify this round's proposal.
     pub fn should_certify(&mut self) -> CertifyResult<Proposal<D>> {
+        // Proposers implicitly certify their own blocks (since they built them, they know they're valid).
+        if let Some(leader) = &self.leader {
+            if self.is_signer(leader.idx) && self.certified.is_none() {
+                self.certified = Some(true);
+                return CertifyResult::Skip;
+            }
+        }
+
         // Skip if no notarization, already certified, or handle exists
         if self.notarization.is_none() || self.certified.is_some() || self.certify_handle.is_some()
         {

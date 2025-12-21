@@ -256,7 +256,9 @@ where
             Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
-        );
+            config.partition_prefix.clone(),
+        )
+        .await;
 
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
             context.with_label("orchestrator"),

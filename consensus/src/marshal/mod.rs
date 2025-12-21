@@ -1548,7 +1548,9 @@ mod tests {
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
-            );
+                "validator_0".to_string(),
+            )
+            .await;
 
             // Test case 1: Non-contiguous height
             //
@@ -1924,8 +1926,14 @@ mod tests {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 max_epoch: 0,
             };
-            let mut marshaled =
-                Marshaled::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
+            let mut marshaled = Marshaled::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                limited_epocher,
+                "validator_0".to_string(),
+            )
+            .await;
 
             // Create a parent block at height 19 (last block in epoch 0, which is supported)
             let parent = B::new::<Sha256>(genesis.commitment(), 19, 1000);
