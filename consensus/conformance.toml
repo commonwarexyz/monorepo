@@ -94,6 +94,10 @@ hash = "9b361e8f45bb08e27ded35ffe7800629c9ba8a82f4d2993e154cfb513f528a21"
 n_cases = 65536
 hash = "9b361e8f45bb08e27ded35ffe7800629c9ba8a82f4d2993e154cfb513f528a21"
 
+["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Context<Sha256Digest,PublicKey>>"]
+n_cases = 65536
+hash = "58d1333109bb5d356034727f529dff08f28ac2300d4749862db2cb6ca2591511"
+
 ["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Finalization<Scheme,Sha256Digest>>"]
 n_cases = 65536
 hash = "c78e26f7142aed21d0bb8bef88e007baae0fe34b3a2533d1085f7c2b08464e95"

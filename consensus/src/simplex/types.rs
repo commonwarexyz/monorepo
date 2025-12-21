@@ -45,6 +45,51 @@ impl<D: Digest, P: PublicKey> Viewable for Context<D, P> {
     }
 }
 
+impl<D: Digest, P: PublicKey> Write for Context<D, P> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.round.write(buf);
+        self.leader.write(buf);
+        self.parent.write(buf);
+    }
+}
+
+impl<D: Digest, P: PublicKey> EncodeSize for Context<D, P> {
+    fn encode_size(&self) -> usize {
+        self.round.encode_size() + self.leader.encode_size() + self.parent.encode_size()
+    }
+}
+
+impl<D: Digest, P: PublicKey> Read for Context<D, P> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let round = Round::read(reader)?;
+        let leader = P::read(reader)?;
+        let parent = <(View, D)>::read_cfg(reader, &((), ()))?;
+
+        Ok(Self {
+            round,
+            leader,
+            parent,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<D: Digest, P: PublicKey> arbitrary::Arbitrary<'_> for Context<D, P>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    P: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            round: Round::arbitrary(u)?,
+            leader: P::arbitrary(u)?,
+            parent: (View::arbitrary(u)?, D::arbitrary(u)?),
+        })
+    }
+}
+
 /// Attributable is a trait that provides access to the signer index.
 /// This is used to identify which participant signed a given message.
 pub trait Attributable {
@@ -3361,6 +3406,7 @@ mod tests {
             CodecConformance<ConflictingNotarize<Scheme, Sha256Digest>>,
             CodecConformance<ConflictingFinalize<Scheme, Sha256Digest>>,
             CodecConformance<NullifyFinalize<Scheme, Sha256Digest>>,
+            CodecConformance<Context<Sha256Digest, PublicKey>>
         }
     }
 }
