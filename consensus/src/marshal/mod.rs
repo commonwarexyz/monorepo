@@ -113,7 +113,7 @@ mod tests {
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-        Automaton, Heightable, Reporter, VerifyingApplication,
+        Automaton, Heightable, CertifiableAutomaton, Reporter, VerifyingApplication,
     };
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
@@ -1845,12 +1845,14 @@ mod tests {
             let mock_app = MockVerifyingApp {
                 genesis: genesis.clone(),
             };
-            let mut marshaled = Marshaled::new(
+            let mut marshaled = Marshaled::init(
                 context.clone(),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
-            );
+                "validator_0".to_string(),
+            )
+            .await;
 
             // Test case 1: Non-contiguous height
             //
@@ -1898,15 +1900,17 @@ mod tests {
                 parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
 
-            // Marshaled.verify() should reject the malicious block
+            // Marshaled.certify() should reject the malicious block
             // The Marshaled verifier will:
             // 1. Fetch honest_parent (height 21) from marshal based on context.parent
             // 2. Fetch malicious_block (height 35) from marshal based on digest
             // 3. Validate height is contiguous (fail)
             // 4. Return false
-            let verify = marshaled
+            let _ = marshaled
                 .verify(byzantine_context, malicious_commitment)
+                .await
                 .await;
+            let verify = marshaled.certify(malicious_commitment).await;
 
             assert!(
                 !verify.await.unwrap(),
@@ -1941,16 +1945,18 @@ mod tests {
                 parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
 
-            // Marshaled.verify() should reject the malicious block
+            // Marshaled.certify() should reject the malicious block
             // The Marshaled verifier will:
             // 1. Fetch honest_parent (height 21) from marshal based on context.parent
             // 2. Fetch malicious_block (height 22) from marshal based on digest
             // 3. Validate height is contiguous
             // 3. Validate parent commitment matches (fail)
             // 4. Return false
-            let verify = marshaled
+            let _ = marshaled
                 .verify(byzantine_context, malicious_commitment)
+                .await
                 .await;
+            let verify = marshaled.certify(malicious_commitment).await;
 
             assert!(
                 !verify.await.unwrap(),
@@ -2244,8 +2250,14 @@ mod tests {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 max_epoch: 0,
             };
-            let mut marshaled =
-                Marshaled::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
+            let mut marshaled = Marshaled::init(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                limited_epocher,
+                "validator_0".to_string(),
+            )
+            .await;
 
             // Create a parent block at height 19 (last block in epoch 0, which is supported)
             let parent = B::new::<Sha256>(genesis.commitment(), Height::new(19), 1000);
@@ -2269,9 +2281,11 @@ mod tests {
                 parent: (View::new(19), parent_commitment),
             };
 
-            let verify = marshaled
+            let _ = marshaled
                 .verify(unsupported_context, block_commitment)
+                .await
                 .await;
+            let verify = marshaled.certify(block_commitment).await;
 
             assert!(
                 !verify.await.unwrap(),
