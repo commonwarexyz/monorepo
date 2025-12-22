@@ -124,12 +124,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::variable as variable_journal,
-        mmr::iterator::nodes_to_pin,
-        qmdb::{
-            any::unordered::{sync_tests::SyncTestHarness, Update},
-            store::CleanStore as _,
-        },
+        qmdb::any::unordered::{sync_tests::SyncTestHarness, Update},
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -138,16 +133,11 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
-        Runner as _,
     };
     use commonware_utils::{NZUsize, NZU64};
-    use futures::future::join_all;
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use rstest::rstest;
-    use std::{
-        collections::{HashMap, HashSet},
-        num::NonZeroU64,
-    };
+    use std::num::NonZeroU64;
 
     const PAGE_SIZE: usize = 99;
     const PAGE_CACHE_SIZE: usize = 3;
@@ -358,334 +348,27 @@ mod tests {
         );
     }
 
-    /// Test `from_sync_result` with an empty source database syncing to a non-empty target.
     #[test]
     fn test_from_sync_result_empty_to_nonempty() {
-        const NUM_OPS: usize = 100;
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create and populate a source database
-            let mut source_db = create_test_db(context.clone()).await;
-            let ops = create_test_ops(NUM_OPS);
-            apply_ops(&mut source_db, ops.clone()).await;
-            source_db.commit(None).await.unwrap();
-            source_db
-                .prune(source_db.inactivity_floor_loc())
-                .await
-                .unwrap();
-
-            let lower_bound = source_db.inactivity_floor_loc();
-            let upper_bound = source_db.op_count();
-
-            // Get pinned nodes and target hash before moving source_db
-            let pinned_nodes_pos = nodes_to_pin(Position::try_from(lower_bound).unwrap());
-            let pinned_nodes =
-                join_all(pinned_nodes_pos.map(|pos| source_db.log.mmr.get_node(pos))).await;
-            let pinned_nodes = pinned_nodes
-                .iter()
-                .map(|node| node.as_ref().unwrap().unwrap())
-                .collect::<Vec<_>>();
-            let target_hash = source_db.root();
-
-            // Create log with operations
-            let log_config = variable_journal::Config {
-                partition: format!("ops_log_{}", context.next_u64()),
-                items_per_section: NZU64!(1024),
-                compression: None,
-                codec_config: ((0..=10000usize).into(), ()),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-                write_buffer: NZUsize!(64),
-            };
-            let mut log = variable_journal::Journal::init_sync(
-                context.with_label("ops_log"),
-                log_config,
-                *lower_bound..*upper_bound,
-            )
-            .await
-            .unwrap();
-
-            // Populate log with operations from source db
-            for i in *lower_bound..*upper_bound {
-                let op = source_db
-                    .log
-                    .read(Location::new_unchecked(i))
-                    .await
-                    .unwrap();
-                log.append(op).await.unwrap();
-            }
-
-            let db_config = test_config(&format!("{}", context.next_u64()));
-            let db =
-                <Db<_, Digest, Vec<u8>, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
-                    context.clone(),
-                    db_config,
-                    log,
-                    Some(pinned_nodes),
-                    lower_bound..upper_bound,
-                    1024,
-                )
-                .await
-                .unwrap();
-
-            // Verify database state
-            assert_eq!(db.op_count(), upper_bound);
-            assert_eq!(db.inactivity_floor_loc(), lower_bound);
-            assert_eq!(db.log.mmr.size(), source_db.log.mmr.size());
-            assert_eq!(db.op_count(), source_db.op_count());
-
-            // Verify the root digest matches the target
-            assert_eq!(db.root(), target_hash);
-
-            // Verify state matches the source operations
-            let mut expected_kvs = HashMap::new();
-            let mut deleted_keys = HashSet::new();
-            for op in &ops {
-                if let Operation::Update(Update(key, value)) = op {
-                    expected_kvs.insert(*key, value.clone());
-                    deleted_keys.remove(key);
-                } else if let Operation::Delete(key) = op {
-                    expected_kvs.remove(key);
-                    deleted_keys.insert(*key);
-                }
-            }
-            for (key, value) in expected_kvs {
-                let synced_value = db.get(&key).await.unwrap().unwrap();
-                assert_eq!(synced_value, value);
-            }
-            // Verify that deleted keys are absent
-            for key in deleted_keys {
-                assert!(db.get(&key).await.unwrap().is_none(),);
-            }
-
-            db.destroy().await.unwrap();
-            source_db.destroy().await.unwrap();
-        });
+        crate::qmdb::any::unordered::sync_tests::test_from_sync_result_empty_to_nonempty::<
+            VariableHarness,
+        >();
     }
 
-    /// Test `from_sync_result` with an empty source database (nothing persisted) syncing to
-    /// an empty target database.
     #[test_traced("WARN")]
     fn test_from_sync_result_empty_to_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let log_config = variable_journal::Config {
-                partition: format!("sync_empty_log_{}", context.next_u64()),
-                items_per_section: NZU64!(1000),
-                compression: None,
-                codec_config: ((0..=10000usize).into(), ()),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut log = variable_journal::Journal::<Context, Operation<Digest, Vec<u8>>>::init(
-                context.clone(),
-                log_config,
-            )
-            .await
-            .unwrap();
-            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
-                .await
-                .unwrap();
-
-            let db_config = test_config(&format!("sync_empty_{}", context.next_u64()));
-            let mut synced_db: AnyTest = <AnyTest as qmdb::sync::Database>::from_sync_result(
-                context.clone(),
-                db_config,
-                log,
-                None,
-                Location::new_unchecked(0)..Location::new_unchecked(1),
-                1024,
-            )
-            .await
-            .unwrap();
-
-            // Verify database state
-            assert_eq!(synced_db.op_count(), 1);
-            assert_eq!(synced_db.inactivity_floor_loc(), Location::new_unchecked(0));
-            assert_eq!(synced_db.log.mmr.size(), 1);
-
-            // Test that we can perform operations on the synced database
-            let key1 = Sha256::hash(&1u64.to_be_bytes());
-            let value1 = vec![10u8; 16];
-            let key2 = Sha256::hash(&2u64.to_be_bytes());
-            let value2 = vec![20u8; 16];
-
-            synced_db.update(key1, value1.clone()).await.unwrap();
-            synced_db.update(key2, value2.clone()).await.unwrap();
-            synced_db.commit(None).await.unwrap();
-
-            // Verify the operations worked
-            assert_eq!(synced_db.get(&key1).await.unwrap(), Some(value1));
-            assert_eq!(synced_db.get(&key2).await.unwrap(), Some(value2));
-            assert!(synced_db.op_count() > 0);
-
-            synced_db.destroy().await.unwrap();
-        });
+        crate::qmdb::any::unordered::sync_tests::test_from_sync_result_empty_to_empty::<
+            VariableHarness,
+        >();
     }
 
-    /// Test `from_sync_result` where the database has some but not all of the operations in the
-    /// target database.
     #[test]
     fn test_from_sync_result_nonempty_to_nonempty_partial_match() {
-        const NUM_OPS: usize = 100;
-        const NUM_ADDITIONAL_OPS: usize = 5;
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create and populate two databases.
-            let mut target_db = create_test_db(context.clone()).await;
-            let sync_db_config = test_config(&format!("sync_partial_{}", context.next_u64()));
-            let mut sync_db: AnyTest = Db::init(context.clone(), sync_db_config.clone())
-                .await
-                .unwrap();
-            let original_ops = create_test_ops(NUM_OPS);
-            apply_ops(&mut target_db, original_ops.clone()).await;
-            target_db.commit(None).await.unwrap();
-            target_db
-                .prune(target_db.inactivity_floor_loc())
-                .await
-                .unwrap();
-            apply_ops(&mut sync_db, original_ops.clone()).await;
-            sync_db.commit(None).await.unwrap();
-            sync_db.prune(sync_db.inactivity_floor_loc()).await.unwrap();
-            let sync_db_original_size = sync_db.op_count();
-
-            // Get pinned nodes before closing the database
-            let pinned_nodes_map = sync_db.log.mmr.get_pinned_nodes();
-            let pinned_nodes = nodes_to_pin(Position::try_from(sync_db_original_size).unwrap())
-                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
-                .collect::<Vec<_>>();
-
-            // Close the sync db
-            sync_db.close().await.unwrap();
-
-            // Add more operations to the target db
-            let more_ops = create_test_ops(NUM_ADDITIONAL_OPS);
-            apply_ops(&mut target_db, more_ops.clone()).await;
-            target_db.commit(None).await.unwrap();
-
-            // Capture target db state for comparison
-            let target_db_op_count = target_db.op_count();
-            let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc();
-            let target_db_log_size = target_db.op_count();
-            let target_db_mmr_size = target_db.log.mmr.size();
-
-            let sync_lower_bound = target_db.inactivity_floor_loc();
-            let sync_upper_bound = target_db.op_count();
-
-            let target_hash = target_db.root();
-
-            let AnyTest { log, .. } = target_db;
-            let mmr = log.mmr;
-            let journal = log.journal;
-
-            // Re-open `sync_db` using from_sync_result
-            let sync_db =
-                <Db<_, Digest, Vec<u8>, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
-                    context.clone(),
-                    sync_db_config,
-                    journal,
-                    Some(pinned_nodes),
-                    sync_lower_bound..sync_upper_bound,
-                    1024,
-                )
-                .await
-                .unwrap();
-
-            // Verify database state
-            assert_eq!(sync_db.op_count(), target_db_op_count);
-            assert_eq!(
-                sync_db.inactivity_floor_loc(),
-                target_db_inactivity_floor_loc
-            );
-            assert_eq!(sync_db.inactivity_floor_loc(), sync_lower_bound);
-            assert_eq!(sync_db.op_count(), target_db_log_size);
-            assert_eq!(sync_db.log.mmr.size(), target_db_mmr_size);
-
-            // Verify the root digest matches the target
-            assert_eq!(sync_db.root(), target_hash);
-
-            // Verify state matches the source operations
-            let mut expected_kvs = HashMap::new();
-            let mut deleted_keys = HashSet::new();
-            for op in &original_ops {
-                if let Operation::Update(Update(key, value)) = op {
-                    expected_kvs.insert(*key, value.clone());
-                    deleted_keys.remove(key);
-                } else if let Operation::Delete(key) = op {
-                    expected_kvs.remove(key);
-                    deleted_keys.insert(*key);
-                }
-            }
-            for (key, value) in expected_kvs {
-                let synced_value = sync_db.get(&key).await.unwrap().unwrap();
-                assert_eq!(synced_value, value);
-            }
-            // Verify that deleted keys are absent
-            for key in deleted_keys {
-                assert!(sync_db.get(&key).await.unwrap().is_none());
-            }
-
-            sync_db.destroy().await.unwrap();
-            mmr.destroy().await.unwrap();
-        });
+        crate::qmdb::any::unordered::sync_tests::test_from_sync_result_nonempty_to_nonempty_partial_match::<VariableHarness>();
     }
 
-    /// Test `from_sync_result` where the database has all of the operations in the target range.
     #[test]
     fn test_from_sync_result_nonempty_to_nonempty_exact_match() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let db_config = test_config(&format!("sync_exact_{}", context.next_u64()));
-            let mut db: AnyTest = Db::init(context.clone(), db_config.clone()).await.unwrap();
-            let ops = create_test_ops(100);
-            apply_ops(&mut db, ops.clone()).await;
-            db.commit(None).await.unwrap();
-
-            let sync_lower_bound = db.inactivity_floor_loc();
-            let sync_upper_bound = db.op_count();
-            let target_db_op_count = db.op_count();
-            let target_db_inactivity_floor_loc = db.inactivity_floor_loc();
-            let target_db_log_size = db.op_count();
-            let target_db_mmr_size = db.log.mmr.size();
-
-            let pinned_nodes = join_all(
-                nodes_to_pin(Position::try_from(db.inactivity_floor_loc()).unwrap())
-                    .map(|pos| db.log.mmr.get_node(pos)),
-            )
-            .await;
-            let pinned_nodes = pinned_nodes
-                .iter()
-                .map(|node| node.as_ref().unwrap().unwrap())
-                .collect::<Vec<_>>();
-            let AnyTest { log, .. } = db;
-            let mmr = log.mmr;
-            let journal = log.journal;
-
-            // When we re-open the database, the MMR is closed and the log is opened.
-            mmr.close().await.unwrap();
-
-            let sync_db: AnyTest =
-                <Db<_, Digest, Vec<u8>, Sha256, TwoCap> as qmdb::sync::Database>::from_sync_result(
-                    context.clone(),
-                    db_config,
-                    journal,
-                    Some(pinned_nodes),
-                    sync_lower_bound..sync_upper_bound,
-                    1024,
-                )
-                .await
-                .unwrap();
-
-            // Verify database state
-            assert_eq!(sync_db.op_count(), target_db_op_count);
-            assert_eq!(
-                sync_db.inactivity_floor_loc(),
-                target_db_inactivity_floor_loc
-            );
-            assert_eq!(sync_db.inactivity_floor_loc(), sync_lower_bound);
-            assert_eq!(sync_db.op_count(), target_db_log_size);
-            assert_eq!(sync_db.log.mmr.size(), target_db_mmr_size);
-
-            sync_db.destroy().await.unwrap();
-        });
+        crate::qmdb::any::unordered::sync_tests::test_from_sync_result_nonempty_to_nonempty_exact_match::<VariableHarness>();
     }
 }

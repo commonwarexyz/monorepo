@@ -5,7 +5,7 @@
 
 use crate::{
     journal::contiguous::Contiguous,
-    mmr::Location,
+    mmr::{Location, Position},
     qmdb::{
         self,
         any::CleanAny,
@@ -38,6 +38,43 @@ pub(crate) type ConfigOf<H> = <DbOf<H> as qmdb::sync::Database>::Config;
 
 /// Type alias for the journal type of a harness.
 pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
+
+/// Trait for cleanup operations in tests.
+pub(crate) trait Closeable {
+    fn close(self) -> impl std::future::Future<Output = Result<(), qmdb::Error>> + Send;
+    fn destroy(self) -> impl std::future::Future<Output = Result<(), qmdb::Error>> + Send;
+}
+
+// Implement Closeable for the concrete MMR type used in tests.
+// This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
+impl Closeable
+    for crate::mmr::journaled::Mmr<deterministic::Context, Digest, crate::mmr::mem::Clean<Digest>>
+{
+    async fn close(self) -> Result<(), qmdb::Error> {
+        self.close().await.map_err(qmdb::Error::Mmr)
+    }
+
+    async fn destroy(self) -> Result<(), qmdb::Error> {
+        self.destroy().await.map_err(qmdb::Error::Mmr)
+    }
+}
+
+/// Trait providing internal access for from_sync_result tests.
+pub(crate) trait FromSyncTestable: qmdb::sync::Database {
+    type Mmr: Closeable + Send;
+
+    /// Get the MMR and journal from the database
+    fn into_log_components(self) -> (Self::Mmr, Self::Journal);
+
+    /// Get the pinned nodes at a given position
+    fn pinned_nodes_at(
+        &self,
+        pos: Position,
+    ) -> impl std::future::Future<Output = Vec<Self::Digest>> + Send;
+
+    /// Get pinned nodes from the internal cached map (used before closing db in partial match tests)
+    fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Self::Digest>;
+}
 
 /// Harness for sync tests.
 pub(crate) trait SyncTestHarness: Sized + 'static {
@@ -957,5 +994,244 @@ where
             .await
             .unwrap();
         reopened_db.destroy().await.unwrap();
+    });
+}
+
+/// Test `from_sync_result` where the database has all operations in the target range.
+pub(crate) fn test_from_sync_result_nonempty_to_nonempty_exact_match<H: SyncTestHarness>()
+where
+    DbOf<H>: FromSyncTestable,
+    OpOf<H>: Encode + Clone,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let db_config = H::config(&context.next_u64().to_string());
+        let mut db = H::init_db_with_config(context.clone(), H::clone_config(&db_config)).await;
+        let ops = H::create_ops(100);
+        H::apply_ops(&mut db, ops).await;
+        db.commit(None).await.unwrap();
+
+        let sync_lower_bound = db.inactivity_floor_loc();
+        let sync_upper_bound = db.op_count();
+        let target_db_op_count = db.op_count();
+        let target_db_inactivity_floor_loc = db.inactivity_floor_loc();
+
+        let pinned_nodes = db
+            .pinned_nodes_at(Position::try_from(db.inactivity_floor_loc()).unwrap())
+            .await;
+        let (mmr, journal) = db.into_log_components();
+
+        // Close the MMR before calling from_sync_result
+        mmr.close().await.unwrap();
+
+        let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
+            context.clone(),
+            db_config,
+            journal,
+            Some(pinned_nodes),
+            sync_lower_bound..sync_upper_bound,
+            1024,
+        )
+        .await
+        .unwrap();
+
+        // Verify database state
+        assert_eq!(sync_db.op_count(), target_db_op_count);
+        assert_eq!(
+            sync_db.inactivity_floor_loc(),
+            target_db_inactivity_floor_loc
+        );
+        assert_eq!(sync_db.inactivity_floor_loc(), sync_lower_bound);
+
+        sync_db.destroy().await.unwrap();
+    });
+}
+
+/// Test `from_sync_result` where the database has some but not all operations in the target range.
+pub(crate) fn test_from_sync_result_nonempty_to_nonempty_partial_match<H: SyncTestHarness>()
+where
+    DbOf<H>: FromSyncTestable,
+    OpOf<H>: Encode + Clone,
+    JournalOf<H>: Contiguous,
+{
+    const NUM_OPS: usize = 100;
+    const NUM_ADDITIONAL_OPS: usize = 5;
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        // Create and populate two databases.
+        let mut target_db = H::init_db(context.clone()).await;
+        let sync_db_config = H::config(&context.next_u64().to_string());
+        let mut sync_db =
+            H::init_db_with_config(context.clone(), H::clone_config(&sync_db_config)).await;
+        let original_ops = H::create_ops(NUM_OPS);
+        H::apply_ops(&mut target_db, original_ops.clone()).await;
+        target_db.commit(None).await.unwrap();
+        target_db
+            .prune(target_db.inactivity_floor_loc())
+            .await
+            .unwrap();
+        H::apply_ops(&mut sync_db, original_ops.clone()).await;
+        sync_db.commit(None).await.unwrap();
+        sync_db.prune(sync_db.inactivity_floor_loc()).await.unwrap();
+        let sync_db_original_size = sync_db.op_count();
+
+        // Get pinned nodes before closing the database
+        let pinned_nodes =
+            sync_db.pinned_nodes_from_map(Position::try_from(sync_db_original_size).unwrap());
+
+        // Close the sync db
+        sync_db.close().await.unwrap();
+
+        // Add more operations to the target db
+        let more_ops = H::create_ops(NUM_ADDITIONAL_OPS);
+        H::apply_ops(&mut target_db, more_ops).await;
+        target_db.commit(None).await.unwrap();
+
+        // Capture target db state for comparison
+        let target_db_op_count = target_db.op_count();
+        let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc();
+        let sync_lower_bound = target_db.inactivity_floor_loc();
+        let sync_upper_bound = target_db.op_count();
+        let target_hash = target_db.root();
+
+        let (mmr, journal) = target_db.into_log_components();
+
+        // Re-open `sync_db` using from_sync_result
+        let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
+            context.clone(),
+            sync_db_config,
+            journal,
+            Some(pinned_nodes),
+            sync_lower_bound..sync_upper_bound,
+            1024,
+        )
+        .await
+        .unwrap();
+
+        // Verify database state
+        assert_eq!(sync_db.op_count(), target_db_op_count);
+        assert_eq!(
+            sync_db.inactivity_floor_loc(),
+            target_db_inactivity_floor_loc
+        );
+        assert_eq!(sync_db.inactivity_floor_loc(), sync_lower_bound);
+
+        // Verify the root digest matches the target (verifies content integrity)
+        assert_eq!(sync_db.root(), target_hash);
+
+        sync_db.destroy().await.unwrap();
+        mmr.destroy().await.unwrap();
+    });
+}
+
+/// Test `from_sync_result` with an empty destination database syncing to a non-empty source.
+/// This tests the scenario where a sync client starts fresh with no existing data.
+pub(crate) fn test_from_sync_result_empty_to_nonempty<H: SyncTestHarness>()
+where
+    DbOf<H>: FromSyncTestable,
+    OpOf<H>: Encode + Clone,
+    JournalOf<H>: Contiguous,
+{
+    const NUM_OPS: usize = 100;
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        // Create and populate a source database
+        let mut source_db = H::init_db(context.clone()).await;
+        let ops = H::create_ops(NUM_OPS);
+        H::apply_ops(&mut source_db, ops).await;
+        source_db.commit(None).await.unwrap();
+        source_db
+            .prune(source_db.inactivity_floor_loc())
+            .await
+            .unwrap();
+
+        let lower_bound = source_db.inactivity_floor_loc();
+        let upper_bound = source_db.op_count();
+
+        // Get pinned nodes and target hash before deconstructing source_db
+        let pinned_nodes = source_db
+            .pinned_nodes_at(Position::try_from(lower_bound).unwrap())
+            .await;
+        let target_hash = source_db.root();
+        let target_op_count = source_db.op_count();
+        let target_inactivity_floor = source_db.inactivity_floor_loc();
+
+        let (mmr, journal) = source_db.into_log_components();
+
+        // Use a different config (simulating a new empty database)
+        let new_db_config = H::config(&context.next_u64().to_string());
+
+        let db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
+            context.clone(),
+            new_db_config,
+            journal,
+            Some(pinned_nodes),
+            lower_bound..upper_bound,
+            1024,
+        )
+        .await
+        .unwrap();
+
+        // Verify database state
+        assert_eq!(db.op_count(), target_op_count);
+        assert_eq!(db.inactivity_floor_loc(), target_inactivity_floor);
+        assert_eq!(db.inactivity_floor_loc(), lower_bound);
+
+        // Verify the root digest matches the target
+        assert_eq!(db.root(), target_hash);
+
+        db.destroy().await.unwrap();
+        mmr.destroy().await.unwrap();
+    });
+}
+
+/// Test `from_sync_result` with an empty source database syncing to an empty target database.
+pub(crate) fn test_from_sync_result_empty_to_empty<H: SyncTestHarness>()
+where
+    DbOf<H>: FromSyncTestable,
+    OpOf<H>: Encode + Clone,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        // Create an empty database (initialized with a single CommitFloor operation)
+        let source_db = H::init_db(context.clone()).await;
+
+        // An empty database has exactly 1 operation (the initial CommitFloor)
+        assert_eq!(source_db.op_count(), Location::new_unchecked(1));
+
+        let target_hash = source_db.root();
+        let (mmr, journal) = source_db.into_log_components();
+
+        // Use a different config (simulating a new empty database)
+        let new_db_config = H::config(&context.next_u64().to_string());
+
+        let mut synced_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
+            context.clone(),
+            new_db_config,
+            journal,
+            None,
+            Location::new_unchecked(0)..Location::new_unchecked(1),
+            1024,
+        )
+        .await
+        .unwrap();
+
+        // Verify database state
+        assert_eq!(synced_db.op_count(), Location::new_unchecked(1));
+        assert_eq!(synced_db.inactivity_floor_loc(), Location::new_unchecked(0));
+        assert_eq!(synced_db.root(), target_hash);
+
+        // Test that we can perform operations on the synced database
+        let ops = H::create_ops(10);
+        H::apply_ops(&mut synced_db, ops).await;
+        synced_db.commit(None).await.unwrap();
+
+        // Verify the operations worked
+        assert!(synced_db.op_count() > Location::new_unchecked(1));
+
+        synced_db.destroy().await.unwrap();
+        mmr.destroy().await.unwrap();
     });
 }
