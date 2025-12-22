@@ -77,8 +77,8 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         metric: metrics::Message,
         payload: types::Message,
     ) -> Result<(), Error> {
-        let msg = payload.encode();
-        sender.send(&msg).await.map_err(Error::SendFailed)?;
+        let msg = payload.encode().freeze();
+        sender.send(msg).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
         Ok(())
     }

@@ -89,8 +89,8 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         metric: metrics::Message,
         payload: types::Payload<C>,
     ) -> Result<(), Error> {
-        let msg = payload.encode();
-        sender.send(&msg).await.map_err(Error::SendFailed)?;
+        let msg = payload.encode().freeze();
+        sender.send(msg).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
         Ok(())
     }
@@ -482,7 +482,7 @@ mod tests {
                 bits: BitMap::ones(10),
             });
             local_sender
-                .send(&bit_vec.encode())
+                .send(bit_vec.encode().freeze())
                 .await
                 .expect("send failed");
 
@@ -578,14 +578,14 @@ mod tests {
             // Send first greeting (valid)
             let first_greeting = types::Payload::<PublicKey>::Greeting(greeting.clone());
             local_sender
-                .send(&first_greeting.encode())
+                .send(first_greeting.encode().freeze())
                 .await
                 .expect("send failed");
 
             // Send second greeting (should cause error)
             let second_greeting = types::Payload::<PublicKey>::Greeting(greeting.clone());
             local_sender
-                .send(&second_greeting.encode())
+                .send(second_greeting.encode().freeze())
                 .await
                 .expect("send failed");
 
@@ -690,7 +690,7 @@ mod tests {
             wrong_greeting.public_key = wrong_pk;
             let greeting_payload = types::Payload::<PublicKey>::Greeting(wrong_greeting);
             local_sender
-                .send(&greeting_payload.encode())
+                .send(greeting_payload.encode().freeze())
                 .await
                 .expect("send failed");
 
