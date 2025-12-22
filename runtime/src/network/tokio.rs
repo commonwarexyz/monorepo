@@ -50,7 +50,7 @@ impl crate::Stream for Stream {
                     .map_err(|_| Error::RecvFailed)?;
 
                 if n == 0 {
-                    return Err(Error::Closed);
+                    return Err(Error::RecvFailed);
                 }
 
                 read += n;
