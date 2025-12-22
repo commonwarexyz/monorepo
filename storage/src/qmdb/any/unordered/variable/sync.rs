@@ -339,6 +339,7 @@ mod tests {
     #[case(2, 1)]
     #[case(2, 2)]
     #[case(2, 100)]
+    // Regression test: panicked when we didn't set pinned nodes after updating target
     #[case(20, 10)]
     #[case(100, 1)]
     #[case(100, 2)]

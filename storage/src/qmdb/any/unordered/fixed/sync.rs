@@ -338,8 +338,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_resolver_fails() {
-        sync_tests::test_sync_resolver_fails::<FixedHarness>();
+    fn test_sync_subset_of_target_database() {
+        sync_tests::test_sync_subset_of_target_database::<FixedHarness>(1000);
     }
 
     #[rstest]
@@ -356,11 +356,6 @@ mod tests {
             target_db_ops,
             NonZeroU64::new(fetch_batch_size).unwrap(),
         );
-    }
-
-    #[test]
-    fn test_sync_subset_of_target_database() {
-        sync_tests::test_sync_subset_of_target_database::<FixedHarness>(1000);
     }
 
     #[test]
@@ -405,6 +400,7 @@ mod tests {
     #[case(2, 1)]
     #[case(2, 2)]
     #[case(2, 100)]
+    // Regression test: panicked when we didn't set pinned nodes after updating target
     #[case(20, 10)]
     #[case(100, 1)]
     #[case(100, 2)]
@@ -417,6 +413,11 @@ mod tests {
     #[test_traced("WARN")]
     fn test_sync_database_persistence() {
         sync_tests::test_sync_database_persistence::<FixedHarness>();
+    }
+
+    #[test]
+    fn test_sync_resolver_fails() {
+        sync_tests::test_sync_resolver_fails::<FixedHarness>();
     }
 
     /// Test `from_sync_result` with an empty source database (nothing persisted) syncing to
