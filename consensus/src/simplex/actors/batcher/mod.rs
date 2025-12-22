@@ -1317,7 +1317,7 @@ mod tests {
                     sender
                         .send(
                             Recipients::One(me.clone()),
-                            Vote::Notarize(vote).encode().into(),
+                            Vote::Notarize(vote).encode().freeze(),
                             true,
                         )
                         .await
@@ -1363,7 +1363,7 @@ mod tests {
                     sender
                         .send(
                             Recipients::One(me.clone()),
-                            Vote::Notarize(vote).encode().into(),
+                            Vote::Notarize(vote).encode().freeze(),
                             true,
                         )
                         .await
