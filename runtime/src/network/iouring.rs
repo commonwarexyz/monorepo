@@ -230,7 +230,7 @@ pub struct Sink {
 }
 
 impl Sink {
-    fn new(fd: Arc<OwnedFd>, submitter: mpsc::Sender<iouring::Op>) -> Self {
+    const fn new(fd: Arc<OwnedFd>, submitter: mpsc::Sender<iouring::Op>) -> Self {
         Self { fd, submitter }
     }
 
