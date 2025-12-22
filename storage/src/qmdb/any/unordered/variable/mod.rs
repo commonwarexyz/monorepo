@@ -4,6 +4,8 @@
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::unordered::fixed]
 //! instead for better performance._
 
+pub mod sync;
+
 use crate::{
     index::unordered::Index,
     journal::{
