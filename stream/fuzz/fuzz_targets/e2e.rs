@@ -236,7 +236,7 @@ fn fuzz(input: FuzzInput) {
                             &mut d_receiver,
                         ),
                     };
-                    sender.send(&data).await.unwrap();
+                    sender.send(data.as_slice()).await.unwrap();
                     let frame = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
                     send_frame(a_out, frame, MAX_MESSAGE_SIZE).await.unwrap();
                     let data2 = receiver.recv().await.unwrap();
@@ -262,7 +262,7 @@ fn fuzz(input: FuzzInput) {
                             &mut d_receiver,
                         ),
                     };
-                    sender.send(&[]).await.unwrap();
+                    sender.send([].as_slice()).await.unwrap();
                     let _ = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
                     send_frame(a_out, data.as_slice(), MAX_MESSAGE_SIZE)
                         .await

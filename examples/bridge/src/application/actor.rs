@@ -82,9 +82,10 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                                 Inbound::GetFinalization::<H::Digest>(inbound::GetFinalization {
                                     network: *self.other_network.identity(),
                                 })
-                                .encode();
+                                .encode()
+                                .freeze();
                             indexer_sender
-                                .send(&msg)
+                                .send(msg)
                                 .await
                                 .expect("failed to send finalization to indexer");
                             let result = indexer_receiver
@@ -123,9 +124,10 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                         network: self.this_network,
                         block,
                     })
-                    .encode();
+                    .encode()
+                    .freeze();
                     indexer_sender
-                        .send(&msg)
+                        .send(msg)
                         .await
                         .expect("failed to send block to indexer");
                     let result = indexer_receiver
@@ -151,9 +153,10 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                         network: self.this_network,
                         digest: payload,
                     })
-                    .encode();
+                    .encode()
+                    .freeze();
                     indexer_sender
-                        .send(&msg)
+                        .send(msg)
                         .await
                         .expect("failed to send block to indexer");
                     let result = indexer_receiver
@@ -204,9 +207,10 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                                     network: self.this_network,
                                     finalization,
                                 })
-                                .encode();
+                                .encode()
+                                .freeze();
                             indexer_sender
-                                .send(&msg)
+                                .send(msg)
                                 .await
                                 .expect("failed to send finalization to indexer");
                             let result = indexer_receiver
