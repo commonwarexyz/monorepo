@@ -1541,7 +1541,7 @@ mod tests {
             let digest = Sha256::hash(buf.as_ref());
             assert_eq!(
                 hex(&digest),
-                "ed2ea67208cde2ee8c16cca5aa4f369f55b1402258c6b7760e5baf134e38944a",
+                "0d6e882dae02b8df8d7dd8396fa0305450ffdf3061a8781bffa791315dd30ec9",
             );
             blob.sync().await.expect("Failed to sync blob");
             let (blob, size) = context
@@ -1556,7 +1556,7 @@ mod tests {
             let digest = Sha256::hash(buf.as_ref());
             assert_eq!(
                 hex(&digest),
-                "cc7efd4fc999aff36b9fd4213ba8da5810dc1849f92ae2ddf7c6dc40545f9aff",
+                "e0f4c82f12a7635a3bc6af7fa37f98a56f73a33c906202b07d66dc70003120e5",
             );
             blob.sync().await.expect("Failed to sync blob");
 

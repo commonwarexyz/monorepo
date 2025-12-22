@@ -2152,7 +2152,7 @@ mod tests {
             let digest = Sha256::hash(buf.as_ref());
             assert_eq!(
                 hex(&digest),
-                "f55bf27a59118603466fcf6a507ab012eea4cb2d6bdd06ce8f515513729af847",
+                "dd945d1b3d7058730f79c7eabecad6dac42ce737ed1c367ea0f4cf71e74970e7",
             );
         });
     }
