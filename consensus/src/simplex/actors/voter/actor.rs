@@ -979,11 +979,8 @@ impl<
                         }
                         Err(err) => {
                             // The application did not explicitly respond whether certification succeeded.
-                            // Retry the certification request (we should never assume failure here because
-                            // we persist certification results to the journal).
                             debug!(?err, ?round, "failed to certify proposal");
                             self.state.retry_certification(view);
-                            self.certification_candidates.insert(view);
                         }
                     };
                 },

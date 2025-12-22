@@ -533,17 +533,8 @@ where
             if let Some(context) = context {
                 self.verify(context, payload).await
             } else {
-                // Debug - will be hit when we receive a notarization for a block we didn't
-                // vote on.
-                panic!("missing verification context for certifying block");
-
-                // Note: This is unsafe, just gets tests passing. We can't blindly certify
-                // blocks when asynchronous verification is enabled, since notarization
-                // certificates carry no weight on block validity.
-                //
-                // let (tx, rx) = oneshot::channel();
-                // let _ = tx.send(true);
-                // rx
+                let (_tx, rx) = oneshot::channel();
+                rx
             }
         } else {
             let (tx, rx) = oneshot::channel();
