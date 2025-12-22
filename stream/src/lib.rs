@@ -63,7 +63,7 @@
 pub mod utils;
 
 use crate::utils::codec::{recv_frame, send_frame};
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
     handshake::{
@@ -306,8 +306,11 @@ pub struct Sender<O> {
 
 impl<O: Sink> Sender<O> {
     /// Encrypts and sends a message to the peer.
-    pub async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
-        let c = self.cipher.send(msg)?;
+    pub async fn send(&mut self, mut buf: impl Buf) -> Result<(), Error> {
+        // Copy the buffer to ensure contiguous memory for encryption.
+        let msg = buf.copy_to_bytes(buf.remaining());
+        let c = self.cipher.send(msg.as_ref())?;
+
         send_frame(
             &mut self.sink,
             Bytes::from(c),
@@ -399,10 +402,10 @@ mod test {
             assert_eq!(listener_peer, dialer_crypto.public_key());
             let messages: Vec<&'static [u8]> = vec![b"A", b"B", b"C"];
             for msg in &messages {
-                dialer_sender.send(msg).await?;
+                dialer_sender.send(&msg[..]).await?;
                 let syn_ack = listener_receiver.recv().await?;
                 assert_eq!(msg, &syn_ack);
-                listener_sender.send(msg).await?;
+                listener_sender.send(&msg[..]).await?;
                 let ack = dialer_receiver.recv().await?;
                 assert_eq!(msg, &ack);
             }
