@@ -499,10 +499,10 @@ mod tests {
             for i in 0..20 {
                 journal.append(test_digest(i)).await.unwrap();
             }
-            journal.sync().await.unwrap();
             let journal_size = journal.size();
             assert_eq!(journal_size, 20);
-            journal.close().await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
 
             // Initialize with sync boundaries that overlap with existing data
             // Lower bound: 8 (prune operations 0-7)
@@ -565,10 +565,10 @@ mod tests {
             for i in 0..20 {
                 journal.append(test_digest(i)).await.unwrap();
             }
-            journal.sync().await.unwrap();
             let initial_size = journal.size();
             assert_eq!(initial_size, 20);
-            journal.close().await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
 
             // Initialize with sync boundaries that exactly match existing data
             // Lower bound: 6 (prune operations 0-5, aligns with blob boundary)
@@ -631,10 +631,10 @@ mod tests {
             for i in 0..30 {
                 journal.append(test_digest(i)).await.unwrap();
             }
-            journal.sync().await.unwrap();
             let initial_size = journal.size();
             assert_eq!(initial_size, 30);
-            journal.close().await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
 
             // Initialize with sync boundaries where existing data exceeds the upper bound
             let lower_bound = 8;

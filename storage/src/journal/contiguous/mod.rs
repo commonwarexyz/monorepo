@@ -178,9 +178,6 @@ pub trait PersistableContiguous: MutableContiguous {
     /// This provides a stronger guarantee than [Self::commit] but may be slower.
     fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Error>>;
 
-    /// Close the journal, syncing all pending writes and releasing resources.
-    fn close(self) -> impl std::future::Future<Output = Result<(), Error>>;
-
     /// Destroy the journal, removing all associated storage.
     ///
     /// This method consumes the journal and deletes all persisted data including blobs,

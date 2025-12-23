@@ -572,15 +572,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(())
     }
 
-    /// Close the journal, persisting all pending writes.
-    ///
-    /// This closes both the data journal and the offsets journal.
-    pub async fn close(mut self) -> Result<(), Error> {
-        self.sync().await?;
-        self.data.close().await?;
-        self.offsets.close().await
-    }
-
     /// Remove any underlying blobs created by the journal.
     ///
     /// This destroys both the data journal and the offsets journal.
@@ -852,10 +843,6 @@ impl<E: Storage + Metrics, V: Codec> PersistableContiguous for Journal<E, V> {
         Self::sync(self).await
     }
 
-    async fn close(self) -> Result<(), Error> {
-        Self::close(self).await
-    }
-
     async fn destroy(self) -> Result<(), Error> {
         Self::destroy(self).await
     }
@@ -906,7 +893,8 @@ mod tests {
             assert_eq!(journal.oldest_retained_pos(), Some(20));
             assert_eq!(journal.size(), 40);
 
-            journal.close().await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
 
             // === Phase 2: Simulate complete offsets partition loss ===
             context
@@ -950,7 +938,8 @@ mod tests {
                 variable.append(i * 100).await.unwrap();
             }
 
-            variable.close().await.unwrap();
+            variable.sync().await.unwrap();
+            drop(variable);
 
             // === Simulate data loss: Delete data partition but keep offsets ===
             context
@@ -1142,7 +1131,8 @@ mod tests {
                 ));
             }
 
-            journal.close().await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
 
             // === Phase 3: Re-init and verify position preserved ===
             let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
@@ -1214,7 +1204,8 @@ mod tests {
             variable.data.prune(2).await.unwrap();
             // Offsets journal still has data from position 10-19
 
-            variable.close().await.unwrap();
+            variable.sync().await.unwrap();
+            drop(variable);
 
             // === Verify recovery ===
             let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
@@ -1270,7 +1261,8 @@ mod tests {
             variable.offsets.prune(20).await.unwrap(); // Prune to position 20
             variable.data.prune(1).await.unwrap(); // Only prune data journal to section 1 (position 10)
 
-            variable.close().await.unwrap();
+            variable.sync().await.unwrap();
+            drop(variable);
 
             // === Verify corruption detected ===
             let result = Journal::<_, u64>::init(context.clone(), cfg.clone()).await;
@@ -1310,7 +1302,8 @@ mod tests {
             }
             // Offsets journal still has only 15 entries
 
-            variable.close().await.unwrap();
+            variable.sync().await.unwrap();
+            drop(variable);
 
             // === Verify recovery ===
             let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
@@ -1366,7 +1359,8 @@ mod tests {
             variable.data.prune(3).await.unwrap();
             // Offsets journal still thinks oldest is position 10
 
-            variable.close().await.unwrap();
+            variable.sync().await.unwrap();
+            drop(variable);
 
             // === Verify recovery ===
             let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
@@ -1431,7 +1425,8 @@ mod tests {
             variable.offsets.rewind(5).await.unwrap();
             // CRASH before data.rewind() completes - data still has all 3 sections
 
-            variable.close().await.unwrap();
+            variable.sync().await.unwrap();
+            drop(variable);
 
             // === Verify recovery ===
             let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
@@ -1702,8 +1697,9 @@ mod tests {
 
             assert_eq!(journal.size(), 20);
 
-            // Close and reopen
-            journal.close().await.unwrap();
+            // Sync and reopen
+            journal.sync().await.unwrap();
+            drop(journal);
 
             let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
@@ -1864,7 +1860,8 @@ mod tests {
             for i in 0..20u64 {
                 journal.append(i * 100).await.unwrap();
             }
-            journal.close().await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
 
             // Initialize with sync boundaries that overlap with existing data
             // lower_bound: 8 (section 1), upper_bound: 31 (last location 30, section 6)
@@ -1958,7 +1955,8 @@ mod tests {
             for i in 0..20u64 {
                 journal.append(i * 100).await.unwrap();
             }
-            journal.close().await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
 
             // Initialize with sync boundaries that exactly match existing data
             let lower_bound = 5; // section 1
@@ -2027,7 +2025,8 @@ mod tests {
             for i in 0..30u64 {
                 journal.append(i * 1000).await.unwrap();
             }
-            journal.close().await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
 
             // Initialize with sync boundaries that are exceeded by existing data
             let lower_bound = 8; // section 1
@@ -2070,7 +2069,8 @@ mod tests {
             for i in 0..10u64 {
                 journal.append(i * 100).await.unwrap();
             }
-            journal.close().await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
 
             // Initialize with sync boundaries beyond all existing data
             let lower_bound = 15; // section 3
@@ -2122,7 +2122,8 @@ mod tests {
             for i in 0..25u64 {
                 journal.append(i * 100).await.unwrap();
             }
-            journal.close().await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
 
             // Test sync boundaries exactly at section boundaries
             let lower_bound = 15; // Exactly at section boundary (15/5 = 3)
@@ -2190,7 +2191,8 @@ mod tests {
             for i in 0..15u64 {
                 journal.append(i * 100).await.unwrap();
             }
-            journal.close().await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
 
             // Test sync boundaries within the same section
             let lower_bound = 10; // operation 10 (section 2: 10/5 = 2)

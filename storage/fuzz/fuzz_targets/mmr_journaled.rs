@@ -430,16 +430,6 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::Reinit => {
-                    // Close the existing MMR
-                    match mmr {
-                        MmrState::Clean(m) => {
-                            m.close().await.unwrap();
-                        }
-                        MmrState::Dirty(m) => {
-                            m.merkleize(&mut hasher).close().await.unwrap();
-                        }
-                    }
-
                     // Init a new MMR
                     let new_mmr = Mmr::init(
                         context.clone(),

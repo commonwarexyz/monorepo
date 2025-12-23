@@ -38,7 +38,6 @@ enum JournalOperation {
         buffer: usize,
         start_pos: u64,
     },
-    Close,
     Destroy,
     AppendMany {
         count: u8,
@@ -130,11 +129,6 @@ fn fuzz(input: FuzzInput) {
                         }
                         Err(e) => panic!("unexpected replay error: {e:?}"),
                     }
-                }
-
-                JournalOperation::Close => {
-                    journal.close().await.unwrap();
-                    return;
                 }
 
                 JournalOperation::Destroy => {
