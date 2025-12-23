@@ -412,10 +412,6 @@ impl<
                 "updated view must be greater than zero"
             );
 
-            // Verifying/constructing notarizations and nullifications is only useful
-            // for advancing the current view, however, finalizations are useful for all tracked views.
-            let is_current_view = updated_view == current;
-
             // Forward leader's proposal to voter (if we're not the leader and haven't already)
             if let Some(round) = work.get_mut(&current) {
                 if let Some(me) = self.scheme.me() {
@@ -425,6 +421,15 @@ impl<
                 }
             }
 
+            // Skip verification and construction for views at or below finalized.
+            //
+            // We still use interesting() for filtering votes because we want to
+            // notify the reporter of all votes within the activity timeout (even
+            // if we don't need them in the voter).
+            if updated_view <= finalized {
+                continue;
+            }
+
             // Process the updated view (if any)
             let Some(round) = work.get_mut(&updated_view) else {
                 continue;
@@ -432,9 +437,9 @@ impl<
 
             // Batch verify votes if ready
             let mut timer = self.verify_latency.timer();
-            let verified = if is_current_view && round.ready_notarizes() {
+            let verified = if round.ready_notarizes() {
                 Some(round.verify_notarizes(&mut self.context))
-            } else if is_current_view && round.ready_nullifies() {
+            } else if round.ready_nullifies() {
                 Some(round.verify_nullifies(&mut self.context))
             } else if round.ready_finalizes() {
                 Some(round.verify_finalizes(&mut self.context))
@@ -474,25 +479,23 @@ impl<
             }
 
             // Try to construct and forward certificates
-            if is_current_view {
-                if let Some(notarization) = self
-                    .recover_latency
-                    .time_some(|| round.try_construct_notarization(&self.scheme))
-                {
-                    debug!(view = %updated_view, "constructed notarization, forwarding to voter");
-                    voter
-                        .recovered(Certificate::Notarization(notarization))
-                        .await;
-                }
-                if let Some(nullification) = self
-                    .recover_latency
-                    .time_some(|| round.try_construct_nullification(&self.scheme))
-                {
-                    debug!(view = %updated_view, "constructed nullification, forwarding to voter");
-                    voter
-                        .recovered(Certificate::Nullification(nullification))
-                        .await;
-                }
+            if let Some(notarization) = self
+                .recover_latency
+                .time_some(|| round.try_construct_notarization(&self.scheme))
+            {
+                debug!(view = %updated_view, "constructed notarization, forwarding to voter");
+                voter
+                    .recovered(Certificate::Notarization(notarization))
+                    .await;
+            }
+            if let Some(nullification) = self
+                .recover_latency
+                .time_some(|| round.try_construct_nullification(&self.scheme))
+            {
+                debug!(view = %updated_view, "constructed nullification, forwarding to voter");
+                voter
+                    .recovered(Certificate::Nullification(nullification))
+                    .await;
             }
             if let Some(finalization) = self
                 .recover_latency
