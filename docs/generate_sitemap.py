@@ -18,41 +18,28 @@ EXTRA_FILES = ["llms.txt", "robots.txt"]
 
 
 def get_versions() -> list[str]:
-    """Get last 2 git tags as versions. Fails if no tag exists."""
-    # Get latest tag
+    """Get last 3 git tags as versions. Fails if no tag exists."""
     result = subprocess.run(
         ["git", "-C", str(DOCS_ROOT.parent), "describe", "--tags", "--abbrev=0"],
         capture_output=True,
         text=True,
         check=True,
     )
-    latest = result.stdout.strip()
-    versions = [latest]
+    versions = [result.stdout.strip()]
 
-    # Try to get previous tag
-    result = subprocess.run(
-        ["git", "-C", str(DOCS_ROOT.parent), "describe", "--tags", "--abbrev=0", f"{latest}^"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0 and result.stdout.strip():
-        versions.append(result.stdout.strip())
-
-    return versions
-
-
-def get_commit() -> str:
-    """Get short git commit hash."""
-    try:
+    # Try to get previous tags
+    for _ in range(2):
         result = subprocess.run(
-            ["git", "-C", str(DOCS_ROOT.parent), "rev-parse", "--short", "HEAD"],
+            ["git", "-C", str(DOCS_ROOT.parent), "describe", "--tags", "--abbrev=0", f"{versions[-1]}^"],
             capture_output=True,
             text=True,
-            check=True,
         )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError:
-        return "unknown"
+        if result.returncode == 0 and result.stdout.strip():
+            versions.append(result.stdout.strip())
+        else:
+            break
+
+    return versions
 
 
 def collect_html() -> list[Path]:
@@ -78,13 +65,9 @@ def collect_html() -> list[Path]:
 CODE_EXTENSIONS = {".md", ".rs", ".toml"}
 
 
-def collect_code(version_prefix: str) -> list[Path]:
-    """Return sorted relative paths of code files from the versioned directory.
-
-    Only collects from code/v<version>/ to avoid duplicating code/main/<commit>/
-    in the sitemap. Both paths contain identical content.
-    """
-    code_dir = DOCS_ROOT / "code" / version_prefix
+def collect_code(version: str) -> list[Path]:
+    """Return sorted relative paths of code files from the versioned directory."""
+    code_dir = DOCS_ROOT / "code" / version
     if not code_dir.exists():
         return []
 
@@ -131,20 +114,19 @@ def write_sitemap(urls: list[str]) -> None:
     (DOCS_ROOT / "sitemap.xml").write_text(content, encoding="utf-8")
 
 
-def write_llms_txt(versions: list[str], commit: str) -> None:
+def write_llms_txt(versions: list[str]) -> None:
     """Write llms.txt with versioned paths for LLM discovery."""
     latest = versions[0]
     version_lines = "\n".join(f"- /code/{v}/" for v in versions)
     content = f"""# Commonware Library
 
-> Version: {latest} (commit: {commit})
+> Version: {latest}
 
 Find more information at [README.md](/code/{latest}/README.md).
 
 ## Paths
 
 {version_lines}
-- /code/main/{commit}/
 
 View [sitemap.xml](/sitemap.xml) for all filepaths.
 """
@@ -153,10 +135,9 @@ View [sitemap.xml](/sitemap.xml) for all filepaths.
 
 def main() -> None:
     versions = get_versions()
-    commit = get_commit()
 
     # Write llms.txt with versioned paths
-    write_llms_txt(versions, commit)
+    write_llms_txt(versions)
 
     # Collect URLs - include all version paths in sitemap
     urls = [build_url(rel, BASE_URL) for rel in collect_html()]

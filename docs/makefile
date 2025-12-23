@@ -3,10 +3,10 @@ MD_SOURCES := $(shell find . -name "*.md" -type f -not -path "./code/*")
 MD_TARGETS := $(MD_SOURCES:.md=.html)
 HTML_DEPS := $(shell find . -name "*.html" -type f ! -name "template.html")
 
-# Version and commit info from git (tags must exist)
-COMMIT := $(shell git -C .. rev-parse --short HEAD)
-LATEST_TAG := $(shell git -C .. describe --tags --abbrev=0)
-PREV_TAG := $(shell git -C .. describe --tags --abbrev=0 $(LATEST_TAG)^ 2>/dev/null)
+# Get last 3 version tags from git (at least one tag must exist)
+TAG1 := $(shell git -C .. describe --tags --abbrev=0)
+TAG2 := $(shell git -C .. describe --tags --abbrev=0 $(TAG1)^ 2>/dev/null)
+TAG3 := $(shell git -C .. describe --tags --abbrev=0 $(TAG2)^ 2>/dev/null)
 
 # Re-runs when the template file changes, or any markdown file changes
 %.html: %.md template.html
@@ -14,22 +14,22 @@ PREV_TAG := $(shell git -C .. describe --tags --abbrev=0 $(LATEST_TAG)^ 2>/dev/n
 markdown: $(MD_TARGETS)
 
 # Mirror source code to versioned paths under /code/
-# Creates: /code/main/<commit>/* and /code/<tag>/* for last 2 tags
+# Creates: /code/<tag>/* for last 3 tags
 mirror:
 	rm -rf code
-	mkdir -p code/main/$(COMMIT)
-	for item in ../*; do \
-		[ "$$(basename $$item)" != "docs" ] && cp -r "$$item" code/main/$(COMMIT)/; \
-	done || true
-	mkdir -p code/$(LATEST_TAG)
-	cp -r code/main/$(COMMIT)/* code/$(LATEST_TAG)/
+	mkdir -p code/$(TAG1)
+	git -C .. archive $(TAG1) | tar -x -C code/$(TAG1)
 	@echo "Mirrored code to:"
-	@echo "  - code/main/$(COMMIT)/"
-	@echo "  - code/$(LATEST_TAG)/"
-ifneq ($(PREV_TAG),)
-	mkdir -p code/$(PREV_TAG)
-	git -C .. archive $(PREV_TAG) | tar -x -C code/$(PREV_TAG)
-	@echo "  - code/$(PREV_TAG)/"
+	@echo "  - code/$(TAG1)/"
+ifneq ($(TAG2),)
+	mkdir -p code/$(TAG2)
+	git -C .. archive $(TAG2) | tar -x -C code/$(TAG2)
+	@echo "  - code/$(TAG2)/"
+endif
+ifneq ($(TAG3),)
+	mkdir -p code/$(TAG3)
+	git -C .. archive $(TAG3) | tar -x -C code/$(TAG3)
+	@echo "  - code/$(TAG3)/"
 endif
 
 # Generate sitemap
