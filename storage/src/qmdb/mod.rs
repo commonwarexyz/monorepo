@@ -2,7 +2,7 @@
 //!
 //! # Terminology
 //!
-//! A _key_ in an authenticated database either has a _value_ or it doesn't. Differen types of
+//! A _key_ in an authenticated database either has a _value_ or it doesn't. Different types of
 //! _operations_ can be applied to the db to modify the state of a specific key. A key that has a
 //! value can change to one without a value through the _delete_ operation. The _update_ operation
 //! gives a key a specific value whether it previously had no value or had a different value. The
@@ -16,7 +16,8 @@
 //! The following resources were used as references when implementing this crate:
 //!
 //! * [QMDB: Quick Merkle Database](https://arxiv.org/abs/2501.05262)
-//! * [Merkle Mountain Ranges](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md)
+//! * [Merkle Mountain
+//!   Ranges](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md)
 
 use crate::{
     index::{Cursor, Unordered as Index},
@@ -25,7 +26,7 @@ use crate::{
     qmdb::operation::Operation,
     DirtyAuthenticatedBitMap,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, DigestOf};
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
@@ -89,6 +90,15 @@ impl From<crate::journal::authenticated::Error> for Error {
         }
     }
 }
+
+/// Type alias for merkleized state of a QMDB.
+pub type Merkleized<H> = crate::mmr::mem::Clean<DigestOf<H>>;
+/// Type alias for unmerkleized state of a QMDB.
+pub type Unmerkleized = crate::mmr::mem::Dirty;
+/// Type alias for durable state of a QMDB.
+pub type Durable = store::Clean;
+/// Type alias for non-durable state of a QMDB.
+pub type NonDurable = store::Dirty;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.

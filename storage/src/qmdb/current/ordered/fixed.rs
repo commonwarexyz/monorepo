@@ -16,7 +16,6 @@ use crate::{
     },
     qmdb::{
         any::{
-            db::{Durable, Merkleized, NonDurable, Unmerkleized},
             ordered::fixed::{Db as AnyDb, Operation, Update},
             FixedValue, MerkleizedDurableAny, MerkleizedNonDurableAny, UnmerkleizedDurableAny,
             UnmerkleizedNonDurableAny,
@@ -28,7 +27,7 @@ use crate::{
             root, FixedConfig as Config,
         },
         store::{Batchable, CleanStore, DirtyStore, LogStore, MerkleizedStore, PrunableStore},
-        Error,
+        Durable, Error, Merkleized, NonDurable, Unmerkleized,
     },
     translator::Translator,
     AuthenticatedBitMap as BitMap, Persistable,

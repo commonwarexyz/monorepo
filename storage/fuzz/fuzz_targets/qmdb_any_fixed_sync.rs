@@ -6,11 +6,10 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     qmdb::{
         any::{
-            db::{Durable, Merkleized},
             unordered::fixed::{Db, Operation as FixedOperation},
             FixedConfig as Config,
         },
-        sync,
+        sync, Durable, Merkleized,
     },
     translator::TwoCap,
 };

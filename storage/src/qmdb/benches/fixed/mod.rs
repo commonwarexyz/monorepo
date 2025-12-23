@@ -9,7 +9,6 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     qmdb::{
         any::{
-            db::{Durable, Merkleized},
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
             FixedConfig as AConfig, UnmerkleizedDurableAny, UnmerkleizedNonDurableAny,
@@ -20,6 +19,7 @@ use commonware_storage::{
             FixedConfig as CConfig,
         },
         store::LogStore,
+        Durable, Merkleized,
     },
     translator::EightCap,
 };

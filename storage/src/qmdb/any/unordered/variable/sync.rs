@@ -5,13 +5,7 @@ use crate::{
     index::unordered::Index,
     journal::{authenticated, contiguous::variable},
     mmr::{mem::Clean, Location, Position, StandardHasher},
-    qmdb::{
-        self,
-        any::{
-            db::{Durable, Merkleized},
-            VariableValue,
-        },
-    },
+    qmdb::{self, any::VariableValue, Durable, Merkleized},
     translator::Translator,
 };
 use commonware_codec::Read;
@@ -130,7 +124,10 @@ where
 mod tests {
     use super::*;
     use crate::{
-        qmdb::any::unordered::{sync_tests::SyncTestHarness, Update},
+        qmdb::{
+            any::unordered::{sync_tests::SyncTestHarness, Update},
+            NonDurable, Unmerkleized,
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -201,15 +198,8 @@ mod tests {
         ops
     }
 
-    type DirtyAnyTest = Db<
-        deterministic::Context,
-        Digest,
-        Vec<u8>,
-        Sha256,
-        TwoCap,
-        crate::qmdb::any::db::Unmerkleized,
-        crate::qmdb::any::db::NonDurable,
-    >;
+    type DirtyAnyTest =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
     /// Applies the given operations to the database.
     async fn apply_ops_inner(

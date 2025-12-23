@@ -8,13 +8,13 @@ use commonware_storage::{
     qmdb::{
         self,
         any::{
-            db::{Durable, Merkleized},
             unordered::{
                 fixed::{Db, Operation as FixedOperation},
                 Update,
             },
             FixedConfig as Config,
         },
+        Durable, Merkleized,
     },
 };
 use commonware_utils::{NZUsize, NZU64};

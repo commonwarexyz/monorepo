@@ -7,7 +7,8 @@ use commonware_storage::{
     mmr::{Location, Proof},
     qmdb::{
         self,
-        immutable::{self, Config, Durable, Merkleized},
+        immutable::{self, Config},
+        Durable, Merkleized,
     },
 };
 use commonware_utils::{NZUsize, NZU64};

@@ -5,12 +5,11 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     qmdb::{
         any::{
-            db::{Durable, Merkleized},
-            ordered::variable::Db as OVariable,
-            unordered::variable::Db as UVariable,
-            UnmerkleizedDurableAny, UnmerkleizedNonDurableAny, VariableConfig as AConfig,
+            ordered::variable::Db as OVariable, unordered::variable::Db as UVariable,
+            VariableConfig as AConfig,
         },
         store::LogStore,
+        Durable, Merkleized,
     },
     translator::EightCap,
 };

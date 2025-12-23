@@ -13,14 +13,9 @@ use crate::{
     },
     mmr::{journaled::Config as MmrConfig, Location},
     qmdb::{
-        any::{
-            db::{Durable, Merkleized},
-            ordered,
-            value::VariableEncoding,
-            VariableConfig, VariableValue,
-        },
+        any::{ordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Committable as _,
-        Error,
+        Durable, Error, Merkleized,
     },
     translator::Translator,
 };

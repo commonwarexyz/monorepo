@@ -29,10 +29,8 @@ use crate::{
         Location, Position, Proof, StandardHasher as Standard,
     },
     qmdb::{
-        any::VariableValue,
-        build_snapshot_from_log,
-        store::{self, State as DurabilityState},
-        Error,
+        any::VariableValue, build_snapshot_from_log, store::State as DurabilityState, Durable,
+        Error, Merkleized, NonDurable, Unmerkleized,
     },
     translator::Translator,
 };
@@ -48,15 +46,6 @@ use tracing::warn;
 
 mod operation;
 pub use operation::Operation;
-
-/// Type alias for merkleized state
-pub type Merkleized<H> = crate::mmr::mem::Clean<DigestOf<H>>;
-/// Type alias for unmerkleized state
-pub type Unmerkleized = crate::mmr::mem::Dirty;
-/// Type alias for durable state
-pub type Durable = store::Clean;
-/// Type alias for non-durable state
-pub type NonDurable = store::Dirty;
 
 type Journal<E, K, V, H, S> =
     authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, H, S>;

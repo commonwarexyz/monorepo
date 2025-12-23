@@ -16,7 +16,7 @@ use crate::{
         build_snapshot_from_log,
         operation::{Committable, Operation as OperationTrait},
         store::{self, LogStore, MerkleizedStore, PrunableStore},
-        Error, FloorHelper,
+        Durable, Error, FloorHelper, Merkleized, NonDurable, Unmerkleized,
     },
     AuthenticatedBitMap, Persistable,
 };
@@ -29,12 +29,6 @@ use tracing::debug;
 
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<E, C, H, S = Merkleized<H>> = authenticated::Journal<E, C, H, S>;
-
-pub type Merkleized<H> = mmr::mem::Clean<DigestOf<H>>;
-pub type Unmerkleized = mmr::mem::Dirty;
-
-pub type Durable = store::Clean;
-pub type NonDurable = store::Dirty;
 
 /// An "Any" QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 /// Consider using one of the following specialized variants instead, which may be more ergonomic:

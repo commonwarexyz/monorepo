@@ -6,13 +6,7 @@ use crate::{
     journal::{authenticated, contiguous::fixed},
     mmr::{mem::Clean, Location, Position, StandardHasher},
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
-    qmdb::{
-        self,
-        any::{
-            db::{Durable, Merkleized},
-            FixedValue,
-        },
-    },
+    qmdb::{self, any::FixedValue, Durable, Merkleized},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;

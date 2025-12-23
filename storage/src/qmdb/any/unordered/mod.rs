@@ -4,14 +4,14 @@ use crate::{
     mmr::{self, Location},
     qmdb::{
         any::{
-            db::{AuthenticatedLog, Db, Durable, Merkleized, NonDurable, Unmerkleized},
+            db::{AuthenticatedLog, Db},
             MerkleizedDurableAny, MerkleizedNonDurableAny, UnmerkleizedDurableAny,
             UnmerkleizedNonDurableAny, ValueEncoding,
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
         operation::{Committable as _, Operation as OperationTrait},
         store::{self, Batchable},
-        update_key, update_known_loc, Error,
+        update_key, update_known_loc, Durable, Error, Merkleized, NonDurable, Unmerkleized,
     },
     Persistable,
 };

@@ -3,7 +3,6 @@ use crate::{
     qmdb::{
         self,
         any::{
-            db::{Durable, Merkleized},
             unordered::{
                 fixed::{Db as FixedDb, Operation as FixedOperation},
                 variable::{Db as VariableDb, Operation as VariableOperation},
@@ -11,6 +10,7 @@ use crate::{
             FixedValue, VariableValue,
         },
         immutable::{self, Immutable},
+        Durable, Merkleized,
     },
     translator::Translator,
 };
@@ -258,8 +258,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> Resolver
-    for Arc<Immutable<E, K, V, H, T, immutable::Merkleized<H>, immutable::Durable>>
+impl<E, K, V, H, T> Resolver for Arc<Immutable<E, K, V, H, T, Merkleized<H>, Durable>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -291,8 +290,7 @@ where
 
 /// Implement Resolver directly for `Arc<RwLock<Immutable>>` to eliminate the need for wrapper
 /// types while allowing direct database access.
-impl<E, K, V, H, T> Resolver
-    for Arc<RwLock<Immutable<E, K, V, H, T, immutable::Merkleized<H>, immutable::Durable>>>
+impl<E, K, V, H, T> Resolver for Arc<RwLock<Immutable<E, K, V, H, T, Merkleized<H>, Durable>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,

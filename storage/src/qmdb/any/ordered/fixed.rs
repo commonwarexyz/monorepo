@@ -10,12 +10,10 @@ use crate::{
     mmr::Location,
     qmdb::{
         any::{
-            db::{Durable, Merkleized},
-            init_fixed_authenticated_log, ordered,
-            value::FixedEncoding,
-            FixedConfig as Config, FixedValue,
+            init_fixed_authenticated_log, ordered, value::FixedEncoding, FixedConfig as Config,
+            FixedValue,
         },
-        Error,
+        Durable, Error, Merkleized,
     },
     translator::Translator,
 };
@@ -76,12 +74,8 @@ mod test {
         index::Unordered as _,
         mmr::{Position, StandardHasher as Standard},
         qmdb::{
-            any::{
-                db::{Durable, Merkleized, NonDurable, Unmerkleized},
-                ordered::Update,
-            },
-            store::batch_tests,
-            verify_proof,
+            any::ordered::Update, store::batch_tests, verify_proof, Durable, Merkleized,
+            NonDurable, Unmerkleized,
         },
         translator::{OneCap, TwoCap},
     };
