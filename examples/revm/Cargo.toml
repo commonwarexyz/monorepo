@@ -1,5 +1,5 @@
 [package]
-name = "commonware-revm-chain"
+name = "commonware-revm"
 edition.workspace = true
 publish = true
 version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 description = "REVM-based example chain running on threshold-simplex (simplex + threshold BLS signatures)."
 readme = "README.md"
 homepage.workspace = true
-repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/revm_chain"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/revm"
 
 [lints]
 workspace = true
@@ -32,5 +32,5 @@ governor.workspace = true
 rand.workspace = true
 
 [[bin]]
-name = "commonware-revm-chain"
+name = "commonware-revm"
 bench = false

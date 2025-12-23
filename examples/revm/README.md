@@ -1,6 +1,6 @@
-# commonware-revm-chain
+# commonware-revm
 
-[![Crates.io](https://img.shields.io/crates/v/commonware-revm-chain.svg)](https://crates.io/crates/commonware-revm-chain)
+[![Crates.io](https://img.shields.io/crates/v/commonware-revm.svg)](https://crates.io/crates/commonware-revm)
 
 REVM-based example chain driven by threshold-simplex (`commonware_consensus::simplex`) and executed with `alloy-evm`.
 
@@ -57,7 +57,7 @@ The main glue points are `src/sim/node.rs` (wiring) and `src/application/` (appl
 ## Run (Deterministic Simulation)
 
 ```sh
-cargo run -p commonware-revm-chain --release -- --nodes 4 --blocks 5 --seed 1
+cargo run -p commonware-revm --release -- --nodes 4 --blocks 5 --seed 1
 ```
 
 Flags:
@@ -76,7 +76,7 @@ Expected output is deterministic for a given `--seed` and includes:
 ## Test
 
 ```sh
-cargo test -p commonware-revm-chain
+cargo test -p commonware-revm
 ```
 
 ## Notes and Next Steps

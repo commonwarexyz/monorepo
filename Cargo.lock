@@ -2426,7 +2426,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "commonware-revm-chain"
+name = "commonware-revm"
 version = "0.0.63"
 dependencies = [
  "alloy-evm",

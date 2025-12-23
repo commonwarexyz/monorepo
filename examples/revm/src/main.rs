@@ -1,8 +1,8 @@
 use clap::{value_parser, Arg, Command};
-use commonware_revm_chain::{simulate, SimConfig};
+use commonware_revm::{simulate, SimConfig};
 
 fn main() -> anyhow::Result<()> {
-    let matches = Command::new("commonware-revm-chain")
+    let matches = Command::new("commonware-revm")
         .about("threshold-simplex + EVM execution example")
         .arg(
             Arg::new("nodes")
