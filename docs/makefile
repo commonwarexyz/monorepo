@@ -17,8 +17,9 @@ clean:
 
 # Mirror source code to /code/
 mirror:
-	rm -rf code
-	cp -r .. code
+	rm -rf code /tmp/commonware-mirror
+	cp -r .. /tmp/commonware-mirror
+	mv /tmp/commonware-mirror code
 	rm -rf code/.git code/target code/docs/code
 	find code -name '.DS_Store' -delete 2>/dev/null || true
 	find code -name '*.swp' -delete 2>/dev/null || true
