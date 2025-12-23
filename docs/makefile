@@ -3,8 +3,8 @@ MD_SOURCES := $(shell find . -name "*.md" -type f -not -path "./code/*")
 MD_TARGETS := $(MD_SOURCES:.md=.html)
 HTML_DEPS := $(shell find . -name "*.html" -type f ! -name "template.html")
 
-# Version and commit info from git
-VERSION := $(shell git -C .. describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+# Version and commit info from git (tag must exist)
+VERSION := $(shell git -C .. describe --tags --abbrev=0)
 COMMIT := $(shell git -C .. rev-parse --short HEAD)
 
 # Re-runs when the template file changes, or any markdown file changes

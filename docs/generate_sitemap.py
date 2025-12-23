@@ -18,17 +18,14 @@ EXTRA_FILES = ["llms.txt", "robots.txt"]
 
 
 def get_version() -> str:
-    """Get latest git tag as version."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(DOCS_ROOT.parent), "describe", "--tags", "--abbrev=0"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError:
-        return "0.0.0"
+    """Get latest git tag as version. Fails if no tag exists."""
+    result = subprocess.run(
+        ["git", "-C", str(DOCS_ROOT.parent), "describe", "--tags", "--abbrev=0"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
 
 
 def get_commit() -> str:
