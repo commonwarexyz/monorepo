@@ -47,7 +47,7 @@ use crate::{
     simplex::types::Context,
     types::{Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
-    VerifyingApplication,
+    VerifyingApplication, Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Committable};
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner, Storage};
@@ -175,6 +175,7 @@ where
     ///
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
+    #[inline]
     async fn verify(
         &mut self,
         context: <Self as Automaton>::Context,
@@ -308,6 +309,7 @@ where
     /// # Panics
     ///
     /// Panics if the verification context cannot be persisted.
+    #[inline]
     async fn store_verification_context(
         lock: &Arc<Mutex<VerificationContexts<E, B, S>>>,
         context: <Self as Automaton>::Context,
@@ -614,16 +616,23 @@ where
     /// Relays a report to the underlying [`Application`] and cleans up verification contexts.
     ///
     /// Verification contexts are kept on disk until finalization to support crash recovery.
-    /// When a block is finalized, its context is no longer needed and is removed here.
+    /// When a block is finalized, its context (and its ancestors' contexts) is no longer
+    /// needed and is removed here.
     async fn report(&mut self, update: Self::Activity) {
-        // Prune the verification context for blocks that have been finalized.
         if let Update::Block(ref block, _) = update {
             let mut contexts_guard = self.verification_contexts.lock().await;
-            contexts_guard.remove(&block.commitment());
-            contexts_guard
-                .sync()
-                .await
-                .expect("must sync verification contexts");
+            // Prune all contexts that are below the view of the finalized block, as they
+            // are no longer needed.
+            if let Some(ours) = contexts_guard.get(&block.commitment()).cloned() {
+                contexts_guard.retain(|_, theirs| {
+                    theirs.epoch() > ours.epoch()
+                        || (theirs.epoch() == ours.epoch() && theirs.view() > ours.view())
+                });
+                contexts_guard
+                    .sync()
+                    .await
+                    .expect("must sync verification contexts");
+            }
             drop(contexts_guard);
         }
 
