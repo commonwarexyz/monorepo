@@ -20,26 +20,15 @@ EXTRA_FILES = ["llms.txt", "robots.txt"]
 def get_versions() -> list[str]:
     """Get last 3 git tags as versions. Fails if no tag exists."""
     result = subprocess.run(
-        ["git", "-C", str(DOCS_ROOT.parent), "describe", "--tags", "--abbrev=0"],
+        ["git", "-C", str(DOCS_ROOT.parent), "tag", "-l", "v*", "--sort=-v:refname"],
         capture_output=True,
         text=True,
         check=True,
     )
-    versions = [result.stdout.strip()]
-
-    # Try to get previous tags
-    for _ in range(2):
-        result = subprocess.run(
-            ["git", "-C", str(DOCS_ROOT.parent), "describe", "--tags", "--abbrev=0", f"{versions[-1]}^"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            versions.append(result.stdout.strip())
-        else:
-            break
-
-    return versions
+    all_tags = [t for t in result.stdout.strip().split("\n") if t]
+    if not all_tags:
+        raise RuntimeError("No version tags found")
+    return all_tags[:3]
 
 
 def collect_html() -> list[Path]:
