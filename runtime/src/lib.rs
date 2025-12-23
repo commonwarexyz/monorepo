@@ -37,6 +37,8 @@ use thiserror::Error;
 mod macros;
 
 pub mod deterministic;
+pub mod hash;
+pub use hash::{HashMap, HashSet};
 pub mod mocks;
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
