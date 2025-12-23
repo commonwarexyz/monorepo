@@ -10,9 +10,9 @@ markdown: $(MD_TARGETS)
 
 # Mirror source code to /code/
 mirror:
-	rm -rf code /tmp/commonware-mirror
-	cp -r .. /tmp/commonware-mirror
-	mv /tmp/commonware-mirror code
+	rm -rf code
+	mkdir -p code
+	for item in ../*; do cp -r "$$item" code/; done
 	rm -rf code/docs/code
 
 # Generate sitemap
