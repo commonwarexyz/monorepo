@@ -24,8 +24,10 @@ use futures::future::try_join_all;
 use std::collections::BTreeMap;
 
 pub mod fixed;
-pub mod sync;
 pub mod variable;
+
+#[cfg(test)]
+pub(crate) mod sync_tests;
 
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
 

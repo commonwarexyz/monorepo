@@ -4,6 +4,8 @@
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::unordered::fixed]
 //! instead for better performance._
 
+pub mod sync;
+
 use crate::{
     index::unordered::Index,
     journal::{
@@ -481,5 +483,38 @@ pub(super) mod test {
             let cfg = db_config(&format!("batch_{seed}"));
             AnyTest::init(ctx, cfg).await.unwrap()
         });
+    }
+
+    // FromSyncTestable implementation for from_sync_result tests
+    mod from_sync_testable {
+        use super::*;
+        use crate::{
+            mmr::{iterator::nodes_to_pin, journaled::Mmr, mem::Clean, Position},
+            qmdb::any::unordered::sync_tests::FromSyncTestable,
+        };
+        use futures::future::join_all;
+
+        type TestMmr = Mmr<deterministic::Context, Digest, Clean<Digest>>;
+
+        impl FromSyncTestable for AnyTest {
+            type Mmr = TestMmr;
+
+            fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
+                (self.log.mmr, self.log.journal)
+            }
+
+            async fn pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
+                join_all(nodes_to_pin(pos).map(|p| self.log.mmr.get_node(p)))
+                    .await
+                    .into_iter()
+                    .map(|n| n.unwrap().unwrap())
+                    .collect()
+            }
+
+            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
+                let map = self.log.mmr.get_pinned_nodes();
+                nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
+            }
+        }
     }
 }
