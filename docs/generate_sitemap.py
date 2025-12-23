@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 from pathlib import Path
@@ -16,7 +15,7 @@ DOCS_ROOT = Path(__file__).resolve().parent
 BASE_URL = "https://commonware.xyz"
 EXCLUDED_FILES = {"template.html"}
 EXCLUDED_DIRS = {".venv"}
-EXTRA_FILES = ["llms.txt", "robots.txt", "code/index.json"]
+EXTRA_FILES = ["llms.txt", "robots.txt"]
 
 
 def get_version() -> str:
@@ -117,21 +116,6 @@ def write_sitemap(urls: list[str]) -> None:
     (DOCS_ROOT / "sitemap.xml").write_text(content, encoding="utf-8")
 
 
-def write_code_index(version: str, commit: str) -> None:
-    """Write code/index.json with metadata for LLM discovery."""
-    index = {
-        "version": version,
-        "commit": commit,
-        "paths": {
-            "versioned": f"/code/v{version}/",
-            "main": f"/code/main/{commit}/",
-        },
-        "description": "Commonware Library source code. Use 'versioned' path for stable references, 'main' path for commit-specific references.",
-    }
-    index_path = DOCS_ROOT / "code" / "index.json"
-    index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
-
-
 def write_llms_txt(version: str, commit: str) -> None:
     """Write llms.txt with versioned paths for LLM discovery."""
     v = f"v{version}"
@@ -179,7 +163,6 @@ def write_llms_txt(version: str, commit: str) -> None:
 - Main branch (commit-specific): /code/main/{commit}/
 
 View [sitemap.xml](/sitemap.xml) for all filepaths.
-View [code/index.json](/code/index.json) for machine-readable path metadata.
 """
     (DOCS_ROOT / "llms.txt").write_text(content, encoding="utf-8")
 
@@ -187,9 +170,6 @@ View [code/index.json](/code/index.json) for machine-readable path metadata.
 def main() -> None:
     version = get_version()
     commit = get_commit()
-
-    # Write code index for LLM discovery
-    write_code_index(version, commit)
 
     # Write llms.txt with versioned paths
     write_llms_txt(version, commit)

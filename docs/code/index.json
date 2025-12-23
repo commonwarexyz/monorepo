@@ -1,9 +1,0 @@
-{
-  "version": "0.0.64",
-  "commit": "476d985",
-  "paths": {
-    "versioned": "/code/v0.0.64/",
-    "main": "/code/main/476d985/"
-  },
-  "description": "Commonware Library source code. Use 'versioned' path for stable references, 'main' path for commit-specific references."
-}

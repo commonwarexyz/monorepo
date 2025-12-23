@@ -1,6 +1,6 @@
 # Commonware Library
 
-> Version: 0.0.64 (commit: 476d985)
+> Version: 0.0.64 (commit: 039b4f7)
 
 ## Documentation
 
@@ -39,7 +39,6 @@
 ## Paths
 
 - Versioned (stable): /code/v0.0.64/
-- Main branch (commit-specific): /code/main/476d985/
+- Main branch (commit-specific): /code/main/039b4f7/
 
 View [sitemap.xml](/sitemap.xml) for all filepaths.
-View [code/index.json](/code/index.json) for machine-readable path metadata.
