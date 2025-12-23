@@ -423,10 +423,10 @@ impl crate::Stream for Stream {
 
             let remaining = buf_len - bytes_received;
 
-            // Buffer is empty, read from socket
-            // For large reads or unbuffered mode, read directly into caller's buffer
-            let buffer_capacity = self.buffer.capacity();
-            if buffer_capacity == 0 || remaining >= buffer_capacity {
+            // Skip internal buffer if disabled, or if the read is large enough
+            // to fill the buffer and immediately drain it
+            let buffer_len = self.buffer.len();
+            if buffer_len == 0 || remaining >= buffer_len {
                 let (returned_buf, result) = self.submit_recv(buf, bytes_received, remaining).await;
                 buf = returned_buf;
                 bytes_received += result?;
