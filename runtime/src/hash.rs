@@ -12,8 +12,6 @@
 //! use commonware_runtime::{HashMap, HashSet};
 //! ```
 
-use rand::Rng;
-use siphasher::sip::SipHasher13;
 use std::{cell::Cell, hash::BuildHasher};
 
 thread_local! {
@@ -48,37 +46,29 @@ pub fn clear_seed() {
 
 /// A BuildHasher that uses the TLS seed if set, otherwise random keys.
 ///
-/// Uses SipHash-1-3 for DoS resistance (same algorithm as std HashMap).
+/// Uses aHash for fast, DoS-resistant hashing.
 #[derive(Clone)]
-pub struct RandomState {
-    k0: u64,
-    k1: u64,
-}
+pub struct RandomState(ahash::RandomState);
 
 impl Default for RandomState {
     fn default() -> Self {
-        let (k0, k1) = HASH_SEED.with(|s| {
+        let state = HASH_SEED.with(|s| {
             s.get().map_or_else(
-                || {
-                    // Production mode: random keys for DoS resistance
-                    let mut rng = rand::thread_rng();
-                    (rng.gen(), rng.gen())
-                },
-                |seed| {
-                    // Deterministic mode: derive keys from seed
-                    (seed, seed.wrapping_add(1))
-                },
+                // Production mode: random keys for DoS resistance
+                ahash::RandomState::new,
+                // Deterministic mode: use fixed seed
+                |seed| ahash::RandomState::with_seed(seed as usize),
             )
         });
-        Self { k0, k1 }
+        Self(state)
     }
 }
 
 impl BuildHasher for RandomState {
-    type Hasher = SipHasher13;
+    type Hasher = ahash::AHasher;
 
     fn build_hasher(&self) -> Self::Hasher {
-        SipHasher13::new_with_keys(self.k0, self.k1)
+        self.0.build_hasher()
     }
 }
 

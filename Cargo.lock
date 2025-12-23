@@ -19,6 +19,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ahash"
+version = "0.8.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
+dependencies = [
+ "cfg-if",
+ "once_cell",
+ "version_check",
+ "zerocopy",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1462,6 +1474,7 @@ dependencies = [
 name = "commonware-runtime"
 version = "0.0.64"
 dependencies = [
+ "ahash",
  "async-lock",
  "axum",
  "bytes",
@@ -1485,7 +1498,6 @@ dependencies = [
  "rand 0.8.5",
  "rayon",
  "sha2 0.10.9",
- "siphasher",
  "sysinfo",
  "thiserror 2.0.17",
  "tokio",
@@ -4595,12 +4607,6 @@ name = "simd-adler32"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d66dc143e6b11c1eddc06d5c423cfc97062865baf299914ab64caa38182078fe"
-
-[[package]]
-name = "siphasher"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
 
 [[package]]
 name = "slab"
