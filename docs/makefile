@@ -10,7 +10,7 @@ markdown: $(MD_TARGETS)
 
 # Mirror source code to versioned paths under /code/
 # Creates: /code/<tag>/* for last 3 tags
-# Fetches tags at runtime to support shallow clones (like Cloudflare Pages)
+# Fetches tags at runtime to support shallow clones
 mirror:
 	rm -rf code
 	@# Fetch all tags (needed for shallow clones)
