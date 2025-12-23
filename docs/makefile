@@ -15,5 +15,25 @@ $(SITEMAP): generate_sitemap.py $(MD_TARGETS) $(HTML_DEPS)
 clean:
 	rm -f $(MD_TARGETS) $(SITEMAP)
 
+# Build site and mirror source code to /code/
+mirror: all
+	rm -rf code
+	mkdir -p code
+	rsync -av --progress ../ code/ \
+		--exclude='.git' \
+		--exclude='target' \
+		--exclude='.DS_Store' \
+		--exclude='*.swp' \
+		--exclude='.vscode' \
+		--exclude='.idea' \
+		--exclude='examples/flood/assets' \
+		--exclude='*/fuzz/artifacts' \
+		--exclude='*/fuzz/corpus' \
+		--exclude='*/fuzz/coverage' \
+		--exclude='*/fuzz/target' \
+		--exclude='**/quint/_apalache-out/' \
+		--exclude='**/quint/out*/' \
+		--exclude='docs/code'
+
 # So that make doesn't think the above two are directories
-.PHONY: all clean
+.PHONY: all clean mirror

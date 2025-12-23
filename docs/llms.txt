@@ -1,0 +1,35 @@
+# Commonware Library
+
+## Documentation
+
+- [README](/code/README.md): Read about the Commonware Library.
+- [AGENTS.md](/code/AGENTS.md): Learn about development guidelines and best practices.
+- [CONTRIBUTING.md](/code/CONTRIBUTING.md): Understand the expectations for contributing to this repository.
+- [Blogs](/blogs/): Provide context on design decisions and implementation details for a selection of novel primitives.
+
+## Source Code
+
+- [broadcast](/code/broadcast/): Disseminate data over a wide-area network.
+- [codec](/code/codec/): Serialize structured data.
+- [coding](/code/coding/): Encode data to enable recovery from a subset of fragments.
+- [collector](/code/collector/): Collect responses to committable requests.
+- [conformance](/code/conformance/): Automatically assert the stability of encoding and mechanisms over time.
+- [consensus](/code/consensus/): Order opaque messages in a Byzantine environment.
+- [cryptography](/code/cryptography/): Generate keys, sign arbitrary messages, and deterministically verify signatures.
+- [deployer](/code/deployer/): Deploy infrastructure across cloud providers.
+- [math](/code/math/): Create and manipulate mathematical objects.
+- [p2p](/code/p2p/): Communicate with authenticated peers over encrypted connections.
+- [resolver](/code/resolver/): Resolve data identified by a fixed-length key.
+- [runtime](/code/runtime/): Execute asynchronous tasks with a configurable scheduler.
+- [storage](/code/storage/): Persist and retrieve data from an abstract store.
+- [stream](/code/stream/): Exchange messages over arbitrary transport.
+
+## Examples
+
+- [examples/bridge](/code/examples/bridge/): Send succinct consensus certificates between two networks.
+- [examples/chat](/code/examples/chat/): Send encrypted messages to a group of friends.
+- [examples/estimator](/code/examples/estimator/): Simulate mechanism performance under realistic network conditions.
+- [examples/flood](/code/examples/flood/): Spam peers deployed to AWS EC2 with random messages.
+- [examples/log](/code/examples/log/): Commit to a secret log and agree to its hash.
+- [examples/reshare](/code/examples/reshare/): Reshare a threshold secret over an epoched log.
+- [examples/sync](/code/examples/sync/): Synchronize state between a server and client.
