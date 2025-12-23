@@ -126,7 +126,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> Resolver for Arc<VariableDb<E, K, V, H, T>>
+impl<E, K, V, H, T> Resolver for Arc<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -158,7 +158,7 @@ where
 
 /// Implement Resolver directly for `Arc<RwLock<VariableDb>>` to eliminate the need for wrapper
 /// types while allowing direct database access.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<VariableDb<E, K, V, H, T>>>
+impl<E, K, V, H, T> Resolver for Arc<RwLock<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -189,8 +189,8 @@ where
     }
 }
 
-/// Implement Resolver for `Arc<RwLock<Option<Db>>>` to allow taking ownership during sync.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<Option<Db<E, K, V, H, T, Merkleized<H>, Durable>>>>
+/// Implement Resolver for `Arc<RwLock<Option<FixedDb>>>` to allow taking ownership during sync.
+impl<E, K, V, H, T> Resolver for Arc<RwLock<Option<FixedDb<E, K, V, H, T, Merkleized<H>, Durable>>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -200,7 +200,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Operation<K, V>;
+    type Op = FixedOperation<K, V>;
     type Error = qmdb::Error;
 
     async fn get_operations(
@@ -210,7 +210,41 @@ where
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
         let guard = self.read().await;
-        let db: &Db<E, K, V, H, T, Merkleized<H>, Durable> =
+        let db: &FixedDb<E, K, V, H, T, Merkleized<H>, Durable> =
+            guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
+        db.historical_proof(op_count, start_loc, max_ops)
+            .await
+            .map(|(proof, operations)| FetchResult {
+                proof,
+                operations,
+                // Result of proof verification isn't used by this implementation.
+                success_tx: oneshot::channel().0,
+            })
+    }
+}
+
+/// Implement Resolver for `Arc<RwLock<Option<VariableDb>>>` to allow taking ownership during sync.
+impl<E, K, V, H, T> Resolver for Arc<RwLock<Option<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>>>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: VariableValue + Send + Sync + 'static,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    type Digest = H::Digest;
+    type Op = VariableOperation<K, V>;
+    type Error = qmdb::Error;
+
+    async fn get_operations(
+        &self,
+        op_count: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
+        let guard = self.read().await;
+        let db: &VariableDb<E, K, V, H, T, Merkleized<H>, Durable> =
             guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
         db.historical_proof(op_count, start_loc, max_ops)
             .await

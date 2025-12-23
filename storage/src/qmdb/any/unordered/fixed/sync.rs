@@ -322,8 +322,8 @@ mod tests {
             AnyTest::init(ctx, config).await.unwrap()
         }
 
-        async fn apply_ops(db: &mut Self::Db, ops: Vec<Operation<Digest, Digest>>) {
-            apply_ops(db, ops).await
+        async fn apply_ops(db: Self::Db, ops: Vec<Operation<Digest, Digest>>) -> Self::Db {
+            apply_ops(db.into_mutable(), ops).await.commit(None).await.unwrap().0.into_provable()
         }
     }
 

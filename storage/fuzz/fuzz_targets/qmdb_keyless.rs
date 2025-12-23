@@ -1,12 +1,12 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{sha256, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    mmr::{hasher::Standard, Location},
+    mmr::{hasher::Standard, mem::Clean, Location},
     qmdb::{
-        keyless::{Config, Keyless},
+        keyless::{Config, Durable, Keyless},
         verify_proof,
     },
 };
@@ -120,6 +120,14 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: usize = 128;
 const PAGE_CACHE_SIZE: usize = 8;
 
+type CleanDb = Keyless<
+    deterministic::Context,
+    Vec<u8>,
+    Sha256,
+    Clean<sha256::Digest>,
+    Durable,
+>;
+
 fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
@@ -141,11 +149,10 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut db =
-            Keyless::<_, _, Sha256, _>::init(context.clone(), test_config("keyless_fuzz_test"))
-                .await
-                .expect("Failed to init keyless db")
-                .into_mutable();
+        let mut db = CleanDb::init(context.clone(), test_config("keyless_fuzz_test"))
+            .await
+            .expect("Failed to init keyless db")
+            .into_mutable();
 
         let mut has_uncommitted = false;
 
@@ -269,12 +276,10 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure{} => {
                     db.simulate_commit_failure().await;
 
-                    db = Keyless::init(
-                        context.clone(),
-                        test_config("keyless_fuzz_test"),
-                    )
-                    .await
-                    .expect("Failed to init keyless db").into_mutable();
+                    db = CleanDb::init(context.clone(), test_config("keyless_fuzz_test"))
+                        .await
+                        .expect("Failed to init keyless db")
+                        .into_mutable();
                     has_uncommitted = false;
                 }
             }
