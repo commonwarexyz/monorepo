@@ -18,7 +18,7 @@ REVM-based example chain driven by threshold-simplex (`commonware_consensus::sim
 
 ## Components
 
-- `src/consensus/`: consensus digest types and the `digest_for_block` mapping.
+- `src/types.rs`: canonical block/tx types and digest mapping (`ConsensusDigest = sha256(BlockId)`).
 - `src/application/`: proposal/verification logic (marshaled), shared state (mempool + DB snapshots), reporters, and query handle.
 - `src/execution.rs`: EVM execution (`EthEvmBuilder`) and the seed precompile.
 - `src/commitment.rs`: canonical `StateChanges` encoding and rolling `StateRoot` commitment.

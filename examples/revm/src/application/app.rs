@@ -5,7 +5,7 @@
 //! wrapper bridges these layers by fetching required ancestors from marshal and calling into this
 //! module with an `AncestorStream` you can iterate to walk back over pending blocks.
 //!
-//! The node wiring that wraps this application lives in `examples/revm_chain/src/sim/node.rs`.
+//! The node wiring that wraps this application lives in `examples/revm/src/sim/node.rs`.
 
 use super::state::Shared;
 use crate::{
