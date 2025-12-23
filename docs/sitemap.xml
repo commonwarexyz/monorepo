@@ -66,4 +66,10 @@
   <url>
     <loc>https://commonware.xyz/podcast.html</loc>
   </url>
+  <url>
+    <loc>https://commonware.xyz/llms.txt</loc>
+  </url>
+  <url>
+    <loc>https://commonware.xyz/robots.txt</loc>
+  </url>
 </urlset>

@@ -13,6 +13,7 @@ DOCS_ROOT = Path(__file__).resolve().parent
 BASE_URL = "https://commonware.xyz"
 EXCLUDED_FILES = {"template.html"}
 EXCLUDED_DIRS = {".venv"}
+EXTRA_FILES = ["llms.txt", "robots.txt"]
 
 
 def collect_html() -> list[Path]:
@@ -62,6 +63,8 @@ def write_sitemap(urls: list[str]) -> None:
 
 def main() -> None:
     urls = [build_url(rel, BASE_URL) for rel in collect_html()]
+    for extra in EXTRA_FILES:
+        urls.append(urljoin(BASE_URL.rstrip("/") + "/", extra))
     write_sitemap(urls)
 
 
