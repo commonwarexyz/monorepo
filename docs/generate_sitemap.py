@@ -13,6 +13,7 @@ DOCS_ROOT = Path(__file__).resolve().parent
 BASE_URL = "https://commonware.xyz"
 EXCLUDED_FILES = {"template.html"}
 EXCLUDED_DIRS = {".venv"}
+EXTRA_FILES = ["llms.txt", "robots.txt"]
 
 
 def collect_html() -> list[Path]:
@@ -26,6 +27,33 @@ def collect_html() -> list[Path]:
         if any(part.startswith(".") for part in rel.parts):
             continue
         if any(part in EXCLUDED_DIRS for part in rel.parts):
+            continue
+        if rel.parts[0] == "code":
+            continue
+
+        results.append(rel)
+
+    return sorted(results)
+
+
+CODE_EXTENSIONS = {".md", ".rs", ".toml"}
+
+
+def collect_code() -> list[Path]:
+    """Return sorted relative paths of code files to include in the sitemap."""
+    code_dir = DOCS_ROOT / "code"
+    if not code_dir.exists():
+        return []
+
+    results = []
+    for path in code_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix not in CODE_EXTENSIONS:
+            continue
+
+        rel = path.relative_to(DOCS_ROOT)
+        if any(part.startswith(".") for part in rel.parts):
             continue
 
         results.append(rel)
@@ -62,6 +90,9 @@ def write_sitemap(urls: list[str]) -> None:
 
 def main() -> None:
     urls = [build_url(rel, BASE_URL) for rel in collect_html()]
+    urls += [build_url(rel, BASE_URL) for rel in collect_code()]
+    for extra in EXTRA_FILES:
+        urls.append(urljoin(BASE_URL.rstrip("/") + "/", extra))
     write_sitemap(urls)
 
 
