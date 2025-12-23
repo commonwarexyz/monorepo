@@ -6,11 +6,7 @@ HTML_DEPS := $(shell find . -name "*.html" -type f ! -name "template.html")
 # Re-runs when the template file changes, or any markdown file changes
 %.html: %.md template.html
 	pandoc $< -o $@ --template=template.html --mathjax --standalone
-
 markdown: $(MD_TARGETS)
-
-clean:
-	rm -f $(MD_TARGETS) $(SITEMAP)
 
 # Mirror source code to /code/
 mirror:
@@ -36,5 +32,9 @@ sitemap:
 
 # Deploy: mirror code and generate sitemap
 deploy: mirror sitemap
+
+# Clean all generated files
+clean:
+	rm -rf code $(MD_TARGETS) $(SITEMAP)
 
 .PHONY: markdown clean mirror sitemap deploy
