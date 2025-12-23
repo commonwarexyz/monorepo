@@ -18,22 +18,19 @@ clean:
 # Mirror source code to /code/
 mirror:
 	rm -rf code
-	mkdir -p code
-	rsync -av --progress ../ code/ \
-		--exclude='.git' \
-		--exclude='target' \
-		--exclude='.DS_Store' \
-		--exclude='*.swp' \
-		--exclude='.vscode' \
-		--exclude='.idea' \
-		--exclude='examples/flood/assets' \
-		--exclude='*/fuzz/artifacts' \
-		--exclude='*/fuzz/corpus' \
-		--exclude='*/fuzz/coverage' \
-		--exclude='*/fuzz/target' \
-		--exclude='**/quint/_apalache-out/' \
-		--exclude='**/quint/out*/' \
-		--exclude='docs/code'
+	cp -r .. code
+	rm -rf code/.git code/target code/docs/code
+	find code -name '.DS_Store' -delete 2>/dev/null || true
+	find code -name '*.swp' -delete 2>/dev/null || true
+	find code -name '.vscode' -type d -exec rm -rf {} + 2>/dev/null || true
+	find code -name '.idea' -type d -exec rm -rf {} + 2>/dev/null || true
+	rm -rf code/examples/flood/assets
+	find code -path '*/fuzz/artifacts' -type d -exec rm -rf {} + 2>/dev/null || true
+	find code -path '*/fuzz/corpus' -type d -exec rm -rf {} + 2>/dev/null || true
+	find code -path '*/fuzz/coverage' -type d -exec rm -rf {} + 2>/dev/null || true
+	find code -path '*/fuzz/target' -type d -exec rm -rf {} + 2>/dev/null || true
+	find code -name '_apalache-out' -type d -exec rm -rf {} + 2>/dev/null || true
+	find code -type d -name 'out*' -path '*/quint/*' -exec rm -rf {} + 2>/dev/null || true
 
 # So that make doesn't think the above two are directories
 .PHONY: all clean mirror
