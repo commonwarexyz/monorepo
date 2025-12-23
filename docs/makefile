@@ -3,6 +3,9 @@ MD_SOURCES := $(shell find . -name "*.md" -type f -not -path "./code/*")
 MD_TARGETS := $(MD_SOURCES:.md=.html)
 HTML_DEPS := $(shell find . -name "*.html" -type f ! -name "template.html")
 
+# Fetch tags (needed for shallow clones like Cloudflare Pages)
+FETCH_TAGS := $(shell git -C .. fetch --tags 2>/dev/null)
+
 # Get last 3 version tags from git (at least one tag must exist)
 TAG1 := $(shell git -C .. describe --tags --abbrev=0)
 TAG2 := $(shell git -C .. describe --tags --abbrev=0 $(TAG1)^ 2>/dev/null)
