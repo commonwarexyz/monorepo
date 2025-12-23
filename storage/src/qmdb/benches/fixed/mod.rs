@@ -11,7 +11,7 @@ use commonware_storage::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
-            FixedConfig as AConfig, UnmerkleizedDurableAny, UnmerkleizedNonDurableAny,
+            FixedConfig as AConfig, MutableAny, UnmerkleizedDurableAny,
             VariableConfig as VariableAnyConfig,
         },
         current::{
@@ -206,7 +206,7 @@ async fn gen_random_kv<M>(
     commit_frequency: Option<u32>,
 ) -> M::Durable
 where
-    M: UnmerkleizedNonDurableAny<Key = Digest> + LogStore<Value = Digest>,
+    M: MutableAny<Key = Digest> + LogStore<Value = Digest>,
     M::Durable: UnmerkleizedDurableAny<Mutable = M>,
 {
     // Insert a random value for every possible element into the db.
@@ -245,7 +245,7 @@ async fn gen_random_kv_batched<M>(
     commit_frequency: Option<u32>,
 ) -> M::Durable
 where
-    M: UnmerkleizedNonDurableAny<Key = Digest> + LogStore<Value = Digest>,
+    M: MutableAny<Key = Digest> + LogStore<Value = Digest>,
     M::Durable: UnmerkleizedDurableAny<Mutable = M>,
 {
     let mut rng = StdRng::seed_from_u64(42);

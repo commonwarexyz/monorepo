@@ -9,7 +9,7 @@ use crate::{
     mmr::{Location, Position},
     qmdb::{
         self,
-        any::MerkleizedDurableAny,
+        any::CleanAny,
         operation::Operation as OperationTrait,
         store::{LogStore as _, MerkleizedStore, PrunableStore},
         sync::{
@@ -82,7 +82,7 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
 pub(crate) trait SyncTestHarness: Sized + 'static {
     /// The database type being tested (Clean state: Merkleized + Durable).
     type Db: qmdb::sync::Database<Context = deterministic::Context, Digest = Digest>
-        + MerkleizedDurableAny<Key = Digest>
+        + CleanAny<Key = Digest>
         + MerkleizedStore<Digest = Digest>
         + Store<Key = Digest>;
 

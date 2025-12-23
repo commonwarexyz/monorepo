@@ -10,7 +10,7 @@ use commonware_runtime::{
     tokio::{Config, Context},
 };
 use commonware_storage::qmdb::{
-    any::{MerkleizedDurableAny, UnmerkleizedDurableAny, UnmerkleizedNonDurableAny},
+    any::{CleanAny, MutableAny, UnmerkleizedDurableAny},
     store::LogStore,
     Error,
 };
@@ -94,10 +94,10 @@ async fn test_db<C>(
     commit_frequency: u32,
 ) -> Result<Duration, Error>
 where
-    C: MerkleizedDurableAny<Key = Digest>,
-    C::Mutable: UnmerkleizedNonDurableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
-    <C::Mutable as UnmerkleizedNonDurableAny>::Durable:
-        UnmerkleizedDurableAny<Mutable = C::Mutable, Provable = C>,
+    C: CleanAny<Key = Digest>,
+    C::Mutable: MutableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
+    <C::Mutable as MutableAny>::Durable:
+        UnmerkleizedDurableAny<Mutable = C::Mutable, Merkleized = C>,
 {
     let start = Instant::now();
 

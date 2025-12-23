@@ -11,7 +11,7 @@ use commonware_runtime::{
     Runner as _,
 };
 use commonware_storage::qmdb::{
-    any::{MerkleizedDurableAny, UnmerkleizedDurableAny, UnmerkleizedNonDurableAny},
+    any::{CleanAny, MutableAny, UnmerkleizedDurableAny},
     store::LogStore,
 };
 use criterion::{criterion_group, Criterion};
@@ -34,10 +34,10 @@ cfg_if::cfg_if! {
 /// Helper function to setup a database with random data, prune, and close it.
 async fn setup_db<C>(db: C, elements: u64, operations: u64)
 where
-    C: MerkleizedDurableAny<Key = Digest>,
-    C::Mutable: UnmerkleizedNonDurableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
-    <C::Mutable as UnmerkleizedNonDurableAny>::Durable:
-        UnmerkleizedDurableAny<Mutable = C::Mutable, Provable = C>,
+    C: CleanAny<Key = Digest>,
+    C::Mutable: MutableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
+    <C::Mutable as MutableAny>::Durable:
+        UnmerkleizedDurableAny<Mutable = C::Mutable, Merkleized = C>,
 {
     let mutable = db.into_mutable();
     let durable = gen_random_kv(mutable, elements, operations, COMMIT_FREQUENCY).await;

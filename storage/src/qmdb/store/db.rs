@@ -100,7 +100,7 @@ use core::ops::Range;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
-/// Configuration for initializing a [Store] database.
+/// Configuration for initializing a [Db] database.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
     /// The name of the [`Storage`] partition used to persist the log of operations.
@@ -266,11 +266,11 @@ where
     V: VariableValue,
     T: Translator,
 {
-    /// Initializes a new [`Store`] database with the given configuration.
+    /// Initializes a new [Db] database with the given configuration.
     ///
     /// ## Rollback
     ///
-    /// Any uncommitted operations will be rolled back if the [Store] was previously closed without
+    /// Any uncommitted operations will be rolled back if the [Db] was previously closed without
     /// committing.
     pub async fn init(
         context: E,

@@ -5,8 +5,8 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     qmdb::{
         any::{
-            ordered::variable::Db as OVariable, unordered::variable::Db as UVariable,
-            UnmerkleizedDurableAny, UnmerkleizedNonDurableAny, VariableConfig as AConfig,
+            ordered::variable::Db as OVariable, unordered::variable::Db as UVariable, MutableAny,
+            UnmerkleizedDurableAny, VariableConfig as AConfig,
         },
         store::LogStore,
         Durable, Merkleized,
@@ -107,7 +107,7 @@ async fn gen_random_kv<M>(
     commit_frequency: u32,
 ) -> M::Durable
 where
-    M: UnmerkleizedNonDurableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
+    M: MutableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
     M::Durable: UnmerkleizedDurableAny<Mutable = M>,
 {
     // Insert a random value for every possible element into the db.
@@ -143,7 +143,7 @@ async fn gen_random_kv_batched<M>(
     commit_frequency: u32,
 ) -> M::Durable
 where
-    M: UnmerkleizedNonDurableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
+    M: MutableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
     M::Durable: UnmerkleizedDurableAny<Mutable = M>,
 {
     let mut rng = StdRng::seed_from_u64(42);

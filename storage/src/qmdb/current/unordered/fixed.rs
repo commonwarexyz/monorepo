@@ -18,8 +18,7 @@ use crate::{
                 fixed::{Db as AnyDb, Operation},
                 Update,
             },
-            FixedValue, MerkleizedDurableAny, MerkleizedNonDurableAny, UnmerkleizedDurableAny,
-            UnmerkleizedNonDurableAny,
+            CleanAny, FixedValue, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny,
         },
         current::{
             merkleize_grafted_bitmap,
@@ -711,7 +710,7 @@ impl<
     }
 }
 
-// MerkleizedDurableAny implementation
+// CleanAny implementation
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -719,7 +718,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > MerkleizedDurableAny for Db<E, K, V, H, T, N, Merkleized<H>, Durable>
+    > CleanAny for Db<E, K, V, H, T, N, Merkleized<H>, Durable>
 {
     type Mutable = Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
 
@@ -787,7 +786,7 @@ impl<
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
     type Mutable = Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
-    type Provable = Db<E, K, V, H, T, N, Merkleized<H>, Durable>;
+    type Merkleized = Db<E, K, V, H, T, N, Merkleized<H>, Durable>;
 
     fn into_mutable(self) -> Self::Mutable {
         Db {
@@ -799,7 +798,7 @@ impl<
         }
     }
 
-    async fn into_merkleized(self) -> Result<Self::Provable, Error> {
+    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
         self.into_merkleized().await
     }
 }
@@ -821,7 +820,7 @@ impl<
     }
 }
 
-// UnmerkleizedNonDurableAny implementation
+// MutableAny implementation
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -829,18 +828,18 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > UnmerkleizedNonDurableAny for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
+    > MutableAny for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
     type Durable = Db<E, K, V, H, T, N, Unmerkleized, Durable>;
-    type Provable = Db<E, K, V, H, T, N, Merkleized<H>, NonDurable>;
+    type Merkleized = Db<E, K, V, H, T, N, Merkleized<H>, NonDurable>;
 
     async fn commit(self, metadata: Option<V>) -> Result<(Self::Durable, Range<Location>), Error> {
         self.commit(metadata).await
     }
 
-    async fn into_merkleized(self) -> Result<Self::Provable, Error> {
+    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
         self.into_merkleized().await
     }
 }

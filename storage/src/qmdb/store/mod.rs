@@ -4,7 +4,7 @@
 //! # Pruning
 //!
 //! A log based store maintains a location before which all operations are inactive, called the
-//! _inactivity floor_. These operations can be cleaned from storage by calling [Store::prune].
+//! _inactivity floor_. These operations can be cleaned from storage by calling [PrunableStore::prune].
 
 use crate::{
     mmr::{Location, Proof},

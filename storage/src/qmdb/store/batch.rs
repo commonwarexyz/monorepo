@@ -163,7 +163,7 @@ pub trait Batchable: Store<Key: Array, Value: Codec + Clone, Error = Error> {
 pub mod tests {
     use super::*;
     use crate::{
-        qmdb::any::{UnmerkleizedDurableAny as _, UnmerkleizedNonDurableAny},
+        qmdb::any::{MutableAny, UnmerkleizedDurableAny as _},
         Persistable as _,
     };
     use commonware_cryptography::{blake3, sha256};
@@ -195,8 +195,8 @@ pub mod tests {
         type Fut = Fut;
     }
 
-    /// Destroy an UnmerkleizedNonDurableAny database by committing and then destroying.
-    async fn destroy_db<D: UnmerkleizedNonDurableAny>(db: D) -> Result<(), Error> {
+    /// Destroy an MutableAny database by committing and then destroying.
+    async fn destroy_db<D: MutableAny>(db: D) -> Result<(), Error> {
         let db = db.commit(None).await?.0;
         db.into_merkleized().await?.destroy().await
     }
@@ -206,7 +206,7 @@ pub mod tests {
     pub fn test_batch<D, F>(mut new_db: F)
     where
         F: NewDb<D> + Clone,
-        D: UnmerkleizedNonDurableAny,
+        D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
     {
@@ -248,7 +248,7 @@ pub mod tests {
     pub async fn run_batch_tests<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDbNoCtx<D>,
-        D: UnmerkleizedNonDurableAny,
+        D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
     {
@@ -265,7 +265,7 @@ pub mod tests {
     async fn test_overlay_reads<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDbNoCtx<D>,
-        D: UnmerkleizedNonDurableAny,
+        D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
     {
@@ -294,7 +294,7 @@ pub mod tests {
     async fn test_create<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDbNoCtx<D>,
-        D: UnmerkleizedNonDurableAny,
+        D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
     {
@@ -340,7 +340,7 @@ pub mod tests {
     async fn test_delete<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDbNoCtx<D>,
-        D: UnmerkleizedNonDurableAny,
+        D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
     {
@@ -368,7 +368,7 @@ pub mod tests {
     async fn test_delete_unchecked<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDbNoCtx<D>,
-        D: UnmerkleizedNonDurableAny,
+        D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
     {
@@ -396,7 +396,7 @@ pub mod tests {
     async fn test_update_delete_update<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDbNoCtx<D>,
-        D: UnmerkleizedNonDurableAny,
+        D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
     {
@@ -468,7 +468,7 @@ pub mod tests {
     async fn test_write_batch_from_to_empty<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDbNoCtx<D>,
-        D: UnmerkleizedNonDurableAny,
+        D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
     {
@@ -529,7 +529,7 @@ pub mod tests {
     async fn test_write_batch<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDbNoCtx<D>,
-        D: UnmerkleizedNonDurableAny,
+        D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
     {

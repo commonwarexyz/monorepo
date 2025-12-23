@@ -5,8 +5,7 @@ use crate::{
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
-            MerkleizedDurableAny, MerkleizedNonDurableAny, UnmerkleizedDurableAny,
-            UnmerkleizedNonDurableAny, ValueEncoding,
+            CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny, ValueEncoding,
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
         operation::{Committable as _, Operation as OperationTrait},
@@ -337,7 +336,7 @@ where
     }
 }
 
-impl<E, K, V, C, I, H> MerkleizedDurableAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
+impl<E, K, V, C, I, H> CleanAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -368,13 +367,13 @@ where
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
-    type Provable = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
+    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
     }
 
-    async fn into_merkleized(self) -> Result<Self::Provable, Error> {
+    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
         Ok(self.into_merkleized())
     }
 }
@@ -400,8 +399,7 @@ where
     }
 }
 
-impl<E, K, V, C, I, H> UnmerkleizedNonDurableAny
-    for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+impl<E, K, V, C, I, H> MutableAny for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -414,7 +412,7 @@ where
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
     type Durable = Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>;
-    type Provable = Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>;
+    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>;
 
     async fn commit(
         self,
@@ -423,7 +421,7 @@ where
         self.commit(metadata).await
     }
 
-    async fn into_merkleized(self) -> Result<Self::Provable, Error> {
+    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
         Ok(self.into_merkleized())
     }
 }
@@ -461,12 +459,12 @@ pub(super) mod test {
 
     /// Helper trait for testing Any databases that cycle through all four states.
     pub(crate) trait TestableAnyDb<V>:
-        MerkleizedDurableAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
+        CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
     {
     }
 
     impl<T, V> TestableAnyDb<V> for T where
-        T: MerkleizedDurableAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
+        T: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
     {
     }
 

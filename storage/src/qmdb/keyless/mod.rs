@@ -1,7 +1,7 @@
 //! The [Keyless] qmdb allows for append-only storage of arbitrary variable-length data that can
 //! later be retrieved by its location.
 //!
-//! The implementation consists of an authenticated [Journal] storing the log of operations that
+//! The implementation consists of an [authenticated::Journal] storing the log of operations that
 //! have been applied to the database.
 //!
 //! A Keyless database can be in one of four states based on two orthogonal dimensions:
