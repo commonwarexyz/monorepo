@@ -15,8 +15,8 @@ $(SITEMAP): generate_sitemap.py $(MD_TARGETS) $(HTML_DEPS)
 clean:
 	rm -f $(MD_TARGETS) $(SITEMAP)
 
-# Build site and mirror source code to /code/
-mirror: all
+# Mirror source code to /code/
+mirror:
 	rm -rf code
 	mkdir -p code
 	rsync -av --progress ../ code/ \
