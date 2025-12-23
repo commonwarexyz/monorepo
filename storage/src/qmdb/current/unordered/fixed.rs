@@ -444,7 +444,7 @@ impl<
 
     /// Merkleize the database and transition to the provable state without committing.
     /// This enables proof generation while keeping the database in the non-durable state.
-    pub async fn into_provable(
+    pub async fn into_merkleized(
         self,
     ) -> Result<Db<E, K, V, H, T, N, Merkleized<H>, NonDurable>, Error> {
         // Merkleize the any db's log
@@ -514,7 +514,7 @@ impl<
         Error,
     > {
         let (durable, range) = self.into_mutable().commit(metadata).await?;
-        Ok((durable.into_provable().await?, range))
+        Ok((durable.into_merkleized().await?, range))
     }
 }
 
@@ -715,7 +715,7 @@ impl<
 
     async fn commit(self, metadata: Option<V>) -> Result<(Self::Clean, Range<Location>), Error> {
         let (durable, range) = self.commit(metadata).await?;
-        let clean = durable.into_provable().await?;
+        let clean = durable.into_merkleized().await?;
         Ok((clean, range))
     }
 }
@@ -777,7 +777,7 @@ impl<
     > Db<E, K, V, H, T, N, Unmerkleized, Durable>
 {
     /// Merkleize the database and transition to the provable state.
-    pub async fn into_provable(
+    pub async fn into_merkleized(
         self,
     ) -> Result<Db<E, K, V, H, T, N, Merkleized<H>, Durable>, Error> {
         // Merkleize the any db's log
@@ -838,8 +838,8 @@ impl<
         }
     }
 
-    async fn into_provable(self) -> Result<Self::Provable, Error> {
-        self.into_provable().await
+    async fn into_merkleized(self) -> Result<Self::Provable, Error> {
+        self.into_merkleized().await
     }
 }
 
@@ -879,8 +879,8 @@ impl<
         self.commit(metadata).await
     }
 
-    async fn into_provable(self) -> Result<Self::Provable, Error> {
-        self.into_provable().await
+    async fn into_merkleized(self) -> Result<Self::Provable, Error> {
+        self.into_merkleized().await
     }
 }
 
@@ -955,7 +955,7 @@ pub mod test {
             assert!(db.create(k1, v1).await.unwrap());
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             let (db, range) = db.commit(None).await.unwrap();
-            let db = db.into_provable().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
             assert_eq!(*range.start, 1);
             assert_eq!(*range.end, 4);
             assert!(db.get_metadata().await.unwrap().is_none());
@@ -976,7 +976,7 @@ pub mod test {
             assert!(db.delete(k1).await.unwrap());
             let metadata = Sha256::hash(&1u64.to_be_bytes());
             let (db, range) = db.commit(Some(metadata)).await.unwrap();
-            let db = db.into_provable().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
             assert_eq!(*range.start, 4);
             assert_eq!(*range.end, 6);
             assert_eq!(db.op_count(), 6); // 1 update, 2 commits, 1 move, 1 delete.
@@ -987,7 +987,7 @@ pub mod test {
             let mut db = db.into_dirty();
             assert!(!db.delete(k1).await.unwrap());
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_provable().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
             // Commit adds a commit even for no-op, so op_count increases and root changes.
             assert_eq!(db.op_count(), 7);
             let root3 = db.root();
@@ -1010,7 +1010,7 @@ pub mod test {
             // Test that we can do a non-durable root.
             let mut db = db.into_mutable();
             db.update(k1, v1).await.unwrap();
-            let db = db.into_provable().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
             assert_ne!(db.root(), root3);
 
             // Test that we can do a merkleized commit.
@@ -1067,7 +1067,7 @@ pub mod test {
 
             // Test that commit + sync w/ pruning will raise the activity floor.
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_provable().await.unwrap();
+            let mut db = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.op_count(), 1957);
@@ -1114,7 +1114,7 @@ pub mod test {
             let v1 = Sha256::fill(0xA1);
             db.update(k, v1).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_provable().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
@@ -1143,7 +1143,7 @@ pub mod test {
             let mut db = db.into_dirty();
             db.update(k, v2).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_provable().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
@@ -1280,13 +1280,13 @@ pub mod test {
             if commit_changes && rng.next_u32() % 20 == 0 {
                 // Commit every ~20 updates.
                 let (durable_db, _) = db.commit(None).await?;
-                let clean_db = durable_db.into_provable().await?;
+                let clean_db = durable_db.into_merkleized().await?;
                 db = clean_db.into_dirty();
             }
         }
         if commit_changes {
             let (durable_db, _) = db.commit(None).await?;
-            let clean_db = durable_db.into_provable().await?;
+            let clean_db = durable_db.into_merkleized().await?;
             db = clean_db.into_dirty();
         }
         Ok(db)
@@ -1303,7 +1303,7 @@ pub mod test {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_provable().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
             let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
@@ -1346,7 +1346,7 @@ pub mod test {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_provable().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
@@ -1428,7 +1428,7 @@ pub mod test {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_provable().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
 
             // Close the db, then replay its operations with a bitmap.
             let root = db.root();
@@ -1461,7 +1461,7 @@ pub mod test {
                 dirty_db.update(k, v).await.unwrap();
                 assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
                 let (durable_db, _) = dirty_db.commit(None).await.unwrap();
-                db = durable_db.into_provable().await.unwrap();
+                db = durable_db.into_merkleized().await.unwrap();
                 let root = db.root();
 
                 // Create a proof for the current value of k.
@@ -1504,7 +1504,7 @@ pub mod test {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_provable().await.unwrap();
+            let mut db = db.into_merkleized().await.unwrap();
             let committed_root = db.root();
             let committed_op_count = db.op_count();
             let committed_inactivity_floor = db.any.inactivity_floor_loc();
@@ -1529,8 +1529,8 @@ pub mod test {
 
             // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
             // before the state of the pruned bitmap can be written to disk (i.e., before
-            // into_provable is called). We do this by committing and then dropping the durable
-            // db without calling close or into_provable.
+            // into_merkleized is called). We do this by committing and then dropping the durable
+            // db without calling close or into_merkleized.
             let (durable_db, _) = db.commit(None).await.unwrap();
             let committed_op_count = durable_db.op_count();
             drop(durable_db);
@@ -1552,7 +1552,7 @@ pub mod test {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_provable().await.unwrap();
+            let mut db = db.into_merkleized().await.unwrap();
             db.prune(db.any.inactivity_floor_loc()).await.unwrap();
             // State from scenario #2 should match that of a successful commit.
             assert_eq!(db.op_count(), committed_op_count);
@@ -1593,9 +1593,9 @@ pub mod test {
                 // Commit periodically
                 if i % 50 == 49 {
                     let (db_1, _) = db_no_pruning.commit(None).await.unwrap();
-                    let clean_no_pruning = db_1.into_provable().await.unwrap();
+                    let clean_no_pruning = db_1.into_merkleized().await.unwrap();
                     let (db_2, _) = db_pruning.commit(None).await.unwrap();
-                    let mut clean_pruning = db_2.into_provable().await.unwrap();
+                    let mut clean_pruning = db_2.into_merkleized().await.unwrap();
                     clean_pruning
                         .prune(clean_no_pruning.any.inactivity_floor_loc())
                         .await
@@ -1607,9 +1607,9 @@ pub mod test {
 
             // Final commit
             let (db_1, _) = db_no_pruning.commit(None).await.unwrap();
-            let db_no_pruning = db_1.into_provable().await.unwrap();
+            let db_no_pruning = db_1.into_merkleized().await.unwrap();
             let (db_2, _) = db_pruning.commit(None).await.unwrap();
-            let db_pruning = db_2.into_provable().await.unwrap();
+            let db_pruning = db_2.into_merkleized().await.unwrap();
 
             // Get roots from both databases
             let root_no_pruning = db_no_pruning.root();

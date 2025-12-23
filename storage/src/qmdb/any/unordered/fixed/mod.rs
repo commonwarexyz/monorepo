@@ -264,7 +264,7 @@ pub(super) mod test {
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(k, v).await.unwrap();
             }
-            let db = db.commit(None).await.unwrap().0.into_provable();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root = db.root();
             db.close().await.unwrap();
 
@@ -301,7 +301,7 @@ pub(super) mod test {
             let db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(20);
             let db = apply_ops(db, ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_provable();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root_hash = db.root();
             let original_op_count = db.op_count();
 
@@ -331,7 +331,7 @@ pub(super) mod test {
             let db = db.into_mutable();
             let more_ops = create_test_ops(5);
             let db = apply_ops(db, more_ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_provable();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
@@ -373,7 +373,7 @@ pub(super) mod test {
             let db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(50);
             let db = apply_ops(db, ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_provable();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let mut hasher = StandardHasher::<Sha256>::new();
 
@@ -395,7 +395,7 @@ pub(super) mod test {
             // Create historical database with single operation without committing it.
             let single_db = create_test_db(context.clone()).await.into_mutable();
             let single_db = apply_ops(single_db, ops[0..1].to_vec()).await;
-            let single_db = single_db.into_provable();
+            let single_db = single_db.into_merkleized();
             let single_root = single_db.root();
 
             assert!(verify_proof(
@@ -449,7 +449,7 @@ pub(super) mod test {
             let db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(100);
             let db = apply_ops(db, ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_provable();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let mut hasher = StandardHasher::<Sha256>::new();
 
@@ -469,7 +469,7 @@ pub(super) mod test {
                 let ref_db = create_test_db(context.clone()).await.into_mutable();
                 let ref_db = apply_ops(ref_db, ops[0..(*end_loc - 1) as usize].to_vec())
                     .await
-                    .into_provable();
+                    .into_merkleized();
 
                 let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
                 assert_eq!(ref_proof.size, historical_proof.size);
@@ -506,7 +506,7 @@ pub(super) mod test {
             let db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(10);
             let db = apply_ops(db, ops).await;
-            let db = db.commit(None).await.unwrap().0.into_provable();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let historical_op_count = Location::new_unchecked(5);
             let historical_mmr_size = Position::try_from(historical_op_count).unwrap();

@@ -939,8 +939,8 @@ where
         self.into_mutable()
     }
 
-    async fn into_provable(self) -> Result<Self::Provable, Error> {
-        Ok(self.into_provable())
+    async fn into_merkleized(self) -> Result<Self::Provable, Error> {
+        Ok(self.into_merkleized())
     }
 }
 
@@ -988,8 +988,8 @@ where
         self.commit(metadata).await
     }
 
-    async fn into_provable(self) -> Result<Self::Provable, Error> {
-        Ok(self.into_provable())
+    async fn into_merkleized(self) -> Result<Self::Provable, Error> {
+        Ok(self.into_merkleized())
     }
 }
 
@@ -1072,7 +1072,7 @@ mod test {
         let metadata = Sha256::fill(3u8);
         let db = db.into_mutable();
         let (db, range) = db.commit(Some(metadata)).await.unwrap();
-        let mut db = db.into_provable().await.unwrap();
+        let mut db = db.into_merkleized().await.unwrap();
         assert_eq!(range.start, Location::new_unchecked(1));
         assert_eq!(range.end, Location::new_unchecked(2));
         assert_eq!(db.op_count(), 2); // floor op added
@@ -1090,7 +1090,7 @@ mod test {
         let mut db = db.into_mutable();
         for _ in 1..100 {
             let (durable_db, _) = db.commit(None).await.unwrap();
-            let clean_db = durable_db.into_provable().await.unwrap();
+            let clean_db = durable_db.into_merkleized().await.unwrap();
             assert_eq!(clean_db.op_count() - 1, clean_db.inactivity_floor_loc());
             db = clean_db.into_mutable();
         }
@@ -1099,7 +1099,7 @@ mod test {
             .await
             .unwrap()
             .0
-            .into_provable()
+            .into_merkleized()
             .await
             .unwrap()
             .destroy()
@@ -1164,7 +1164,7 @@ mod test {
         assert_eq!(db.op_count(), 9);
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
         let (durable_db, _) = db.commit(None).await.unwrap();
-        let mut db = durable_db.into_provable().await.unwrap().into_mutable();
+        let mut db = durable_db.into_merkleized().await.unwrap().into_mutable();
 
         // Make sure create won't modify active keys.
         assert!(!db.create(key1.clone(), val1).await.unwrap());
@@ -1176,7 +1176,7 @@ mod test {
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
-        let db = db.commit(None).await.unwrap().0.into_provable().await.unwrap();
+        let db = db.commit(None).await.unwrap().0.into_merkleized().await.unwrap();
 
         // Multiple deletions of the same key should be a no-op.
         let prev_op_count = db.op_count();
@@ -1191,7 +1191,7 @@ mod test {
         assert_eq!(db.op_count(), prev_op_count);
 
         // Make sure closing/reopening gets us back to the same state.
-        let db = db.commit(None).await.unwrap().0.into_provable().await.unwrap();
+        let db = db.commit(None).await.unwrap().0.into_merkleized().await.unwrap();
         let op_count = db.op_count();
         let root = db.root();
         let db = reopen_db(context.clone()).await;
@@ -1206,7 +1206,7 @@ mod test {
         db.update(key2.clone(), val1).await.unwrap();
         db.update(key1.clone(), val2).await.unwrap();
 
-        let db = db.commit(None).await.unwrap().0.into_provable().await.unwrap();
+        let db = db.commit(None).await.unwrap().0.into_merkleized().await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
         let op_count = db.op_count();
@@ -1219,7 +1219,7 @@ mod test {
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
         let db = db.into_mutable();
-        let mut db = db.commit(None).await.unwrap().0.into_provable().await.unwrap();
+        let mut db = db.commit(None).await.unwrap().0.into_merkleized().await.unwrap();
 
         assert!(db.root() != root);
 
@@ -1270,7 +1270,7 @@ mod test {
         assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
 
         let db = db.commit(None).await.unwrap().0;
-        db.into_provable().await.unwrap().destroy().await.unwrap();
+        db.into_merkleized().await.unwrap().destroy().await.unwrap();
     }
 
     #[test_traced("WARN")]
@@ -1333,7 +1333,7 @@ mod test {
             assert_eq!(span3.1.next_key, key1);
 
             let db = db.into_mutable().commit(None).await.unwrap().0;
-            db.into_provable().destroy().await.unwrap();
+            db.into_merkleized().destroy().await.unwrap();
         });
     }
 
@@ -1368,7 +1368,7 @@ mod test {
             assert_eq!(span2.1.next_key, preceeding_key);
 
             let db = db.into_mutable().commit(None).await.unwrap().0;
-            db.into_provable().destroy().await.unwrap();
+            db.into_merkleized().destroy().await.unwrap();
         });
     }
 
@@ -1403,7 +1403,7 @@ mod test {
             let mut batch = db.start_batch();
             batch.delete(key_b.clone()).await.unwrap();
             db.write_batch(batch.into_iter()).await.unwrap();
-            let db = db.commit(None).await.unwrap().0.into_provable();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             // Verify B is deleted
             assert!(db.get(&key_b).await.unwrap().is_none());
@@ -1452,7 +1452,7 @@ mod test {
             let span3 = db.get_span(&key3).await.unwrap().unwrap();
             assert_eq!(span3.1.next_key, key2);
             let db = db.commit(None).await.unwrap().0;
-            db.into_provable().destroy().await.unwrap();
+            db.into_merkleized().destroy().await.unwrap();
 
             // Create a key that becomes the previous key of a concurrently deleted key.
             let mut db = open_variable_db(context.clone()).await.into_mutable();
@@ -1473,7 +1473,7 @@ mod test {
             let span2 = db.get_span(&key2).await.unwrap().unwrap();
             assert_eq!(span2.1.next_key, key1);
             let db = db.commit(None).await.unwrap().0;
-            db.into_provable().destroy().await.unwrap();
+            db.into_merkleized().destroy().await.unwrap();
         });
     }
 
@@ -1593,7 +1593,7 @@ mod test {
             }
 
             let db = db.into_mutable().commit(None).await.unwrap().0;
-            db.into_provable().destroy().await.unwrap();
+            db.into_merkleized().destroy().await.unwrap();
         });
     }
 }

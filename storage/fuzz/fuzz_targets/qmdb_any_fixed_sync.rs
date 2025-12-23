@@ -187,13 +187,13 @@ fn fuzz(mut input: FuzzInput) {
                         .commit(Some(FixedBytes::new(commit_id)))
                         .await
                         .expect("Commit should not fail");
-                    db = durable_db.into_provable().into_mutable();
+                    db = durable_db.into_merkleized().into_mutable();
                 }
 
                 Operation::Prune => {
                     input.commit_counter = 0;
                     let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    let mut clean_db = durable_db.into_provable();
+                    let mut clean_db = durable_db.into_merkleized();
                     clean_db
                         .prune(clean_db.inactivity_floor_loc())
                         .await
@@ -212,7 +212,7 @@ fn fuzz(mut input: FuzzInput) {
                         .commit(Some(FixedBytes::new(commit_id)))
                         .await
                         .expect("commit should not fail");
-                    let clean_db = durable_db.into_provable();
+                    let clean_db = durable_db.into_merkleized();
 
                     let target = sync::Target {
                         root: clean_db.root(),
@@ -249,7 +249,7 @@ fn fuzz(mut input: FuzzInput) {
 
         let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
         durable_db
-            .into_provable()
+            .into_merkleized()
             .destroy()
             .await
             .expect("Destroy should not fail");

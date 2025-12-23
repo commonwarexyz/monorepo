@@ -112,7 +112,7 @@ where
     };
 
     // Convert durable → provable (clean) for pruning
-    let mut clean = durable.into_provable().await?;
+    let mut clean = durable.into_merkleized().await?;
     clean.prune(clean.inactivity_floor_loc()).await?;
 
     let elapsed = start.elapsed();

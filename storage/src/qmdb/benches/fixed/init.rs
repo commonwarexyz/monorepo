@@ -43,7 +43,7 @@ where
 {
     let mutable = db.into_mutable();
     let durable = gen_random_kv(mutable, elements, operations, Some(COMMIT_FREQUENCY)).await;
-    let mut clean = durable.into_provable().await.unwrap();
+    let mut clean = durable.into_merkleized().await.unwrap();
     clean.prune(clean.inactivity_floor_loc()).await.unwrap();
     clean.close().await.unwrap();
 }

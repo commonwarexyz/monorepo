@@ -187,7 +187,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Prune => {
                     let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    let mut clean_db = durable_db.into_provable();
+                    let mut clean_db = durable_db.into_merkleized();
                     clean_db.prune(clean_db.last_commit_loc())
                         .await
                         .expect("Prune should not fail");
@@ -197,7 +197,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Sync => {
                     let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    let mut clean_db = durable_db.into_provable();
+                    let mut clean_db = durable_db.into_merkleized();
                     clean_db.sync().await.expect("Sync should not fail");
                     db = clean_db.into_mutable();
                     has_uncommitted = false;
@@ -218,7 +218,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::Root => {
                     if !has_uncommitted {
                         let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                        let clean_db = durable_db.into_provable();
+                        let clean_db = durable_db.into_merkleized();
                         let _ = clean_db.root();
                         db = clean_db.into_mutable();
                     }
@@ -231,7 +231,7 @@ fn fuzz(input: FuzzInput) {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                        let clean_db = durable_db.into_provable();
+                        let clean_db = durable_db.into_merkleized();
                         let start_loc = (*start_offset as u64) % op_count.as_u64();
                         let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                         let start_loc = Location::new(start_loc).unwrap();
@@ -254,7 +254,7 @@ fn fuzz(input: FuzzInput) {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                        let clean_db = durable_db.into_provable();
+                        let clean_db = durable_db.into_merkleized();
                         let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
                         let size = Location::new(size).unwrap();
                         let start_loc = (*start_offset as u64) % *size;
@@ -286,7 +286,7 @@ fn fuzz(input: FuzzInput) {
         }
 
         let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-        let clean_db = durable_db.into_provable();
+        let clean_db = durable_db.into_merkleized();
         clean_db.destroy().await.expect("Destroy should not fail");
     });
 }

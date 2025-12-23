@@ -159,7 +159,7 @@ fn fuzz(data: FuzzInput) {
 
                 CurrentOperation::Commit => {
                     let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    let clean_db = durable_db.into_provable().await.expect("into_provable should not fail");
+                    let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
                     last_committed_op_count = clean_db.op_count();
                     uncommitted_ops = 0;
                     db = clean_db.into_mutable();
@@ -168,14 +168,14 @@ fn fuzz(data: FuzzInput) {
                 CurrentOperation::Prune => {
                     let (durable_db, _) = db.commit(None).await.expect("Commit before prune should not fail");
                     uncommitted_ops = 0;
-                    let mut clean_db = durable_db.into_provable().await.expect("into_provable should not fail");
+                    let mut clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
                     last_committed_op_count = clean_db.op_count();
                     clean_db.prune(clean_db.inactivity_floor_loc()).await.expect("Prune should not fail");
                     db = clean_db.into_mutable();
                 }
 
                 CurrentOperation::Root => {
-                    let clean_db = db.into_provable().await.expect("into_provable should not fail");
+                    let clean_db = db.into_merkleized().await.expect("into_merkleized should not fail");
                     let _root = clean_db.root();
                     db = clean_db.into_mutable();
                 }
@@ -187,7 +187,7 @@ fn fuzz(data: FuzzInput) {
                         // Commit first to get Durable state (range_proof requires Durable)
                         let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
                         uncommitted_ops = 0;
-                        let clean_db = durable_db.into_provable().await.expect("into_provable should not fail");
+                        let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
                         last_committed_op_count = clean_db.op_count();
 
                         let current_root = clean_db.root();
@@ -227,7 +227,7 @@ fn fuzz(data: FuzzInput) {
                     // Commit first to get Durable state (range_proof requires Durable)
                     let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
                     uncommitted_ops = 0;
-                    let clean_db = durable_db.into_provable().await.expect("into_provable should not fail");
+                    let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
                     last_committed_op_count = clean_db.op_count();
 
                     let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
@@ -272,7 +272,7 @@ fn fuzz(data: FuzzInput) {
                     // Commit first to get Durable state (key_value_proof requires Durable)
                     let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
                     uncommitted_ops = 0;
-                    let clean_db = durable_db.into_provable().await.expect("into_provable should not fail");
+                    let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
                     last_committed_op_count = clean_db.op_count();
 
                     let current_root = clean_db.root();
@@ -330,7 +330,7 @@ fn fuzz(data: FuzzInput) {
         }
 
         let (durable_db, _) = db.commit(None).await.expect("Final commit should not fail");
-        durable_db.into_provable().await.expect("into_provable should not fail").close().await.expect("Close should not fail");
+        durable_db.into_merkleized().await.expect("into_merkleized should not fail").close().await.expect("Close should not fail");
     });
 }
 

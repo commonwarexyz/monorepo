@@ -171,7 +171,7 @@ pub(super) mod test {
                 let v = to_bytes(i);
                 db.update(k, v).await.unwrap();
             }
-            let db = db.commit(None).await.unwrap().0.into_provable();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root = db.root();
             db.close().await.unwrap();
 
@@ -228,7 +228,7 @@ pub(super) mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
-            let db = db.commit(None).await.unwrap().0.into_provable();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root = db.root();
 
             // Update every 3rd key
@@ -257,7 +257,7 @@ pub(super) mod test {
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
-            let db = db.commit(None).await.unwrap().0.into_provable();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root = db.root();
 
             // Delete every 7th key
@@ -284,7 +284,7 @@ pub(super) mod test {
                 let k = Sha256::hash(&i.to_be_bytes());
                 db.delete(k).await.unwrap();
             }
-            let mut db = db.commit(None).await.unwrap().0.into_provable();
+            let mut db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let root = db.root();
             assert_eq!(db.op_count(), 1961);
@@ -371,7 +371,7 @@ pub(super) mod test {
             let beyond_floor = Location::new_unchecked(*inactivity_floor + 1);
 
             // Try to prune beyond the inactivity floor
-            let mut db = db.into_provable();
+            let mut db = db.into_merkleized();
             let result = db.prune(beyond_floor).await;
             assert!(
                 matches!(result, Err(Error::PruneBeyondMinRequired(loc, floor))

@@ -264,7 +264,7 @@ mod tests {
                 .await
                 .unwrap()
                 .0
-                .into_provable()
+                .into_merkleized()
         }
     }
 

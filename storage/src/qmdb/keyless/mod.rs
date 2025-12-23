@@ -15,7 +15,7 @@
 //! - `init()`                                    → `(Merkleized,Durable)`
 //! - `(Merkleized,Durable).into_mutable()`       → `(Unmerkleized,NonDurable)`
 //! - `(Unmerkleized,Durable).into_mutable()`     → `(Unmerkleized,NonDurable)`
-//! - `(Unmerkleized,Durable).into_provable()`    → `(Merkleized,Durable)`
+//! - `(Unmerkleized,Durable).into_merkleized()`    → `(Merkleized,Durable)`
 //! - `(Unmerkleized,NonDurable).commit()`        → `(Unmerkleized,Durable)`
 //!
 //! We call the combined (Unmerkleized,NonDurable) state the _Mutable_ state since it's the only
@@ -345,7 +345,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     }
 
     /// Compute the merkle root and transition to the Clean (Merkleized, Durable) state.
-    pub fn into_provable(self) -> Keyless<E, V, H, Clean<H::Digest>, Durable> {
+    pub fn into_merkleized(self) -> Keyless<E, V, H, Clean<H::Digest>, Durable> {
         Keyless {
             journal: self.journal.merkleize(),
             last_commit_loc: self.last_commit_loc,
@@ -422,7 +422,7 @@ mod test {
             let metadata = vec![3u8; 10];
             let db = db.into_mutable();
             let (durable, _) = db.commit(Some(metadata.clone())).await.unwrap();
-            let db = durable.into_provable();
+            let db = durable.into_merkleized();
             assert_eq!(db.op_count(), 2); // 2 commit ops
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
             assert_eq!(
@@ -461,7 +461,7 @@ mod test {
 
             // Make sure closing/reopening gets us back to the same state.
             let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_provable();
+            let db = durable.into_merkleized();
             assert_eq!(db.op_count(), 4); // 2 appends, 1 commit + 1 initial commit
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert_eq!(db.get(Location::new_unchecked(3)).await.unwrap(), None); // the commit op
@@ -523,7 +523,7 @@ mod test {
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
             let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_provable();
+            let db = durable.into_merkleized();
             let root = db.root();
 
             // Append more values.
@@ -540,7 +540,7 @@ mod test {
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
             let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_provable();
+            let db = durable.into_merkleized();
             let root = db.root();
 
             // Make sure we can close/reopen and get back to the same state.
@@ -566,7 +566,7 @@ mod test {
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
             let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_provable();
+            let db = durable.into_merkleized();
             let root = db.root();
             let op_count = db.op_count();
 
@@ -695,7 +695,7 @@ mod test {
                 db.append(v).await.unwrap();
             }
             let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_provable();
+            let db = durable.into_merkleized();
 
             // Test that historical proof fails with op_count > number of operations
             assert!(matches!(
@@ -804,7 +804,7 @@ mod test {
                 db.append(v).await.unwrap();
             }
             let (durable, _) = db.commit(None).await.unwrap();
-            let mut db = durable.into_provable();
+            let mut db = durable.into_merkleized();
             let root = db.root();
 
             println!("last commit loc: {}", db.last_commit_loc());
@@ -921,7 +921,7 @@ mod test {
                 db.append(v).await.unwrap();
             }
             let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_provable();
+            let db = durable.into_merkleized();
             let committed_root = db.root();
             let committed_size = db.op_count();
 
@@ -964,7 +964,7 @@ mod test {
 
             // Test with multiple trailing appends to ensure robustness
             let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_provable();
+            let db = durable.into_merkleized();
             let new_committed_root = db.root();
             let new_committed_size = db.op_count();
 
@@ -1032,7 +1032,7 @@ mod test {
                 matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(4) && size == Location::new_unchecked(4))
             );
 
-            let db = durable.into_provable();
+            let db = durable.into_merkleized();
             db.destroy().await.unwrap();
         });
     }
@@ -1067,7 +1067,7 @@ mod test {
 
             // Test valid prune (at last commit) - need Clean state for prune
             let (durable, _) = db.commit(None).await.unwrap();
-            let mut db = durable.into_provable();
+            let mut db = durable.into_merkleized();
             assert!(db.prune(Location::new_unchecked(3)).await.is_ok());
 
             // Test pruning beyond last commit

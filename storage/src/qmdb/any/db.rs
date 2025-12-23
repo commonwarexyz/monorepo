@@ -300,7 +300,7 @@ where
         }
     }
 
-    pub fn into_provable(self) -> Db<E, C, I, H, U, Merkleized<H>, Durable> {
+    pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, Durable> {
         Db {
             log: self.log.merkleize(),
             inactivity_floor_loc: self.inactivity_floor_loc,
@@ -325,7 +325,7 @@ where
     H: Hasher,
     Operation<K, V, U>: Codec,
 {
-    pub fn into_provable(self) -> Db<E, C, I, H, U, Merkleized<H>, NonDurable> {
+    pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, NonDurable> {
         Db {
             log: self.log.merkleize(),
             inactivity_floor_loc: self.inactivity_floor_loc,

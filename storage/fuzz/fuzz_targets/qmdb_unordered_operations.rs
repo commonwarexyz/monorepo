@@ -106,7 +106,7 @@ fn fuzz(data: FuzzInput) {
 
                 QmdbOperation::Root => {
                     // root requires merkleization but not commit
-                    let clean_db = db.into_provable();
+                    let clean_db = db.into_merkleized();
                     clean_db.root();
                     db = clean_db.into_mutable();
                 }
@@ -116,7 +116,7 @@ fn fuzz(data: FuzzInput) {
 
                     // Only generate proof if QMDB has operations and valid parameters
                     if actual_op_count > 0 && *max_ops > 0 {
-                        let clean_db = db.into_provable();
+                        let clean_db = db.into_merkleized();
 
                         let current_root = clean_db.root();
                         // Adjust start_loc to be within valid range
@@ -214,7 +214,7 @@ fn fuzz(data: FuzzInput) {
         }
 
         let (durable_db, _) = db.commit(None).await.expect("final commit should not fail");
-        durable_db.into_provable().destroy().await.expect("destroy should not fail");
+        durable_db.into_merkleized().destroy().await.expect("destroy should not fail");
         expected_state.clear();
         all_keys.clear();
     });

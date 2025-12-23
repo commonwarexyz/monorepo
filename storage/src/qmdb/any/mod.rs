@@ -18,8 +18,8 @@
 //! - `(Merkleized,Durable).into_mutable()`       → `(Unmerkleized,NonDurable)`
 //! - `(Unmerkleized,Durable).into_mutable()`     → `(Unmerkleized,NonDurable)`
 //! - `(Merkleized,NonDurable).into_mutable()`    → `(Unmerkleized,NonDurable)`
-//! - `(Unmerkleized,Durable).into_provable()`    → `(Merkleized,Durable)`
-//! - `(Unmerkleized,NonDurable).into_provable()` → `(Merkleized,NonDurable)`
+//! - `(Unmerkleized,Durable).into_merkleized()`    → `(Merkleized,Durable)`
+//! - `(Unmerkleized,NonDurable).into_merkleized()` → `(Merkleized,NonDurable)`
 //! - `(Unmerkleized,NonDurable).commit()`        → `(Unmerkleized,Durable)`
 //!
 //! We call the combined (Unmerkleized,NonDurable) state the _Mutable_ state since it's the only
@@ -85,13 +85,13 @@ pub trait MerkleizedDurableAny:
             Key = Self::Key,
             Digest = <Self as MerkleizedStore>::Digest,
             Operation = <Self as MerkleizedStore>::Operation,
-            // Cycle constraint for path: into_provable() then commit()
+            // Cycle constraint for path: into_merkleized() then commit()
             Provable: MerkleizedNonDurableAny<Durable = Self>
                           + MerkleizedStore<
                 Digest = <Self as MerkleizedStore>::Digest,
                 Operation = <Self as MerkleizedStore>::Operation,
             >,
-            // Cycle constraints for path: commit() then into_provable() or into_mutable()
+            // Cycle constraints for path: commit() then into_merkleized() or into_mutable()
             Durable: UnmerkleizedDurableAny<Provable = Self, Mutable = Self::Mutable>,
         > + LogStore<Value = <Self as LogStore>::Value>;
 
@@ -101,7 +101,7 @@ pub trait MerkleizedDurableAny:
 
 /// Trait for the (Unmerkleized,Durable) state.
 ///
-/// Use `into_mutable` to transition to the (Unmerkleized,NonDurable) state, or `into_provable` to
+/// Use `into_mutable` to transition to the (Unmerkleized,NonDurable) state, or `into_merkleized` to
 /// transition to the (Merkleized,Durable) state.
 pub trait UnmerkleizedDurableAny:
     LogStore + Store<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
@@ -131,7 +131,7 @@ pub trait UnmerkleizedDurableAny:
     fn into_mutable(self) -> Self::Mutable;
 
     /// Convert this database into the provable (Merkleized,Durable) state.
-    fn into_provable(self) -> impl Future<Output = Result<Self::Provable, Error>>;
+    fn into_merkleized(self) -> impl Future<Output = Result<Self::Provable, Error>>;
 }
 
 /// Trait for the (Merkleized,NonDurable) state.
@@ -162,7 +162,7 @@ pub trait MerkleizedNonDurableAny:
 /// Trait for the (Unmerkleized,NonDurable) state.
 ///
 /// This is the only state that allows mutations (create/update/delete). Use `commit` to transition
-/// to the Unmerkleized, Durable state, or `into_provable` to transition to the Merkleized,
+/// to the Unmerkleized, Durable state, or `into_merkleized` to transition to the Merkleized,
 /// NonDurable state.
 pub trait UnmerkleizedNonDurableAny:
     LogStore + StoreDeletable<Key: Array, Value = <Self as LogStore>::Value, Error = Error> + Batchable
@@ -193,7 +193,7 @@ pub trait UnmerkleizedNonDurableAny:
     ) -> impl Future<Output = Result<(Self::Durable, Range<Location>), Error>>;
 
     /// Convert this database into the provable (Merkleized, Non-durable) state.
-    fn into_provable(self) -> impl Future<Output = Result<Self::Provable, Error>>;
+    fn into_merkleized(self) -> impl Future<Output = Result<Self::Provable, Error>>;
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.

@@ -198,7 +198,7 @@ pub mod tests {
     /// Destroy an UnmerkleizedNonDurableAny database by committing and then destroying.
     async fn destroy_db<D: UnmerkleizedNonDurableAny>(db: D) -> Result<(), Error> {
         let db = db.commit(None).await?.0;
-        db.into_provable().await?.destroy().await
+        db.into_merkleized().await?.destroy().await
     }
 
     /// Run the batch test suite against a database factory within a deterministic executor twice,
@@ -460,7 +460,7 @@ pub mod tests {
             );
         }
 
-        durable.into_provable().await?.destroy().await
+        durable.into_merkleized().await?.destroy().await
     }
 
     /// Create an empty db, write a batch containing small # of keys, then write another batch deleting those

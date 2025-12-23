@@ -277,7 +277,7 @@ mod tests {
             apply_ops(&mut target_db, target_db_ops.clone()).await;
             let metadata = Some(Sha256::fill(1));
             let (durable_db, _) = target_db.commit(metadata).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
             let target_op_count = target_db.op_count();
             let target_oldest_retained_loc = target_db.oldest_retained_loc();
             let target_root = target_db.root();
@@ -343,7 +343,7 @@ mod tests {
             }
 
             let (durable_db, _) = got_db.commit(None).await.unwrap();
-            durable_db.into_provable().destroy().await.unwrap();
+            durable_db.into_merkleized().destroy().await.unwrap();
             let target_db = Arc::try_unwrap(target_db).map_or_else(
                 |_| panic!("Failed to unwrap Arc - still has references"),
                 |rw_lock| rw_lock.into_inner(),
@@ -361,7 +361,7 @@ mod tests {
             let target_db = create_test_db(context.clone()).await;
             let target_db = target_db.into_mutable();
             let (durable_db, _) = target_db.commit(Some(Sha256::fill(1))).await.unwrap(); // Commit to establish a valid root
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
 
             let target_op_count = target_db.op_count();
             let target_oldest_retained_loc = target_db.oldest_retained_loc();
@@ -410,7 +410,7 @@ mod tests {
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, target_ops.clone()).await;
             let (durable_db, _) = target_db.commit(Some(Sha256::fill(0))).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
 
             // Capture target state
             let target_root = target_db.root();
@@ -486,7 +486,7 @@ mod tests {
             let initial_ops = create_test_ops(50);
             apply_ops(&mut target_db, initial_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
 
             // Capture the state after first commit
             let initial_lower_bound = target_db.oldest_retained_loc();
@@ -498,7 +498,7 @@ mod tests {
             let additional_ops = create_test_ops(25);
             apply_ops(&mut target_db, additional_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
             let final_upper_bound = target_db.op_count();
             let final_root = target_db.root();
 
@@ -624,7 +624,7 @@ mod tests {
             // Apply all but the last operation
             apply_ops(&mut target_db, target_ops[..29].to_vec()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
 
             let target_root = target_db.root();
             let lower_bound = target_db.oldest_retained_loc();
@@ -634,7 +634,7 @@ mod tests {
             let mut target_db = target_db.into_mutable();
             apply_ops(&mut target_db, target_ops[29..].to_vec()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
 
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
@@ -686,9 +686,9 @@ mod tests {
             apply_ops(&mut target_db, original_ops.clone()).await;
             apply_ops(&mut sync_db, original_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
             let (durable_db, _) = sync_db.commit(None).await.unwrap();
-            let sync_db = durable_db.into_provable();
+            let sync_db = durable_db.into_merkleized();
 
             // Close sync_db
             sync_db.close().await.unwrap();
@@ -698,7 +698,7 @@ mod tests {
             let last_op = create_test_ops(1);
             apply_ops(&mut target_db, last_op.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
             let root = target_db.root();
             let lower_bound = target_db.oldest_retained_loc();
             let upper_bound = target_db.op_count(); // Up to the last operation
@@ -753,9 +753,9 @@ mod tests {
             apply_ops(&mut target_db, target_ops.clone()).await;
             apply_ops(&mut sync_db, target_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
             let (durable_db, _) = sync_db.commit(None).await.unwrap();
-            let sync_db = durable_db.into_provable();
+            let sync_db = durable_db.into_merkleized();
 
             // Close sync_db
             sync_db.close().await.unwrap();
@@ -804,7 +804,7 @@ mod tests {
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, target_ops).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let mut target_db = durable_db.into_provable();
+            let mut target_db = durable_db.into_merkleized();
 
             target_db.prune(Location::new_unchecked(10)).await.unwrap();
 
@@ -866,7 +866,7 @@ mod tests {
             let target_ops = create_test_ops(50);
             apply_ops(&mut target_db, target_ops).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
 
             // Capture initial target state
             let initial_lower_bound = target_db.oldest_retained_loc();
@@ -926,7 +926,7 @@ mod tests {
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, target_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
 
             // Capture initial target state
             let initial_lower_bound = target_db.oldest_retained_loc();
@@ -938,12 +938,12 @@ mod tests {
             let more_ops = create_test_ops(5);
             apply_ops(&mut target_db, more_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let mut target_db = durable_db.into_provable();
+            let mut target_db = durable_db.into_merkleized();
 
             target_db.prune(Location::new_unchecked(10)).await.unwrap();
             let target_db = target_db.into_mutable();
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
 
             // Capture final target state
             let final_lower_bound = target_db.oldest_retained_loc();
@@ -1008,7 +1008,7 @@ mod tests {
             let target_ops = create_test_ops(25);
             apply_ops(&mut target_db, target_ops).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
 
             // Capture initial target state
             let initial_lower_bound = target_db.oldest_retained_loc();
@@ -1066,7 +1066,7 @@ mod tests {
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, target_ops).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_provable();
+            let target_db = durable_db.into_merkleized();
 
             // Capture target state
             let lower_bound = target_db.oldest_retained_loc();

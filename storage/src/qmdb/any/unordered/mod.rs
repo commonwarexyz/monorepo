@@ -374,8 +374,8 @@ where
         self.into_mutable()
     }
 
-    async fn into_provable(self) -> Result<Self::Provable, Error> {
-        Ok(self.into_provable())
+    async fn into_merkleized(self) -> Result<Self::Provable, Error> {
+        Ok(self.into_merkleized())
     }
 }
 
@@ -423,8 +423,8 @@ where
         self.commit(metadata).await
     }
 
-    async fn into_provable(self) -> Result<Self::Provable, Error> {
-        Ok(self.into_provable())
+    async fn into_merkleized(self) -> Result<Self::Provable, Error> {
+        Ok(self.into_merkleized())
     }
 }
 
@@ -509,8 +509,8 @@ pub(super) mod test {
         // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
         let db = db.into_mutable();
-        // into_provable() -> MerkleizedNonDurable, then commit() -> MerkleizedDurable
-        let (mut db, range) = db.into_provable().await.unwrap().commit(Some(metadata)).await.unwrap();
+        // into_merkleized() -> MerkleizedNonDurable, then commit() -> MerkleizedDurable
+        let (mut db, range) = db.into_merkleized().await.unwrap().commit(Some(metadata)).await.unwrap();
         assert_eq!(range.start, 1);
         assert_eq!(range.end, 2);
         assert_eq!(db.op_count(), 2); // another commit op added
@@ -530,7 +530,7 @@ pub(super) mod test {
         let mut db = db.into_mutable();
         db.update(k1, v1).await.unwrap();
         for _ in 1..100 {
-            let (clean_db, _) = db.into_provable().await.unwrap().commit(None).await.unwrap();
+            let (clean_db, _) = db.into_merkleized().await.unwrap().commit(None).await.unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
             // referencing the previous commit operation.
             assert!(clean_db.op_count() - clean_db.inactivity_floor_loc() <= 3);
@@ -540,7 +540,7 @@ pub(super) mod test {
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.delete(k1).await.unwrap();
-        let (db, _) = db.into_provable().await.unwrap().commit(None).await.unwrap();
+        let (db, _) = db.into_merkleized().await.unwrap().commit(None).await.unwrap();
         assert!(db.is_empty());
         assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
 
@@ -613,7 +613,7 @@ pub(super) mod test {
 
         // Commit + sync with pruning raises inactivity floor.
         let (db, _) = db.commit(None).await.unwrap();
-        let mut db = db.into_provable().await.unwrap();
+        let mut db = db.into_merkleized().await.unwrap();
         db.sync().await.unwrap();
         db.prune(db.inactivity_floor_loc()).await.unwrap();
         assert_eq!(db.op_count(), Location::new_unchecked(1957));
@@ -722,7 +722,7 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 13);
 
         // Make sure closing/reopening gets us back to the same state.
-        let db = db.commit(None).await.unwrap().0.into_provable().await.unwrap();
+        let db = db.commit(None).await.unwrap().0.into_merkleized().await.unwrap();
         assert_eq!(db.op_count(), 14);
         let root = db.root();
         let db = reopen_db(context.clone()).await;
@@ -738,7 +738,7 @@ pub(super) mod test {
         db.update(d1, v2).await.unwrap();
 
         // Make sure last_commit is updated by changing the metadata back to None.
-        let db = db.commit(None).await.unwrap().0.into_provable().await.unwrap();
+        let db = db.commit(None).await.unwrap().0.into_merkleized().await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
         assert_eq!(db.op_count(), 23);
@@ -751,7 +751,7 @@ pub(super) mod test {
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
         let db = db.into_mutable();
-        let mut db = db.commit(None).await.unwrap().0.into_provable().await.unwrap();
+        let mut db = db.commit(None).await.unwrap().0.into_merkleized().await.unwrap();
 
         assert!(db.root() != root);
 
@@ -796,7 +796,7 @@ pub(super) mod test {
             let v = make_value(i * 1000);
             db.update(k, v).await.unwrap();
         }
-        let mut db = db.commit(None).await.unwrap().0.into_provable().await.unwrap();
+        let mut db = db.commit(None).await.unwrap().0.into_merkleized().await.unwrap();
         db.prune(db.inactivity_floor_loc()).await.unwrap();
         let root = db.root();
         let op_count = db.op_count();
@@ -908,7 +908,7 @@ pub(super) mod test {
             let v = make_value((i + 1) * 10000);
             db.update(k, v).await.unwrap();
         }
-        let db = db.commit(None).await.unwrap().0.into_provable().await.unwrap();
+        let db = db.commit(None).await.unwrap().0.into_merkleized().await.unwrap();
         drop(db);
         let db = reopen_db(context.clone()).await;
         assert!(db.op_count() > 1);
@@ -939,14 +939,14 @@ pub(super) mod test {
                 map.insert(k, v);
             }
             let (clean_db, _) = db.commit(Some(metadata_value.clone())).await.unwrap();
-            db = clean_db.into_provable().await.unwrap().into_mutable();
+            db = clean_db.into_merkleized().await.unwrap().into_mutable();
         }
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
         let k = key_at(ELEMENTS - 1, ELEMENTS - 1);
 
         db.delete(k).await.unwrap();
         let (db, _) = db.commit(None).await.unwrap();
-        let db = db.into_provable().await.unwrap();
+        let db = db.into_merkleized().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert!(db.get(&k).await.unwrap().is_none());
 

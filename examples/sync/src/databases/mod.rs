@@ -45,7 +45,7 @@ impl DatabaseType {
 ///
 /// The database uses a state transition model:
 /// - `Merkleized, Durable` (clean state) → `into_mutable()` → `Unmerkleized, NonDurable` (mutable state)
-/// - `Unmerkleized, NonDurable` → `commit()` → `Unmerkleized, Durable` → `into_provable()` → `Merkleized, Durable`
+/// - `Unmerkleized, NonDurable` → `commit()` → `Unmerkleized, Durable` → `into_merkleized()` → `Merkleized, Durable`
 ///
 /// This trait abstracts over the state machine, providing ownership-based methods.
 pub trait Syncable: Sized {
