@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import re
 import subprocess
 from pathlib import Path
 from urllib.parse import urljoin
@@ -19,11 +18,17 @@ EXTRA_FILES = ["llms.txt", "robots.txt"]
 
 
 def get_version() -> str:
-    """Extract workspace version from Cargo.toml."""
-    cargo_toml = DOCS_ROOT.parent / "Cargo.toml"
-    content = cargo_toml.read_text()
-    match = re.search(r'^version\s*=\s*"([^"]+)"', content, re.MULTILINE)
-    return match.group(1) if match else "unknown"
+    """Get latest git tag as version."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(DOCS_ROOT.parent), "describe", "--tags", "--abbrev=0"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return "0.0.0"
 
 
 def get_commit() -> str:
