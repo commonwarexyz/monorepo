@@ -17,15 +17,28 @@ EXCLUDED_DIRS = {".venv"}
 EXTRA_FILES = ["llms.txt", "robots.txt"]
 
 
-def get_version() -> str:
-    """Get latest git tag as version. Fails if no tag exists."""
+def get_versions() -> list[str]:
+    """Get last 2 git tags as versions. Fails if no tag exists."""
+    # Get latest tag
     result = subprocess.run(
         ["git", "-C", str(DOCS_ROOT.parent), "describe", "--tags", "--abbrev=0"],
         capture_output=True,
         text=True,
         check=True,
     )
-    return result.stdout.strip()
+    latest = result.stdout.strip()
+    versions = [latest]
+
+    # Try to get previous tag
+    result = subprocess.run(
+        ["git", "-C", str(DOCS_ROOT.parent), "describe", "--tags", "--abbrev=0", f"{latest}^"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        versions.append(result.stdout.strip())
+
+    return versions
 
 
 def get_commit() -> str:
@@ -118,18 +131,20 @@ def write_sitemap(urls: list[str]) -> None:
     (DOCS_ROOT / "sitemap.xml").write_text(content, encoding="utf-8")
 
 
-def write_llms_txt(version: str, commit: str) -> None:
+def write_llms_txt(versions: list[str], commit: str) -> None:
     """Write llms.txt with versioned paths for LLM discovery."""
+    latest = versions[0]
+    version_lines = "\n".join(f"- /code/{v}/" for v in versions)
     content = f"""# Commonware Library
 
-> Version: {version} (commit: {commit})
+> Version: {latest} (commit: {commit})
 
-Find more information at [README.md](/code/{version}/README.md).
+Find more information at [README.md](/code/{latest}/README.md).
 
 ## Paths
 
-- Versioned (stable): /code/{version}/
-- Main branch (commit-specific): /code/main/{commit}/
+{version_lines}
+- /code/main/{commit}/
 
 View [sitemap.xml](/sitemap.xml) for all filepaths.
 """
@@ -137,15 +152,16 @@ View [sitemap.xml](/sitemap.xml) for all filepaths.
 
 
 def main() -> None:
-    version = get_version()
+    versions = get_versions()
     commit = get_commit()
 
     # Write llms.txt with versioned paths
-    write_llms_txt(version, commit)
+    write_llms_txt(versions, commit)
 
-    # Collect URLs - only use versioned path for code to avoid duplicates
+    # Collect URLs - include all version paths in sitemap
     urls = [build_url(rel, BASE_URL) for rel in collect_html()]
-    urls += [build_url(rel, BASE_URL) for rel in collect_code(f"v{version}")]
+    for version in versions:
+        urls += [build_url(rel, BASE_URL) for rel in collect_code(version)]
     for extra in EXTRA_FILES:
         urls.append(urljoin(BASE_URL.rstrip("/") + "/", extra))
     write_sitemap(urls)
