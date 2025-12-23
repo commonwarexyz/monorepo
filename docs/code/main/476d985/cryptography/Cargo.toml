@@ -1,0 +1,124 @@
+[package]
+name = "commonware-cryptography"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Generate keys, sign arbitrary messages, and deterministically verify signatures."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/cryptography"
+documentation = "https://docs.rs/commonware-cryptography"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true, optional = true }
+arbitrary = { workspace = true, optional = true, features = ["derive"] }
+blake3 = { workspace = true, features = ["zeroize"] }
+blst = { workspace = true, features = ["no-threads"] }
+bytes.workspace = true
+cfg-if.workspace = true
+chacha20poly1305 = { workspace = true, default-features = false, features = ["alloc"] }
+commonware-codec.workspace = true
+commonware-math.workspace = true
+commonware-utils.workspace = true
+ecdsa.workspace = true
+ed25519-consensus = { workspace = true, default-features = false }
+p256 = { workspace = true, features = ["ecdsa"] }
+rand.workspace = true
+rand_chacha.workspace = true
+rand_core.workspace = true
+rayon = { workspace = true, optional = true }
+sha2.workspace = true
+thiserror.workspace = true
+x25519-dalek = { workspace = true, features = ["zeroize"] }
+zeroize = { workspace = true, features = ["zeroize_derive"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
+# Enable "js" feature when WASM is target
+version = "0.2.15"
+features = ["js"]
+
+[dev-dependencies]
+anyhow.workspace = true
+commonware-conformance.workspace = true
+commonware-math = { workspace = true, features = ["test_strategies"] }
+criterion.workspace = true
+proptest.workspace = true
+rstest.workspace = true
+
+[lib]
+bench = false
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = [ "std" ]
+parallel = [ "blake3/rayon", "rayon", "std" ]
+mocks = [ "std" ]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-math/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:anyhow",
+	"dep:arbitrary",
+	"std",
+]
+std = [
+	"anyhow?/std",
+	"blake3/std",
+	"bytes/std",
+	"chacha20poly1305/getrandom",
+	"chacha20poly1305/std",
+	"commonware-codec/std",
+	"commonware-math/std",
+	"commonware-utils/std",
+	"ecdsa/std",
+	"ed25519-consensus/std",
+	"getrandom/std",
+	"p256/std",
+	"rand/std",
+	"rand/std_rng",
+	"rand_chacha/std",
+	"rand_core/std",
+	"rayon",
+	"sha2/std",
+	"thiserror/std",
+	"zeroize/std",
+]
+
+[[bench]]
+name = "bls12381"
+harness = false
+path = "src/bls12381/benches/bench.rs"
+
+[[bench]]
+name = "ed25519"
+harness = false
+path = "src/ed25519/benches/bench.rs"
+
+[[bench]]
+name = "secp256r1"
+harness = false
+path = "src/secp256r1/benches/bench.rs"
+
+[[bench]]
+name = "sha256"
+harness = false
+path = "src/sha256/benches/bench.rs"
+
+[[bench]]
+name = "blake3"
+harness = false
+path = "src/blake3/benches/bench.rs"
+
+[[bench]]
+name = "lthash"
+harness = false
+path = "src/lthash/benches/bench.rs"
+
+[[bench]]
+name = "handshake"
+harness = false
+path = "src/handshake/benches/bench.rs"

@@ -1,0 +1,38 @@
+//! Secp256r1 implementation of the [crate::Verifier] and [crate::Signer] traits.
+//!
+//! This implementation operates over public keys in compressed form (SEC 1, Version 2.0, Section 2.3.3), generates
+//! deterministic signatures as specified in [RFC 6979](https://datatracker.ietf.org/doc/html/rfc6979), and enforces
+//! signatures are normalized according to [BIP 62](https://github.com/bitcoin/bips/blob/master/bip-0062.mediawiki#low-s-values-in-signatures).
+//!
+//! # Example
+//! ```rust
+//! use commonware_cryptography::{secp256r1, PrivateKey, PublicKey, Signature, Recoverable, Verifier as _, Signer as _};
+//! use commonware_math::algebra::Random;
+//! use rand::rngs::OsRng;
+//!
+//! // Generate a new private key
+//! let mut signer = secp256r1::standard::PrivateKey::random(&mut OsRng);
+//!
+//! // Create a message to sign
+//! let namespace = &b"demo"[..];
+//! let msg = b"hello, world!";
+//!
+//! // Sign the message
+//! let signature = signer.sign(namespace, msg);
+//!
+//! // Verify the signature
+//! assert!(signer.public_key().verify(namespace, msg, &signature));
+//!
+//! // Generate a new private key that supports recoverable signatures
+//! let mut signer = secp256r1::recoverable::PrivateKey::random(&mut OsRng);
+//!
+//! // Sign the message
+//! let signature = signer.sign(namespace, msg);
+//!
+//! // Verify the signature
+//! assert_eq!(signature.recover_signer(namespace, msg).unwrap(), signer.public_key());
+//! ```
+
+mod common;
+pub mod recoverable;
+pub mod standard;

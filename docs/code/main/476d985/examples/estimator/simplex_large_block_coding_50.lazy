@@ -1,0 +1,15 @@
+# Simplex (with Coding over 50 Replicas)
+
+## Propose a block (1MB proposal any f + 1 of 3f + 1 can recover)
+propose{0, size=61682}
+
+## Multicast notarize (Shard + 32B digest + 8B view)
+wait{0, threshold=1}
+broadcast{1, size=61722}
+
+## Multicast finalize after observing 2f+1 notarize (32B digest + 8B view)
+wait{1, threshold=67%}
+broadcast{2, size=40}
+
+## Wait for 2f+1 finalize
+wait{2, threshold=67%}

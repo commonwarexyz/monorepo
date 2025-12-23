@@ -1,0 +1,14 @@
+# Minimmit
+
+## Propose a block
+propose{0}
+
+## Multicast notarize
+wait{0, threshold=1}
+broadcast{1}
+
+## Wait for 2f+1 to notarize
+wait{1, threshold=41%}
+
+## Wait for n-f to finalize
+wait{1, threshold=81%}

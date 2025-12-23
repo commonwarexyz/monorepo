@@ -1,0 +1,224 @@
+[package]
+name = "commonware-storage-fuzz"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+bytes.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+commonware-runtime.workspace = true
+commonware-storage = { workspace = true, features = ["std", "fuzzing"] }
+commonware-utils.workspace = true
+futures.workspace = true
+libfuzzer-sys.workspace = true
+rand.workspace = true
+
+[[bin]]
+name = "qmdb_unordered_operations"
+path = "fuzz_targets/qmdb_unordered_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmdb_ordered_operations"
+path = "fuzz_targets/qmdb_ordered_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmdb_ordered_batching"
+path = "fuzz_targets/qmdb_ordered_batching.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_operations"
+path = "fuzz_targets/archive_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rmap_operations"
+path = "fuzz_targets/rmap_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mmr_operations"
+path = "fuzz_targets/mmr_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metadata_operations"
+path = "fuzz_targets/metadata_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fixed_journal_operations"
+path = "fuzz_targets/fixed_journal_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ordered_index_operations"
+path = "fuzz_targets/ordered_index_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unordered_index_operations"
+path = "fuzz_targets/unordered_index_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bmt_operations"
+path = "fuzz_targets/bmt_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "freezer_operations"
+path = "fuzz_targets/freezer_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "current_unordered_operations"
+path = "fuzz_targets/current_unordered_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "current_ordered_operations"
+path = "fuzz_targets/current_ordered_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmdb_any_fixed_sync"
+path = "fuzz_targets/qmdb_any_fixed_sync.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmdb_any_variable_sync"
+path = "fuzz_targets/qmdb_any_variable_sync.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmdb_keyless"
+path = "fuzz_targets/qmdb_keyless.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "store_operations"
+path = "fuzz_targets/store_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ordinal_operations"
+path = "fuzz_targets/ordinal_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "translator_operations"
+path = "fuzz_targets/translator_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mmr_journaled"
+path = "fuzz_targets/mmr_journaled.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mmr_bitmap"
+path = "fuzz_targets/mmr_bitmap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache_operations"
+path = "fuzz_targets/cache_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmdb_immutable"
+path = "fuzz_targets/qmdb_immutable.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proofs_malleability"
+path = "fuzz_targets/proofs_malleability.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verify_proof"
+path = "fuzz_targets/verify_proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "range_proof"
+path = "fuzz_targets/range_proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extract_pinned_nodes"
+path = "fuzz_targets/extract_pinned_nodes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proof_store"
+path = "fuzz_targets/proof_store.rs"
+test = false
+doc = false
+bench = false

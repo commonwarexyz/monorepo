@@ -1,0 +1,21 @@
+[package]
+name = "commonware-runtime-fuzz"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+commonware-runtime.workspace = true
+commonware-utils.workspace = true
+libfuzzer-sys.workspace = true
+
+[[bin]]
+name = "buffer"
+path = "fuzz_targets/buffer.rs"
+test = false
+doc = false

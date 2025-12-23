@@ -1,0 +1,29 @@
+[package]
+name = "commonware-collector-fuzz"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+bytes.workspace = true
+commonware-codec.workspace = true
+commonware-collector.workspace = true
+commonware-cryptography.workspace = true
+commonware-p2p.workspace = true
+commonware-runtime.workspace = true
+futures.workspace = true
+libfuzzer-sys.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+
+[[bin]]
+name = "collector"
+path = "fuzz_targets/collector.rs"
+test = false
+doc = false
+bench = false

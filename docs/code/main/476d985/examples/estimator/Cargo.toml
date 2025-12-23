@@ -1,0 +1,40 @@
+[package]
+name = "commonware-estimator"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Simulate mechanism performance under realistic network conditions."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/estimator"
+documentation = "https://docs.rs/commonware-estimator"
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes.workspace = true
+clap.workspace = true
+colored.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+commonware-macros.workspace = true
+commonware-p2p.workspace = true
+commonware-runtime.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+prometheus-client.workspace = true
+rand.workspace = true
+reqwest = { workspace = true, features = ["json", "rustls-tls", "blocking"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
+
+[lib]
+name = "estimator"
+
+[[bin]]
+name = "commonware-estimator"
+bench = false

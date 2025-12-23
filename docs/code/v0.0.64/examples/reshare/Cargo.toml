@@ -1,0 +1,45 @@
+[package]
+name = "commonware-reshare"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Reshare a threshold secret over an epoched log."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"
+documentation = "https://docs.rs/commonware-reshare"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap = { workspace = true, features = ["derive"] }
+commonware-broadcast.workspace = true
+commonware-codec.workspace = true
+commonware-consensus.workspace = true
+commonware-cryptography.workspace = true
+commonware-macros.workspace = true
+commonware-math.workspace = true
+commonware-p2p.workspace = true
+commonware-resolver.workspace = true
+commonware-runtime.workspace = true
+commonware-storage.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+prometheus-client.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+
+[[bin]]
+name = "commonware-reshare"
+bench = false

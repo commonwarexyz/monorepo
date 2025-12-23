@@ -1,0 +1,15 @@
+# Simplex
+
+## Propose a block
+propose{0}
+
+## Multicast notarize
+wait{0, threshold=1}
+broadcast{1}
+
+## Multicast finalize after observing 2f+1 notarize
+wait{1, threshold=67%}
+broadcast{2}
+
+## Wait for 2f+1 finalize
+wait{2, threshold=67%}

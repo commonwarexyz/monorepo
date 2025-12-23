@@ -1,0 +1,42 @@
+[package]
+name = "commonware-coding-fuzz"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+commonware-cryptography.workspace = true
+libfuzzer-sys.workspace = true
+rand_chacha.workspace = true
+
+[dependencies.commonware-coding]
+path = ".."
+
+[lib]
+bench = false
+
+[[bin]]
+name = "reed_solomon"
+path = "fuzz_targets/reed_solomon.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "no_coding"
+path = "fuzz_targets/no_coding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zoda"
+path = "fuzz_targets/zoda.rs"
+test = false
+doc = false
+bench = false

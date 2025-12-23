@@ -1,0 +1,49 @@
+[package]
+name = "commonware-stream-fuzz"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+chacha20poly1305 = { workspace = true, default-features = false, features = ["std", "getrandom"] }
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+commonware-runtime.workspace = true
+commonware-stream.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+libfuzzer-sys.workspace = true
+rand_core.workspace = true
+
+[[bin]]
+name = "transport"
+path = "fuzz_targets/transport.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lazy_transport"
+path = "fuzz_targets/lazy_transport.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connection"
+path = "fuzz_targets/connection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "e2e"
+path = "fuzz_targets/e2e.rs"
+test = false
+doc = false
+bench = false

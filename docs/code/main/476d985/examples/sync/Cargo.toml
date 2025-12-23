@@ -1,0 +1,43 @@
+[package]
+name = "commonware-sync"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Synchronize state between a server and client."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/sync"
+documentation = "https://docs.rs/commonware-sync"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "client"
+path = "src/bin/client.rs"
+
+[dependencies]
+bytes.workspace = true
+clap.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+commonware-macros.workspace = true
+commonware-runtime.workspace = true
+commonware-storage = { workspace = true, features = ["std"] }
+commonware-stream.workspace = true
+commonware-utils.workspace = true
+futures.workspace = true
+prometheus-client.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
