@@ -9,7 +9,7 @@ use crate::{
             },
             FixedValue, VariableValue,
         },
-        immutable::{self, Immutable},
+        immutable::{Immutable, Operation as ImmutableOp},
         Durable, Merkleized,
     },
     translator::Translator,
@@ -268,7 +268,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = immutable::Operation<K, V>;
+    type Op = ImmutableOp<K, V>;
     type Error = crate::qmdb::Error;
 
     async fn get_operations(
@@ -300,7 +300,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = immutable::Operation<K, V>;
+    type Op = ImmutableOp<K, V>;
     type Error = crate::qmdb::Error;
 
     async fn get_operations(

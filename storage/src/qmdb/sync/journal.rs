@@ -28,8 +28,7 @@ where
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        Self::append(self, op).await?;
-        Ok(())
+        self.append(op).await.map(|_| ())
     }
 }
 
@@ -46,7 +45,6 @@ where
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        Self::append(self, op).await?;
-        Ok(())
+        self.append(op).await.map(|_| ())
     }
 }
