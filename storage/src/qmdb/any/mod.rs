@@ -28,8 +28,8 @@
 //! The database implements [Store] and [LogStore] in every state. The additional functionality
 //! offered by specific states is as follow:
 //!
-//! - (Merkleized,Durable):      [AuthenticatedStore], [PrunableStore], [Persistable]
-//! - (Merkleized,NonDurable):   [AuthenticatedStore], [PrunableStore]
+//! - (Merkleized,Durable):      [MerkleizedStore], [PrunableStore], [Persistable]
+//! - (Merkleized,NonDurable):   [MerkleizedStore], [PrunableStore]
 //! - (Unmerkleized,NonDurable): [StoreDeletable] (create/update/delete/commit) [Batchable]
 //! - (Unmerkleized,Durable):    <None>
 
@@ -41,7 +41,7 @@ use crate::{
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
         operation::Committable,
-        store::{AuthenticatedStore, Batchable, LogStore, PrunableStore},
+        store::{MerkleizedStore, Batchable, LogStore, PrunableStore},
         Error,
     },
     store::{Store, StoreDeletable},
@@ -75,7 +75,7 @@ pub mod unordered;
 /// This state allows authentication (root, proofs), pruning, and persistence operations
 /// (sync/close/destroy). Use `into_mutable` to transition to the (Unmerkleized,Non-durable) state.
 pub trait MerkleizedDurableAny:
-    AuthenticatedStore
+    MerkleizedStore
     + PrunableStore
     + Persistable<Error = Error>
     + Store<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
@@ -83,13 +83,13 @@ pub trait MerkleizedDurableAny:
     /// The mutable state type (Unmerkleized,Non-durable).
     type Mutable: UnmerkleizedNonDurableAny<
             Key = Self::Key,
-            Digest = <Self as AuthenticatedStore>::Digest,
-            Operation = <Self as AuthenticatedStore>::Operation,
+            Digest = <Self as MerkleizedStore>::Digest,
+            Operation = <Self as MerkleizedStore>::Operation,
             // Cycle constraint for path: into_provable() then commit()
             Provable: MerkleizedNonDurableAny<Durable = Self>
-                          + AuthenticatedStore<
-                Digest = <Self as AuthenticatedStore>::Digest,
-                Operation = <Self as AuthenticatedStore>::Operation,
+                          + MerkleizedStore<
+                Digest = <Self as MerkleizedStore>::Digest,
+                Operation = <Self as MerkleizedStore>::Operation,
             >,
             // Cycle constraints for path: commit() then into_provable() or into_mutable()
             Durable: UnmerkleizedDurableAny<Provable = Self, Mutable = Self::Mutable>,
@@ -121,7 +121,7 @@ pub trait UnmerkleizedDurableAny:
 
     /// The provable state type (Merkleized,Durable).
     type Provable: MerkleizedDurableAny<Key = Self::Key>
-        + AuthenticatedStore<
+        + MerkleizedStore<
             Value = <Self as LogStore>::Value,
             Digest = Self::Digest,
             Operation = Self::Operation,
@@ -139,16 +139,16 @@ pub trait UnmerkleizedDurableAny:
 /// This state allows authentication (root, proofs) and pruning. Use `commit` to transition to the
 /// Merkleized, Durable state.
 pub trait MerkleizedNonDurableAny:
-    AuthenticatedStore
+    MerkleizedStore
     + PrunableStore
     + Store<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
 {
     /// The durable state type (Merkleized,Durable).
     type Durable: MerkleizedDurableAny<Key = Self::Key>
-        + AuthenticatedStore<
+        + MerkleizedStore<
             Value = <Self as LogStore>::Value,
-            Digest = <Self as AuthenticatedStore>::Digest,
-            Operation = <Self as AuthenticatedStore>::Operation,
+            Digest = <Self as MerkleizedStore>::Digest,
+            Operation = <Self as MerkleizedStore>::Operation,
         >;
 
     /// Commit any pending operations to the database, ensuring their durability. Returns the
@@ -179,7 +179,7 @@ pub trait UnmerkleizedNonDurableAny:
 
     /// The provable state type (Merkleized,NonDurable).
     type Provable: MerkleizedNonDurableAny<Key = Self::Key>
-        + AuthenticatedStore<
+        + MerkleizedStore<
             Value = <Self as LogStore>::Value,
             Digest = Self::Digest,
             Operation = Self::Operation,

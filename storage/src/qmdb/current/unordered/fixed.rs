@@ -27,7 +27,7 @@ use crate::{
             proof::{OperationProof, RangeProof},
             root, FixedConfig as Config,
         },
-        store::{AuthenticatedStore, Batchable, CleanStore, DirtyStore, LogStore, PrunableStore},
+        store::{MerkleizedStore, Batchable, CleanStore, DirtyStore, LogStore, PrunableStore},
         Error,
     },
     translator::Translator,
@@ -625,7 +625,7 @@ where
     }
 }
 
-// AuthenticatedStore for Merkleized states (both Durable and NonDurable)
+// MerkleizedStore for Merkleized states (both Durable and NonDurable)
 // TODO: This is broken -- it's computing proofs only over the any db mmr not the grafted mmr, so
 // they won't validate against the grafted root.
 impl<
@@ -636,7 +636,7 @@ impl<
         T: Translator,
         const N: usize,
         D: crate::qmdb::store::State,
-    > AuthenticatedStore for Db<E, K, V, H, T, N, Merkleized<H>, D>
+    > MerkleizedStore for Db<E, K, V, H, T, N, Merkleized<H>, D>
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;

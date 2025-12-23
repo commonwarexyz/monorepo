@@ -999,7 +999,7 @@ mod test {
     use crate::{
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
-            store::{AuthenticatedStore, Getter, LogStore as _},
+            store::{MerkleizedStore, Getter, LogStore as _},
         },
         store::{StoreDeletable as _, StoreMut as _},
         translator::TwoCap,
@@ -1024,13 +1024,13 @@ mod test {
 
     /// Helper trait for testing Any databases that cycle through all four states.
     trait TestableAnyDb<V>:
-        MerkleizedDurableAny<Key = FixedBytes<4>> + AuthenticatedStore<Value = V, Digest = Digest>
+        MerkleizedDurableAny<Key = FixedBytes<4>> + MerkleizedStore<Value = V, Digest = Digest>
     {
     }
 
     impl<T, V> TestableAnyDb<V> for T where
         T: MerkleizedDurableAny<Key = FixedBytes<4>>
-            + AuthenticatedStore<Value = V, Digest = Digest>
+            + MerkleizedStore<Value = V, Digest = Digest>
     {
     }
 

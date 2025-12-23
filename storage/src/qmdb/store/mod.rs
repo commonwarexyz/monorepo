@@ -108,7 +108,7 @@ pub trait CleanStore: LogStore {
 }
 
 /// A trait for stores that support authentication through merkleization and inclusion proofs.
-pub trait AuthenticatedStore: LogStore {
+pub trait MerkleizedStore: LogStore {
     /// The digest type used for authentication.
     type Digest: Digest;
 

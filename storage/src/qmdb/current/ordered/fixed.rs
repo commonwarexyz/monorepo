@@ -27,7 +27,7 @@ use crate::{
             proof::{OperationProof, RangeProof},
             root, FixedConfig as Config,
         },
-        store::{AuthenticatedStore, Batchable, CleanStore, DirtyStore, LogStore, PrunableStore},
+        store::{MerkleizedStore, Batchable, CleanStore, DirtyStore, LogStore, PrunableStore},
         Error,
     },
     translator::Translator,
@@ -802,7 +802,7 @@ where
     }
 }
 
-// AuthenticatedStore for Merkleized states (both Durable and NonDurable)
+// MerkleizedStore for Merkleized states (both Durable and NonDurable)
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -811,7 +811,7 @@ impl<
         T: Translator,
         const N: usize,
         D: crate::qmdb::store::State,
-    > AuthenticatedStore for Db<E, K, V, H, T, N, Merkleized<H>, D>
+    > MerkleizedStore for Db<E, K, V, H, T, N, Merkleized<H>, D>
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;

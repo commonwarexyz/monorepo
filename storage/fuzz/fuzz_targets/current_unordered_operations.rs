@@ -8,7 +8,7 @@ use commonware_storage::{
     qmdb::{
         any::{MerkleizedDurableAny as _, UnmerkleizedDurableAny as _},
         current::{unordered::fixed::Db as Current, FixedConfig as Config},
-        store::AuthenticatedStore as _,
+        store::MerkleizedStore as _,
     },
     translator::TwoCap,
 };

@@ -585,7 +585,7 @@ impl<
         H: CHasher,
         T: Translator,
         D: DurabilityState,
-    > crate::qmdb::store::AuthenticatedStore for Immutable<E, K, V, H, T, Merkleized<H>, D>
+    > crate::qmdb::store::MerkleizedStore for Immutable<E, K, V, H, T, Merkleized<H>, D>
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;

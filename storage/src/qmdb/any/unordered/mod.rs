@@ -436,7 +436,7 @@ pub(super) mod test {
         mmr::StandardHasher,
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
-            store::{AuthenticatedStore, Getter, LogStore},
+            store::{MerkleizedStore, Getter, LogStore},
             verify_proof,
         },
         store::{StoreDeletable as _, StoreMut as _},
@@ -461,12 +461,12 @@ pub(super) mod test {
 
     /// Helper trait for testing Any databases that cycle through all four states.
     pub(crate) trait TestableAnyDb<V>:
-        MerkleizedDurableAny<Key = Digest> + AuthenticatedStore<Value = V, Digest = Digest>
+        MerkleizedDurableAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
     {
     }
 
     impl<T, V> TestableAnyDb<V> for T where
-        T: MerkleizedDurableAny<Key = Digest> + AuthenticatedStore<Value = V, Digest = Digest>
+        T: MerkleizedDurableAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
     {
     }
 
@@ -574,7 +574,7 @@ pub(super) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        <D as AuthenticatedStore>::Operation: Codec,
+        <D as MerkleizedStore>::Operation: Codec,
     {
         const ELEMENTS: u64 = 1000;
 

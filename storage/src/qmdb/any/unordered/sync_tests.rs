@@ -10,7 +10,7 @@ use crate::{
         self,
         any::MerkleizedDurableAny,
         operation::Operation as OperationTrait,
-        store::{AuthenticatedStore, LogStore as _, PrunableStore},
+        store::{MerkleizedStore, LogStore as _, PrunableStore},
         sync::{
             self,
             engine::{Config, NextStep},
@@ -83,7 +83,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     /// The database type being tested (Clean state: Merkleized + Durable).
     type Db: qmdb::sync::Database<Context = deterministic::Context, Digest = Digest>
         + MerkleizedDurableAny<Key = Digest>
-        + AuthenticatedStore<Digest = Digest>
+        + MerkleizedStore<Digest = Digest>
         + Store<Key = Digest>;
 
     /// Create a config with unique partition names

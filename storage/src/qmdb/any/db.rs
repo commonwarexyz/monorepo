@@ -15,7 +15,7 @@ use crate::{
         any::ValueEncoding,
         build_snapshot_from_log,
         operation::{Committable, Operation as OperationTrait},
-        store::{self, AuthenticatedStore, LogStore, PrunableStore},
+        store::{self, MerkleizedStore, LogStore, PrunableStore},
         Error, FloorHelper,
     },
     AuthenticatedBitMap, Persistable,
@@ -524,7 +524,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, D> AuthenticatedStore for Db<E, C, I, H, U, Merkleized<H>, D>
+impl<E, K, V, U, C, I, H, D> MerkleizedStore for Db<E, C, I, H, U, Merkleized<H>, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
