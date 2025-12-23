@@ -64,11 +64,8 @@ mod operation;
 mod value;
 pub(crate) use value::{FixedValue, ValueEncoding, VariableValue};
 
-mod ext;
 pub mod ordered;
 pub mod unordered;
-
-//pub use ext::AnyExt;
 
 /// Trait for the (Merkleized,Durable) state.
 ///

@@ -26,7 +26,7 @@ use crate::{
             proof::{OperationProof, RangeProof},
             root, FixedConfig as Config,
         },
-        store::{Batchable, CleanStore, DirtyStore, LogStore, MerkleizedStore, PrunableStore},
+        store::{Batchable, LogStore, MerkleizedStore, PrunableStore},
         Durable, Error, Merkleized, NonDurable, Unmerkleized,
     },
     translator::Translator,
@@ -853,44 +853,6 @@ impl<
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
-    }
-}
-
-// CleanStore for Merkleized, Durable state
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > CleanStore for Db<E, K, V, H, T, N, Merkleized<H>, Durable>
-{
-    type Operation = Operation<K, V>;
-    type Dirty = Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
-
-    fn into_dirty(self) -> Self::Dirty {
-        self.into_dirty()
-    }
-}
-
-// DirtyStore for Unmerkleized, NonDurable state
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > DirtyStore for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
-{
-    type Operation = Operation<K, V>;
-    type Clean = Db<E, K, V, H, T, N, Merkleized<H>, Durable>;
-
-    async fn commit(self, metadata: Option<V>) -> Result<(Self::Clean, Range<Location>), Error> {
-        let (durable, range) = self.commit(metadata).await?;
-        let clean = durable.into_merkleized().await?;
-        Ok((clean, range))
     }
 }
 

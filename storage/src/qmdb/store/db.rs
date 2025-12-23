@@ -98,7 +98,7 @@ use crate::{
         },
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable as _, Operation as _},
-        store::{Batchable, Clean, CleanStore, Dirty, DirtyStore, LogStore, PrunableStore, State},
+        store::{Batchable, Clean, Dirty, LogStore, PrunableStore, State},
         update_key, Error, FloorHelper,
     },
     store::{StoreDeletable, StoreMut},
@@ -611,36 +611,6 @@ where
             }
         }
         Ok(())
-    }
-}
-
-impl<E, K, V, T> CleanStore for Db<E, K, V, T, Clean>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue,
-    T: Translator,
-{
-    type Dirty = Db<E, K, V, T, Dirty>;
-    type Operation = Operation<K, V>;
-
-    fn into_dirty(self) -> Db<E, K, V, T, Dirty> {
-        self.into_dirty()
-    }
-}
-
-impl<E, K, V, T> DirtyStore for Db<E, K, V, T, Dirty>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue,
-    T: Translator,
-{
-    type Clean = Db<E, K, V, T, Clean>;
-    type Operation = Operation<K, V>;
-
-    async fn commit(self, metadata: Option<V>) -> Result<(Self::Clean, Range<Location>), Error> {
-        self.commit(metadata).await
     }
 }
 

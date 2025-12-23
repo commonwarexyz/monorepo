@@ -6,7 +6,7 @@ use commonware_storage::{
     qmdb::{
         any::{
             ordered::variable::Db as OVariable, unordered::variable::Db as UVariable,
-            VariableConfig as AConfig,
+            UnmerkleizedDurableAny, UnmerkleizedNonDurableAny, VariableConfig as AConfig,
         },
         store::LogStore,
         Durable, Merkleized,

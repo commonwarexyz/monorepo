@@ -19,7 +19,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Digest;
-use core::{future::Future, ops::Range};
+use core::future::Future;
 use std::num::NonZeroU64;
 
 mod batch;
@@ -77,34 +77,6 @@ pub trait LogStore {
 pub trait PrunableStore: LogStore {
     /// Prune historical operations prior to `loc`.
     fn prune(&mut self, loc: Location) -> impl Future<Output = Result<(), Error>>;
-}
-
-/// A trait for stores in a "dirty" state (mutations allowed, may have uncommitted operations).
-pub trait DirtyStore: LogStore {
-    /// The operation type stored in the log.
-    type Operation;
-
-    /// The clean state type that this dirty store transitions to.
-    type Clean: CleanStore<Operation = Self::Operation, Dirty = Self, Value = Self::Value>;
-
-    /// Commit the dirty store and transition it to a clean one, returning the range of operations
-    /// that were committed.
-    fn commit(
-        self,
-        metadata: Option<Self::Value>,
-    ) -> impl Future<Output = Result<(Self::Clean, Range<Location>), Error>>;
-}
-
-/// A trait for authenticated stores in a "clean" state where the MMR root is computed.
-pub trait CleanStore: LogStore {
-    /// The operation type stored in the log.
-    type Operation;
-
-    /// The dirty state type that this clean store transitions to.
-    type Dirty: DirtyStore<Operation = Self::Operation, Clean = Self, Value = Self::Value>;
-
-    /// Convert this clean store into its dirty counterpart for making updates.
-    fn into_dirty(self) -> Self::Dirty;
 }
 
 /// A trait for stores that support authentication through merkleization and inclusion proofs.
