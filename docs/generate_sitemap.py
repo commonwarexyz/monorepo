@@ -106,16 +106,15 @@ def write_sitemap(urls: list[str]) -> None:
 def write_llms_txt(versions: list[str]) -> None:
     """Write llms.txt with versioned paths for LLM discovery."""
     latest = versions[0]
-    version_lines = "\n".join(f"- /code/{v}/" for v in versions)
+    version_lines = [f"- /code/{versions[0]}/ (latest)"]
+    version_lines += [f"- /code/{v}/" for v in versions[1:]]
     content = f"""# Commonware Library
-
-> Version: {latest}
 
 Find more information at [README.md](/code/{latest}/README.md).
 
 ## Paths
 
-{version_lines}
+{chr(10).join(version_lines)}
 
 View [sitemap.xml](/sitemap.xml) for all filepaths.
 """
