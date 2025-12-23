@@ -32,6 +32,7 @@ mirror:
 	find code -path '*/fuzz/target' -type d -exec rm -rf {} + 2>/dev/null || true
 	find code -name '_apalache-out' -type d -exec rm -rf {} + 2>/dev/null || true
 	find code -type d -name 'out*' -path '*/quint/*' -exec rm -rf {} + 2>/dev/null || true
+	python3 generate_sitemap.py
 
 # So that make doesn't think the above two are directories
 .PHONY: all clean mirror
