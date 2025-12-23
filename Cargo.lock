@@ -1474,6 +1474,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.16",
  "governor",
+ "hashbrown 0.16.1",
  "io-uring",
  "libc",
  "opentelemetry",

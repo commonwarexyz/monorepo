@@ -22,6 +22,7 @@ commonware-macros.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
 futures.workspace = true
 governor.workspace = true
+hashbrown.workspace = true
 io-uring = { workspace = true, optional = true }
 libc.workspace = true
 opentelemetry.workspace = true

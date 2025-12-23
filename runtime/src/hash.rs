@@ -86,13 +86,17 @@ impl BuildHasher for RandomState {
 ///
 /// In production mode (no seed set), behaves identically to std HashMap with
 /// random keys for DoS resistance.
-pub type HashMap<K, V> = std::collections::HashMap<K, V, RandomState>;
+///
+/// Uses hashbrown under the hood (same implementation as std::collections::HashMap).
+pub type HashMap<K, V> = hashbrown::HashMap<K, V, RandomState>;
 
 /// A HashSet that uses deterministic hashing when a seed is set via TLS.
 ///
 /// In production mode (no seed set), behaves identically to std HashSet with
 /// random keys for DoS resistance.
-pub type HashSet<K> = std::collections::HashSet<K, RandomState>;
+///
+/// Uses hashbrown under the hood (same implementation as std::collections::HashSet).
+pub type HashSet<K> = hashbrown::HashSet<K, RandomState>;
 
 #[cfg(test)]
 mod tests {
