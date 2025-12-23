@@ -2,18 +2,20 @@
 //!
 //! # Terminology
 //!
-//! A _key_ in an authenticated database either has a _value_ or it doesn't. Different types of
-//! _operations_ can be applied to the db to modify the state of a specific key. A key that has a
-//! value can change to one without a value through the _delete_ operation. The _update_ operation
-//! gives a key a specific value whether it previously had no value or had a different value. The
-//! _create_ operation gives a key a specific value only if it previously had no value.
+//! A database's state is derived from an append-only log of state-changing _operations_.
+//!
+//! In a _keyed_ database, a _key_ either has a _value_ or it doesn't, and different types of
+//! operations modify the state of a specific key. A key that has a value can change to one without
+//! a value through the _delete_ operation. The _update_ operation gives a key a specific value. We
+//! sometimes call an update for a key that doesn't already a value a _create_ operation, but its
+//! representation in the log is the same.
 //!
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
 //!
 //! # Database States
 //!
-//! An authenticated database can be in one of four states based on two orthogonal dimensions:
+//! An _authenticated_ database can be in one of four states based on two orthogonal dimensions:
 //! - Merkleization: [Merkleized] (has computed root) or [Unmerkleized] (root not yet computed)
 //! - Durability   : [Durable] (committed to disk) or [NonDurable] (uncommitted changes)
 //!
@@ -31,13 +33,13 @@
 //! - `Mutable.into_merkleized()`                   → `(Merkleized,NonDurable)`
 //! - `Mutable.commit()`                            → `(Unmerkleized,Durable)`
 //!
-//! QMDB databases implement [store::LogStore] in every state, and keyed databases additionally
-//! implement [super::kv::Store]. Additional functionality in other states includes:
+//! An authendicated database implements [store::LogStore] in every state, and keyed databases
+//! additionally implement [super::kv::Store]. Additional functionality in other states includes:
 //!
 //! - Clean: [store::MerkleizedStore], [store::PrunableStore], [super::Persistable]
 //! - (Merkleized,NonDurable): [store::MerkleizedStore], [store::PrunableStore]
 //!
-//! Keyed database types additionally implement:
+//! Keyed databases additionally implement:
 //! - Mutable: [super::kv::StoreDeletable], [store::Batchable]
 //!
 //! # Acknowledgments

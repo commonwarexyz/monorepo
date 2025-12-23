@@ -28,7 +28,12 @@ use crate::{
         mem::{Clean, Dirty, State},
         Location, Proof,
     },
-    qmdb::{any::VariableValue, operation::Committable, Error},
+    qmdb::{
+        any::VariableValue,
+        operation::Committable,
+        store::{LogStore, MerkleizedStore, PrunableStore},
+        Error,
+    },
 };
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
@@ -283,6 +288,77 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
             last_commit_loc: self.last_commit_loc,
             _durability: PhantomData,
         }
+    }
+}
+
+/// Implementation of LogStore for all states.
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, M: State<DigestOf<H>>, D> LogStore
+    for Keyless<E, V, H, M, D>
+{
+    type Value = V;
+
+    fn is_empty(&self) -> bool {
+        // A keyless database is never "empty" in the traditional sense since it always
+        // has at least one commit operation. We consider it empty if there are no appends.
+        self.op_count() <= 1
+    }
+
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
+    }
+
+    async fn get_metadata(&self) -> Result<Option<Self::Value>, Error> {
+        self.get_metadata().await
+    }
+}
+
+/// Implementation of PrunableStore for the Merkleized state (any durability).
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D> PrunableStore
+    for Keyless<E, V, H, Clean<H::Digest>, D>
+{
+    async fn prune(&mut self, loc: Location) -> Result<(), Error> {
+        if loc > self.last_commit_loc {
+            return Err(Error::PruneBeyondMinRequired(loc, self.last_commit_loc));
+        }
+        self.journal.prune(loc).await?;
+        Ok(())
+    }
+}
+
+/// Implementation of MerkleizedStore for the Merkleized state (any durability).
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D> MerkleizedStore
+    for Keyless<E, V, H, Clean<H::Digest>, D>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<V>;
+
+    fn root(&self) -> Self::Digest {
+        self.journal.root()
+    }
+
+    async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.historical_proof(self.op_count(), start_loc, max_ops)
+            .await
+    }
+
+    async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        Ok(self
+            .journal
+            .historical_proof(historical_size, start_loc, max_ops)
+            .await?)
     }
 }
 

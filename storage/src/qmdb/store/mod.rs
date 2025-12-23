@@ -1,17 +1,10 @@
-//! Traits for interacting with log based key value stores.
-//!
-//! # Terminology
-//!
-//! A _key_ in a database either has a _value_ or it doesn't. The _update_ operation gives a key a
-//! specific value whether it previously had no value or had a different value.
-//!
-//! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
-//! (2) it is an update operation, and (3) it is the most recent operation for that key.
+//! Traits for interacting with stores whose state is derived from an append-only log of
+//! state-changing operations.
 //!
 //! # Pruning
 //!
-//! A database maintains a location before which all operations are inactive, called the _inactivity
-//! floor_. These items can be cleaned from storage by calling [Store::prune].
+//! A log based store maintains a location before which all operations are inactive, called the
+//! _inactivity floor_. These operations can be cleaned from storage by calling [Store::prune].
 
 use crate::{
     mmr::{Location, Proof},
