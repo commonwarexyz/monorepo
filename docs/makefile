@@ -22,8 +22,11 @@ sitemap:
 # Deploy: mirror code and generate sitemap
 deploy: mirror sitemap
 
+# Build everything: markdown, mirror, and sitemap
+all: markdown mirror sitemap
+
 # Clean all generated files
 clean:
 	rm -rf code $(MD_TARGETS) $(SITEMAP)
 
-.PHONY: markdown clean mirror sitemap deploy
+.PHONY: markdown mirror sitemap deploy all clean
