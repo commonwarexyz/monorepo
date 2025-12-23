@@ -5,6 +5,7 @@
 
 use crate::{
     journal::contiguous::Contiguous,
+    kv::Store,
     mmr::{Location, Position},
     qmdb::{
         self,
@@ -18,7 +19,6 @@ use crate::{
             Engine, Target,
         },
     },
-    store::Store,
     Persistable,
 };
 use commonware_codec::Encode;

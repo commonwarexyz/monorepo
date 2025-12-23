@@ -526,7 +526,7 @@ impl<
         T: Translator,
         S: MerkleState<DigestOf<H>>,
         D: DurabilityState,
-    > crate::store::Store for Immutable<E, K, V, H, T, S, D>
+    > crate::kv::Store for Immutable<E, K, V, H, T, S, D>
 {
     type Key = K;
     type Value = V;

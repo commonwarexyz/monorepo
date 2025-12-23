@@ -274,7 +274,7 @@ impl<
         H: Hasher,
         S: mmr::mem::State<DigestOf<H>>,
         D: store::State,
-    > crate::store::Store for Db<E, C, I, H, Update<K, V>, S, D>
+    > crate::kv::Store for Db<E, C, I, H, Update<K, V>, S, D>
 where
     Operation<K, V>: Codec,
 {
@@ -294,7 +294,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreMut for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+    > crate::kv::StoreMut for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
 {
@@ -310,7 +310,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreDeletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+    > crate::kv::StoreDeletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
 {
@@ -433,13 +433,13 @@ where
 pub(super) mod test {
     use super::*;
     use crate::{
+        kv::{StoreDeletable as _, StoreMut as _},
         mmr::StandardHasher,
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
             store::{Getter, LogStore, MerkleizedStore},
             verify_proof,
         },
-        store::{StoreDeletable as _, StoreMut as _},
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};

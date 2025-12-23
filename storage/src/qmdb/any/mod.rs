@@ -14,13 +14,13 @@ use crate::{
         authenticated,
         contiguous::fixed::{Config as JConfig, Journal},
     },
+    kv::{Store, StoreDeletable},
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
         operation::Committable,
         store::{Batchable, LogStore, MerkleizedStore, PrunableStore},
         Error,
     },
-    store::{Store, StoreDeletable},
     translator::Translator,
     Persistable,
 };

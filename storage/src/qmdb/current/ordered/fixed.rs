@@ -735,7 +735,7 @@ impl<
         const N: usize,
         S: State<DigestOf<H>>,
         D: crate::qmdb::store::State,
-    > crate::store::Store for Db<E, K, V, H, T, N, S, D>
+    > crate::kv::Store for Db<E, K, V, H, T, N, S, D>
 {
     type Key = K;
     type Value = V;
@@ -754,7 +754,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreMut for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
+    > crate::kv::StoreMut for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
@@ -769,7 +769,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreDeletable for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
+    > crate::kv::StoreDeletable for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await

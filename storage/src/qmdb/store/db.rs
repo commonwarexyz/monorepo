@@ -1,27 +1,15 @@
 //! A mutable key-value database that supports variable-sized values, but without authentication.
 //!
-//! # Terminology
-//!
-//! A _key_ in an unauthenticated database either has a _value_ or it doesn't. The _update_ operation gives a key a
-//! specific value whether it previously had no value or had a different value.
-//!
-//! Keys with values are called _active_. An operation is called _active_ if (1) its key is active, (2) it is an update
-//! operation, and (3) it is the most recent operation for that key.
-//!
 //! # Lifecycle
 //!
-//! A store exists in one of two states:
+//! Unlike authenticated stores which have 4 potential states, an unauthenticated store only has
+//! two:
 //!
-//! - **Clean**: The store has no uncommitted operations and its key/value state is immutable. Use `into_dirty` to
-//!   transform it into a dirty state.
+//! - **Clean**: The store has no uncommitted operations and its key/value state is immutable. Use
+//!   `into_dirty` to transform it into a dirty state.
 //!
-//! - **Dirty**: The store has uncommitted operations and its key/value state is mutable. Use `commit` to transform it
-//!   into a clean state.
-//!
-//! # Pruning
-//!
-//! The database maintains a location before which all operations are inactive, called the _inactivity floor_. These
-//! items can be cleaned from storage by calling [Store::prune] while in the Clean state.
+//! - **Dirty**: The store has uncommitted operations and its key/value state is mutable. Use
+//!   `commit` to transform it into a clean state.
 //!
 //! # Example
 //!
@@ -90,6 +78,7 @@ use crate::{
         variable::{Config as JournalConfig, Journal},
         MutableContiguous as _,
     },
+    kv::{StoreDeletable, StoreMut},
     mmr::Location,
     qmdb::{
         any::{
@@ -101,7 +90,6 @@ use crate::{
         store::{Batchable, Clean, Dirty, LogStore, PrunableStore, State},
         update_key, Error, FloorHelper,
     },
-    store::{StoreDeletable, StoreMut},
     translator::Translator,
     Persistable,
 };
@@ -551,7 +539,7 @@ where
     }
 }
 
-impl<E, K, V, T, S> crate::store::Store for Db<E, K, V, T, S>
+impl<E, K, V, T, S> crate::kv::Store for Db<E, K, V, T, S>
 where
     E: Storage + Clock + Metrics,
     K: Array,

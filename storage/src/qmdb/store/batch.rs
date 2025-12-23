@@ -1,6 +1,6 @@
 //! Support for batching changes to an underlying database.
 
-use crate::{qmdb::Error, store::Store};
+use crate::{kv::Store, qmdb::Error};
 use commonware_codec::Codec;
 use commonware_utils::Array;
 use core::future::Future;

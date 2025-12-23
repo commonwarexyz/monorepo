@@ -32,13 +32,13 @@
 //! - `Mutable.commit()`                            → `(Unmerkleized,Durable)`
 //!
 //! QMDB databases implement [store::LogStore] in every state, and keyed databases additionally
-//! implement [super::store::Store]. Additional functionality in other states includes:
+//! implement [super::kv::Store]. Additional functionality in other states includes:
 //!
 //! - Clean: [store::MerkleizedStore], [store::PrunableStore], [super::Persistable]
 //! - (Merkleized,NonDurable): [store::MerkleizedStore], [store::PrunableStore]
 //!
 //! Keyed database types additionally implement:
-//! - Mutable: [super::store::StoreDeletable], [store::Batchable]
+//! - Mutable: [super::kv::StoreDeletable], [store::Batchable]
 //!
 //! # Acknowledgments
 //!
