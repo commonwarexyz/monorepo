@@ -8,30 +8,6 @@
 //! - Ordered: The database maintains a total order over active keys.
 //!   - Fixed-size values
 //!   - Variable-size values
-//!
-//! An Any database can be in one of four states based on two orthogonal dimensions:
-//! - Merkleization: `Merkleized` (has computed root) or `Unmerkleized` (root not yet computed)
-//! - Durability: `Durable` (committed to disk) or `NonDurable` (uncommitted changes)
-//!
-//! State transitions:
-//! - `init()`                                    → `(Merkleized,Durable)`
-//! - `(Merkleized,Durable).into_mutable()`       → `(Unmerkleized,NonDurable)`
-//! - `(Unmerkleized,Durable).into_mutable()`     → `(Unmerkleized,NonDurable)`
-//! - `(Merkleized,NonDurable).into_mutable()`    → `(Unmerkleized,NonDurable)`
-//! - `(Unmerkleized,Durable).into_merkleized()`    → `(Merkleized,Durable)`
-//! - `(Unmerkleized,NonDurable).into_merkleized()` → `(Merkleized,NonDurable)`
-//! - `(Unmerkleized,NonDurable).commit()`        → `(Unmerkleized,Durable)`
-//!
-//! We call the combined (Unmerkleized,NonDurable) state the _Mutable_ state since it's the only
-//! state in which the database state (as reflected by its `root`) can be changed.
-//!
-//! The database implements [Store] and [LogStore] in every state. The additional functionality
-//! offered by specific states is as follow:
-//!
-//! - (Merkleized,Durable):      [MerkleizedStore], [PrunableStore], [Persistable]
-//! - (Merkleized,NonDurable):   [MerkleizedStore], [PrunableStore]
-//! - (Unmerkleized,NonDurable): [StoreDeletable] (create/update/delete/commit) [Batchable]
-//! - (Unmerkleized,Durable):    <None>
 
 use crate::{
     journal::{

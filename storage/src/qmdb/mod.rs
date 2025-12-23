@@ -11,6 +11,35 @@
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
 //!
+//! # Database States
+//!
+//! An authenticated database can be in one of four states based on two orthogonal dimensions:
+//! - Merkleization: [Merkleized] (has computed root) or [Unmerkleized] (root not yet computed)
+//! - Durability   : [Durable] (committed to disk) or [NonDurable] (uncommitted changes)
+//!
+//! We call the combined (Merkleized,Durable) state the _Clean_ state.
+//!
+//! We call the combined (Unmerkleized,NonDurable) state the _Mutable_ state since it's the only
+//! state in which the database state (as reflected by its `root`) can be changed.
+//!
+//! State transitions result from `into_mutable()`, `into_merkleized()`, and `commit()`:
+//! - `init()`                                      → `Clean`
+//! - `Clean.into_mutable()`                        → `Mutable`
+//! - `(Unmerkleized,Durable).into_mutable()`       → `Mutable`
+//! - `(Merkleized,NonDurable).into_mutable()`      → `Mutable`
+//! - `(Unmerkleized,Durable).into_merkleized()`    → `Clean`
+//! - `Mutable.into_merkleized()`                   → `(Merkleized,NonDurable)`
+//! - `Mutable.commit()`                            → `(Unmerkleized,Durable)`
+//!
+//! QMDB databases implement [store::LogStore] in every state, and keyed databases additionally
+//! implement [super::store::Store]. Additional functionality in other states includes:
+//!
+//! - Clean: [store::MerkleizedStore], [store::PrunableStore], [super::Persistable]
+//! - (Merkleized,NonDurable): [store::MerkleizedStore], [store::PrunableStore]
+//!
+//! Keyed database types additionally implement:
+//! - Mutable: [super::store::StoreDeletable], [store::Batchable]
+//!
 //! # Acknowledgments
 //!
 //! The following resources were used as references when implementing this crate:
