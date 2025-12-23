@@ -1,5 +1,5 @@
 SITEMAP := sitemap.xml
-MD_SOURCES := $(shell find . -name "*.md" -type f)
+MD_SOURCES := $(shell find . -name "*.md" -type f -not -path "./code/*")
 MD_TARGETS := $(MD_SOURCES:.md=.html)
 HTML_DEPS := $(shell find . -name "*.html" -type f ! -name "template.html")
 
