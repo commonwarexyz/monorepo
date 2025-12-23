@@ -224,7 +224,8 @@ where
 }
 
 /// Implement Resolver for `Arc<RwLock<Option<VariableDb>>>` to allow taking ownership during sync.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<Option<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>>>
+impl<E, K, V, H, T> Resolver
+    for Arc<RwLock<Option<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -257,7 +258,8 @@ where
     }
 }
 
-impl<E, K, V, H, T> Resolver for Arc<Immutable<E, K, V, H, T, immutable::Merkleized<H>, immutable::Durable>>
+impl<E, K, V, H, T> Resolver
+    for Arc<Immutable<E, K, V, H, T, immutable::Merkleized<H>, immutable::Durable>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -289,7 +291,8 @@ where
 
 /// Implement Resolver directly for `Arc<RwLock<Immutable>>` to eliminate the need for wrapper
 /// types while allowing direct database access.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<Immutable<E, K, V, H, T, immutable::Merkleized<H>, immutable::Durable>>>
+impl<E, K, V, H, T> Resolver
+    for Arc<RwLock<Immutable<E, K, V, H, T, immutable::Merkleized<H>, immutable::Durable>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,

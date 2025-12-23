@@ -141,15 +141,13 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Sync => {
-                    let (mut clean_db, _) =
-                        db.commit(None).await.expect("Commit should not fail");
+                    let (mut clean_db, _) = db.commit(None).await.expect("Commit should not fail");
                     clean_db.sync().await.expect("Sync should not fail");
                     db = clean_db.into_dirty();
                 }
 
                 Operation::Prune => {
-                    let (mut clean_db, _) =
-                        db.commit(None).await.expect("Commit should not fail");
+                    let (mut clean_db, _) = db.commit(None).await.expect("Commit should not fail");
                     clean_db
                         .prune(clean_db.inactivity_floor_loc())
                         .await
@@ -177,10 +175,7 @@ fn fuzz(input: FuzzInput) {
         }
 
         let (clean_db, _) = db.commit(None).await.expect("Commit should not fail");
-        clean_db
-            .destroy()
-            .await
-            .expect("Destroy should not fail");
+        clean_db.destroy().await.expect("Destroy should not fail");
     });
 }
 

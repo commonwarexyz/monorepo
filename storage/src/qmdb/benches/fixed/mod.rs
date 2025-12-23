@@ -88,14 +88,10 @@ const DELETE_FREQUENCY: u32 = 10;
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 /// Clean (Merkleized, Durable) type aliases for Any databases.
-type UFixedClean =
-    UFixed<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
-type OFixedClean =
-    OFixed<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
-type UVAnyClean =
-    UVariable<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
-type OVAnyClean =
-    OVariable<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
+type UFixedClean = UFixed<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
+type OFixedClean = OFixed<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
+type UVAnyClean = UVariable<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
+type OVAnyClean = OVariable<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
 
 type UCurrentDb = UCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 type OCurrentDb = OCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;

@@ -168,7 +168,8 @@ mod tests {
     }
 
     /// Type alias for tests
-    type AnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+    type AnyTest =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
 
     fn test_value(i: u64) -> Vec<u8> {
         let len = ((i % 13) + 7) as usize;

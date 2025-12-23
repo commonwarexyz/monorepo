@@ -27,7 +27,7 @@ use crate::{
             proof::{OperationProof, RangeProof},
             root, FixedConfig as Config,
         },
-        store::{MerkleizedStore, Batchable, CleanStore, DirtyStore, LogStore, PrunableStore},
+        store::{Batchable, CleanStore, DirtyStore, LogStore, MerkleizedStore, PrunableStore},
         Error,
     },
     translator::Translator,

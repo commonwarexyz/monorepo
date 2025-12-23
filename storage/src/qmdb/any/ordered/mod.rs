@@ -999,7 +999,7 @@ mod test {
     use crate::{
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
-            store::{MerkleizedStore, Getter, LogStore as _},
+            store::{Getter, LogStore as _, MerkleizedStore},
         },
         store::{StoreDeletable as _, StoreMut as _},
         translator::TwoCap,
@@ -1029,8 +1029,7 @@ mod test {
     }
 
     impl<T, V> TestableAnyDb<V> for T where
-        T: MerkleizedDurableAny<Key = FixedBytes<4>>
-            + MerkleizedStore<Value = V, Digest = Digest>
+        T: MerkleizedDurableAny<Key = FixedBytes<4>> + MerkleizedStore<Value = V, Digest = Digest>
     {
     }
 
@@ -1176,7 +1175,14 @@ mod test {
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
-        let db = db.commit(None).await.unwrap().0.into_merkleized().await.unwrap();
+        let db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
 
         // Multiple deletions of the same key should be a no-op.
         let prev_op_count = db.op_count();
@@ -1191,7 +1197,14 @@ mod test {
         assert_eq!(db.op_count(), prev_op_count);
 
         // Make sure closing/reopening gets us back to the same state.
-        let db = db.commit(None).await.unwrap().0.into_merkleized().await.unwrap();
+        let db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
         let op_count = db.op_count();
         let root = db.root();
         let db = reopen_db(context.clone()).await;
@@ -1206,7 +1219,14 @@ mod test {
         db.update(key2.clone(), val1).await.unwrap();
         db.update(key1.clone(), val2).await.unwrap();
 
-        let db = db.commit(None).await.unwrap().0.into_merkleized().await.unwrap();
+        let db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
 
         // Confirm close/reopen gets us back to the same state.
         let op_count = db.op_count();
@@ -1219,7 +1239,14 @@ mod test {
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
         let db = db.into_mutable();
-        let mut db = db.commit(None).await.unwrap().0.into_merkleized().await.unwrap();
+        let mut db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
 
         assert!(db.root() != root);
 

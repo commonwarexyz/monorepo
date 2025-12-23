@@ -41,7 +41,7 @@ use crate::{
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     qmdb::{
         operation::Committable,
-        store::{MerkleizedStore, Batchable, LogStore, PrunableStore},
+        store::{Batchable, LogStore, MerkleizedStore, PrunableStore},
         Error,
     },
     store::{Store, StoreDeletable},

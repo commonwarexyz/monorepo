@@ -120,13 +120,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: usize = 128;
 const PAGE_CACHE_SIZE: usize = 8;
 
-type CleanDb = Keyless<
-    deterministic::Context,
-    Vec<u8>,
-    Sha256,
-    Clean<sha256::Digest>,
-    Durable,
->;
+type CleanDb = Keyless<deterministic::Context, Vec<u8>, Sha256, Clean<sha256::Digest>, Durable>;
 
 fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
     Config {

@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::mmr::{
     journaled::{CleanMmr, Config, DirtyMmr, Mmr, SyncConfig},

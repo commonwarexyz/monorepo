@@ -15,7 +15,7 @@ use crate::{
         any::ValueEncoding,
         build_snapshot_from_log,
         operation::{Committable, Operation as OperationTrait},
-        store::{self, MerkleizedStore, LogStore, PrunableStore},
+        store::{self, LogStore, MerkleizedStore, PrunableStore},
         Error, FloorHelper,
     },
     AuthenticatedBitMap, Persistable,

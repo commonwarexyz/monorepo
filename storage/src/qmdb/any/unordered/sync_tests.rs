@@ -10,7 +10,7 @@ use crate::{
         self,
         any::MerkleizedDurableAny,
         operation::Operation as OperationTrait,
-        store::{MerkleizedStore, LogStore as _, PrunableStore},
+        store::{LogStore as _, MerkleizedStore, PrunableStore},
         sync::{
             self,
             engine::{Config, NextStep},
@@ -109,7 +109,6 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
         db: Self::Db,
         ops: Vec<OpOf<Self>>,
     ) -> impl std::future::Future<Output = Self::Db> + Send;
-
 }
 
 /// Test that invalid bounds are rejected

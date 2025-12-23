@@ -1,11 +1,8 @@
 //! The [Keyless] qmdb allows for append-only storage of arbitrary variable-length data that can
 //! later be retrieved by its location.
 //!
-//! The implementation consists of an `mmr` over the operations applied to the database and an
-//! operations `log` storing these operations.
-//!
-//! The state of the operations log up until the last commit point is the "source of truth". In the
-//! event of unclean shutdown, the mmr will be brought back into alignment with the log on startup.
+//! The implementation consists of an authenticated [Journal] storing the log of operations that
+//! have been applied to the database.
 //!
 //! A Keyless database can be in one of four states based on two orthogonal dimensions:
 //! - Merkleization: `Merkleized` (has computed root) or `Unmerkleized` (root not yet computed)
@@ -15,7 +12,7 @@
 //! - `init()`                                    → `(Merkleized,Durable)`
 //! - `(Merkleized,Durable).into_mutable()`       → `(Unmerkleized,NonDurable)`
 //! - `(Unmerkleized,Durable).into_mutable()`     → `(Unmerkleized,NonDurable)`
-//! - `(Unmerkleized,Durable).into_merkleized()`    → `(Merkleized,Durable)`
+//! - `(Unmerkleized,Durable).into_merkleized()`  → `(Merkleized,Durable)`
 //! - `(Unmerkleized,NonDurable).commit()`        → `(Unmerkleized,Durable)`
 //!
 //! We call the combined (Unmerkleized,NonDurable) state the _Mutable_ state since it's the only
@@ -331,9 +328,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
 }
 
 /// Implementation for the (Unmerkleized, Durable) state - the "Durable" state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
-    Keyless<E, V, H, Dirty, Durable>
-{
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H, Dirty, Durable> {
     /// Convert this database into the Mutable state for accepting more operations without
     /// re-merkleizing.
     pub fn into_mutable(self) -> Keyless<E, V, H, Dirty, NonDurable> {
@@ -385,15 +380,22 @@ mod test {
     }
 
     /// Type alias for the Clean (Merkleized, Durable) state.
-    type CleanDb =
-        Keyless<deterministic::Context, Vec<u8>, Sha256, Clean<<Sha256 as Hasher>::Digest>, Durable>;
+    type CleanDb = Keyless<
+        deterministic::Context,
+        Vec<u8>,
+        Sha256,
+        Clean<<Sha256 as Hasher>::Digest>,
+        Durable,
+    >;
 
     /// Type alias for the Mutable (Unmerkleized, NonDurable) state.
     type MutableDb = Keyless<deterministic::Context, Vec<u8>, Sha256, Dirty, NonDurable>;
 
     /// Return a [Keyless] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanDb {
-        CleanDb::init(context, db_config("partition")).await.unwrap()
+        CleanDb::init(context, db_config("partition"))
+            .await
+            .unwrap()
     }
 
     #[test_traced("INFO")]

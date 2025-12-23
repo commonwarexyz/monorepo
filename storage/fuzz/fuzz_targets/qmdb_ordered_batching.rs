@@ -196,9 +196,7 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        db.destroy()
-            .await
-            .expect("destroy should not fail");
+        db.destroy().await.expect("destroy should not fail");
         expected_state.clear();
         all_keys.clear();
     });
