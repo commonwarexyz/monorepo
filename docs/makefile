@@ -13,18 +13,7 @@ mirror:
 	rm -rf code /tmp/commonware-mirror
 	cp -r .. /tmp/commonware-mirror
 	mv /tmp/commonware-mirror code
-	rm -rf code/.git code/target code/docs/code
-	find code -name '.DS_Store' -delete 2>/dev/null || true
-	find code -name '*.swp' -delete 2>/dev/null || true
-	find code -name '.vscode' -type d -exec rm -rf {} + 2>/dev/null || true
-	find code -name '.idea' -type d -exec rm -rf {} + 2>/dev/null || true
-	rm -rf code/examples/flood/assets
-	find code -path '*/fuzz/artifacts' -type d -exec rm -rf {} + 2>/dev/null || true
-	find code -path '*/fuzz/corpus' -type d -exec rm -rf {} + 2>/dev/null || true
-	find code -path '*/fuzz/coverage' -type d -exec rm -rf {} + 2>/dev/null || true
-	find code -path '*/fuzz/target' -type d -exec rm -rf {} + 2>/dev/null || true
-	find code -name '_apalache-out' -type d -exec rm -rf {} + 2>/dev/null || true
-	find code -type d -name 'out*' -path '*/quint/*' -exec rm -rf {} + 2>/dev/null || true
+	rm -rf code/docs/code
 
 # Generate sitemap
 sitemap:
