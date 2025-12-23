@@ -7,10 +7,7 @@ HTML_DEPS := $(shell find . -name "*.html" -type f ! -name "template.html")
 %.html: %.md template.html
 	pandoc $< -o $@ --template=template.html --mathjax --standalone
 
-all: $(MD_TARGETS) $(SITEMAP)
-
-$(SITEMAP): generate_sitemap.py $(MD_TARGETS) $(HTML_DEPS)
-	python3 generate_sitemap.py
+markdown: $(MD_TARGETS)
 
 clean:
 	rm -f $(MD_TARGETS) $(SITEMAP)
@@ -32,7 +29,12 @@ mirror:
 	find code -path '*/fuzz/target' -type d -exec rm -rf {} + 2>/dev/null || true
 	find code -name '_apalache-out' -type d -exec rm -rf {} + 2>/dev/null || true
 	find code -type d -name 'out*' -path '*/quint/*' -exec rm -rf {} + 2>/dev/null || true
+
+# Generate sitemap
+sitemap:
 	python3 generate_sitemap.py
 
-# So that make doesn't think the above two are directories
-.PHONY: all clean mirror
+# Deploy: mirror code and generate sitemap
+deploy: mirror sitemap
+
+.PHONY: markdown clean mirror sitemap deploy
