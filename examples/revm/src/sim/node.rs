@@ -203,10 +203,10 @@ async fn start_node(
             automaton: marshaled.clone(),
             relay: marshaled,
             reporter,
-            partition: format!("revm-chain-{index}"),
+            partition: format!("revm-{index}"),
             mailbox_size: MAILBOX_SIZE,
             epoch: Epoch::zero(),
-            namespace: b"revm-chain-consensus".to_vec(),
+            namespace: b"revm-consensus".to_vec(),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             leader_timeout: Duration::from_millis(50),
@@ -293,7 +293,7 @@ where
     // - a request/response resolver for ancestor backfill, and
     // - local archives for finalized blocks and certificates.
     let ctx = context.with_label(&format!("marshal_{index}"));
-    let partition_prefix = format!("revm-chain-marshal-{index}");
+    let partition_prefix = format!("revm-marshal-{index}");
     let scheme_provider = ConstantSchemeProvider::from(scheme.clone());
 
     let resolver_cfg = marshal::resolver::p2p::Config {
@@ -380,7 +380,7 @@ where
             partition_prefix,
             mailbox_size: MAILBOX_SIZE,
             view_retention_timeout: ViewDelta::new(10),
-            namespace: b"revm-chain-marshal".to_vec(),
+            namespace: b"revm-marshal".to_vec(),
             prunable_items_per_section: NZU64!(10),
             buffer_pool,
             replay_buffer: NZUsize!(1024 * 1024),
