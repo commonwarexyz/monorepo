@@ -302,6 +302,23 @@ where
 
         rx
     }
+
+    /// Acquire a lock to the verification contexts and store the given context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the verification context cannot be persisted.
+    async fn store_verification_context(
+        lock: &Arc<Mutex<VerificationContexts<E, B, S>>>,
+        context: <Self as Automaton>::Context,
+        digest: B::Commitment,
+    ) {
+        let mut contexts_guard = lock.lock().await;
+        contexts_guard
+            .put_sync(digest, context)
+            .await
+            .expect("must persist verification context");
+    }
 }
 
 impl<E, S, A, B, ES> Automaton for Marshaled<E, S, A, B, ES>
@@ -419,12 +436,12 @@ where
                         *lock = Some((consensus_context.round, parent));
                     }
 
-                    let mut contexts_guard = verification_contexts.lock().await;
-                    contexts_guard
-                        .put_sync(digest, consensus_context.clone())
-                        .await
-                        .expect("must persist verification context");
-                    drop(contexts_guard);
+                    Self::store_verification_context(
+                        &verification_contexts,
+                        consensus_context.clone(),
+                        digest,
+                    )
+                    .await;
 
                     let result = tx.send(digest);
                     debug!(
@@ -470,12 +487,12 @@ where
                     *lock = Some((consensus_context.round, built_block));
                 }
 
-                let mut contexts_guard = verification_contexts.lock().await;
-                contexts_guard
-                    .put_sync(digest, consensus_context.clone())
-                    .await
-                    .expect("must persist verification context");
-                drop(contexts_guard);
+                Self::store_verification_context(
+                    &verification_contexts,
+                    consensus_context.clone(),
+                    digest,
+                )
+                .await;
 
                 let result = tx.send(digest);
                 debug!(
@@ -493,12 +510,7 @@ where
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        let mut contexts_guard = self.verification_contexts.lock().await;
-        contexts_guard
-            .put_sync(digest, context)
-            .await
-            .expect("must persist verification context");
-        drop(contexts_guard);
+        Self::store_verification_context(&self.verification_contexts, context, digest).await;
 
         let (tx, rx) = oneshot::channel();
         let _ = tx.send(true);
@@ -520,12 +532,12 @@ where
     ES: Epocher,
 {
     async fn certify(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        let mut contexts_guard = self.verification_contexts.lock().await;
-        let context = contexts_guard.remove(&payload);
-        contexts_guard
-            .sync()
-            .await
-            .expect("must sync verification contexts");
+        // Note: We intentionally don't remove the context from metadata here. Verification contexts
+        // are kept on disk until the block is finalized (via `report`) to support crash recovery.
+        // If we crash before finalization, consensus will replay and re-attempt certification; the
+        // context must still be available on disk to succeed.
+        let contexts_guard = self.verification_contexts.lock().await;
+        let context = contexts_guard.get(&payload).cloned();
         drop(contexts_guard);
 
         if let Some(context) = context {
@@ -599,8 +611,22 @@ where
 {
     type Activity = A::Activity;
 
-    /// Relays a report to the underlying [Application].
+    /// Relays a report to the underlying [`Application`] and cleans up verification contexts.
+    ///
+    /// Verification contexts are kept on disk until finalization to support crash recovery.
+    /// When a block is finalized, its context is no longer needed and is removed here.
     async fn report(&mut self, update: Self::Activity) {
+        // Prune the verification context for blocks that have been finalized.
+        if let Update::Block(ref block, _) = update {
+            let mut contexts_guard = self.verification_contexts.lock().await;
+            contexts_guard.remove(&block.commitment());
+            contexts_guard
+                .sync()
+                .await
+                .expect("must sync verification contexts");
+            drop(contexts_guard);
+        }
+
         self.application.report(update).await
     }
 }
