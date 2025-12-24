@@ -275,7 +275,6 @@ fn fuzz(input: FuzzInput) {
 
         if let Some(mut cache) = cache_opt {
             cache.sync().await.ok();
-            drop(cache);
         }
     });
 }

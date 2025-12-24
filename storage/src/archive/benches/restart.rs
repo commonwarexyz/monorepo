@@ -41,7 +41,6 @@ fn bench_restart(c: &mut Criterion) {
                                 let start = Instant::now();
                                 let a = Archive::init(ctx.clone(), variant, compression).await; // replay happens inside init
                                 total += start.elapsed();
-                                drop(a);
                             }
                             total
                         });

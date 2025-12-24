@@ -510,7 +510,6 @@ mod tests {
             }
 
             archive.sync().await.expect("Failed to sync archive");
-            drop(archive);
         }
 
         {
