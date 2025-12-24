@@ -21,11 +21,11 @@ pub mod tests {
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::collections::HashSet;
 
-    pub trait TestKey: Array {
+    pub trait TestKey: Array + Copy {
         fn from_seed(seed: u8) -> Self;
     }
 
-    pub trait TestValue: Codec + Clone + PartialEq + Debug {
+    pub trait TestValue: Codec + Eq + PartialEq + Debug {
         fn from_seed(seed: u8) -> Self;
     }
 
@@ -61,7 +61,7 @@ pub mod tests {
         let mut new_db_clone = new_db.clone();
         let state1 = executor.start(|context| async move {
             let ctx = context.clone();
-            run_batch_tests::<D, _>(&mut || new_db_clone(ctx.clone()))
+            run_batch_tests(&mut || new_db_clone(ctx.clone()))
                 .await
                 .unwrap();
             ctx.auditor().state()
@@ -70,9 +70,7 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         let state2 = executor.start(|context| async move {
             let ctx = context.clone();
-            run_batch_tests::<D, _>(&mut || new_db(ctx.clone()))
-                .await
-                .unwrap();
+            run_batch_tests(&mut || new_db(ctx.clone())).await.unwrap();
             ctx.auditor().state()
         });
 
@@ -106,22 +104,13 @@ pub mod tests {
     {
         let mut db = new_db().await;
         let key = D::Key::from_seed(1);
-        db.update(key.clone(), <D as Store>::Value::from_seed(1))
-            .await?;
+        db.update(key, TestValue::from_seed(1)).await?;
 
         let mut batch = db.start_batch();
-        assert_eq!(
-            batch.get(&key).await?,
-            Some(<D as Store>::Value::from_seed(1))
-        );
+        assert_eq!(batch.get(&key).await?, Some(TestValue::from_seed(1)));
 
-        batch
-            .update(key.clone(), <D as Store>::Value::from_seed(9))
-            .await?;
-        assert_eq!(
-            batch.get(&key).await?,
-            Some(<D as Store>::Value::from_seed(9))
-        );
+        batch.update(key, TestValue::from_seed(9)).await?;
+        assert_eq!(batch.get(&key).await?, Some(TestValue::from_seed(9)));
 
         destroy_db(db).await
     }
@@ -136,38 +125,18 @@ pub mod tests {
         let mut db = new_db().await;
         let mut batch = db.start_batch();
         let key = D::Key::from_seed(2);
-        assert!(
-            batch
-                .create(key.clone(), <D as Store>::Value::from_seed(1))
-                .await?
-        );
-        assert!(
-            !batch
-                .create(key.clone(), <D as Store>::Value::from_seed(2))
-                .await?
-        );
+        assert!(batch.create(key, TestValue::from_seed(1)).await?);
+        assert!(!batch.create(key, TestValue::from_seed(2)).await?);
 
-        batch.delete_unchecked(key.clone()).await?;
-        assert!(
-            batch
-                .create(key.clone(), <D as Store>::Value::from_seed(3))
-                .await?
-        );
-        assert_eq!(
-            batch.get(&key).await?,
-            Some(<D as Store>::Value::from_seed(3))
-        );
+        batch.delete_unchecked(key).await?;
+        assert!(batch.create(key, TestValue::from_seed(3)).await?);
+        assert_eq!(batch.get(&key).await?, Some(TestValue::from_seed(3)));
 
         let existing = D::Key::from_seed(3);
-        db.update(existing.clone(), <D as Store>::Value::from_seed(4))
-            .await?;
+        db.update(existing, TestValue::from_seed(4)).await?;
 
         let mut batch = db.start_batch();
-        assert!(
-            !batch
-                .create(existing.clone(), <D as Store>::Value::from_seed(5))
-                .await?
-        );
+        assert!(!batch.create(existing, TestValue::from_seed(5)).await?);
 
         destroy_db(db).await
     }
@@ -181,19 +150,16 @@ pub mod tests {
     {
         let mut db = new_db().await;
         let base_key = D::Key::from_seed(4);
-        db.update(base_key.clone(), <D as Store>::Value::from_seed(10))
-            .await?;
+        db.update(base_key, TestValue::from_seed(10)).await?;
         let mut batch = db.start_batch();
-        assert!(batch.delete(base_key.clone()).await?);
+        assert!(batch.delete(base_key).await?);
         assert_eq!(batch.get(&base_key).await?, None);
-        assert!(!batch.delete(base_key.clone()).await?);
+        assert!(!batch.delete(base_key).await?);
 
         let mut batch = db.start_batch();
         let overlay_key = D::Key::from_seed(5);
-        batch
-            .update(overlay_key.clone(), <D as Store>::Value::from_seed(11))
-            .await?;
-        assert!(batch.delete(overlay_key.clone()).await?);
+        batch.update(overlay_key, TestValue::from_seed(11)).await?;
+        assert!(batch.delete(overlay_key).await?);
         assert_eq!(batch.get(&overlay_key).await?, None);
         assert!(!batch.delete(overlay_key).await?);
 
@@ -211,16 +177,13 @@ pub mod tests {
         let key = D::Key::from_seed(6);
 
         let mut batch = db.start_batch();
-        batch
-            .update(key.clone(), <D as Store>::Value::from_seed(12))
-            .await?;
-        batch.delete_unchecked(key.clone()).await?;
+        batch.update(key, TestValue::from_seed(12)).await?;
+        batch.delete_unchecked(key).await?;
         assert_eq!(batch.get(&key).await?, None);
 
-        db.update(key.clone(), <D as Store>::Value::from_seed(13))
-            .await?;
+        db.update(key, TestValue::from_seed(13)).await?;
         let mut batch = db.start_batch();
-        batch.delete_unchecked(key.clone()).await?;
+        batch.delete_unchecked(key).await?;
         assert_eq!(batch.get(&key).await?, None);
 
         destroy_db(db).await
@@ -239,7 +202,7 @@ pub mod tests {
         // Create 100 keys and commit them.
         for i in 0..100 {
             assert!(
-                db.create(D::Key::from_seed(i), <D as Store>::Value::from_seed(i))
+                db.create(D::Key::from_seed(i), TestValue::from_seed(i))
                     .await?
             );
         }
@@ -268,7 +231,7 @@ pub mod tests {
             } else {
                 assert_eq!(
                     Store::get(&durable, &D::Key::from_seed(i)).await?,
-                    Some(<D as Store>::Value::from_seed(i))
+                    Some(TestValue::from_seed(i))
                 );
             }
         }
@@ -279,7 +242,7 @@ pub mod tests {
         for i in 0..100 {
             if deleted.contains(&i) {
                 batch
-                    .create(D::Key::from_seed(i), <D as Store>::Value::from_seed(i))
+                    .create(D::Key::from_seed(i), TestValue::from_seed(i))
                     .await?;
             }
         }
@@ -291,7 +254,7 @@ pub mod tests {
         for i in 0..100 {
             assert_eq!(
                 Store::get(&durable, &D::Key::from_seed(i)).await?,
-                Some(<D as Store>::Value::from_seed(i))
+                Some(TestValue::from_seed(i))
             );
         }
 
@@ -312,29 +275,23 @@ pub mod tests {
         let created1 = D::Key::from_seed(1);
         let created2 = D::Key::from_seed(2);
         let mut batch = db.start_batch();
-        batch
-            .create(created1.clone(), <D as Store>::Value::from_seed(1))
-            .await?;
-        batch
-            .create(created2.clone(), <D as Store>::Value::from_seed(2))
-            .await?;
-        batch
-            .update(created1.clone(), <D as Store>::Value::from_seed(3))
-            .await?;
+        batch.create(created1, TestValue::from_seed(1)).await?;
+        batch.create(created2, TestValue::from_seed(2)).await?;
+        batch.update(created1, TestValue::from_seed(3)).await?;
         db.write_batch(batch.into_iter()).await?;
 
         assert_eq!(
             Store::get(&db, &created1).await?,
-            Some(<D as Store>::Value::from_seed(3))
+            Some(TestValue::from_seed(3))
         );
         assert_eq!(
             Store::get(&db, &created2).await?,
-            Some(<D as Store>::Value::from_seed(2))
+            Some(TestValue::from_seed(2))
         );
 
         let mut delete_batch = db.start_batch();
-        delete_batch.delete(created1.clone()).await?;
-        delete_batch.delete(created2.clone()).await?;
+        delete_batch.delete(created1).await?;
+        delete_batch.delete(created2).await?;
         db.write_batch(delete_batch.into_iter()).await?;
         assert_eq!(Store::get(&db, &created1).await?, None);
         assert_eq!(Store::get(&db, &created2).await?, None);
@@ -345,16 +302,14 @@ pub mod tests {
         let mut db = new_db().await;
         let created1 = D::Key::from_seed(1);
         let mut batch = db.start_batch();
-        batch
-            .create(created1.clone(), <D as Store>::Value::from_seed(1))
-            .await?;
+        batch.create(created1, TestValue::from_seed(1)).await?;
         db.write_batch(batch.into_iter()).await?;
         assert_eq!(
             Store::get(&db, &created1).await?,
-            Some(<D as Store>::Value::from_seed(1))
+            Some(TestValue::from_seed(1))
         );
         let mut delete_batch = db.start_batch();
-        delete_batch.delete(created1.clone()).await?;
+        delete_batch.delete(created1).await?;
         db.write_batch(delete_batch.into_iter()).await?;
         assert_eq!(Store::get(&db, &created1).await?, None);
 
@@ -370,30 +325,25 @@ pub mod tests {
     {
         let mut db = new_db().await;
         let existing = D::Key::from_seed(7);
-        db.update(existing.clone(), <D as Store>::Value::from_seed(7))
-            .await?;
+        db.update(existing, TestValue::from_seed(7)).await?;
 
         let created = D::Key::from_seed(8);
         let mut batch = db.start_batch();
-        batch
-            .update(existing.clone(), <D as Store>::Value::from_seed(8))
-            .await?;
-        batch
-            .create(created.clone(), <D as Store>::Value::from_seed(9))
-            .await?;
+        batch.update(existing, TestValue::from_seed(8)).await?;
+        batch.create(created, TestValue::from_seed(9)).await?;
         db.write_batch(batch.into_iter()).await?;
 
         assert_eq!(
             Store::get(&db, &existing).await?,
-            Some(<D as Store>::Value::from_seed(8))
+            Some(TestValue::from_seed(8))
         );
         assert_eq!(
             Store::get(&db, &created).await?,
-            Some(<D as Store>::Value::from_seed(9))
+            Some(TestValue::from_seed(9))
         );
 
         let mut delete_batch = db.start_batch();
-        delete_batch.delete(existing.clone()).await?;
+        delete_batch.delete(existing).await?;
         db.write_batch(delete_batch.into_iter()).await?;
         assert_eq!(Store::get(&db, &existing).await?, None);
 

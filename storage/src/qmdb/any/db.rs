@@ -148,11 +148,10 @@ where
 
     pub async fn proof(
         &self,
-        start_loc: Location,
+        loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        let size = self.op_count();
-        self.historical_proof(size, start_loc, max_ops).await
+        self.historical_proof(self.op_count(), loc, max_ops).await
     }
 
     pub async fn historical_proof(
@@ -535,14 +534,6 @@ where
 
     fn root(&self) -> H::Digest {
         self.root()
-    }
-
-    async fn proof(
-        &self,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        self.proof(start_loc, max_ops).await
     }
 
     async fn historical_proof(

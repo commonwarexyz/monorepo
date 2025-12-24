@@ -567,14 +567,6 @@ impl<
         self.root()
     }
 
-    async fn proof(
-        &self,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        self.proof(start_loc, max_ops).await
-    }
-
     async fn historical_proof(
         &self,
         historical_size: Location,

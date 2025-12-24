@@ -99,7 +99,9 @@ pub trait MerkleizedStore: LogStore {
         &self,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>>;
+    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> {
+        self.historical_proof(self.op_count(), start_loc, max_ops)
+    }
 
     /// Generate and return:
     ///  1. a proof of all operations applied to the store in the range starting at (and including)

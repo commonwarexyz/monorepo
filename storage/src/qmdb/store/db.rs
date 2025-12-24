@@ -23,8 +23,8 @@
 //! use commonware_math::algebra::Random;
 //! use commonware_runtime::{buffer::PoolRef, deterministic::Runner, Metrics, Runner as _};
 //!
-//! const PAGE_SIZE: usize = 77;
-//! const PAGE_CACHE_SIZE: usize = 9;
+//! const PAGE_SIZE: usize = 8192;
+//! const PAGE_CACHE_SIZE: usize = 100;
 //!
 //! let executor = Runner::default();
 //! executor.start(|mut ctx| async move {
@@ -100,10 +100,10 @@ use core::ops::Range;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
-/// Configuration for initializing a [Db] database.
+/// Configuration for initializing a [Db].
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
-    /// The name of the [`Storage`] partition used to persist the log of operations.
+    /// The name of the [Storage] partition used to persist the log of operations.
     pub log_partition: String,
 
     /// The size of the write buffer to use for each blob in the [Journal].
@@ -118,10 +118,10 @@ pub struct Config<T: Translator, C> {
     /// The number of operations to store in each section of the [Journal].
     pub log_items_per_section: NonZeroU64,
 
-    /// The [`Translator`] used by the compressed index.
+    /// The [Translator] used by the [Index].
     pub translator: T,
 
-    /// The buffer pool to use for caching data.
+    /// The [PoolRef] to use for caching data.
     pub buffer_pool: PoolRef,
 }
 
@@ -163,10 +163,6 @@ where
     /// The state of the store.
     pub state: S,
 }
-
-/// Type alias for the shared state wrapper used by this Any database variant.
-type FloorHelperState<'a, E, K, V, T> =
-    FloorHelper<'a, Index<T, Location>, Journal<E, Operation<K, V>>>;
 
 impl<E, K, V, T, S> Db<E, K, V, T, S>
 where
@@ -266,12 +262,7 @@ where
     V: VariableValue,
     T: Translator,
 {
-    /// Initializes a new [Db] database with the given configuration.
-    ///
-    /// ## Rollback
-    ///
-    /// Any uncommitted operations will be rolled back if the [Db] was previously closed without
-    /// committing.
+    /// Initializes a new [Db] with the given configuration.
     pub async fn init(
         context: E,
         cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
@@ -339,8 +330,7 @@ where
         self.log.sync().await.map_err(Into::into)
     }
 
-    /// Close the db. Operations that have not been committed will be lost or rolled back on
-    /// restart.
+    /// Close the db.
     pub async fn close(self) -> Result<(), Error> {
         self.log.close().await.map_err(Into::into)
     }
@@ -358,7 +348,9 @@ where
     V: VariableValue,
     T: Translator,
 {
-    const fn as_floor_helper(&mut self) -> FloorHelperState<'_, E, K, V, T> {
+    const fn as_floor_helper(
+        &mut self,
+    ) -> FloorHelper<'_, Index<T, Location>, Journal<E, Operation<K, V>>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,

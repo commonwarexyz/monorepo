@@ -15,7 +15,7 @@ use crate::{
         any::VariableValue,
         operation::Committable,
         store::{LogStore, MerkleizedStore, PrunableStore},
-        Error,
+        Durable, Error, NonDurable,
     },
 };
 use commonware_cryptography::{DigestOf, Hasher};
@@ -23,12 +23,6 @@ use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use core::{marker::PhantomData, ops::Range};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
-
-/// Marker for durable state (data is committed to disk).
-pub struct Durable;
-
-/// Marker for non-durable state (uncommitted changes may be lost on crash).
-pub struct NonDurable;
 
 mod operation;
 pub use operation::Operation;
@@ -321,15 +315,6 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D> MerkleizedSto
 
     fn root(&self) -> Self::Digest {
         self.journal.root()
-    }
-
-    async fn proof(
-        &self,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        self.historical_proof(self.op_count(), start_loc, max_ops)
-            .await
     }
 
     async fn historical_proof(

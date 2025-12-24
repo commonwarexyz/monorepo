@@ -628,8 +628,9 @@ where
 }
 
 // MerkleizedStore for Merkleized states (both Durable and NonDurable)
-// TODO: This is broken -- it's computing proofs only over the any db mmr not the grafted mmr, so
-// they won't validate against the grafted root.
+// TODO(https://github.com/commonwarexyz/monorepo/issues/2560): This is broken -- it's computing
+// proofs only over the any db mmr not the grafted mmr, so they won't validate against the grafted
+// root.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -646,14 +647,6 @@ impl<
     fn root(&self) -> Self::Digest {
         self.cached_root
             .expect("Merkleized state must have cached root")
-    }
-
-    async fn proof(
-        &self,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        self.any.proof(start_loc, max_ops).await
     }
 
     async fn historical_proof(
