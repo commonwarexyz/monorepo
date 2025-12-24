@@ -375,10 +375,6 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
         self.intervals.last_index()
     }
 
-    async fn close(self) -> Result<(), Error> {
-        self.journal.close().await.map_err(Error::Journal)
-    }
-
     async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await.map_err(Error::Journal)
     }

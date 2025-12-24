@@ -12,7 +12,6 @@ use prometheus_client::metrics::counter::Counter;
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     marker::PhantomData,
-    mem::take,
 };
 use tracing::{debug, warn};
 
@@ -392,15 +391,6 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         // Clear pending sections
         self.pending.clear();
 
-        Ok(())
-    }
-
-    /// Sync all pending entries and [Blob]s.
-    pub async fn close(mut self) -> Result<(), Error> {
-        self.sync().await?;
-        for (_, blob) in take(&mut self.blobs) {
-            blob.sync().await?;
-        }
         Ok(())
     }
 

@@ -18,7 +18,7 @@ fn bench_restart(c: &mut Criterion) {
                 builder.start(|ctx| async move {
                     let mut a = Archive::init(ctx, variant, compression).await;
                     append_random(&mut a, items).await;
-                    a.close().await.unwrap();
+                    a.sync().await.unwrap();
                 });
 
                 // Run the benchmarks
@@ -41,7 +41,7 @@ fn bench_restart(c: &mut Criterion) {
                                 let start = Instant::now();
                                 let a = Archive::init(ctx.clone(), variant, compression).await; // replay happens inside init
                                 total += start.elapsed();
-                                a.close().await.unwrap();
+                                drop(a);
                             }
                             total
                         });
