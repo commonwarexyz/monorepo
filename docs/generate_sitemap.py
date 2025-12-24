@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from urllib.parse import urljoin
 from xml.sax.saxutils import escape
@@ -14,6 +15,20 @@ BASE_URL = "https://commonware.xyz"
 EXCLUDED_FILES = {"template.html"}
 EXCLUDED_DIRS = {".venv"}
 EXTRA_FILES = ["llms.txt", "robots.txt"]
+
+
+def get_versions() -> list[str]:
+    """Get last 3 git tags as versions. Fails if no tag exists."""
+    result = subprocess.run(
+        ["git", "-C", str(DOCS_ROOT.parent), "tag", "-l", "v*", "--sort=-v:refname"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    all_tags = [t for t in result.stdout.strip().split("\n") if t]
+    if not all_tags:
+        raise RuntimeError("No version tags found")
+    return all_tags[:3]
 
 
 def collect_html() -> list[Path]:
@@ -39,9 +54,9 @@ def collect_html() -> list[Path]:
 CODE_EXTENSIONS = {".md", ".rs", ".toml"}
 
 
-def collect_code() -> list[Path]:
-    """Return sorted relative paths of code files to include in the sitemap."""
-    code_dir = DOCS_ROOT / "code"
+def collect_code(version: str) -> list[Path]:
+    """Return sorted relative paths of code files from the versioned directory."""
+    code_dir = DOCS_ROOT / "code" / version
     if not code_dir.exists():
         return []
 
@@ -88,9 +103,34 @@ def write_sitemap(urls: list[str]) -> None:
     (DOCS_ROOT / "sitemap.xml").write_text(content, encoding="utf-8")
 
 
+def write_llms_txt(versions: list[str]) -> None:
+    """Write llms.txt with versioned paths for LLM discovery."""
+    latest = versions[0]
+    version_lines = [f"- /code/{versions[0]}/ (latest)"]
+    version_lines += [f"- /code/{v}/" for v in versions[1:]]
+    content = f"""# Commonware Library
+
+Find more information at [README.md](/code/{latest}/README.md).
+
+## Paths
+
+{chr(10).join(version_lines)}
+
+View [sitemap.xml](/sitemap.xml) for all filepaths.
+"""
+    (DOCS_ROOT / "llms.txt").write_text(content, encoding="utf-8")
+
+
 def main() -> None:
+    versions = get_versions()
+
+    # Write llms.txt with versioned paths
+    write_llms_txt(versions)
+
+    # Collect URLs - include all version paths in sitemap
     urls = [build_url(rel, BASE_URL) for rel in collect_html()]
-    urls += [build_url(rel, BASE_URL) for rel in collect_code()]
+    for version in versions:
+        urls += [build_url(rel, BASE_URL) for rel in collect_code(version)]
     for extra in EXTRA_FILES:
         urls.append(urljoin(BASE_URL.rstrip("/") + "/", extra))
     write_sitemap(urls)
