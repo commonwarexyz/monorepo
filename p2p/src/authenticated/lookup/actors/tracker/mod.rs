@@ -3,7 +3,11 @@
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use std::{collections::HashSet, net::IpAddr};
+use std::{
+    collections::HashSet,
+    net::IpAddr,
+    time::{Duration, SystemTime},
+};
 
 pub mod actor;
 mod directory;
@@ -18,6 +22,15 @@ pub use ingress::{Message, Oracle};
 pub use metadata::Metadata;
 pub use reservation::Reservation;
 
+/// Message containing listener filter information.
+#[derive(Clone, Debug)]
+pub struct ListenerFilter {
+    /// IPs of eligible peers we should accept connections from.
+    pub registered_ips: HashSet<IpAddr>,
+    /// IPs of blocked peers with their expiry times.
+    pub blocked_ips: std::collections::HashMap<IpAddr, SystemTime>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config<C: Signer> {
     pub crypto: C,
@@ -25,5 +38,6 @@ pub struct Config<C: Signer> {
     pub allowed_connection_rate_per_peer: Quota,
     pub allow_private_ips: bool,
     pub allow_dns: bool,
-    pub listener: Mailbox<HashSet<IpAddr>>,
+    pub block_duration: Duration,
+    pub listener: Mailbox<ListenerFilter>,
 }

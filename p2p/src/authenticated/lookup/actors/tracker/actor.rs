@@ -1,7 +1,7 @@
 use super::{
     directory::{self, Directory},
     ingress::{Message, Oracle},
-    Config,
+    Config, ListenerFilter,
 };
 use crate::authenticated::{
     lookup::actors::{peer, tracker::ingress::Releaser},
@@ -16,10 +16,7 @@ use commonware_runtime::{
 use commonware_utils::ordered::Set;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
-use std::{
-    collections::{HashMap, HashSet},
-    net::IpAddr,
-};
+use std::collections::HashMap;
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
@@ -35,7 +32,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     receiver: mpsc::UnboundedReceiver<Message<C::PublicKey>>,
 
     /// The mailbox for the listener.
-    listener: Mailbox<HashSet<IpAddr>>,
+    listener: Mailbox<ListenerFilter>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
@@ -67,6 +64,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             rate_limit: cfg.allowed_connection_rate_per_peer,
             allow_private_ips: cfg.allow_private_ips,
             allow_dns: cfg.allow_dns,
+            block_duration: cfg.block_duration,
         };
 
         // Create the mailboxes
@@ -132,8 +130,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     }
                 }
 
-                // Send the updated listenable IPs to the listener.
-                let _ = self.listener.send(self.directory.listenable()).await;
+                // Send the updated filter to the listener.
+                let filter = ListenerFilter {
+                    registered_ips: self.directory.listenable(),
+                    blocked_ips: self.directory.blocked_ips(),
+                };
+                let _ = self.listener.send(filter).await;
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
@@ -207,8 +209,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     peer.kill().await;
                 }
 
-                // Send the updated listenable IPs to the listener.
-                let _ = self.listener.send(self.directory.listenable()).await;
+                // Send the updated filter to the listener.
+                let filter = ListenerFilter {
+                    registered_ips: self.directory.listenable(),
+                    blocked_ips: self.directory.blocked_ips(),
+                };
+                let _ = self.listener.send(filter).await;
             }
             Message::Release { metadata } => {
                 // Clear the peer handle if it exists
@@ -240,7 +246,7 @@ mod tests {
     };
 
     // Test Configuration Setup
-    fn default_test_config<C: Signer>(crypto: C) -> (Config<C>, mpsc::Receiver<HashSet<IpAddr>>) {
+    fn default_test_config<C: Signer>(crypto: C) -> (Config<C>, mpsc::Receiver<ListenerFilter>) {
         let (registered_ips_sender, registered_ips_receiver) = Mailbox::new(1);
         (
             Config {
@@ -249,6 +255,7 @@ mod tests {
                 allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
                 allow_private_ips: true,
                 allow_dns: true,
+                block_duration: Duration::from_secs(60),
                 listener: registered_ips_sender,
             },
             registered_ips_receiver,
@@ -599,10 +606,10 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Wait for a listener update
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(registered_ips.contains(&my_addr.ip()));
-            assert!(registered_ips.contains(&addr_1.ip()));
-            assert!(!registered_ips.contains(&addr_2.ip()));
+            let filter = listener_receiver.next().await.unwrap();
+            assert!(filter.registered_ips.contains(&my_addr.ip()));
+            assert!(filter.registered_ips.contains(&addr_1.ip()));
+            assert!(!filter.registered_ips.contains(&addr_2.ip()));
 
             // Mark peer as connected
             let reservation = mailbox.listen(pk_1.clone()).await;
@@ -617,10 +624,10 @@ mod tests {
                 .await;
 
             // Wait for a listener update
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(!registered_ips.contains(&my_addr.ip()));
-            assert!(!registered_ips.contains(&addr_1.ip()));
-            assert!(registered_ips.contains(&addr_2.ip()));
+            let filter = listener_receiver.next().await.unwrap();
+            assert!(!filter.registered_ips.contains(&my_addr.ip()));
+            assert!(!filter.registered_ips.contains(&addr_1.ip()));
+            assert!(filter.registered_ips.contains(&addr_2.ip()));
 
             // The first peer should be have received a kill message because its
             // peer set was removed because `tracked_peer_sets` is 1.

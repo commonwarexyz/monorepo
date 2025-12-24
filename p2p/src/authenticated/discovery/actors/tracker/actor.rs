@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::ingress::Acceptable;
 use super::{
     directory::{self, Directory},
     ingress::{Message, Oracle},
@@ -79,6 +81,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             max_sets: cfg.tracked_peer_sets,
             dial_fail_limit: cfg.dial_fail_limit,
             rate_limit: cfg.allowed_connection_rate_per_peer,
+            block_duration: cfg.block_duration,
         };
 
         // Create the mailboxes
@@ -319,6 +322,7 @@ mod tests {
             peer_gossip_max_count: 5,
             max_peer_set_size: 128,
             dial_fail_limit: 1,
+            block_duration: Duration::from_secs(60),
         }
     }
 
@@ -795,9 +799,18 @@ mod tests {
             } = setup_actor(context.clone(), cfg_initial);
 
             // None listenable because not registered
-            assert!(!mailbox.acceptable(peer_pk.clone()).await);
-            assert!(!mailbox.acceptable(peer_pk2.clone()).await);
-            assert!(!mailbox.acceptable(peer_pk3.clone()).await);
+            assert_eq!(
+                mailbox.acceptable(peer_pk.clone()).await,
+                Acceptable::Unknown
+            );
+            assert_eq!(
+                mailbox.acceptable(peer_pk2.clone()).await,
+                Acceptable::Unknown
+            );
+            assert_eq!(
+                mailbox.acceptable(peer_pk3.clone()).await,
+                Acceptable::Unknown
+            );
 
             oracle
                 .update(0, [peer_pk.clone(), peer_pk2.clone()].try_into().unwrap())
@@ -805,11 +818,11 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Not listenable because self
-            assert!(!mailbox.acceptable(peer_pk).await);
+            assert_eq!(mailbox.acceptable(peer_pk).await, Acceptable::Unknown);
             // Listenable because registered
-            assert!(mailbox.acceptable(peer_pk2).await);
+            assert_eq!(mailbox.acceptable(peer_pk2).await, Acceptable::Yes);
             // Not listenable because not registered
-            assert!(!mailbox.acceptable(peer_pk3).await);
+            assert_eq!(mailbox.acceptable(peer_pk3).await, Acceptable::Unknown);
         });
     }
 
@@ -834,12 +847,15 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
-            assert!(mailbox.acceptable(peer_pk.clone()).await);
+            assert_eq!(mailbox.acceptable(peer_pk.clone()).await, Acceptable::Yes);
 
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some());
 
-            assert!(!mailbox.acceptable(peer_pk.clone()).await);
+            assert_eq!(
+                mailbox.acceptable(peer_pk.clone()).await,
+                Acceptable::Unknown
+            );
 
             let failed_reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(failed_reservation.is_none());

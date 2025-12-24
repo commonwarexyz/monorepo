@@ -15,7 +15,7 @@ mod reservation;
 mod set;
 
 pub use actor::Actor;
-pub use ingress::{Message, Oracle};
+pub use ingress::{Acceptable, Message, Oracle};
 pub use metadata::Metadata;
 pub use reservation::Reservation;
 
@@ -31,6 +31,7 @@ pub struct Config<C: Signer> {
     pub tracked_peer_sets: usize,
     pub max_peer_set_size: u64,
     pub allowed_connection_rate_per_peer: Quota,
+    pub block_duration: Duration,
     pub peer_gossip_max_count: usize,
     pub dial_fail_limit: usize,
 }

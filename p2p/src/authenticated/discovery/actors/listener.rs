@@ -11,7 +11,7 @@ use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
     SinkOf, Spawner, StreamOf,
 };
-use commonware_stream::{listen, Config as StreamConfig};
+use commonware_stream::{listen, Config as StreamConfig, Error as StreamError};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
@@ -103,9 +103,23 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
         mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
+        // Track the rejection reason from the bouncer
+        let rejection_reason = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let rejection_reason_clone = rejection_reason.clone();
+
         let (peer, send, recv) = match listen(
             context,
-            |peer| tracker.acceptable(peer),
+            |peer| {
+                let mut tracker = tracker.clone();
+                let rejection_reason = rejection_reason_clone.clone();
+                async move {
+                    let result = tracker.acceptable(peer).await;
+                    if result != tracker::Acceptable::Yes {
+                        *rejection_reason.lock().unwrap() = Some(result);
+                    }
+                    result == tracker::Acceptable::Yes
+                }
+            },
             stream_cfg,
             stream,
             sink,
@@ -113,6 +127,20 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
         .await
         {
             Ok(x) => x,
+            Err(StreamError::PeerRejected(_)) => {
+                // The bouncer returned false - check the captured reason
+                let reason = rejection_reason.lock().unwrap().take();
+                match reason {
+                    Some(tracker::Acceptable::Blocked) => {
+                        debug!(?address, "peer is blocked");
+                    }
+                    Some(tracker::Acceptable::Unknown) | None => {
+                        debug!(?address, "peer not acceptable (unknown or not in peer set)");
+                    }
+                    Some(tracker::Acceptable::Yes) => unreachable!(),
+                }
+                return;
+            }
             Err(err) => {
                 debug!(?err, "failed to complete handshake");
                 return;
@@ -300,7 +328,7 @@ mod tests {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
+                            let _ = responder.send(tracker::Acceptable::Yes);
                         }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
@@ -443,7 +471,7 @@ mod tests {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
+                            let _ = responder.send(tracker::Acceptable::Yes);
                         }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);

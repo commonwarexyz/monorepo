@@ -96,6 +96,12 @@ pub struct Config<C: Signer> {
     /// set (if we, for example, are trying to do a reshare of a threshold
     /// key).
     pub tracked_peer_sets: usize,
+
+    /// Duration after which blocked peers are automatically unblocked.
+    ///
+    /// This allows recovery from temporary issues like misconfigured nodes
+    /// without requiring restarts across all peers.
+    pub block_duration: Duration,
 }
 
 impl<C: Signer> Config<C> {
@@ -127,6 +133,7 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_secs(1),
             query_frequency: Duration::from_secs(60),
             tracked_peer_sets: 4,
+            block_duration: Duration::from_secs(60 * 60), // 1 hour
         }
     }
 
@@ -158,6 +165,7 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(500),
             query_frequency: Duration::from_secs(30),
             tracked_peer_sets: 4,
+            block_duration: Duration::from_secs(60 * 60), // 1 hour
         }
     }
 
@@ -184,6 +192,7 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(200),
             query_frequency: Duration::from_secs(5),
             tracked_peer_sets: 4,
+            block_duration: Duration::from_secs(60), // 1 minute for tests
         }
     }
 }
