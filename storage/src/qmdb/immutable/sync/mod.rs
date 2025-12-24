@@ -185,9 +185,8 @@ mod tests {
         sha256::Digest,
         Sha256,
         crate::translator::TwoCap,
-        immutable::Merkleized<Sha256>,
-        immutable::Durable,
     >;
+
     /// Type alias for mutable state (Unmerkleized, NonDurable)
     type ImmutableSyncTestMutable = immutable::Immutable<
         deterministic::Context,
@@ -252,8 +251,7 @@ mod tests {
                     db.set(key, value).await.unwrap();
                 }
                 Operation::Commit(_metadata) => {
-                    // Note: commit consumes self in 4-state model, skip in apply_ops.
-                    // Individual tests must handle commits explicitly.
+                    // Commit causes a state change, so it is not supported here.
                     panic!("Commit operation not supported in apply_ops");
                 }
             }
@@ -321,7 +319,7 @@ mod tests {
                 assert_eq!(synced_value, Some(*expected_value));
             }
 
-            // Put more key-value pairs into the synced database
+            // Put more key-value pairs into both databases
             let mut new_ops = Vec::new();
             let mut rng = StdRng::seed_from_u64(42);
             let mut new_kvs: HashMap<sha256::Digest, sha256::Digest> = HashMap::new();
@@ -332,23 +330,27 @@ mod tests {
                 new_kvs.insert(key, value);
             }
 
-            // Apply new operations to the synced database
+            // Apply new operations to both databases.
             let mut got_db = got_db.into_mutable();
             apply_ops(&mut got_db, new_ops.clone()).await;
+            let mut target_db = Arc::try_unwrap(target_db).map_or_else(
+                |_| panic!("target_db should have no other references"),
+                |rw_lock| rw_lock.into_inner().into_mutable(),
+            );
+            apply_ops(&mut target_db, new_ops.clone()).await;
 
-            // Verify the synced database has the new values
+            // Verify both databases have the new values
             for (key, expected_value) in &new_kvs {
                 let synced_value = got_db.get(key).await.unwrap();
                 assert_eq!(synced_value, Some(*expected_value));
+                let target_value = target_db.get(key).await.unwrap();
+                assert_eq!(target_value, Some(*expected_value));
             }
 
-            let (durable_db, _) = got_db.commit(None).await.unwrap();
-            durable_db.into_merkleized().destroy().await.unwrap();
-            let target_db = Arc::try_unwrap(target_db).map_or_else(
-                |_| panic!("Failed to unwrap Arc - still has references"),
-                |rw_lock| rw_lock.into_inner(),
-            );
-            target_db.destroy().await.unwrap();
+            let (got_durable, _) = got_db.commit(None).await.unwrap();
+            got_durable.into_merkleized().destroy().await.unwrap();
+            let (target_durable, _) = target_db.commit(None).await.unwrap();
+            target_durable.into_merkleized().destroy().await.unwrap();
         });
     }
 

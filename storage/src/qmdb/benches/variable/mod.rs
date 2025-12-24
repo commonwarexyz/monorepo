@@ -12,7 +12,6 @@ use commonware_storage::{
             VariableConfig as AConfig,
         },
         store::LogStore,
-        Durable, Merkleized,
     },
     translator::EightCap,
 };
@@ -61,11 +60,9 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-/// Clean (Merkleized, Durable) type aliases.
-type UVariableClean =
-    UVariable<Context, Digest, Vec<u8>, Sha256, EightCap, Merkleized<Sha256>, Durable>;
-type OVariableClean =
-    OVariable<Context, Digest, Vec<u8>, Sha256, EightCap, Merkleized<Sha256>, Durable>;
+/// Clean (Merkleized, Durable) db type aliases.
+type UVariableDb = UVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
+type OVariableDb = OVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
 
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     AConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
@@ -84,16 +81,16 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
     }
 }
 
-async fn get_any_unordered(ctx: Context) -> UVariableClean {
+async fn get_any_unordered(ctx: Context) -> UVariableDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
-    UVariableClean::init(ctx, any_cfg).await.unwrap()
+    UVariableDb::init(ctx, any_cfg).await.unwrap()
 }
 
-async fn get_any_ordered(ctx: Context) -> OVariableClean {
+async fn get_any_ordered(ctx: Context) -> OVariableDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
-    OVariableClean::init(ctx, any_cfg).await.unwrap()
+    OVariableDb::init(ctx, any_cfg).await.unwrap()
 }
 
 /// Generate a large db with random data. The function seeds the db with exactly `num_elements`

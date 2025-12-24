@@ -14,14 +14,15 @@ use commonware_storage::{
             },
             FixedConfig as Config,
         },
-        Durable, Merkleized,
+        operation::Committable,
     },
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
+use tracing::error;
 
-/// Database type alias for the clean (merkleized, durable) state.
-pub type Database<E> = Db<E, Key, Value, Hasher, Translator, Merkleized<Hasher>, Durable>;
+/// Database type alias for the Clean state.
+pub type Database<E> = Db<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
 pub type Operation = FixedOperation<Key, Value>;
@@ -80,6 +81,11 @@ where
         self,
         operations: Vec<Self::Operation>,
     ) -> Result<Self, commonware_storage::qmdb::Error> {
+        if operations.last().is_none() || !operations.last().unwrap().is_commit() {
+            // Ignore bad inputs rather than return errors.
+            error!("operations must end with a commit");
+            return Ok(self);
+        }
         let mut db = self.into_mutable();
         let num_ops = operations.len();
 
@@ -102,8 +108,7 @@ where
                 }
             }
         }
-
-        panic!("operations must end with a commit");
+        panic!("operations should end with a commit");
     }
 
     fn root(&self) -> Key {

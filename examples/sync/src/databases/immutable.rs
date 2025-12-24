@@ -103,8 +103,7 @@ where
                 }
             }
         }
-
-        panic!("operations must end with a commit");
+        unreachable!("operations must end with a commit");
     }
 
     fn root(&self) -> Key {

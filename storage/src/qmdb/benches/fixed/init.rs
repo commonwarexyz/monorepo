@@ -4,8 +4,8 @@
 use crate::fixed::{
     any_cfg, current_cfg, gen_random_kv, get_any_ordered_fixed, get_any_ordered_variable,
     get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
-    get_current_unordered_fixed, variable_any_cfg, Digest, OCurrentDb, OFixedClean, OVAnyClean,
-    UCurrentDb, UFixedClean, UVAnyClean, Variant, THREADS, VARIANTS,
+    get_current_unordered_fixed, variable_any_cfg, Digest, OCurrentDb, OFixedDb, OVAnyDb,
+    UCurrentDb, UFixedDb, UVAnyDb, Variant, THREADS, VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -107,14 +107,14 @@ fn bench_fixed_init(c: &mut Criterion) {
                             for _ in 0..iters {
                                 match variant {
                                     Variant::AnyUnorderedFixed => {
-                                        let db = UFixedClean::init(ctx.clone(), any_cfg.clone())
+                                        let db = UFixedDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
                                     Variant::AnyOrderedFixed => {
-                                        let db = OFixedClean::init(ctx.clone(), any_cfg.clone())
+                                        let db = OFixedDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
@@ -136,7 +136,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                                     }
                                     Variant::AnyUnorderedVariable => {
                                         let db =
-                                            UVAnyClean::init(ctx.clone(), variable_any_cfg.clone())
+                                            UVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
                                                 .await
                                                 .unwrap();
                                         assert_ne!(db.op_count(), 0);
@@ -144,7 +144,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                                     }
                                     Variant::AnyOrderedVariable => {
                                         let db =
-                                            OVAnyClean::init(ctx.clone(), variable_any_cfg.clone())
+                                            OVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
                                                 .await
                                                 .unwrap();
                                         assert_ne!(db.op_count(), 0);

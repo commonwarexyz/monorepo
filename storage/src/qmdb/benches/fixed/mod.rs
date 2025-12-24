@@ -20,7 +20,6 @@ use commonware_storage::{
             FixedConfig as CConfig,
         },
         store::LogStore,
-        Durable, Merkleized,
     },
     translator::EightCap,
 };
@@ -88,11 +87,11 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-/// Clean (Merkleized, Durable) type aliases for Any databases.
-type UFixedClean = UFixed<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
-type OFixedClean = OFixed<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
-type UVAnyClean = UVariable<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
-type OVAnyClean = OVariable<Context, Digest, Digest, Sha256, EightCap, Merkleized<Sha256>, Durable>;
+/// Clean (Merkleized, Durable) Db type aliases for Any databases.
+type UFixedDb = UFixed<Context, Digest, Digest, Sha256, EightCap>;
+type OFixedDb = OFixed<Context, Digest, Digest, Sha256, EightCap>;
+type UVAnyDb = UVariable<Context, Digest, Digest, Sha256, EightCap>;
+type OVAnyDb = OVariable<Context, Digest, Digest, Sha256, EightCap>;
 
 type UCurrentDb = UCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 type OCurrentDb = OCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
@@ -148,31 +147,31 @@ fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
 }
 
 /// Get an unordered fixed Any QMDB instance in clean state.
-async fn get_any_unordered_fixed(ctx: Context) -> UFixedClean {
+async fn get_any_unordered_fixed(ctx: Context) -> UFixedDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
-    UFixedClean::init(ctx, any_cfg).await.unwrap()
+    UFixedDb::init(ctx, any_cfg).await.unwrap()
 }
 
 /// Get an ordered fixed Any QMDB instance in clean state.
-async fn get_any_ordered_fixed(ctx: Context) -> OFixedClean {
+async fn get_any_ordered_fixed(ctx: Context) -> OFixedDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
-    OFixedClean::init(ctx, any_cfg).await.unwrap()
+    OFixedDb::init(ctx, any_cfg).await.unwrap()
 }
 
 /// Get an unordered variable Any QMDB instance in clean state.
-async fn get_any_unordered_variable(ctx: Context) -> UVAnyClean {
+async fn get_any_unordered_variable(ctx: Context) -> UVAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let variable_any_cfg = variable_any_cfg(pool);
-    UVAnyClean::init(ctx, variable_any_cfg).await.unwrap()
+    UVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
 }
 
 /// Get an ordered variable Any QMDB instance in clean state.
-async fn get_any_ordered_variable(ctx: Context) -> OVAnyClean {
+async fn get_any_ordered_variable(ctx: Context) -> OVAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let variable_any_cfg = variable_any_cfg(pool);
-    OVAnyClean::init(ctx, variable_any_cfg).await.unwrap()
+    OVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
 }
 
 /// Get an unordered current QMDB instance.

@@ -2,8 +2,8 @@
 //! database with variable-sized values.
 
 use crate::variable::{
-    any_cfg, gen_random_kv, get_any_ordered, get_any_unordered, Digest, OVariableClean,
-    UVariableClean, Variant, THREADS, VARIANTS,
+    any_cfg, gen_random_kv, get_any_ordered, get_any_unordered, Digest, OVariableDb, UVariableDb,
+    Variant, THREADS, VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -87,7 +87,7 @@ fn bench_variable_init(c: &mut Criterion) {
                                         let pool =
                                             commonware_runtime::create_pool(ctx.clone(), THREADS)
                                                 .unwrap();
-                                        let db = UVariableClean::init(ctx.clone(), any_cfg(pool))
+                                        let db = UVariableDb::init(ctx.clone(), any_cfg(pool))
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
@@ -97,7 +97,7 @@ fn bench_variable_init(c: &mut Criterion) {
                                         let pool =
                                             commonware_runtime::create_pool(ctx.clone(), THREADS)
                                                 .unwrap();
-                                        let db = OVariableClean::init(ctx.clone(), any_cfg(pool))
+                                        let db = OVariableDb::init(ctx.clone(), any_cfg(pool))
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);

@@ -218,7 +218,7 @@ impl<
     }
 }
 
-// Functionality for the (Merkleized, Durable) state.
+// Functionality for the Clean state.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -422,8 +422,8 @@ impl<
         self.any.destroy().await
     }
 
-    /// Convert this clean database into its dirty counterpart for performing mutations.
-    pub fn into_dirty(self) -> Db<E, K, V, H, T, N, Unmerkleized, NonDurable> {
+    /// Transition into the mutable state.
+    pub fn into_mutable(self) -> Db<E, K, V, H, T, N, Unmerkleized, NonDurable> {
         Db {
             any: self.any.into_mutable(),
             status: self.status.into_dirty(),
@@ -462,7 +462,7 @@ impl<
     }
 }
 
-// Functionality for the (Unmerkleized, NonDurable) (aka "Mutable") state.
+// Functionality for the Mutable state.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -609,6 +609,44 @@ impl<
     }
 }
 
+// Functionality for (Merkleized, NonDurable) state.
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > Db<E, K, V, H, T, N, Merkleized<H>, NonDurable>
+{
+    /// Transition into the mutable state.
+    pub fn into_mutable(self) -> Db<E, K, V, H, T, N, Unmerkleized, NonDurable> {
+        Db {
+            any: self.any.into_mutable(),
+            status: self.status.into_dirty(),
+            context: self.context,
+            bitmap_metadata_partition: self.bitmap_metadata_partition,
+            cached_root: None,
+        }
+    }
+
+    /// Commit any pending operations to the database, ensuring their durability upon return.
+    /// Returns the committed database and the range of committed operations.
+    pub async fn commit(
+        self,
+        metadata: Option<V>,
+    ) -> Result<
+        (
+            Db<E, K, V, H, T, N, Merkleized<H>, Durable>,
+            Range<Location>,
+        ),
+        Error,
+    > {
+        let (durable, range) = self.into_mutable().commit(metadata).await?;
+        Ok((durable.into_merkleized().await?, range))
+    }
+}
+
 // Functionality for (Unmerkleized, Durable) state.
 impl<
         E: RStorage + Clock + Metrics,
@@ -654,47 +692,20 @@ impl<
             cached_root,
         })
     }
-}
 
-// Functionality for (Merkleized, NonDurable) state.
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > Db<E, K, V, H, T, N, Merkleized<H>, NonDurable>
-{
-    /// Convert to mutable (Unmerkleized, NonDurable) state.
+    /// Transition into the mutable state.
     pub fn into_mutable(self) -> Db<E, K, V, H, T, N, Unmerkleized, NonDurable> {
         Db {
             any: self.any.into_mutable(),
-            status: self.status.into_dirty(),
+            status: self.status,
             context: self.context,
             bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
         }
     }
-
-    /// Commit any pending operations to the database, ensuring their durability upon return.
-    /// Returns the committed database and the range of committed operations.
-    pub async fn commit(
-        self,
-        metadata: Option<V>,
-    ) -> Result<
-        (
-            Db<E, K, V, H, T, N, Merkleized<H>, Durable>,
-            Range<Location>,
-        ),
-        Error,
-    > {
-        let (durable, range) = self.into_mutable().commit(metadata).await?;
-        Ok((durable.into_merkleized().await?, range))
-    }
 }
 
-// LogStore implementation for all states
+// LogStore implementation for all states.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -802,6 +813,9 @@ where
 }
 
 // MerkleizedStore for Merkleized states (both Durable and NonDurable)
+// TODO(https://github.com/commonwarexyz/monorepo/issues/2560): This is broken -- it's computing
+// proofs only over the any db mmr not the grafted mmr, so they won't validate against the grafted
+// root.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -840,7 +854,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-        D: crate::qmdb::store::State,
+        D: DurabilityState,
     > PrunableStore for Db<E, K, V, H, T, N, Merkleized<H>, D>
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
@@ -848,7 +862,7 @@ impl<
     }
 }
 
-// Persistable for Merkleized, Durable state
+// Persistable for Clean state
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -892,7 +906,7 @@ impl<
     type Mutable = Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
 
     fn into_mutable(self) -> Self::Mutable {
-        self.into_dirty()
+        self.into_mutable()
     }
 }
 
@@ -913,13 +927,7 @@ impl<
     type Merkleized = Db<E, K, V, H, T, N, Merkleized<H>, Durable>;
 
     fn into_mutable(self) -> Self::Mutable {
-        Db {
-            any: self.any.into_mutable(),
-            status: self.status, // Already in Dirty (Unmerkleized) state
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
-            cached_root: None,
-        }
+        self.into_mutable()
     }
 
     async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
@@ -1038,7 +1046,7 @@ pub mod test {
             // Add one key.
             let k1 = Sha256::hash(&0u64.to_be_bytes());
             let v1 = Sha256::hash(&10u64.to_be_bytes());
-            let mut db = db.into_dirty();
+            let mut db = db.into_mutable();
             assert!(db.create(k1, v1).await.unwrap());
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             let (db, _) = db.commit(None).await.unwrap();
@@ -1053,7 +1061,7 @@ pub mod test {
             assert_eq!(db.root(), root1);
 
             // Create of same key should fail.
-            let mut db = db.into_dirty();
+            let mut db = db.into_mutable();
             assert!(!db.create(k1, v1).await.unwrap());
 
             // Delete that one key.
@@ -1074,7 +1082,7 @@ pub mod test {
             assert_eq!(db.root(), root2);
 
             // Repeated delete of same key should fail.
-            let mut db = db.into_dirty();
+            let mut db = db.into_mutable();
             assert!(!db.delete(k1).await.unwrap());
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
@@ -1096,7 +1104,7 @@ pub mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut db = open_db(context.clone(), "build_big").await.into_dirty();
+            let mut db = open_db(context.clone(), "build_big").await.into_mutable();
 
             let mut map = HashMap::<Digest, Digest>::default();
             for i in 0u64..ELEMENTS {
@@ -1173,7 +1181,7 @@ pub mod test {
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
             let partition = "build_small";
-            let mut db = open_db(context.clone(), partition).await.into_dirty();
+            let mut db = open_db(context.clone(), partition).await.into_mutable();
 
             // Add one key.
             let k = Sha256::fill(0x01);
@@ -1216,7 +1224,7 @@ pub mod test {
             ));
 
             // Update the key to a new value (v2), which inactivates the previous operation.
-            let mut db = db.into_dirty();
+            let mut db = db.into_mutable();
             db.update(k, v2).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
@@ -1364,13 +1372,13 @@ pub mod test {
                 // Commit every ~20 updates.
                 let (durable_db, _) = db.commit(None).await?;
                 let clean_db = durable_db.into_merkleized().await?;
-                db = clean_db.into_dirty();
+                db = clean_db.into_mutable();
             }
         }
         if commit_changes {
             let (durable_db, _) = db.commit(None).await?;
             let clean_db = durable_db.into_merkleized().await?;
-            db = clean_db.into_dirty();
+            db = clean_db.into_mutable();
         }
         Ok(db)
     }
@@ -1381,7 +1389,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "range_proofs";
             let mut hasher = StandardHasher::<Sha256>::new();
-            let db = open_db(context.clone(), partition).await.into_dirty();
+            let db = open_db(context.clone(), partition).await.into_mutable();
             let db = apply_random_ops(200, true, context.next_u64(), db)
                 .await
                 .unwrap();
@@ -1424,7 +1432,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "range_proofs";
             let mut hasher = StandardHasher::<Sha256>::new();
-            let db = open_db(context.clone(), partition).await.into_dirty();
+            let db = open_db(context.clone(), partition).await.into_mutable();
             let db = apply_random_ops(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
@@ -1514,7 +1522,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random";
             let rng_seed = context.next_u64();
-            let db = open_db(context.clone(), partition).await.into_dirty();
+            let db = open_db(context.clone(), partition).await.into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -1548,7 +1556,7 @@ pub mod test {
             let mut old_val = Sha256::fill(0x00);
             for i in 1u8..=255 {
                 let v = Sha256::fill(i);
-                let mut dirty_db = db.into_dirty();
+                let mut dirty_db = db.into_mutable();
                 dirty_db.update(k, v).await.unwrap();
                 assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
                 let (dirty_db, _) = dirty_db.commit(None).await.unwrap();
@@ -1591,7 +1599,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random_fail_commit";
             let rng_seed = context.next_u64();
-            let db = open_db(context.clone(), partition).await.into_dirty();
+            let db = open_db(context.clone(), partition).await.into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -1603,7 +1611,7 @@ pub mod test {
             db.prune(committed_inactivity_floor).await.unwrap();
 
             // Perform more random operations without committing any of them.
-            let db = apply_random_ops(ELEMENTS, false, rng_seed + 1, db.into_dirty())
+            let db = apply_random_ops(ELEMENTS, false, rng_seed + 1, db.into_mutable())
                 .await
                 .unwrap();
 
@@ -1615,7 +1623,7 @@ pub mod test {
             assert_eq!(db.op_count(), committed_op_count);
 
             // Re-apply the exact same uncommitted operations.
-            let db = apply_random_ops(ELEMENTS, false, rng_seed + 1, db.into_dirty())
+            let db = apply_random_ops(ELEMENTS, false, rng_seed + 1, db.into_mutable())
                 .await
                 .unwrap();
 
@@ -1635,7 +1643,9 @@ pub mod test {
             // To confirm the second committed hash is correct we'll re-build the DB in a new
             // partition, but without any failures. They should have the exact same state.
             let fresh_partition = "build_random_fail_commit_fresh";
-            let db = open_db(context.clone(), fresh_partition).await.into_dirty();
+            let db = open_db(context.clone(), fresh_partition)
+                .await
+                .into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -1667,11 +1677,11 @@ pub mod test {
                 CleanCurrentTest::init(context.clone(), db_config_no_pruning.clone())
                     .await
                     .unwrap()
-                    .into_dirty();
+                    .into_mutable();
             let mut db_pruning = CleanCurrentTest::init(context.clone(), db_config_pruning.clone())
                 .await
                 .unwrap()
-                .into_dirty();
+                .into_mutable();
 
             // Apply identical operations to both databases, but only prune one.
             const NUM_OPERATIONS: u64 = 1000;
@@ -1692,8 +1702,8 @@ pub mod test {
                         .prune(clean_no_pruning.any.inactivity_floor_loc())
                         .await
                         .unwrap();
-                    db_no_pruning = clean_no_pruning.into_dirty();
-                    db_pruning = clean_pruning.into_dirty();
+                    db_no_pruning = clean_no_pruning.into_mutable();
+                    db_pruning = clean_pruning.into_mutable();
                 }
             }
 
@@ -1765,7 +1775,7 @@ pub mod test {
 
             // Add `key_exists_1` and test exclusion proving over the single-key database case.
             let v1 = Sha256::fill(0xA1);
-            let mut db = db.into_dirty();
+            let mut db = db.into_mutable();
             db.update(key_exists_1, v1).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
@@ -1815,7 +1825,7 @@ pub mod test {
             let key_exists_2 = Sha256::fill(0x30);
             let v2 = Sha256::fill(0xB2);
 
-            let mut db = db.into_dirty();
+            let mut db = db.into_mutable();
             db.update(key_exists_2, v2).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
@@ -1908,7 +1918,7 @@ pub mod test {
 
             // Make the DB empty again by deleting the keys and check the empty case
             // again.
-            let mut db = db.into_dirty();
+            let mut db = db.into_mutable();
             db.delete(key_exists_1).await.unwrap();
             db.delete(key_exists_2).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
@@ -1959,7 +1969,7 @@ pub mod test {
         batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
             let partition = format!("current_ordered_batch_{seed}");
-            open_db(ctx, &partition).await.into_dirty()
+            open_db(ctx, &partition).await.into_mutable()
         });
     }
 }

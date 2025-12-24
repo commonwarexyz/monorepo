@@ -42,12 +42,6 @@ impl DatabaseType {
 }
 
 /// Helper trait for databases that can be synced.
-///
-/// The database uses a state transition model:
-/// - `Merkleized, Durable` (clean state) → `into_mutable()` → `Unmerkleized, NonDurable` (mutable state)
-/// - `Unmerkleized, NonDurable` → `commit()` → `Unmerkleized, Durable` → `into_merkleized()` → `Merkleized, Durable`
-///
-/// This trait abstracts over the state machine, providing ownership-based methods.
 pub trait Syncable: Sized {
     /// The type of operations in the database.
     type Operation: Operation + Encode + Sync + 'static;
@@ -57,7 +51,10 @@ pub trait Syncable: Sized {
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation>;
 
     /// Add operations to the database and return the clean database.
-    /// The operations must end with a commit operation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operations do not end with a commit operation.
     fn add_operations(
         self,
         operations: Vec<Self::Operation>,
