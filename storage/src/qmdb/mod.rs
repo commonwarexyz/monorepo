@@ -40,7 +40,7 @@
 //! - (Merkleized,NonDurable): [store::MerkleizedStore], [store::PrunableStore]
 //!
 //! Keyed databases additionally implement:
-//! - Mutable: [super::kv::StoreDeletable], [store::Batchable]
+//! - Mutable: [super::kv::StoreDeletable], [super::kv::Batchable]
 //!
 //! # Acknowledgments
 //!
@@ -53,8 +53,8 @@
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Contiguous, MutableContiguous},
-    mmr::Location,
-    qmdb::operation::Operation,
+    mmr::{mem::State as MerkleizationState, Location},
+    qmdb::{operation::Operation, store::State as DurabilityState},
     DirtyAuthenticatedBitMap,
 };
 use commonware_cryptography::{Digest, DigestOf};

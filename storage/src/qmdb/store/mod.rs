@@ -17,7 +17,6 @@ use std::num::NonZeroU64;
 
 mod batch;
 pub mod db;
-pub use crate::kv::{Batch, Batchable};
 #[cfg(test)]
 pub use batch::tests as batch_tests;
 

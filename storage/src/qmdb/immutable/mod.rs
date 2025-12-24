@@ -9,12 +9,11 @@ use crate::{
     },
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
-        mem::State as MerkleState,
         Location, Position, Proof, StandardHasher as Standard,
     },
     qmdb::{
-        any::VariableValue, build_snapshot_from_log, store::State as DurabilityState, Durable,
-        Error, Merkleized, NonDurable, Unmerkleized,
+        any::VariableValue, build_snapshot_from_log, DurabilityState, Durable, Error,
+        MerkleizationState, Merkleized, NonDurable, Unmerkleized,
     },
     translator::Translator,
 };
@@ -84,11 +83,11 @@ pub struct Immutable<
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    S: MerkleState<DigestOf<H>> = Merkleized<H>,
+    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
     D: DurabilityState = Durable,
 > {
     /// Authenticated journal of operations.
-    journal: Journal<E, K, V, H, S>,
+    journal: Journal<E, K, V, H, M>,
 
     /// A map from each active key to the location of the operation that set its value.
     ///
@@ -111,9 +110,9 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        S: MerkleState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > Immutable<E, K, V, H, T, S, D>
+    > Immutable<E, K, V, H, T, M, D>
 {
     /// Return the oldest location that remains retrievable.
     pub fn oldest_retained_loc(&self) -> Location {
@@ -508,9 +507,9 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        S: MerkleState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > crate::kv::Store for Immutable<E, K, V, H, T, S, D>
+    > crate::kv::Store for Immutable<E, K, V, H, T, M, D>
 {
     type Key = K;
     type Value = V;
@@ -527,9 +526,9 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        S: MerkleState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > crate::qmdb::store::LogStore for Immutable<E, K, V, H, T, S, D>
+    > crate::qmdb::store::LogStore for Immutable<E, K, V, H, T, M, D>
 {
     type Value = V;
 

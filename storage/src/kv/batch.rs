@@ -98,6 +98,10 @@ where
             }
         }
 
+        if self.db.get(&key).await?.is_some() {
+            return Ok(false);
+        }
+
         self.diff.insert(key, Some(value));
         Ok(true)
     }

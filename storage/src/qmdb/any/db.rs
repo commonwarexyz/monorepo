@@ -10,13 +10,14 @@ use crate::{
         contiguous::{Contiguous, MutableContiguous},
         Error as JournalError,
     },
-    mmr::{self, Location, Proof},
+    mmr::{Location, Proof},
     qmdb::{
         any::ValueEncoding,
         build_snapshot_from_log,
         operation::{Committable, Operation as OperationTrait},
         store::{self, LogStore, MerkleizedStore, PrunableStore},
-        Durable, Error, FloorHelper, Merkleized, NonDurable, Unmerkleized,
+        DurabilityState, Durable, Error, FloorHelper, MerkleizationState, Merkleized, NonDurable,
+        Unmerkleized,
     },
     AuthenticatedBitMap, Persistable,
 };
@@ -28,7 +29,7 @@ use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
 
 /// Type alias for the authenticated journal used by [Db].
-pub(crate) type AuthenticatedLog<E, C, H, S = Merkleized<H>> = authenticated::Journal<E, C, H, S>;
+pub(crate) type AuthenticatedLog<E, C, H, M = Merkleized<H>> = authenticated::Journal<E, C, H, M>;
 
 /// An "Any" QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 /// Consider using one of the following specialized variants instead, which may be more ergonomic:
@@ -42,8 +43,8 @@ pub struct Db<
     I,
     H: Hasher,
     U,
-    S: mmr::mem::State<DigestOf<H>>,
-    D: store::State,
+    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
+    D: DurabilityState = Durable,
 > where
     C::Item: Codec,
 {
@@ -54,7 +55,7 @@ pub struct Db<
     ///
     /// - The log is never pruned beyond the inactivity floor.
     /// - There is always at least one commit operation in the log.
-    pub(crate) log: AuthenticatedLog<E, C, H, S>,
+    pub(crate) log: AuthenticatedLog<E, C, H, M>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -82,7 +83,7 @@ pub struct Db<
 }
 
 // Functionality shared across all DB states, such as most non-mutating operations.
-impl<E, K, V, U, C, I, H, S, D> Db<E, C, I, H, U, S, D>
+impl<E, K, V, U, C, I, H, M, D> Db<E, C, I, H, U, M, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -91,8 +92,8 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    S: mmr::mem::State<DigestOf<H>>,
-    D: store::State,
+    M: MerkleizationState<DigestOf<H>>,
+    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     /// The number of operations that have been applied to this db, including those that have been
@@ -139,7 +140,7 @@ where
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: store::State,
+    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     pub const fn root(&self) -> H::Digest {
@@ -358,7 +359,7 @@ where
 }
 
 // Functionality shared across Durable states.
-impl<E, K, V, U, C, I, H, S> Db<E, C, I, H, U, S, Durable>
+impl<E, K, V, U, C, I, H, M> Db<E, C, I, H, U, M, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -367,14 +368,14 @@ where
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    S: mmr::mem::State<DigestOf<H>>,
+    M: MerkleizationState<DigestOf<H>>,
     Operation<K, V, U>: Codec,
-    AuthenticatedLog<E, C, H, S>: MutableContiguous<Item = Operation<K, V, U>>,
+    AuthenticatedLog<E, C, H, M>: MutableContiguous<Item = Operation<K, V, U>>,
 {
 }
 
 // Funtionality shared across NonDurable states.
-impl<E, K, V, U, C, I, H, S> Db<E, C, I, H, U, S, NonDurable>
+impl<E, K, V, U, C, I, H, M> Db<E, C, I, H, U, M, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -383,9 +384,9 @@ where
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    S: mmr::mem::State<DigestOf<H>>,
+    M: MerkleizationState<DigestOf<H>>,
     Operation<K, V, U>: Codec,
-    AuthenticatedLog<E, C, H, S>: MutableContiguous<Item = Operation<K, V, U>>,
+    AuthenticatedLog<E, C, H, M>: MutableContiguous<Item = Operation<K, V, U>>,
 {
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
     /// inactivity floor.
@@ -407,7 +408,7 @@ where
     pub async fn commit(
         mut self,
         metadata: Option<V::Value>,
-    ) -> Result<(Db<E, C, I, H, U, S, Durable>, Range<Location>), Error> {
+    ) -> Result<(Db<E, C, I, H, U, M, Durable>, Range<Location>), Error> {
         let start_loc = self.last_commit_loc + 1;
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
@@ -455,7 +456,7 @@ where
     /// operation above the inactivity floor.
     pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
         &mut self,
-        status: &mut AuthenticatedBitMap<D, N, mmr::mem::Dirty>,
+        status: &mut AuthenticatedBitMap<D, N, Unmerkleized>,
     ) -> Result<Location, Error> {
         if self.is_empty() {
             self.inactivity_floor_loc = self.op_count();
@@ -478,7 +479,7 @@ where
     /// Returns a FloorHelper wrapping the current state of the log.
     pub(crate) const fn as_floor_helper(
         &mut self,
-    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H, S>> {
+    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H, M>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
@@ -526,7 +527,7 @@ where
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: store::State,
+    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     type Digest = H::Digest;
@@ -547,7 +548,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, S, D> LogStore for Db<E, C, I, H, U, S, D>
+impl<E, K, V, U, C, I, H, M, D> LogStore for Db<E, C, I, H, U, M, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -556,8 +557,8 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    S: mmr::mem::State<DigestOf<H>>,
-    D: store::State,
+    M: MerkleizationState<DigestOf<H>>,
+    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     type Value = V::Value;
@@ -588,7 +589,7 @@ where
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: store::State,
+    D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {

@@ -2,10 +2,10 @@
 //! benchmark code across the variants.
 
 use crate::{
-    kv::{Store, StoreDeletable},
+    kv::{Batchable, Store, StoreDeletable},
     mmr::Location,
     qmdb::{
-        store::{Batchable, LogStore, MerkleizedStore, PrunableStore},
+        store::{LogStore, MerkleizedStore, PrunableStore},
         Error,
     },
     Persistable,

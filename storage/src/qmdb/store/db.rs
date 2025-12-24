@@ -78,7 +78,7 @@ use crate::{
         variable::{Config as JournalConfig, Journal},
         MutableContiguous as _,
     },
-    kv::{StoreDeletable, StoreMut},
+    kv::{Batchable, StoreDeletable, StoreMut},
     mmr::Location,
     qmdb::{
         any::{
@@ -87,7 +87,7 @@ use crate::{
         },
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable as _, Operation as _},
-        store::{Batchable, Clean, Dirty, LogStore, PrunableStore, State},
+        store::{Clean, Dirty, LogStore, PrunableStore, State},
         update_key, Error, FloorHelper,
     },
     translator::Translator,

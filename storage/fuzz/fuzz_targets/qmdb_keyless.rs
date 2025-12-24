@@ -1,12 +1,12 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256, Sha256};
+use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    mmr::{hasher::Standard, mem::Clean, Location},
+    mmr::{hasher::Standard, Location},
     qmdb::{
-        keyless::{Config, Durable, Keyless},
+        keyless::{Config, Keyless},
         verify_proof,
     },
 };
@@ -120,7 +120,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: usize = 128;
 const PAGE_CACHE_SIZE: usize = 8;
 
-type CleanDb = Keyless<deterministic::Context, Vec<u8>, Sha256, Clean<sha256::Digest>, Durable>;
+type CleanDb = Keyless<deterministic::Context, Vec<u8>, Sha256>;
 
 fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
     Config {
@@ -268,7 +268,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::SimulateFailure{} => {
-                    db.simulate_commit_failure().await;
+                    drop(db);
 
                     db = CleanDb::init(context.clone(), test_config("keyless_fuzz_test"))
                         .await

@@ -14,12 +14,12 @@ use crate::{
         authenticated,
         contiguous::fixed::{Config as JConfig, Journal},
     },
-    mmr::{journaled::Config as MmrConfig, mem::Clean},
-    qmdb::{operation::Committable, Error},
+    mmr::journaled::Config as MmrConfig,
+    qmdb::{operation::Committable, Error, Merkleized},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -106,8 +106,7 @@ pub struct VariableConfig<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-type AuthenticatedLog<E, O, H, S = Clean<DigestOf<H>>> =
-    authenticated::Journal<E, Journal<E, O>, H, S>;
+type AuthenticatedLog<E, O, H, S = Merkleized<H>> = authenticated::Journal<E, Journal<E, O>, H, S>;
 
 /// Initialize the authenticated log from the given config, returning it along with the inactivity
 /// floor specified by the last commit.

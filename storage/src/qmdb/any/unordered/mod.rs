@@ -1,7 +1,8 @@
 use crate::{
     index::Unordered as Index,
     journal::contiguous::{Contiguous, MutableContiguous},
-    mmr::{self, Location},
+    kv::Batchable,
+    mmr::Location,
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
@@ -9,8 +10,8 @@ use crate::{
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
         operation::{Committable as _, Operation as OperationTrait},
-        store::{self, Batchable},
-        update_key, update_known_loc, Durable, Error, Merkleized, NonDurable, Unmerkleized,
+        update_key, update_known_loc, DurabilityState, Durable, Error, MerkleizationState,
+        Merkleized, NonDurable, Unmerkleized,
     },
 };
 #[cfg(any(test, feature = "test-traits"))]
@@ -40,9 +41,9 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        S: mmr::mem::State<DigestOf<H>>,
-        D: store::State,
-    > Db<E, C, I, H, Update<K, V>, S, D>
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
 {
@@ -261,7 +262,7 @@ where
             inactivity_floor_loc,
             snapshot,
             last_commit_loc,
-            durable_state: store::Clean,
+            durable_state: Durable {},
             active_keys,
             _update: core::marker::PhantomData,
         })
@@ -275,9 +276,9 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        S: mmr::mem::State<DigestOf<H>>,
-        D: store::State,
-    > crate::kv::Store for Db<E, C, I, H, Update<K, V>, S, D>
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > crate::kv::Store for Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
 {

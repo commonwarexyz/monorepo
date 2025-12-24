@@ -4,10 +4,9 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    kv::{Store, StoreDeletable, StoreMut},
+    kv::{Batchable as _, Store, StoreDeletable, StoreMut},
     qmdb::{
         any::{ordered::fixed::Db, FixedConfig as Config},
-        store::Batchable as _,
         Durable, Merkleized,
     },
     translator::EightCap,

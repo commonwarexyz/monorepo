@@ -13,11 +13,8 @@ use crate::qmdb::any::states::{
 };
 use crate::{
     bitmap::CleanBitMap,
-    mmr::{
-        grafting::Storage as GraftingStorage,
-        mem::{Clean, State},
-        Location, Proof, StandardHasher,
-    },
+    kv::Batchable,
+    mmr::{grafting::Storage as GraftingStorage, Location, Proof, StandardHasher},
     qmdb::{
         any::{
             ordered::fixed::{Db as AnyDb, Operation, Update},
@@ -29,8 +26,8 @@ use crate::{
             proof::{OperationProof, RangeProof},
             root, FixedConfig as Config,
         },
-        store::{Batchable, LogStore, MerkleizedStore, PrunableStore},
-        Durable, Error, Merkleized, NonDurable, Unmerkleized,
+        store::{LogStore, MerkleizedStore, PrunableStore},
+        DurabilityState, Durable, Error, MerkleizationState, Merkleized, NonDurable, Unmerkleized,
     },
     translator::Translator,
     AuthenticatedBitMap as BitMap, Persistable,
@@ -56,16 +53,16 @@ pub struct Db<
     H: Hasher,
     T: Translator,
     const N: usize,
-    S: State<DigestOf<H>> = Clean<DigestOf<H>>,
-    D: crate::qmdb::store::State = Durable,
+    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
+    D: DurabilityState = Durable,
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    any: AnyDb<E, K, V, H, T, S, D>,
+    any: AnyDb<E, K, V, H, T, M, D>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    status: BitMap<H::Digest, N, S>,
+    status: BitMap<H::Digest, N, M>,
 
     context: E,
 
@@ -90,9 +87,9 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-        S: State<DigestOf<H>>,
-        D: crate::qmdb::store::State,
-    > Db<E, K, V, H, T, N, S, D>
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > Db<E, K, V, H, T, N, M, D>
 {
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
@@ -705,9 +702,9 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-        S: State<DigestOf<H>>,
-        D: crate::qmdb::store::State,
-    > LogStore for Db<E, K, V, H, T, N, S, D>
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > LogStore for Db<E, K, V, H, T, N, M, D>
 {
     type Value = V;
 
@@ -736,9 +733,9 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-        S: State<DigestOf<H>>,
-        D: crate::qmdb::store::State,
-    > crate::kv::Store for Db<E, K, V, H, T, N, S, D>
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > crate::kv::Store for Db<E, K, V, H, T, N, M, D>
 {
     type Key = K;
     type Value = V;

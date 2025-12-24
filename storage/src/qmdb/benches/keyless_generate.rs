@@ -1,4 +1,4 @@
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::Sha256;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::PoolRef,
@@ -6,9 +6,9 @@ use commonware_runtime::{
     tokio::{Config, Context},
     ThreadPool,
 };
-use commonware_storage::{
-    mmr::mem::{Clean, Dirty},
-    qmdb::keyless::{Config as KConfig, Durable, Keyless, NonDurable},
+use commonware_storage::qmdb::{
+    keyless::{Config as KConfig, Keyless},
+    Durable, Merkleized, NonDurable, Unmerkleized,
 };
 use commonware_utils::{NZUsize, NZU64};
 use criterion::{criterion_group, Criterion};
@@ -50,10 +50,10 @@ fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, 
 }
 
 /// Clean (Merkleized, Durable) type alias for Keyless.
-type KeylessClean = Keyless<Context, Vec<u8>, Sha256, Clean<<Sha256 as Hasher>::Digest>, Durable>;
+type KeylessClean = Keyless<Context, Vec<u8>, Sha256, Merkleized<Sha256>, Durable>;
 
 /// Mutable (Unmerkleized, NonDurable) type alias for Keyless.
-type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, Dirty, NonDurable>;
+type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, Unmerkleized, NonDurable>;
 
 /// Generate a keyless db by appending `num_operations` random values in total. The database is
 /// committed after every `COMMIT_FREQUENCY` operations.

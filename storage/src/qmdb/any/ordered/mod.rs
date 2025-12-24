@@ -1,7 +1,8 @@
 use crate::{
     index::{Cursor as _, Ordered as Index},
     journal::contiguous::{Contiguous, MutableContiguous},
-    mmr::{self, Location},
+    kv::Batchable,
+    mmr::Location,
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
@@ -9,8 +10,7 @@ use crate::{
         },
         delete_known_loc,
         operation::Operation as OperationTrait,
-        store::{self, Batchable},
-        update_known_loc, Error, NonDurable, Unmerkleized,
+        update_known_loc, DurabilityState, Error, MerkleizationState, NonDurable, Unmerkleized,
     },
 };
 #[cfg(any(test, feature = "test-traits"))]
@@ -61,14 +61,14 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        S: mmr::mem::State<DigestOf<H>>,
-        D: store::State,
-    > Db<E, C, I, H, Update<K, V>, S, D>
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
 {
     async fn get_update_op(
-        log: &AuthenticatedLog<E, C, H, S>,
+        log: &AuthenticatedLog<E, C, H, M>,
         loc: Location,
     ) -> Result<Update<K, V>, Error> {
         match log.read(loc).await? {
@@ -806,9 +806,9 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        S: mmr::mem::State<DigestOf<H>>,
-        D: store::State,
-    > crate::kv::Store for Db<E, C, I, H, Update<K, V>, S, D>
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > crate::kv::Store for Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
 {
@@ -1025,12 +1025,10 @@ mod test {
     use futures::StreamExt as _;
 
     /// A type alias for the concrete [fixed::Db] type used in these unit tests.
-    type FixedDb =
-        fixed::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+    type FixedDb = fixed::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
 
     /// A type alias for the concrete [variable::Db] type used in these unit tests.
-    type VariableDb =
-        variable::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+    type VariableDb = variable::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
 
     /// Helper trait for testing Any databases that cycle through all four states.
     trait TestableAnyDb<V>:

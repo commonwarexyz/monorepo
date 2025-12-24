@@ -6,16 +6,12 @@ use crate::{
         authenticated,
         contiguous::variable::{Config as JournalConfig, Journal as ContiguousJournal},
     },
-    mmr::{
-        journaled::Config as MmrConfig,
-        mem::{Clean, Dirty, State},
-        Location, Proof,
-    },
+    mmr::{journaled::Config as MmrConfig, Location, Proof},
     qmdb::{
         any::VariableValue,
         operation::Committable,
         store::{LogStore, MerkleizedStore, PrunableStore},
-        Durable, Error, NonDurable,
+        DurabilityState, Durable, Error, MerkleizationState, Merkleized, NonDurable, Unmerkleized,
     },
 };
 use commonware_cryptography::{DigestOf, Hasher};
@@ -68,16 +64,12 @@ pub struct Config<C> {
 type Journal<E, V, H, S> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H, S>;
 
 /// A keyless authenticated database for variable-length data.
-///
-/// The type parameters `M` and `D` represent the merkleization and durability state respectively:
-/// - `M`: Either `Clean<H::Digest>` (merkleized) or `Dirty` (unmerkleized)
-/// - `D`: Either `Durable` (committed to disk) or `NonDurable` (uncommitted)
 pub struct Keyless<
     E: Storage + Clock + Metrics,
     V: VariableValue,
     H: Hasher,
-    M: State<DigestOf<H>> = Dirty,
-    D = NonDurable,
+    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
+    D: DurabilityState = Durable,
 > {
     /// Authenticated journal of operations.
     journal: Journal<E, V, H, M>,
@@ -89,8 +81,13 @@ pub struct Keyless<
     _durability: PhantomData<D>,
 }
 
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, M: State<DigestOf<H>>, D>
-    Keyless<E, V, H, M, D>
+impl<
+        E: Storage + Clock + Metrics,
+        V: VariableValue,
+        H: Hasher,
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > Keyless<E, V, H, M, D>
 {
     /// Get the value at location `loc` in the database.
     ///
@@ -141,9 +138,9 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, M: State<DigestO
     }
 }
 
-/// Implementation for the (Merkleized, Durable) state - the "Clean" state.
+/// Implementation for the (Merkleized, Durable) state.
 impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
-    Keyless<E, V, H, Clean<H::Digest>, Durable>
+    Keyless<E, V, H, Merkleized<H>, Durable>
 {
     /// Returns a [Keyless] qmdb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
@@ -259,7 +256,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     }
 
     /// Convert this database into the Mutable state for accepting new operations.
-    pub fn into_mutable(self) -> Keyless<E, V, H, Dirty, NonDurable> {
+    pub fn into_mutable(self) -> Keyless<E, V, H, Unmerkleized, NonDurable> {
         Keyless {
             journal: self.journal.into_dirty(),
             last_commit_loc: self.last_commit_loc,
@@ -269,8 +266,13 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
 }
 
 /// Implementation of LogStore for all states.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, M: State<DigestOf<H>>, D> LogStore
-    for Keyless<E, V, H, M, D>
+impl<
+        E: Storage + Clock + Metrics,
+        V: VariableValue,
+        H: Hasher,
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > LogStore for Keyless<E, V, H, M, D>
 {
     type Value = V;
 
@@ -294,8 +296,8 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, M: State<DigestO
 }
 
 /// Implementation of PrunableStore for the Merkleized state (any durability).
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D> PrunableStore
-    for Keyless<E, V, H, Clean<H::Digest>, D>
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> PrunableStore
+    for Keyless<E, V, H, Merkleized<H>, D>
 {
     async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         if loc > self.last_commit_loc {
@@ -307,8 +309,8 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D> PrunableStore
 }
 
 /// Implementation of MerkleizedStore for the Merkleized state (any durability).
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D> MerkleizedStore
-    for Keyless<E, V, H, Clean<H::Digest>, D>
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> MerkleizedStore
+    for Keyless<E, V, H, Merkleized<H>, D>
 {
     type Digest = H::Digest;
     type Operation = Operation<V>;
@@ -332,7 +334,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D> MerkleizedSto
 
 /// Implementation for the (Unmerkleized, NonDurable) state - the "Mutable" state.
 impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
-    Keyless<E, V, H, Dirty, NonDurable>
+    Keyless<E, V, H, Unmerkleized, NonDurable>
 {
     /// Append a value to the db, returning its location which can be used to retrieve it.
     pub async fn append(&mut self, value: V) -> Result<Location, Error> {
@@ -350,7 +352,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     pub async fn commit(
         mut self,
         metadata: Option<V>,
-    ) -> Result<(Keyless<E, V, H, Dirty, Durable>, Range<Location>), Error> {
+    ) -> Result<(Keyless<E, V, H, Unmerkleized, Durable>, Range<Location>), Error> {
         let start_loc = self.last_commit_loc + 1;
         self.last_commit_loc = self.journal.append(Operation::Commit(metadata)).await?;
         self.journal.commit().await?;
@@ -365,17 +367,15 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
 
         Ok((durable, start_loc..op_count))
     }
-
-    #[cfg(any(test, feature = "fuzzing"))]
-    /// Simulate failure by consuming the db without syncing / closing the various structures.
-    pub async fn simulate_commit_failure(self) {}
 }
 
-/// Implementation for the (Unmerkleized, Durable) state - the "Durable" state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H, Dirty, Durable> {
+/// Implementation for the (Unmerkleized, Durable) state.
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
+    Keyless<E, V, H, Unmerkleized, Durable>
+{
     /// Convert this database into the Mutable state for accepting more operations without
     /// re-merkleizing.
-    pub fn into_mutable(self) -> Keyless<E, V, H, Dirty, NonDurable> {
+    pub fn into_mutable(self) -> Keyless<E, V, H, Unmerkleized, NonDurable> {
         Keyless {
             journal: self.journal,
             last_commit_loc: self.last_commit_loc,
@@ -383,8 +383,8 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H,
         }
     }
 
-    /// Compute the merkle root and transition to the Clean (Merkleized, Durable) state.
-    pub fn into_merkleized(self) -> Keyless<E, V, H, Clean<H::Digest>, Durable> {
+    /// Compute the merkle root and transition to the Merkleized, Durable state.
+    pub fn into_merkleized(self) -> Keyless<E, V, H, Merkleized<H>, Durable> {
         Keyless {
             journal: self.journal.merkleize(),
             last_commit_loc: self.last_commit_loc,
@@ -423,17 +423,11 @@ mod test {
         }
     }
 
-    /// Type alias for the Clean (Merkleized, Durable) state.
-    type CleanDb = Keyless<
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        Clean<<Sha256 as Hasher>::Digest>,
-        Durable,
-    >;
+    /// Type alias for the Merkleized, Durable state.
+    type CleanDb = Keyless<deterministic::Context, Vec<u8>, Sha256, Merkleized<Sha256>, Durable>;
 
     /// Type alias for the Mutable (Unmerkleized, NonDurable) state.
-    type MutableDb = Keyless<deterministic::Context, Vec<u8>, Sha256, Dirty, NonDurable>;
+    type MutableDb = Keyless<deterministic::Context, Vec<u8>, Sha256, Unmerkleized, NonDurable>;
 
     /// Return a [Keyless] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanDb {
@@ -458,7 +452,7 @@ mod test {
             let root = db.root();
             let mut db = db.into_mutable();
             db.append(v1).await.unwrap();
-            db.simulate_commit_failure().await;
+            drop(db);
             let db = open_db(context.clone()).await;
             assert_eq!(db.root(), root);
             assert_eq!(db.op_count(), 1);
@@ -525,7 +519,7 @@ mod test {
             db.append(v1).await.unwrap();
 
             // Make sure uncommitted items get rolled back.
-            db.simulate_commit_failure().await;
+            drop(db);
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root);
@@ -560,7 +554,7 @@ mod test {
             append_elements(&mut db, &mut context, ELEMENTS).await;
 
             // Simulate a failure before committing.
-            db.simulate_commit_failure().await;
+            drop(db);
             // Should rollback to the previous root.
             let db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
@@ -577,7 +571,7 @@ mod test {
             append_elements(&mut db, &mut context, ELEMENTS).await;
 
             // Simulate a failure.
-            db.simulate_commit_failure().await;
+            drop(db);
             // Should rollback to the previous root.
             let db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
@@ -633,7 +627,7 @@ mod test {
 
                 // Append operations and simulate failure.
                 append_elements(&mut db, &mut context, ELEMENTS).await;
-                db.simulate_commit_failure().await;
+                drop(db);
                 let db = open_db(context.clone()).await;
                 assert_eq!(db.op_count(), op_count);
                 assert_eq!(db.root(), root);
@@ -688,7 +682,7 @@ mod test {
             // Simulate failure after inserting operations without a commit.
             let mut db = db.into_mutable();
             apply_ops(&mut db).await;
-            db.simulate_commit_failure().await;
+            drop(db);
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 1); // initial commit should exist
             assert_eq!(db.root(), root);
@@ -696,7 +690,7 @@ mod test {
             // Repeat: simulate failure after inserting operations without a commit.
             let mut db = db.into_mutable();
             apply_ops(&mut db).await;
-            db.simulate_commit_failure().await;
+            drop(db);
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 1); // initial commit should exist
             assert_eq!(db.root(), root);
@@ -706,7 +700,7 @@ mod test {
             apply_ops(&mut db).await;
             apply_ops(&mut db).await;
             apply_ops(&mut db).await;
-            db.simulate_commit_failure().await;
+            drop(db);
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 1); // initial commit should exist
             assert_eq!(db.root(), root);
@@ -977,7 +971,7 @@ mod test {
             db.append(uncommitted_value.clone()).await.unwrap();
 
             // Simulate failure without commit
-            db.simulate_commit_failure().await;
+            drop(db);
 
             // Reopen database
             let db = open_db(context.clone()).await;
@@ -1022,7 +1016,7 @@ mod test {
             }
 
             // Simulate failure without commit
-            db.simulate_commit_failure().await;
+            drop(db);
 
             // Reopen and verify correct recovery
             let db = open_db(context.clone()).await;
