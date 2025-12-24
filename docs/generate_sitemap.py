@@ -110,13 +110,16 @@ def write_llms_txt(versions: list[str]) -> None:
     version_lines += [f"- /code/{v}/" for v in versions[1:]]
     content = f"""# Commonware Library
 
-Find more information at [README.md](/code/{latest}/README.md).
+> Source code is mirrored at versioned paths under /code/. These paths are
+> not browseable directories. Use [sitemap.xml](/sitemap.xml) to discover
+> all available files (.rs, .md, .toml). If a file is not in the sitemap,
+> it does not exist.
 
-## Paths
+Start with [README.md](/code/{latest}/README.md) for an overview.
+
+## Versions
 
 {chr(10).join(version_lines)}
-
-View [sitemap.xml](/sitemap.xml) for all filepaths.
 """
     (DOCS_ROOT / "llms.txt").write_text(content, encoding="utf-8")
 
