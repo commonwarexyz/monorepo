@@ -64,7 +64,7 @@ mod actor;
 pub use actor::Actor;
 
 mod marshaled;
-pub use marshaled::Marshaled;
+pub use marshaled::{Marshaled, MarshaledConfig};
 
 #[cfg(test)]
 mod tests {
