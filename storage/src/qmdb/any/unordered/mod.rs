@@ -439,11 +439,11 @@ where
 pub(super) mod test {
     use super::*;
     use crate::{
-        kv::{StoreDeletable as _, StoreMut as _},
+        kv::{Store as _, StoreDeletable as _, StoreMut as _},
         mmr::StandardHasher,
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
-            store::{Getter, LogStore, MerkleizedStore},
+            store::{LogStore, MerkleizedStore},
             verify_proof,
         },
         translator::TwoCap,

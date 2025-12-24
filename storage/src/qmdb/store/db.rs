@@ -605,7 +605,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::translator::TwoCap;
+    use crate::{kv::Store as _, translator::TwoCap};
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
         Hasher as _,

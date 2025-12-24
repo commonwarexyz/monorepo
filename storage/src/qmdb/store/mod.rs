@@ -17,9 +17,9 @@ use std::num::NonZeroU64;
 
 mod batch;
 pub mod db;
+pub use crate::kv::{Batch, Batchable};
 #[cfg(test)]
 pub use batch::tests as batch_tests;
-pub use batch::{Batch, Batchable, Getter};
 
 /// Sealed trait for store state types.
 mod private {
@@ -47,7 +47,7 @@ pub struct Dirty {
 impl private::Sealed for Dirty {}
 impl State for Dirty {}
 
-/// A trait for any key-value store based on an append-only log of operations.
+/// A trait for a store based on an append-only log of operations.
 pub trait LogStore {
     type Value: Codec + Clone;
 

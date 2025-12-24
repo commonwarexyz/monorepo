@@ -1,176 +1,22 @@
-//! Support for batching changes to an underlying database.
-
-use crate::{kv::Store, qmdb::Error};
-use commonware_codec::Codec;
-use commonware_utils::Array;
-use core::future::Future;
-use std::collections::BTreeMap;
-
-/// A trait for getting values from a keyed database.
-pub trait Getter<K, V> {
-    /// Get the value of `key` from the database.
-    fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
-}
-
-/// All databases implement the [Getter] trait.
-impl<D> Getter<D::Key, D::Value> for D
-where
-    D: Store<Error = Error>,
-    D::Key: Array,
-    D::Value: Codec + Clone,
-{
-    async fn get(&self, key: &D::Key) -> Result<Option<D::Value>, Error> {
-        Store::get(self, key).await
-    }
-}
-
-/// A batch of changes which may be written to an underlying database with [Batchable::write_batch].
-/// Writes and deletes to a batch are not applied to the database until the batch is written but
-/// will be reflected in reads from the batch.
-pub struct Batch<'a, K, V, D>
-where
-    K: Array,
-    V: Codec + Clone,
-    D: Getter<K, V>,
-{
-    /// The underlying database.
-    db: &'a D,
-    /// The diff of changes to the database.
-    ///
-    /// If the value is Some, the key is being created or updated.
-    /// If the value is None, the key is being deleted.
-    ///
-    /// We use a BTreeMap instead of HashMap to allow for a deterministic iteration order.
-    diff: BTreeMap<K, Option<V>>,
-}
-
-impl<'a, K, V, D> Batch<'a, K, V, D>
-where
-    K: Array,
-    V: Codec + Clone,
-    D: Getter<K, V>,
-{
-    /// Returns a new batch of changes that may be written to the database.
-    pub const fn new(db: &'a D) -> Self {
-        Self {
-            db,
-            diff: BTreeMap::new(),
-        }
-    }
-
-    /// Returns the value of `key` in the batch, or the value in the database if it is not present
-    /// in the batch.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        if let Some(value) = self.diff.get(key) {
-            return Ok(value.clone());
-        }
-
-        self.db.get(key).await
-    }
-
-    /// Creates a new key-value pair in the batch if it isn't present in the batch or database.
-    /// Returns true if the key was created, false if it already existed.
-    pub async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        if let Some(value_opt) = self.diff.get_mut(&key) {
-            match value_opt {
-                Some(_) => return Ok(false),
-                None => {
-                    *value_opt = Some(value);
-                    return Ok(true);
-                }
-            }
-        }
-
-        if self.db.get(&key).await?.is_some() {
-            return Ok(false);
-        }
-
-        self.diff.insert(key, Some(value));
-        Ok(true)
-    }
-
-    /// Updates the value of `key` to `value` in the batch.
-    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.diff.insert(key, Some(value));
-
-        Ok(())
-    }
-
-    /// Deletes `key` from the batch.
-    /// Returns true if the key was in the batch or database, false otherwise.
-    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
-        if let Some(entry) = self.diff.get_mut(&key) {
-            match entry {
-                Some(_) => {
-                    *entry = None;
-                    return Ok(true);
-                }
-                None => return Ok(false),
-            }
-        }
-
-        if self.db.get(&key).await?.is_some() {
-            self.diff.insert(key, None);
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    /// Deletes `key` from the batch without checking if it is present in the batch or database.
-    pub async fn delete_unchecked(&mut self, key: K) -> Result<(), Error> {
-        self.diff.insert(key, None);
-
-        Ok(())
-    }
-}
-
-impl<'a, K, V, D> IntoIterator for Batch<'a, K, V, D>
-where
-    K: Array,
-    V: Codec + Clone,
-    D: Getter<K, V>,
-{
-    type Item = (K, Option<V>);
-    type IntoIter = std::collections::btree_map::IntoIter<K, Option<V>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.diff.into_iter()
-    }
-}
-
-/// A database that supports making batched changes.
-pub trait Batchable: Store<Key: Array, Value: Codec + Clone, Error = Error> {
-    /// Returns a new empty batch of changes.
-    fn start_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>
-    where
-        Self: Sized,
-    {
-        Batch {
-            db: self,
-            diff: BTreeMap::new(),
-        }
-    }
-
-    /// Writes a batch of changes to the database.
-    fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (Self::Key, Option<Self::Value>)>,
-    ) -> impl Future<Output = Result<(), Error>>;
-}
+//! Test utilities for batch operations on qmdb databases.
 
 #[cfg(test)]
 pub mod tests {
-    use super::*;
     use crate::{
-        qmdb::any::states::{MutableAny, UnmerkleizedDurableAny as _},
+        kv::{Batchable, Store, StoreDeletable as _, StoreMut},
+        qmdb::{
+            any::states::{MutableAny, UnmerkleizedDurableAny as _},
+            Error,
+        },
         Persistable as _,
     };
+    use commonware_codec::Codec;
     use commonware_cryptography::{blake3, sha256};
     use commonware_runtime::{
         deterministic::{self, Context},
         Runner as _,
     };
+    use commonware_utils::Array;
     use core::{fmt::Debug, future::Future};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::collections::HashSet;
@@ -184,12 +30,12 @@ pub mod tests {
     }
 
     /// Helper trait for async closures that create a database.
-    pub trait NewDb<D>: FnMut(Context) -> Self::Fut {
+    pub trait NewDb<D>: FnMut() -> Self::Fut {
         type Fut: Future<Output = D>;
     }
     impl<F, Fut, D> NewDb<D> for F
     where
-        F: FnMut(Context) -> Fut,
+        F: FnMut() -> Fut,
         Fut: Future<Output = D>,
     {
         type Fut = Fut;
@@ -203,9 +49,10 @@ pub mod tests {
 
     /// Run the batch test suite against a database factory within a deterministic executor twice,
     /// and test the auditor output for equality.
-    pub fn test_batch<D, F>(mut new_db: F)
+    pub fn test_batch<D, F, Fut>(mut new_db: F)
     where
-        F: NewDb<D> + Clone,
+        F: FnMut(Context) -> Fut + Clone,
+        Fut: Future<Output = D>,
         D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
@@ -232,22 +79,10 @@ pub mod tests {
         assert_eq!(state1, state2);
     }
 
-    /// Helper trait for async closures that create a database (no context).
-    pub trait NewDbNoCtx<D>: FnMut() -> Self::Fut {
-        type Fut: Future<Output = D>;
-    }
-    impl<F, Fut, D> NewDbNoCtx<D> for F
-    where
-        F: FnMut() -> Fut,
-        Fut: Future<Output = D>,
-    {
-        type Fut = Fut;
-    }
-
     /// Run the shared batch test suite against a database factory.
     pub async fn run_batch_tests<D, F>(new_db: &mut F) -> Result<(), Error>
     where
-        F: NewDbNoCtx<D>,
+        F: NewDb<D>,
         D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
@@ -264,7 +99,7 @@ pub mod tests {
 
     async fn test_overlay_reads<D, F>(new_db: &mut F) -> Result<(), Error>
     where
-        F: NewDbNoCtx<D>,
+        F: NewDb<D>,
         D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
@@ -293,7 +128,7 @@ pub mod tests {
 
     async fn test_create<D, F>(new_db: &mut F) -> Result<(), Error>
     where
-        F: NewDbNoCtx<D>,
+        F: NewDb<D>,
         D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
@@ -339,7 +174,7 @@ pub mod tests {
 
     async fn test_delete<D, F>(new_db: &mut F) -> Result<(), Error>
     where
-        F: NewDbNoCtx<D>,
+        F: NewDb<D>,
         D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
@@ -367,7 +202,7 @@ pub mod tests {
 
     async fn test_delete_unchecked<D, F>(new_db: &mut F) -> Result<(), Error>
     where
-        F: NewDbNoCtx<D>,
+        F: NewDb<D>,
         D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
@@ -395,7 +230,7 @@ pub mod tests {
     /// deleted. Also includes a delete_unchecked of an inactive key.
     async fn test_update_delete_update<D, F>(new_db: &mut F) -> Result<(), Error>
     where
-        F: NewDbNoCtx<D>,
+        F: NewDb<D>,
         D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
@@ -467,7 +302,7 @@ pub mod tests {
     /// keys.
     async fn test_write_batch_from_to_empty<D, F>(new_db: &mut F) -> Result<(), Error>
     where
-        F: NewDbNoCtx<D>,
+        F: NewDb<D>,
         D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,
@@ -528,7 +363,7 @@ pub mod tests {
 
     async fn test_write_batch<D, F>(new_db: &mut F) -> Result<(), Error>
     where
-        F: NewDbNoCtx<D>,
+        F: NewDb<D>,
         D: MutableAny,
         D::Key: TestKey,
         <D as Store>::Value: TestValue,

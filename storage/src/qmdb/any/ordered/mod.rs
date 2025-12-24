@@ -1007,10 +1007,10 @@ where
 mod test {
     use super::*;
     use crate::{
-        kv::{StoreDeletable as _, StoreMut as _},
+        kv::{Store as _, StoreDeletable as _, StoreMut as _},
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
-            store::{Getter, LogStore as _, MerkleizedStore},
+            store::{LogStore as _, MerkleizedStore},
         },
         translator::TwoCap,
     };

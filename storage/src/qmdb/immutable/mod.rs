@@ -1,21 +1,5 @@
 //! An authenticated database that only supports adding new keyed values (no updates or
 //! deletions), where values can have varying sizes.
-//!
-//! The [Immutable] db can be in one of four states based on two orthogonal dimensions:
-//! - Merkleization: `Merkleized` (has computed root) or `Unmerkleized` (root not yet computed)
-//! - Durability: `Durable` (committed to disk) or `NonDurable` (uncommitted changes)
-//!
-//! State transitions:
-//! - `init()`                                    → `(Merkleized,Durable)`
-//! - `(Merkleized,Durable).into_mutable()`       → `(Unmerkleized,NonDurable)`
-//! - `(Unmerkleized,Durable).into_mutable()`     → `(Unmerkleized,NonDurable)`
-//! - `(Merkleized,NonDurable).into_mutable()`    → `(Unmerkleized,NonDurable)`
-//! - `(Unmerkleized,Durable).into_merkleized()`    → `(Merkleized,Durable)`
-//! - `(Unmerkleized,NonDurable).into_merkleized()` → `(Merkleized,NonDurable)`
-//! - `(Unmerkleized,NonDurable).commit()`        → `(Unmerkleized,Durable)`
-//!
-//! We call the combined (Unmerkleized,NonDurable) state the _Mutable_ state since it's the only
-//! state in which the database state (as reflected by its `root`) can be changed.
 
 use crate::{
     index::{unordered::Index, Unordered as _},
