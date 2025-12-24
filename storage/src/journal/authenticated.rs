@@ -323,15 +323,6 @@ where
     C: PersistableContiguous<Item: Encode>,
     H: Hasher,
 {
-    /// Close the authenticated journal, syncing all pending writes.
-    pub async fn close(self) -> Result<(), Error> {
-        try_join!(
-            self.journal.close().map_err(Error::Journal),
-            self.mmr.close().map_err(Error::Mmr),
-        )?;
-        Ok(())
-    }
-
     /// Destroy the authenticated journal, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         try_join!(
@@ -613,13 +604,6 @@ where
         })
     }
 
-    async fn close(self) -> Result<(), JournalError> {
-        self.close().await.map_err(|e| match e {
-            Error::Journal(inner) => inner,
-            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
-        })
-    }
-
     async fn destroy(self) -> Result<(), JournalError> {
         self.destroy().await.map_err(|e| match e {
             Error::Journal(inner) => inner,
@@ -868,8 +852,9 @@ mod tests {
             let size_before = journal.size();
             assert_eq!(size_before, 20);
 
-            // Close and recreate to simulate restart (which calls align internally)
-            journal.close().await.unwrap();
+            // Drop and recreate to simulate restart (which calls align internally)
+            journal.sync().await.unwrap();
+            drop(journal);
             let journal = create_empty_journal(context, "mismatched").await;
 
             // Uncommitted operations should be gone
@@ -1267,9 +1252,10 @@ mod tests {
                 Location::new_unchecked(20),
                 "commit should be at location 20"
             );
-            journal.close().await.unwrap();
+            journal.sync().await.unwrap();
 
             // Reopen and verify the operations persisted
+            drop(journal);
             let journal = create_empty_journal(context, "close_pending").await;
             assert_eq!(journal.size(), 21);
 

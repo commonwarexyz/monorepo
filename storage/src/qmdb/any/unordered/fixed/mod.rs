@@ -253,9 +253,9 @@ pub(super) mod test {
             }
             db.commit(None).await.unwrap();
             let root = db.root();
-            db.close().await.unwrap();
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
+            drop(db);
             let db = open_db(context.clone()).await;
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);

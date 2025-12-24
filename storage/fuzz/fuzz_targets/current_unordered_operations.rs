@@ -316,8 +316,6 @@ fn fuzz(data: FuzzInput) {
                 }
             }
         }
-
-        db.close().await.expect("Close should not fail");
     });
 }
 

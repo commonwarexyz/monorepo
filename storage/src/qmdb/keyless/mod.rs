@@ -255,11 +255,6 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H,
         self.journal.sync().await.map_err(Into::into)
     }
 
-    /// Close the db. Operations that have not been committed will be lost.
-    pub async fn close(self) -> Result<(), Error> {
-        Ok(self.journal.close().await?)
-    }
-
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         Ok(self.journal.destroy().await?)
@@ -440,7 +435,8 @@ mod test {
             let v1 = vec![1u8; 8];
             let root = db.root();
             db.append(v1).await.unwrap();
-            db.close().await.unwrap();
+            db.sync().await.unwrap();
+            drop(db);
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(), root);
             assert_eq!(db.op_count(), 1);
@@ -490,7 +486,7 @@ mod test {
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert_eq!(db.get(Location::new_unchecked(3)).await.unwrap(), None); // the commit op
             let root = db.root();
-            db.close().await.unwrap();
+            drop(db);
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root);
@@ -502,13 +498,14 @@ mod test {
             db.append(v1).await.unwrap();
 
             // Make sure uncommitted items get rolled back.
-            db.close().await.unwrap();
+            db.sync().await.unwrap();
+            drop(db);
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root);
 
-            // Make sure commit operation remains after close/reopen.
-            db.close().await.unwrap();
+            // Make sure commit operation remains after drop/reopen.
+            drop(db);
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root);
@@ -576,8 +573,8 @@ mod test {
             db.commit(None).await.unwrap();
             let root = db.root();
 
-            // Make sure we can close/reopen and get back to the same state.
-            db.close().await.unwrap();
+            // Make sure we can reopen and get back to the same state.
+            drop(db);
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 2 * ELEMENTS as u64 + 3);
             assert_eq!(db.root(), root);
@@ -606,7 +603,7 @@ mod test {
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(), root);
             assert_eq!(db.last_commit_loc(), op_count - 1);
-            db.close().await.unwrap();
+            drop(db);
 
             // Insert many operations without commit, then simulate various types of failures.
             async fn recover_from_failure(
@@ -647,14 +644,15 @@ mod test {
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(), root);
-            db.close().await.unwrap();
+            drop(db);
 
             // Repeat recover_from_failure tests after successfully pruning to the last commit.
             let mut db = open_db(context.clone()).await;
             db.prune(db.last_commit_loc()).await.unwrap();
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(), root);
-            db.close().await.unwrap();
+            db.sync().await.unwrap();
+            drop(db);
 
             recover_from_failure(context.clone(), root, op_count).await;
 
@@ -896,7 +894,8 @@ mod test {
                 "Root should not change after pruning"
             );
 
-            db.close().await.unwrap();
+            db.sync().await.unwrap();
+            drop(db);
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(), root);
             assert_eq!(db.op_count(), 2 * ELEMENTS + 3);

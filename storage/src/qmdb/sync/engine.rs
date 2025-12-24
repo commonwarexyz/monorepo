@@ -454,6 +454,8 @@ where
     pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         // Check if sync is complete
         if self.is_complete().await? {
+            self.journal.sync().await?;
+
             // Build the database from the completed sync
             let database = DB::from_sync_result(
                 self.context,

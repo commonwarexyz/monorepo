@@ -40,20 +40,15 @@ pub(crate) type ConfigOf<H> = <DbOf<H> as qmdb::sync::Database>::Config;
 pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
 
 /// Trait for cleanup operations in tests.
-pub(crate) trait Closeable {
-    fn close(self) -> impl std::future::Future<Output = Result<(), qmdb::Error>> + Send;
+pub(crate) trait Destructible {
     fn destroy(self) -> impl std::future::Future<Output = Result<(), qmdb::Error>> + Send;
 }
 
-// Implement Closeable for the concrete MMR type used in tests.
+// Implement Destructible for the concrete MMR type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
-impl Closeable
+impl Destructible
     for crate::mmr::journaled::Mmr<deterministic::Context, Digest, crate::mmr::mem::Clean<Digest>>
 {
-    async fn close(self) -> Result<(), qmdb::Error> {
-        self.close().await.map_err(qmdb::Error::Mmr)
-    }
-
     async fn destroy(self) -> Result<(), qmdb::Error> {
         self.destroy().await.map_err(qmdb::Error::Mmr)
     }
@@ -61,7 +56,7 @@ impl Closeable
 
 /// Trait providing internal access for from_sync_result tests.
 pub(crate) trait FromSyncTestable: qmdb::sync::Database {
-    type Mmr: Closeable + Send;
+    type Mmr: Destructible + Send;
 
     /// Get the MMR and journal from the database
     fn into_log_components(self) -> (Self::Mmr, Self::Journal);
@@ -232,9 +227,9 @@ where
         let final_root = synced_db.root();
         let final_op_count = synced_db.op_count();
         let final_inactivity_floor = synced_db.inactivity_floor_loc();
-        synced_db.close().await.unwrap();
 
         // Reopen and verify state persisted
+        drop(synced_db);
         let reopened_db = H::init_db_with_config(context.clone(), db_config).await;
         assert_eq!(reopened_db.op_count(), final_op_count);
         assert_eq!(reopened_db.inactivity_floor_loc(), final_inactivity_floor);
@@ -336,8 +331,7 @@ where
         target_db.commit(None).await.unwrap();
         sync_db.commit(None).await.unwrap();
 
-        // Close sync_db
-        sync_db.close().await.unwrap();
+        drop(sync_db);
 
         // Add more operations and commit the target database
         let more_ops = H::create_ops(1);
@@ -433,8 +427,8 @@ where
             .unwrap();
         sync_db.prune(sync_db.inactivity_floor_loc()).await.unwrap();
 
-        // Close sync_db
-        sync_db.close().await.unwrap();
+        sync_db.sync().await.unwrap();
+        drop(sync_db);
 
         // Capture target state
         let root = target_db.root();
@@ -967,15 +961,13 @@ where
         // Verify initial sync worked
         assert_eq!(synced_db.root(), target_root);
 
-        // Save state before closing
+        // Save state before dropping
         let expected_root = synced_db.root();
         let expected_op_count = synced_db.op_count();
         let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc();
 
-        // Close the database
-        synced_db.close().await.unwrap();
-
         // Re-open the database
+        drop(synced_db);
         let reopened_db = H::init_db_with_config(context_clone, db_config).await;
 
         // Verify the state is unchanged
@@ -1020,10 +1012,7 @@ where
         let pinned_nodes = db
             .pinned_nodes_at(Position::try_from(db.inactivity_floor_loc()).unwrap())
             .await;
-        let (mmr, journal) = db.into_log_components();
-
-        // Close the MMR before calling from_sync_result
-        mmr.close().await.unwrap();
+        let (_, journal) = db.into_log_components();
 
         let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             context.clone(),
@@ -1080,8 +1069,8 @@ where
         let pinned_nodes =
             sync_db.pinned_nodes_from_map(Position::try_from(sync_db_original_size).unwrap());
 
-        // Close the sync db
-        sync_db.close().await.unwrap();
+        sync_db.sync().await.unwrap();
+        drop(sync_db);
 
         // Add more operations to the target db
         let more_ops = H::create_ops(NUM_ADDITIONAL_OPS);

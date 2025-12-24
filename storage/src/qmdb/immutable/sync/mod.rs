@@ -422,7 +422,7 @@ mod tests {
                 max_outstanding_requests: 1,
                 update_rx: None,
             };
-            let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+            let mut synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify initial sync worked
             assert_eq!(synced_db.root(), target_root);
@@ -432,8 +432,9 @@ mod tests {
             let expected_op_count = synced_db.op_count();
             let expected_oldest_retained_loc = synced_db.oldest_retained_loc();
 
-            // Close and reopen the database to test persistence
-            synced_db.close().await.unwrap();
+            // Drop & reopen the database to test persistence
+            synced_db.sync().await.unwrap();
+            drop(synced_db);
             let reopened_db = ImmutableSyncTest::init(context_clone, db_config)
                 .await
                 .unwrap();
@@ -666,8 +667,7 @@ mod tests {
             target_db.commit(None).await.unwrap();
             sync_db.commit(None).await.unwrap();
 
-            // Close sync_db
-            sync_db.close().await.unwrap();
+            drop(sync_db);
 
             // Add one more operation and commit the target database
             let last_op = create_test_ops(1);
@@ -727,8 +727,7 @@ mod tests {
             target_db.commit(None).await.unwrap();
             sync_db.commit(None).await.unwrap();
 
-            // Close sync_db
-            sync_db.close().await.unwrap();
+            drop(sync_db);
 
             // Prepare target
             let root = target_db.root();

@@ -22,6 +22,10 @@ where
     type Op = Op;
     type Error = Error;
 
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        Self::sync(self).await
+    }
+
     async fn size(&self) -> u64 {
         Self::size(self)
     }

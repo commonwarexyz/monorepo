@@ -730,13 +730,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         Ok(())
     }
 
-    /// Close the MMR, syncing any cached elements to disk and closing the journal.
-    pub async fn close(mut self) -> Result<(), Error> {
-        self.sync().await?;
-        self.journal.close().await?;
-        self.metadata.close().await.map_err(Error::MetadataError)
-    }
-
     /// Close and permanently remove any disk resources.
     pub async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await?;
@@ -1212,7 +1205,8 @@ mod tests {
             }
             assert_eq!(mmr.size(), 498);
             let root = mmr.root();
-            mmr.close().await.unwrap();
+            mmr.sync().await.unwrap();
+            drop(mmr);
 
             // The very last element we added (pos=495) resulted in new parents at positions 496 &
             // 497. Simulate a partial write by corrupting the last parent's checksum by truncating
@@ -1236,13 +1230,13 @@ mod tests {
             assert_eq!(mmr.size(), 498);
             assert_eq!(mmr.root(), root);
 
-            // Make sure closing it and re-opening it persists the recovered state.
-            mmr.close().await.unwrap();
+            // Make sure dropping it and re-opening it persists the recovered state.
+            drop(mmr);
             let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
             assert_eq!(mmr.size(), 498);
-            mmr.close().await.unwrap();
+            drop(mmr);
 
             // Repeat partial write test though this time truncate the leaf itself not just some
             // parent. The leaf is in the *previous* blob so we'll have to delete the most recent
@@ -1332,8 +1326,9 @@ mod tests {
             pruned_mmr.sync().await.unwrap();
             assert_eq!(pruned_mmr.root(), mmr.root());
 
-            // Close the MMR & reopen.
-            pruned_mmr.close().await.unwrap();
+            // Sync the MMR & reopen.
+            pruned_mmr.sync().await.unwrap();
+            drop(pruned_mmr);
             let mut pruned_mmr = Mmr::init(context.clone(), &mut hasher, cfg_pruned.clone())
                 .await
                 .unwrap();
@@ -1356,7 +1351,8 @@ mod tests {
                 .await
                 .unwrap();
             assert!(*pruned_mmr.size() % cfg_pruned.items_per_blob != 0);
-            pruned_mmr.close().await.unwrap();
+            pruned_mmr.sync().await.unwrap();
+            drop(pruned_mmr);
             let mut pruned_mmr = Mmr::init(context.clone(), &mut hasher, cfg_pruned.clone())
                 .await
                 .unwrap();
@@ -1405,7 +1401,8 @@ mod tests {
                 positions.push(pos);
             }
             assert_eq!(mmr.size(), 3994);
-            mmr.close().await.unwrap();
+            mmr.sync().await.unwrap();
+            drop(mmr);
 
             // Prune the MMR in increments of 50, simulating a partial write after each prune.
             for i in 0usize..200 {
@@ -1768,8 +1765,9 @@ mod tests {
             let new_mmr_root = new_mmr.root();
             assert_eq!(new_mmr_root, original_mmr_root);
 
-            // Close and re-open the journaled MMR
-            new_mmr.close().await.unwrap();
+            // Drop and re-open the journaled MMR
+            new_mmr.sync().await.unwrap();
+            drop(new_mmr);
             let new_mmr = Mmr::<_, sha256::Digest, Clean<sha256::Digest>>::init(
                 context.clone(),
                 &mut hasher,
@@ -1943,7 +1941,8 @@ mod tests {
                 pinned_nodes: None,
             };
 
-            mmr.close().await.unwrap();
+            mmr.sync().await.unwrap();
+            drop(mmr);
 
             let sync_mmr = Mmr::init_sync(context.clone(), sync_cfg, &mut hasher)
                 .await
@@ -2004,7 +2003,8 @@ mod tests {
                 pinned_nodes: None,
             };
 
-            mmr.close().await.unwrap();
+            mmr.sync().await.unwrap();
+            drop(mmr);
 
             let sync_mmr = Mmr::init_sync(context.clone(), sync_cfg, &mut hasher)
                 .await

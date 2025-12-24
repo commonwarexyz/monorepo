@@ -161,7 +161,6 @@ where
             sync_interval = ?config.sync_interval,
             "✅ Any sync completed successfully"
         );
-        database.close().await?;
         target_update_handle.abort();
         context.sleep(config.sync_interval).await;
         iteration += 1;
@@ -222,7 +221,6 @@ where
             sync_interval = ?config.sync_interval,
             "✅ Immutable sync completed successfully"
         );
-        database.close().await?;
         target_update_handle.abort();
         context.sleep(config.sync_interval).await;
         iteration += 1;

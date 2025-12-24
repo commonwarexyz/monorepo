@@ -385,11 +385,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         Ok(self.journal.sync().await?)
     }
 
-    /// Close the db. Operations that have not been committed will be lost.
-    pub async fn close(self) -> Result<(), Error> {
-        Ok(self.journal.close().await?)
-    }
-
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         Ok(self.journal.destroy().await?)
@@ -412,7 +407,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         V: Default,
     {
         self.apply_op(Operation::Commit(None)).await?;
-        self.journal.journal.close().await?;
+        self.journal.journal.sync().await?;
         self.journal.mmr.simulate_partial_sync(write_limit).await?;
 
         Ok(())
@@ -428,12 +423,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         self.apply_op(Operation::Commit(None)).await?;
         let log_size = self.journal.journal.size();
 
-        self.journal.mmr.close().await?;
+        self.journal.mmr.sync().await?;
+
         // Rewind the operation log over the commit op to force rollback to the previous commit.
         if log_size > 0 {
             self.journal.journal.rewind(log_size - 1).await?;
         }
-        self.journal.journal.close().await?;
+        self.journal.journal.sync().await?;
 
         Ok(())
     }
@@ -598,7 +594,8 @@ pub(super) mod test {
             let v1 = vec![4, 5, 6, 7];
             let root = db.root();
             db.set(k1, v1).await.unwrap();
-            db.close().await.unwrap();
+            db.sync().await.unwrap();
+            drop(db);
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(), root);
             assert_eq!(db.op_count(), 1);
@@ -607,7 +604,7 @@ pub(super) mod test {
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 2); // commit op added
             let root = db.root();
-            db.close().await.unwrap();
+            drop(db);
 
             let db = open_db(context.clone()).await;
             assert_eq!(db.root(), root);
@@ -667,8 +664,9 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 6);
             assert_ne!(db.root(), root);
 
-            // Close & reopen, make sure state is restored to last commit point.
-            db.close().await.unwrap();
+            // Drop & reopen, make sure state is restored to last commit point.
+            db.sync().await.unwrap();
+            drop(db);
             let db = open_db(context.clone()).await;
             assert!(db.get(&k3).await.unwrap().is_none());
             assert_eq!(db.op_count(), 5);
@@ -700,9 +698,10 @@ pub(super) mod test {
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), ELEMENTS + 2);
 
-            // Close & reopen the db, making sure the re-opened db has exactly the same state.
+            // Drop & reopen the db, making sure it has exactly the same state.
             let root = db.root();
-            db.close().await.unwrap();
+            drop(db);
+
             let db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), ELEMENTS + 2);
@@ -764,8 +763,8 @@ pub(super) mod test {
             let root = db.root();
             assert_ne!(root, halfway_root);
 
-            // Close & reopen could preserve the final commit.
-            db.close().await.unwrap();
+            // Drop & reopen could preserve the final commit.
+            drop(db);
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 2002);
             assert_eq!(db.root(), root);
@@ -858,9 +857,11 @@ pub(super) mod test {
             let unpruned_key = Sha256::hash(&oldest_retained_loc.to_be_bytes());
             assert!(db.get(&unpruned_key).await.unwrap().is_some());
 
-            // Close & reopen the db, making sure the re-opened db has exactly the same state.
+            // Drop & reopen the db, making sure it has exactly the same state.
             let root = db.root();
-            db.close().await.unwrap();
+            db.sync().await.unwrap();
+            drop(db);
+
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), ELEMENTS + 2);
@@ -878,7 +879,8 @@ pub(super) mod test {
             );
 
             // Confirm boundary persists across restart.
-            db.close().await.unwrap();
+            db.sync().await.unwrap();
+            drop(db);
             let db = open_db(context.clone()).await;
             let oldest_retained_loc = db.oldest_retained_loc();
             assert_eq!(
