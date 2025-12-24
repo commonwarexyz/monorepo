@@ -47,7 +47,7 @@ fn bench_get(c: &mut Criterion) {
     builder.start(|ctx| async move {
         let mut store = init(ctx).await;
         append_random(&mut store, ITEMS).await;
-        store.close().await.unwrap();
+        store.sync().await.unwrap();
     });
 
     // Run the benchmarks.

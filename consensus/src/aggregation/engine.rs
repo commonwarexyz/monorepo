@@ -419,7 +419,7 @@ impl<
         // Close journal on shutdown
         if let Some(journal) = self.journal.take() {
             journal
-                .close()
+                .sync_all()
                 .await
                 .expect("unable to close aggregation journal");
         }

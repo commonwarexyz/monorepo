@@ -15,7 +15,6 @@ enum OrdinalOperation {
     NextGap { index: u64 },
     Sync,
     Prune { min: u64 },
-    Close,
     Destroy,
     // Edge case operations
     PutSparse { indices: Vec<u64> },
@@ -28,7 +27,7 @@ const MAX_SPARSE_INDICES: usize = 10;
 impl<'a> Arbitrary<'a> for OrdinalOperation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 11 {
+        match choice % 10 {
             0 => Ok(OrdinalOperation::Put {
                 index: u.arbitrary()?,
                 value: u.arbitrary()?,
@@ -46,20 +45,19 @@ impl<'a> Arbitrary<'a> for OrdinalOperation {
             5 => Ok(OrdinalOperation::Prune {
                 min: u.arbitrary()?,
             }),
-            6 => Ok(OrdinalOperation::Close),
-            7 => Ok(OrdinalOperation::Destroy),
-            8 => {
+            6 => Ok(OrdinalOperation::Destroy),
+            7 => {
                 let num_indices = u.int_in_range(1..=MAX_SPARSE_INDICES)?;
                 let indices = (0..num_indices)
                     .map(|_| u.arbitrary())
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(OrdinalOperation::PutSparse { indices })
             }
-            9 => Ok(OrdinalOperation::PutLargeBatch {
+            8 => Ok(OrdinalOperation::PutLargeBatch {
                 start: u.arbitrary()?,
                 count: u.arbitrary()?,
             }),
-            10 => Ok(OrdinalOperation::ReopenAfterOperations),
+            9 => Ok(OrdinalOperation::ReopenAfterOperations),
             _ => unreachable!(),
         }
     }
@@ -190,12 +188,6 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                OrdinalOperation::Close => {
-                    if let Some(o) = store.take() {
-                        o.close().await.expect("failed to close store");
-                        return;
-                    }
-                }
 
                 OrdinalOperation::Destroy => {
                     if let Some(o) = store.take() {
@@ -249,11 +241,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 OrdinalOperation::ReopenAfterOperations => {
-                    if let Some(o) = store.take() {
-                        // Close the current ordinal (which includes a sync)
-                        o.close().await.expect("failed to close store before reopen failed");
+                    if let Some(mut o) = store.take() {
+                        // Sync and drop the current ordinal
+                        o.sync().await.expect("failed to sync store before reopen failed");
+                        drop(o);
 
-                        // Note: close() calls sync() internally, so update synced_data
+                        // Update synced_data
                         synced_data = expected_data.clone();
 
                         // Reopen and verify synced data persisted

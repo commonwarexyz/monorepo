@@ -421,16 +421,6 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         Ok(())
     }
 
-    /// Sync outstanding data and close [Metadata].
-    pub async fn close(mut self) -> Result<(), Error> {
-        // Sync and drop blobs
-        self.sync().await?;
-        for wrapper in self.blobs.into_iter() {
-            wrapper.blob.sync().await?;
-        }
-        Ok(())
-    }
-
     /// Remove the underlying blobs for this [Metadata].
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, wrapper) in self.blobs.into_iter().enumerate() {

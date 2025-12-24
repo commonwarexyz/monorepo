@@ -325,23 +325,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         self.ordinal.last_index()
     }
 
-    async fn close(mut self) -> Result<(), Error> {
-        // Close ordinal
-        self.ordinal.close().await?;
-
-        // Close table
-        let checkpoint = self.freezer.close().await?;
-
-        // Update checkpoint
-        let freezer_key = U64::new(FREEZER_PREFIX, 0);
-        self.metadata.put(freezer_key, Record::Freezer(checkpoint));
-
-        // Close metadata
-        self.metadata.close().await?;
-
-        Ok(())
-    }
-
     async fn destroy(self) -> Result<(), Error> {
         // Destroy ordinal
         self.ordinal.destroy().await?;

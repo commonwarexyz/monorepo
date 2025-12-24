@@ -881,15 +881,10 @@ impl<
                 _ = &mut shutdown => {
                     debug!("context shutdown, stopping voter");
 
-                    // Close journal
-                    self.journal
-                        .take()
-                        .unwrap()
-                        .close()
-                        .await
-                        .expect("unable to close journal");
+                    // Sync and drop journal
+                    self.journal.take().unwrap().sync_all().await.expect("unable to sync journal");
 
-                    // Only drop shutdown once journal is closed
+                    // Only drop shutdown once journal is synced
                     drop(shutdown);
                     return;
                 },

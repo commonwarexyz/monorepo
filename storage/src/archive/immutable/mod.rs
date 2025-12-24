@@ -58,8 +58,8 @@
 //!     // Put a key
 //!     archive.put(1, Sha256::hash(b"data"), 10).await.unwrap();
 //!
-//!     // Close the archive (also closes the freezer and ordinal)
-//!     archive.close().await.unwrap();
+//!     // Sync the archive
+//!     archive.sync().await.unwrap();
 //! });
 
 mod storage;
@@ -160,8 +160,9 @@ mod tests {
             archive.put(1, key1, 2000).await.unwrap();
             archive.put(2, key2, 2001).await.unwrap();
 
-            // Close archive (this should save the checkpoint)
-            archive.close().await.unwrap();
+            // Sync archive to save the checkpoint
+            archive.sync().await.unwrap();
+            drop(archive);
 
             // Re-initialize archive (should load from checkpoint)
             let archive = Archive::init(context, cfg).await.unwrap();
@@ -181,9 +182,6 @@ mod tests {
                     .unwrap(),
                 Some(2001)
             );
-
-            // Close the archive
-            archive.close().await.unwrap();
         });
     }
 }

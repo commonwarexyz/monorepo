@@ -480,10 +480,10 @@ impl<
             }
         }
 
-        // Close all journals, regardless of how we exit the loop
+        // Sync and drop all journals, regardless of how we exit the loop
         self.pending_verifies.cancel_all();
         while let Some((_, journal)) = self.journals.pop_first() {
-            journal.close().await.expect("unable to close journal");
+            journal.sync_all().await.expect("unable to sync journal");
         }
     }
 

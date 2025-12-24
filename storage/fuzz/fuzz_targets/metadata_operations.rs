@@ -14,7 +14,6 @@ enum MetadataOperation {
     Remove { key: u64 },
     Clear,
     Sync,
-    Close,
     Destroy,
     Keys { prefix: Option<Vec<u8>> },
     RemovePrefix { prefix: Vec<u8> },
@@ -67,10 +66,6 @@ fn fuzz(input: FuzzInput) {
                 }
                 MetadataOperation::Sync => {
                     metadata.sync().await.unwrap();
-                }
-                MetadataOperation::Close => {
-                    metadata.close().await.unwrap();
-                    return;
                 }
                 MetadataOperation::Destroy => {
                     metadata.destroy().await.unwrap();

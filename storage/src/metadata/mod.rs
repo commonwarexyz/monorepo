@@ -60,8 +60,6 @@
 //!     // Retrieve some metadata
 //!     let value = metadata.get(&U64::new(1)).unwrap();
 //!
-//!     // Close the store
-//!     metadata.close().await.unwrap();
 //! });
 //! ```
 
@@ -135,8 +133,8 @@ mod tests {
             assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 1"));
 
-            // Close the metadata store
-            metadata.close().await.unwrap();
+            // Sync the metadata store
+            metadata.sync().await.unwrap();
 
             // Check metrics
             let buffer = context.encode();
@@ -145,6 +143,7 @@ mod tests {
             assert!(buffer.contains("keys 1"));
 
             // Reopen the metadata store
+            drop(metadata);
             let cfg = Config {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
@@ -213,8 +212,8 @@ mod tests {
             let foo = b"foo".to_vec();
             metadata.put(key2.clone(), foo.clone());
 
-            // Close the metadata store
-            metadata.close().await.unwrap();
+            // Sync the metadata store
+            metadata.sync().await.unwrap();
 
             // Check metrics
             let buffer = context.encode();
@@ -223,6 +222,7 @@ mod tests {
             assert!(buffer.contains("keys 2"));
 
             // Reopen the metadata store
+            drop(metadata);
             let cfg = Config {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
@@ -255,10 +255,8 @@ mod tests {
             assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 1"));
 
-            // Close the metadata store
-            metadata.close().await.unwrap();
-
             // Reopen the metadata store
+            drop(metadata);
             let cfg = Config {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
@@ -312,8 +310,9 @@ mod tests {
             let foo = b"foo".to_vec();
             metadata.put(key2, foo.clone());
 
-            // Close the metadata store
-            metadata.close().await.unwrap();
+            // Sync the metadata store
+            metadata.sync().await.unwrap();
+            drop(metadata);
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
@@ -366,8 +365,9 @@ mod tests {
             let foo = b"foo".to_vec();
             metadata.put(key2, foo.clone());
 
-            // Close the metadata store
-            metadata.close().await.unwrap();
+            // Sync the metadata store
+            metadata.sync().await.unwrap();
+            drop(metadata);
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
@@ -427,8 +427,9 @@ mod tests {
             let foo = b"foo".to_vec();
             metadata.put(key2, foo.clone());
 
-            // Close the metadata store
-            metadata.close().await.unwrap();
+            // Sync the metadata store
+            metadata.sync().await.unwrap();
+            drop(metadata);
 
             // Corrupt the metadata store
             let (blob, len) = context.open("test", b"left").await.unwrap();
@@ -479,8 +480,9 @@ mod tests {
             let foo = b"foo".to_vec();
             metadata.put(key2, foo.clone());
 
-            // Close the metadata store
-            metadata.close().await.unwrap();
+            // Sync the metadata store
+            metadata.sync().await.unwrap();
+            drop(metadata);
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
@@ -746,7 +748,7 @@ mod tests {
             assert!(buffer.contains("sync_overwrites_total 1"));
 
             // Restart the metadata store
-            metadata.close().await.unwrap();
+            drop(metadata);
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context, cfg)
                 .await
                 .unwrap();
@@ -792,7 +794,7 @@ mod tests {
             assert_eq!(value, b"fourth");
 
             // Restart the metadata store
-            metadata.close().await.unwrap();
+            drop(metadata);
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context, cfg)
                 .await
                 .unwrap();
@@ -914,7 +916,7 @@ mod tests {
             assert!(buffer.contains("sync_overwrites_total 0"));
 
             // Restart the metadata store
-            metadata.close().await.unwrap();
+            drop(metadata);
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context, cfg)
                 .await
                 .unwrap();
@@ -959,7 +961,7 @@ mod tests {
             assert!(metadata.get(&U64::new(2)).is_none());
 
             // Restart the metadata store
-            metadata.close().await.unwrap();
+            drop(metadata);
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context, cfg)
                 .await
                 .unwrap();
@@ -1159,7 +1161,7 @@ mod tests {
 
             // Sync and reopen to ensure persistence
             metadata.sync().await.unwrap();
-            metadata.close().await.unwrap();
+            drop(metadata);
             let cfg = Config {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),

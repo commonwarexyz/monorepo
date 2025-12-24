@@ -15,7 +15,7 @@ fn bench_restart(c: &mut Criterion) {
         builder.start(|ctx| async move {
             let mut store = init(ctx).await;
             append_random(&mut store, items).await;
-            store.close().await.unwrap();
+            store.sync().await.unwrap();
         });
 
         // Run the benchmarks
@@ -27,9 +27,8 @@ fn bench_restart(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
                     let start = Instant::now();
-                    let store = init(ctx.clone()).await; // replay happens inside init
+                    let _store = init(ctx.clone()).await; // replay happens inside init
                     total += start.elapsed();
-                    store.close().await.unwrap();
                 }
                 total
             });

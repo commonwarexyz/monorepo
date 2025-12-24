@@ -71,8 +71,8 @@
 //!     assert!(current_end.is_none());
 //!     assert_eq!(start_next, Some(10));
 //!
-//!     // Close the cache (also closes the journal)
-//!     cache.close().await.unwrap();
+//!     // Sync the cache
+//!     cache.sync().await.unwrap();
 //! });
 //! ```
 
@@ -163,8 +163,9 @@ mod tests {
             let data = 1;
             cache.put(index, data).await.expect("Failed to put data");
 
-            // Close the cache
-            cache.close().await.expect("Failed to close cache");
+            // Sync and drop the cache
+            cache.sync().await.expect("Failed to sync cache");
+            drop(cache);
 
             // Initialize the cache again without compression
             let cfg = Config {
@@ -212,8 +213,9 @@ mod tests {
                 .await
                 .expect("Failed to put data");
 
-            // Close the cache
-            cache.close().await.expect("Failed to close cache");
+            // Sync and drop the cache
+            cache.sync().await.expect("Failed to sync cache");
+            drop(cache);
 
             // Corrupt the value
             let section = (index / DEFAULT_ITEMS_PER_BLOB) * DEFAULT_ITEMS_PER_BLOB;
@@ -356,8 +358,9 @@ mod tests {
             let tracked = format!("items_tracked {num_items:?}");
             assert!(buffer.contains(&tracked));
 
-            // Close the cache
-            cache.close().await.expect("Failed to close cache");
+            // Sync and drop the cache
+            cache.sync().await.expect("Failed to sync cache");
+            drop(cache);
 
             // Reinitialize the cache
             let cfg = Config {
@@ -558,8 +561,6 @@ mod tests {
                 items,
                 vec![DEFAULT_ITEMS_PER_BLOB - 2, DEFAULT_ITEMS_PER_BLOB]
             );
-
-            cache.close().await.expect("Failed to close cache");
         });
     }
 
@@ -577,7 +578,7 @@ mod tests {
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            // Insert data and close
+            // Insert data and sync
             {
                 let mut cache = Cache::init(context.clone(), cfg.clone())
                     .await
@@ -587,7 +588,7 @@ mod tests {
                 cache.put(100, 100).await.expect("Failed to put data");
                 cache.put(1000, 1000).await.expect("Failed to put data");
 
-                cache.close().await.expect("Failed to close cache");
+                cache.sync().await.expect("Failed to sync cache");
             }
 
             // Reopen and verify intervals are preserved

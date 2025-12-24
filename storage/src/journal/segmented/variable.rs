@@ -89,8 +89,8 @@
 //!     // Append data to the journal
 //!     journal.append(1, 128).await.unwrap();
 //!
-//!     // Close the journal
-//!     journal.close().await.unwrap();
+//!     // Sync the journal
+//!     journal.sync_all().await.unwrap();
 //! });
 //! ```
 
@@ -719,6 +719,15 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         blob.sync().await.map_err(Error::Runtime)
     }
 
+    /// Syncs all open sections.
+    pub async fn sync_all(&self) -> Result<(), Error> {
+        for blob in self.blobs.values() {
+            self.synced.inc();
+            blob.sync().await.map_err(Error::Runtime)?;
+        }
+        Ok(())
+    }
+
     /// Prunes all `sections` less than `min`. Returns true if any sections were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
         // Prune any blobs that are smaller than the minimum
@@ -750,16 +759,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         }
 
         Ok(pruned)
-    }
-
-    /// Syncs and closes all open sections.
-    pub async fn close(self) -> Result<(), Error> {
-        for (section, blob) in self.blobs.into_iter() {
-            let size = blob.size().await;
-            blob.sync().await?;
-            debug!(blob = section, size, "synced blob");
-        }
-        Ok(())
     }
 
     /// Returns the number of the oldest section in the journal.
@@ -833,18 +832,10 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("tracked 1"));
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
-
-            // Re-initialize the journal to simulate a restart
-            let cfg = Config {
-                partition: "test_partition".into(),
-                compression: None,
-                codec_config: (),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-            let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+            // Drop and re-open the journal to simulate a restart
+            journal.sync(index).await.expect("Failed to sync journal");
+            drop(journal);
+            let journal = Journal::<_, i32>::init(context.clone(), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -909,10 +900,8 @@ mod tests {
             assert!(buffer.contains("tracked 3"));
             assert!(buffer.contains("synced_total 4"));
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
-
-            // Re-initialize the journal to simulate a restart
+            // Drop and re-open the journal to simulate a restart
+            drop(journal);
             let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to re-initialize journal");
@@ -997,10 +986,8 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("pruned_total 2"));
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
-
-            // Re-initialize the journal to simulate a restart
+            // Drop and re-open the journal to simulate a restart
+            drop(journal);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
@@ -1031,8 +1018,8 @@ mod tests {
             // Prune all blobs
             journal.prune(6).await.expect("Failed to prune blobs");
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Drop the journal
+            drop(journal);
 
             // Ensure no remaining blobs exist
             //
@@ -1154,8 +1141,6 @@ mod tests {
 
             // Section 5 should still be accessible
             assert!(journal.get(5, 0).await.is_ok());
-
-            journal.close().await.expect("Failed to close journal");
         });
     }
 
@@ -1188,8 +1173,6 @@ mod tests {
 
                 journal.prune(3).await.expect("Failed to prune");
                 assert_eq!(journal.oldest_retained_section, 3);
-
-                journal.close().await.expect("Failed to close journal");
             }
 
             // Second session: verify oldest_retained_section is reset
@@ -1218,8 +1201,6 @@ mod tests {
                 assert!(journal.get(3, 0).await.is_ok());
                 assert!(journal.get(4, 0).await.is_ok());
                 assert!(journal.get(5, 0).await.is_ok());
-
-                journal.close().await.expect("Failed to close journal");
             }
         });
     }
@@ -1491,7 +1472,7 @@ mod tests {
                 }
                 assert!(items.is_empty());
             }
-            journal.close().await.expect("Failed to close journal");
+            drop(journal);
 
             // Confirm blob is expected length
             let (_, blob_size) = context
@@ -1536,8 +1517,9 @@ mod tests {
                 journal.sync(*index).await.expect("Failed to sync blob");
             }
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Sync all sections and drop the journal
+            journal.sync_all().await.expect("Failed to sync");
+            drop(journal);
 
             // Manually corrupt the end of the second blob
             let (blob, blob_size) = context
@@ -1569,7 +1551,7 @@ mod tests {
                     }
                 }
             }
-            journal.close().await.expect("Failed to close journal");
+            drop(journal);
 
             // Verify that only non-corrupted items were replayed
             assert_eq!(items.len(), 3);
@@ -1627,8 +1609,8 @@ mod tests {
             let item = journal.get(2, 2).await.expect("Failed to get item");
             assert_eq!(item, 5);
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Drop the journal (data already synced)
+            drop(journal);
 
             // Confirm blob is expected length
             // Items 1 and 2 at positions 0 and 16, item 3 (value 5) at position 32
@@ -1707,8 +1689,9 @@ mod tests {
                 journal.sync(*index).await.expect("Failed to sync blob");
             }
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Sync all sections and drop the journal
+            journal.sync_all().await.expect("Failed to sync");
+            drop(journal);
 
             // Manually corrupt the end of the second blob
             let (blob, blob_size) = context
@@ -1758,8 +1741,8 @@ mod tests {
             let item = journal.get(2, 2).await.expect("Failed to get item");
             assert_eq!(item, 5);
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Drop the journal (data already synced)
+            drop(journal);
 
             // Confirm blob is expected length
             // entry = 1 (varint for 8) + 8 (u64 data) + 4 (checksum) = 13 bytes
@@ -1790,7 +1773,6 @@ mod tests {
                     }
                 }
             }
-            journal.close().await.expect("Failed to close journal");
 
             // Verify that only non-corrupted items were replayed
             assert_eq!(items.len(), 4);
@@ -1839,8 +1821,9 @@ mod tests {
                 journal.sync(*index).await.expect("Failed to sync blob");
             }
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Sync all sections and drop the journal
+            journal.sync_all().await.expect("Failed to sync");
+            drop(journal);
 
             // Manually add extra data to the end of the second blob
             let (blob, blob_size) = context
@@ -2136,8 +2119,8 @@ mod tests {
             }
             journal.sync(1).await.expect("Failed to sync blob");
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Drop the journal (data already synced)
+            drop(journal);
 
             // Hash blob contents
             let (blob, size) = context

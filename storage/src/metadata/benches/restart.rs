@@ -21,7 +21,7 @@ fn bench_restart(c: &mut Criterion) {
 
             // Sync twice to ensure both blobs populated
             metadata.sync().await.unwrap();
-            metadata.close().await.unwrap();
+            metadata.sync().await.unwrap();
         });
 
         // Benchmark
@@ -33,9 +33,8 @@ fn bench_restart(c: &mut Criterion) {
                 for _ in 0..iters {
                     let start = Instant::now();
                     // This is the benchmarked operation
-                    let metadata = init(ctx.clone()).await;
+                    let _metadata = init(ctx.clone()).await;
                     total += start.elapsed();
-                    metadata.close().await.unwrap();
                 }
                 total
             });
