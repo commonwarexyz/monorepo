@@ -13,13 +13,11 @@ use tracing::debug;
 
 pub struct Config<S: Scheme> {
     pub scheme: S,
-    pub namespace: Vec<u8>,
 }
 
 pub struct Nuller<E: Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
-    namespace: Vec<u8>,
     _hasher: PhantomData<H>,
 }
 
@@ -33,7 +31,6 @@ where
         Self {
             context: ContextCell::new(context),
             scheme: cfg.scheme,
-            namespace: cfg.namespace,
             _hasher: PhantomData,
         }
     }
@@ -58,14 +55,13 @@ where
             match msg {
                 Vote::Notarize(notarize) => {
                     // Nullify
-                    let n = Nullify::sign(&self.scheme, &self.namespace, notarize.round()).unwrap();
+                    let n = Nullify::sign(&self.scheme, notarize.round()).unwrap();
                     let msg = Vote::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
                     let proposal = notarize.proposal;
-                    let f =
-                        Finalize::<S, _>::sign(&self.scheme, &self.namespace, proposal).unwrap();
+                    let f = Finalize::<S, _>::sign(&self.scheme, proposal).unwrap();
                     let msg = Vote::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

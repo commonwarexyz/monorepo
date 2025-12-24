@@ -196,6 +196,7 @@ fn main() {
             context.with_label("application"),
             application::Config {
                 hasher: Sha256::default(),
+                namespace: namespace.clone(),
                 mailbox_size: 1024,
                 participants: validators.clone(),
                 private_key: signer.clone(),
@@ -210,7 +211,6 @@ fn main() {
             automaton: mailbox.clone(),
             relay: mailbox.clone(),
             reporter: reporter.clone(),
-            namespace,
             partition: String::from("log"),
             mailbox_size: 1024,
             epoch: Epoch::zero(),

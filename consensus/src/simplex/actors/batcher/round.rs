@@ -312,9 +312,8 @@ impl<
     pub fn verify_notarizes<E: Rng + CryptoRng>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
     ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_notarizes(rng, namespace)
+        self.verifier.verify_notarizes(rng)
     }
 
     pub const fn ready_nullifies(&self) -> bool {
@@ -328,9 +327,8 @@ impl<
     pub fn verify_nullifies<E: Rng + CryptoRng>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
     ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_nullifies(rng, namespace)
+        self.verifier.verify_nullifies(rng)
     }
 
     pub const fn ready_finalizes(&self) -> bool {
@@ -344,9 +342,8 @@ impl<
     pub fn verify_finalizes<E: Rng + CryptoRng>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
     ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_finalizes(rng, namespace)
+        self.verifier.verify_finalizes(rng)
     }
 
     pub fn is_active(&self, leader: u32) -> bool {

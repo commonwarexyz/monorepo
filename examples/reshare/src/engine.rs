@@ -220,11 +220,14 @@ where
 
         // Create the certificate verifier from the initial output (if available).
         // This allows epoch-independent certificate verification after the DKG is complete.
-        let certificate_verifier = config
-            .output
-            .as_ref()
-            .and_then(<Provider<S, C> as EpochProvider>::certificate_verifier);
-        let provider = Provider::new(config.signer.clone(), certificate_verifier);
+        let certificate_verifier = config.output.as_ref().and_then(|output| {
+            <Provider<S, C> as EpochProvider>::certificate_verifier(&consensus_namespace, output)
+        });
+        let provider = Provider::new(
+            consensus_namespace.clone(),
+            config.signer.clone(),
+            certificate_verifier,
+        );
 
         let (marshal, marshal_mailbox, _processed_height) = marshal::Actor::init(
             context.with_label("marshal"),
@@ -240,7 +243,6 @@ where
                         .get()
                         .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
                 ),
-                namespace: consensus_namespace.clone(),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
                 buffer_pool: buffer_pool.clone(),
                 replay_buffer: REPLAY_BUFFER,
@@ -265,7 +267,6 @@ where
                 application,
                 provider,
                 marshal: marshal_mailbox,
-                namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),

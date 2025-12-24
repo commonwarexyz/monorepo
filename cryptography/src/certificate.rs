@@ -145,10 +145,31 @@ impl<S: Scheme> Verification<S> {
     }
 }
 
+/// Trait for namespace types that can derive themselves from a base namespace.
+///
+/// This trait is implemented by namespace types to define how they are computed
+/// from a base namespace string.
+pub trait Namespace: Clone + Send + Sync {
+    /// Derive a namespace from the given base.
+    fn derive(namespace: &[u8]) -> Self;
+}
+
+impl Namespace for Vec<u8> {
+    fn derive(namespace: &[u8]) -> Self {
+        namespace.to_vec()
+    }
+}
+
 /// Identifies the subject of a signature or certificate.
 pub trait Subject: Clone + Debug + Send + Sync {
-    /// Returns the namespace and message for the subject, given some base namespace.
-    fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes);
+    /// Pre-computed namespace(s) for this subject type.
+    type Namespace: Namespace;
+
+    /// Get the namespace bytes for this subject instance.
+    fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8];
+
+    /// Get the message bytes for this subject instance.
+    fn message(&self) -> Bytes;
 }
 
 /// Cryptographic surface for multi-party certificate schemes.
@@ -174,18 +195,13 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Returns the ordered set of participant public identity keys managed by the scheme.
     fn participants(&self) -> &Set<Self::PublicKey>;
 
-    /// Signs a subject using the supplied namespace for domain separation.
+    /// Signs a subject.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
-    fn sign<D: Digest>(
-        &self,
-        namespace: &[u8],
-        subject: Self::Subject<'_, D>,
-    ) -> Option<Attestation<Self>>;
+    fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>>;
 
     /// Verifies a single attestation against the participant material managed by the scheme.
     fn verify_attestation<D: Digest>(
         &self,
-        namespace: &[u8],
         subject: Self::Subject<'_, D>,
         attestation: &Attestation<Self>,
     ) -> bool;
@@ -197,7 +213,6 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn verify_attestations<R, D, I>(
         &self,
         _rng: &mut R,
-        namespace: &[u8],
         subject: Self::Subject<'_, D>,
         attestations: I,
     ) -> Verification<Self>
@@ -209,7 +224,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         let mut invalid = BTreeSet::new();
 
         let verified = attestations.into_iter().filter_map(|attestation| {
-            if self.verify_attestation(namespace, subject.clone(), &attestation) {
+            if self.verify_attestation(subject.clone(), &attestation) {
                 Some(attestation)
             } else {
                 invalid.insert(attestation.signer);
@@ -231,25 +246,19 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
         &self,
         rng: &mut R,
-        namespace: &[u8],
         subject: Self::Subject<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool;
 
     /// Verifies a stream of certificates, returning `false` at the first failure.
-    fn verify_certificates<'a, R, D, I>(
-        &self,
-        rng: &mut R,
-        namespace: &[u8],
-        certificates: I,
-    ) -> bool
+    fn verify_certificates<'a, R, D, I>(&self, rng: &mut R, certificates: I) -> bool
     where
         R: Rng + CryptoRng,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
     {
         for (subject, certificate) in certificates {
-            if !self.verify_certificate(rng, namespace, subject, certificate) {
+            if !self.verify_certificate(rng, subject, certificate) {
                 return false;
             }
         }
@@ -498,18 +507,24 @@ mod tests {
 
         /// Test context type for generic scheme tests.
         #[derive(Clone, Debug)]
-        pub struct TestSubject<'a> {
-            pub message: &'a [u8],
+        pub struct TestSubject {
+            pub message: Bytes,
         }
 
-        impl<'a> Subject for TestSubject<'a> {
-            fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
-                (namespace.to_vec().into(), self.message.to_vec().into())
+        impl Subject for TestSubject {
+            type Namespace = Vec<u8>;
+
+            fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8] {
+                derived
+            }
+
+            fn message(&self) -> Bytes {
+                self.message.clone()
             }
         }
 
         // Use the macro to generate the test scheme (signer/verifier are unused in conformance tests)
-        impl_certificate_ed25519!(TestSubject<'a>);
+        impl_certificate_ed25519!(TestSubject, Vec<u8>);
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Signers>,

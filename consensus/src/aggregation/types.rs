@@ -6,7 +6,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    certificate::{Attestation, Scheme, Subject},
+    certificate::{self, Attestation, Scheme, Subject},
     Digest,
 };
 use commonware_utils::union;
@@ -90,6 +90,19 @@ fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, ACK_SUFFIX)
 }
 
+/// Namespace type for aggregation acknowledgments.
+///
+/// This type encapsulates the pre-computed namespace bytes used for signing and
+/// verifying acks.
+#[derive(Clone, Debug)]
+pub struct Namespace(Vec<u8>);
+
+impl certificate::Namespace for Namespace {
+    fn derive(namespace: &[u8]) -> Self {
+        Self(ack_namespace(namespace))
+    }
+}
+
 /// Item represents a single element being aggregated in the protocol.
 /// Each item has a unique index and contains a digest that validators sign.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -124,8 +137,14 @@ impl<D: Digest> EncodeSize for Item<D> {
 }
 
 impl<D: Digest> Subject for &Item<D> {
-    fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
-        (ack_namespace(namespace).into(), self.encode().freeze())
+    type Namespace = Namespace;
+
+    fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8] {
+        &derived.0
+    }
+
+    fn message(&self) -> Bytes {
+        self.encode().freeze()
     }
 }
 
@@ -158,11 +177,11 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     ///
     /// Returns `true` if the attestation is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify(&self, scheme: &S) -> bool
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<D>(namespace, &self.item, &self.attestation)
+        scheme.verify_attestation::<D>(&self.item, &self.attestation)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -172,11 +191,11 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     /// # Determinism
     ///
     /// Signatures produced by this function are deterministic and safe for consensus.
-    pub fn sign(scheme: &S, namespace: &[u8], epoch: Epoch, item: Item<D>) -> Option<Self>
+    pub fn sign(scheme: &S, epoch: Epoch, item: Item<D>) -> Option<Self>
     where
         S: scheme::Scheme<D>,
     {
-        let attestation = scheme.sign::<D>(namespace, &item)?;
+        let attestation = scheme.sign::<D>(&item)?;
         Some(Self {
             item,
             epoch,
@@ -304,12 +323,12 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     }
 
     /// Verifies the recovered certificate for the item.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
     where
         R: Rng + CryptoRng,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D>(rng, namespace, &self.item, &self.certificate)
+        scheme.verify_certificate::<_, D>(rng, &self.item, &self.certificate)
     }
 }
 
@@ -448,10 +467,10 @@ mod tests {
     /// Generate a fixture using the provided generator function.
     fn setup<S, F>(n: u32, fixture: F) -> Fixture<S>
     where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let mut rng = StdRng::seed_from_u64(0);
-        fixture(&mut rng, n)
+        fixture(NAMESPACE, &mut rng, n)
     }
 
     #[test]
@@ -464,7 +483,7 @@ mod tests {
     fn codec<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
         let schemes = &fixture.schemes;
@@ -478,7 +497,7 @@ mod tests {
         assert_eq!(item, restored_item);
 
         // Test Ack creation and codec
-        let ack = Ack::sign(&schemes[0], NAMESPACE, Epoch::new(1), item.clone()).unwrap();
+        let ack = Ack::sign(&schemes[0], Epoch::new(1), item.clone()).unwrap();
         let cfg = schemes[0].certificate_codec_config();
         let encoded_ack = ack.encode();
         let restored_ack: Ack<S, Sha256Digest> = Ack::decode(encoded_ack).unwrap();
@@ -486,7 +505,7 @@ mod tests {
         // Verify the restored ack
         assert_eq!(restored_ack.item, item);
         assert_eq!(restored_ack.epoch, Epoch::new(1));
-        assert!(restored_ack.verify(&schemes[0], NAMESPACE));
+        assert!(restored_ack.verify(&schemes[0]));
 
         // Test TipAck codec
         let tip_ack = TipAck {
@@ -516,12 +535,12 @@ mod tests {
         let acks: Vec<_> = schemes
             .iter()
             .take(schemes[0].participants().quorum() as usize)
-            .filter_map(|scheme| Ack::sign(scheme, NAMESPACE, Epoch::new(1), item.clone()))
+            .filter_map(|scheme| Ack::sign(scheme, Epoch::new(1), item.clone()))
             .collect();
 
         let certificate = Certificate::from_acks(&schemes[0], &acks).unwrap();
         let mut rng = StdRng::seed_from_u64(0);
-        assert!(certificate.verify(&mut rng, &schemes[0], NAMESPACE));
+        assert!(certificate.verify(&mut rng, &schemes[0]));
 
         let activity_certified = Activity::Certified(certificate.clone());
         let encoded_certified = activity_certified.encode();
@@ -529,7 +548,7 @@ mod tests {
             Activity::decode_cfg(encoded_certified, &cfg).unwrap();
         if let Activity::Certified(restored) = restored_activity_certified {
             assert_eq!(restored.item, item);
-            assert!(restored.verify(&mut rng, &schemes[0], NAMESPACE));
+            assert!(restored.verify(&mut rng, &schemes[0]));
         } else {
             panic!("Expected Activity::Certified");
         }
@@ -558,7 +577,7 @@ mod tests {
     fn activity_invalid_enum<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
         let mut buf = BytesMut::new();

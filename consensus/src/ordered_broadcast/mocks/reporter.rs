@@ -101,7 +101,7 @@ where
                 }
                 Message::Locked(lock) => {
                     // Verify properly constructed (not needed in production)
-                    if !lock.verify(&mut self.rng, &self.namespace, &self.scheme) {
+                    if !lock.verify(&mut self.rng, &self.scheme) {
                         panic!("Invalid proof");
                     }
 

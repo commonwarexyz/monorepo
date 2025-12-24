@@ -32,7 +32,6 @@ const GENESIS_VIEW: View = View::zero();
 pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub scheme: S,
     pub elector: L,
-    pub namespace: Vec<u8>,
     pub epoch: Epoch,
     pub activity_timeout: ViewDelta,
     pub leader_timeout: Duration,
@@ -49,7 +48,6 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorC
     context: E,
     scheme: S,
     elector: L::Elector,
-    namespace: Vec<u8>,
     epoch: Epoch,
     activity_timeout: ViewDelta,
     leader_timeout: Duration,
@@ -83,7 +81,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
             context,
             scheme: cfg.scheme,
             elector,
-            namespace: cfg.namespace,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
             leader_timeout: cfg.leader_timeout,
@@ -202,7 +199,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
         let Some(retry) = self.create_round(view).construct_nullify() else {
             return (false, None, None);
         };
-        let nullify = Nullify::sign::<D>(&self.scheme, &self.namespace, Rnd::new(self.epoch, view));
+        let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view));
 
         // If was retry, we need to get entry certificates for the previous view
         let entry_view = view.previous().unwrap_or(GENESIS_VIEW);
@@ -274,7 +271,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
 
         // Signing can only fail if we are a verifier, so we don't need to worry about
         // unwinding our broadcast toggle.
-        Notarize::sign(&self.scheme, &self.namespace, candidate)
+        Notarize::sign(&self.scheme, candidate)
     }
 
     /// Construct a finalize vote if the round provides a candidate.
@@ -286,7 +283,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D:
 
         // Signing can only fail if we are a verifier, so we don't need to worry about
         // unwinding our broadcast toggle.
-        Finalize::sign(&self.scheme, &self.namespace, candidate)
+        Finalize::sign(&self.scheme, candidate)
     }
 
     /// Construct a notarization certificate once the round has quorum.
@@ -610,16 +607,15 @@ mod tests {
     fn certificate_candidates_respect_force_flag() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&mut context, 4);
-            let namespace = b"ns".to_vec();
+            } = ed25519::fixture(&namespace, &mut context, 4);
             let mut state = State::new(
                 context,
                 Config {
                     scheme: verifier.clone(),
                     elector: <RoundRobin>::default(),
-                    namespace: namespace.clone(),
                     epoch: Epoch::new(11),
                     activity_timeout: ViewDelta::new(6),
                     leader_timeout: Duration::from_secs(1),
@@ -636,9 +632,7 @@ mod tests {
                 Proposal::new(notarize_round, GENESIS_VIEW, Sha256Digest::from([50u8; 32]));
             let notarize_votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| {
-                    Notarize::sign(scheme, &namespace, notarize_proposal.clone()).unwrap()
-                })
+                .map(|scheme| Notarize::sign(scheme, notarize_proposal.clone()).unwrap())
                 .collect();
             let notarization = Notarization::from_notarizes(&verifier, notarize_votes.iter())
                 .expect("notarization");
@@ -655,8 +649,7 @@ mod tests {
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, &namespace, nullify_round)
-                        .expect("nullify")
+                    Nullify::sign::<Sha256Digest>(scheme, nullify_round).expect("nullify")
                 })
                 .collect();
             let nullification =
@@ -675,9 +668,7 @@ mod tests {
                 Proposal::new(finalize_round, GENESIS_VIEW, Sha256Digest::from([51u8; 32]));
             let finalize_votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| {
-                    Finalize::sign(scheme, &namespace, finalize_proposal.clone()).unwrap()
-                })
+                .map(|scheme| Finalize::sign(scheme, finalize_proposal.clone()).unwrap())
                 .collect();
             let finalization = Finalization::from_finalizes(&verifier, finalize_votes.iter())
                 .expect("finalization");
@@ -694,14 +685,13 @@ mod tests {
     fn timeout_helpers_reuse_and_reset_deadlines() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let Fixture { schemes, .. } = ed25519::fixture(&mut context, 4);
             let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&namespace, &mut context, 4);
             let local_scheme = schemes[0].clone(); // leader of view 1
             let retry = Duration::from_secs(3);
             let cfg = Config {
                 scheme: local_scheme.clone(),
                 elector: <RoundRobin>::default(),
-                namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
@@ -755,11 +745,10 @@ mod tests {
             let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&mut context, 4);
+            } = ed25519::fixture(&namespace, &mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
-                namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
@@ -782,7 +771,7 @@ mod tests {
             );
             let finalization_votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| Finalize::sign(scheme, &namespace, proposal_a.clone()).unwrap())
+                .map(|scheme| Finalize::sign(scheme, proposal_a.clone()).unwrap())
                 .collect();
             let finalization = Finalization::from_finalizes(&verifier, finalization_votes.iter())
                 .expect("finalization");
@@ -808,15 +797,14 @@ mod tests {
     fn parent_payload_returns_parent_digest() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&mut context, 4);
-            let namespace = b"ns".to_vec();
+            } = ed25519::fixture(&namespace, &mut context, 4);
             let local_scheme = schemes[2].clone(); // leader of view 1
             let cfg = Config {
                 scheme: local_scheme,
                 elector: <RoundRobin>::default(),
-                namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
@@ -846,7 +834,7 @@ mod tests {
             // Add notarization certificate
             let notarization_votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| Notarize::sign(scheme, &namespace, parent_proposal.clone()).unwrap())
+                .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
             let notarization =
                 Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
@@ -866,15 +854,14 @@ mod tests {
     fn parent_certificate_prefers_finalization() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&mut context, 4);
-            let namespace = b"ns".to_vec();
+            } = ed25519::fixture(&namespace, &mut context, 4);
             let local_scheme = schemes[1].clone(); // leader of view 2
             let cfg = Config {
                 scheme: local_scheme,
                 elector: <RoundRobin>::default(),
-                namespace: namespace.clone(),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
@@ -890,7 +877,7 @@ mod tests {
                 Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([11u8; 32]));
             let notarize_votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| Notarize::sign(scheme, &namespace, parent_proposal.clone()).unwrap())
+                .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
             let notarization = Notarization::from_notarizes(&verifier, notarize_votes.iter())
                 .expect("notarization");
@@ -911,7 +898,7 @@ mod tests {
             // Add finalization for the same parent view
             let finalize_votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| Finalize::sign(scheme, &namespace, parent_proposal.clone()).unwrap())
+                .map(|scheme| Finalize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
             let finalization = Finalization::from_finalizes(&verifier, finalize_votes.iter())
                 .expect("finalization");
@@ -927,14 +914,13 @@ mod tests {
     fn parent_payload_errors_without_nullification() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&mut context, 4);
-            let namespace = b"ns".to_vec();
+            } = ed25519::fixture(&namespace, &mut context, 4);
             let cfg = Config {
                 scheme: verifier.clone(),
                 elector: <RoundRobin>::default(),
-                namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
@@ -953,7 +939,7 @@ mod tests {
             );
             let notarization_votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| Notarize::sign(scheme, &namespace, parent_proposal.clone()).unwrap())
+                .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
             let notarization =
                 Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
@@ -974,14 +960,13 @@ mod tests {
     fn parent_payload_returns_genesis_payload() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&mut context, 4);
-            let namespace = b"ns".to_vec();
+            } = ed25519::fixture(&namespace, &mut context, 4);
             let cfg = Config {
                 scheme: verifier.clone(),
                 elector: <RoundRobin>::default(),
-                namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
@@ -995,12 +980,8 @@ mod tests {
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(
-                        scheme,
-                        &namespace,
-                        Rnd::new(Epoch::new(1), View::new(1)),
-                    )
-                    .unwrap()
+                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), View::new(1)))
+                        .unwrap()
                 })
                 .collect();
             let nullification = Nullification::from_nullifies(&verifier, &nullify_votes).unwrap();
@@ -1025,11 +1006,10 @@ mod tests {
             let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&mut context, 4);
+            } = ed25519::fixture(&namespace, &mut context, 4);
             let cfg = Config {
                 scheme: verifier.clone(),
                 elector: <RoundRobin>::default(),
-                namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
                 leader_timeout: Duration::from_secs(1),
@@ -1047,7 +1027,7 @@ mod tests {
             );
             let finalization_votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| Finalize::sign(scheme, &namespace, proposal_a.clone()).unwrap())
+                .map(|scheme| Finalize::sign(scheme, proposal_a.clone()).unwrap())
                 .collect();
             let finalization = Finalization::from_finalizes(&verifier, finalization_votes.iter())
                 .expect("finalization");
@@ -1067,10 +1047,10 @@ mod tests {
     fn replay_restores_conflict_state() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&mut context, 4);
-            let namespace = b"ns".to_vec();
+            } = ed25519::fixture(&namespace, &mut context, 4);
             let mut scheme_iter = schemes.into_iter();
             let local_scheme = scheme_iter.next().unwrap();
             let other_schemes: Vec<_> = scheme_iter.collect();
@@ -1080,7 +1060,6 @@ mod tests {
                 Config {
                     scheme: local_scheme.clone(),
                     elector: <RoundRobin>::default(),
-                    namespace: namespace.clone(),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
@@ -1093,7 +1072,7 @@ mod tests {
             let round = Rnd::new(epoch, view);
             let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([21u8; 32]));
             let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([22u8; 32]));
-            let local_vote = Notarize::sign(&local_scheme, &namespace, proposal_a).unwrap();
+            let local_vote = Notarize::sign(&local_scheme, proposal_a).unwrap();
 
             // Replay local notarize vote
             state.replay(&Artifact::Notarize(local_vote.clone()));
@@ -1102,7 +1081,7 @@ mod tests {
             let votes_b: Vec<_> = other_schemes
                 .iter()
                 .take(3)
-                .map(|scheme| Notarize::sign(scheme, &namespace, proposal_b.clone()).unwrap())
+                .map(|scheme| Notarize::sign(scheme, proposal_b.clone()).unwrap())
                 .collect();
             let conflicting =
                 Notarization::from_notarizes(&verifier, votes_b.iter()).expect("certificate");
@@ -1118,7 +1097,6 @@ mod tests {
                 Config {
                     scheme: local_scheme,
                     elector: <RoundRobin>::default(),
-                    namespace,
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
@@ -1141,11 +1119,10 @@ mod tests {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
-            let Fixture { schemes, .. } = ed25519::fixture(&mut context, 4);
+            let Fixture { schemes, .. } = ed25519::fixture(&namespace, &mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
-                namespace,
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
                 leader_timeout: Duration::from_secs(1),

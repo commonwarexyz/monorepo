@@ -71,13 +71,15 @@ mod tests {
     use rand::{rngs::StdRng, SeedableRng};
     use std::panic::catch_unwind;
 
+    const NAMESPACE: &[u8] = b"tip_manager_test";
+
     /// Generate a fixture using the provided generator function.
     fn setup<S, F>(num_validators: u32, fixture: F) -> Fixture<S>
     where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let mut rng = StdRng::seed_from_u64(0);
-        fixture(&mut rng, num_validators)
+        fixture(NAMESPACE, &mut rng, num_validators)
     }
 
     /// Creates a node for testing with a given scheme.
@@ -114,7 +116,7 @@ mod tests {
     fn put_new_tip<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
@@ -139,7 +141,7 @@ mod tests {
     fn put_same_height_same_payload<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
@@ -165,7 +167,7 @@ mod tests {
     fn put_higher_tip<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
@@ -192,7 +194,7 @@ mod tests {
     fn put_lower_tip_panics<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
@@ -223,7 +225,7 @@ mod tests {
     fn put_same_height_different_payload_panics<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
@@ -277,7 +279,7 @@ mod tests {
     fn multiple_sequencers<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
@@ -306,7 +308,7 @@ mod tests {
     fn put_multiple_updates<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let fixture = setup(4, fixture);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();

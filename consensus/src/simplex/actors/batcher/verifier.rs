@@ -182,7 +182,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// # Arguments
     ///
     /// * `rng` - Randomness source used by schemes that require batching randomness.
-    /// * `namespace` - The namespace for signature domain separation.
     ///
     /// # Returns
     ///
@@ -192,7 +191,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     pub fn verify_notarizes<R: Rng + CryptoRng>(
         &mut self,
         rng: &mut R,
-        namespace: &[u8],
     ) -> (Vec<Vote<S, D>>, Vec<u32>) {
         let notarizes = std::mem::take(&mut self.notarizes);
 
@@ -210,7 +208,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
         let Verification { verified, invalid } = self.scheme.verify_attestations::<_, D, _>(
             rng,
-            namespace,
             Subject::Notarize { proposal },
             attestations,
         );
@@ -271,7 +268,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// # Arguments
     ///
     /// * `rng` - Randomness source used by schemes that require batching randomness.
-    /// * `namespace` - The namespace for signature domain separation.
     ///
     /// # Returns
     ///
@@ -281,7 +277,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     pub fn verify_nullifies<R: Rng + CryptoRng>(
         &mut self,
         rng: &mut R,
-        namespace: &[u8],
     ) -> (Vec<Vote<S, D>>, Vec<u32>) {
         let nullifies = std::mem::take(&mut self.nullifies);
 
@@ -294,7 +289,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
         let Verification { verified, invalid } = self.scheme.verify_attestations::<_, D, _>(
             rng,
-            namespace,
             Subject::Nullify { round },
             nullifies.into_iter().map(|nullify| nullify.attestation),
         );
@@ -342,7 +336,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// # Arguments
     ///
     /// * `rng` - Randomness source used by schemes that require batching randomness.
-    /// * `namespace` - The namespace for signature domain separation.
     ///
     /// # Returns
     ///
@@ -352,7 +345,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     pub fn verify_finalizes<R: Rng + CryptoRng>(
         &mut self,
         rng: &mut R,
-        namespace: &[u8],
     ) -> (Vec<Vote<S, D>>, Vec<u32>) {
         let finalizes = std::mem::take(&mut self.finalizes);
 
@@ -370,7 +362,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
         let Verification { verified, invalid } = self.scheme.verify_attestations::<_, D, _>(
             rng,
-            namespace,
             Subject::Finalize { proposal },
             attestations,
         );
@@ -464,11 +455,13 @@ mod tests {
         let (polynomial, shares) =
             deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
 
+        let participants: Set<_> = participants.try_into().unwrap();
         shares
             .into_iter()
             .map(|share| {
                 bls12381_threshold::Scheme::signer(
-                    participants.clone().try_into().unwrap(),
+                    NAMESPACE,
+                    participants.clone(),
                     polynomial.clone(),
                     share,
                 )
@@ -489,7 +482,7 @@ mod tests {
 
         private_keys
             .into_iter()
-            .map(|sk| ed25519::Scheme::signer(participants.clone(), sk).unwrap())
+            .map(|sk| ed25519::Scheme::signer(NAMESPACE, participants.clone(), sk).unwrap())
             .collect()
     }
 
@@ -501,12 +494,12 @@ mod tests {
         payload_val: u8,
     ) -> Notarize<S, Sha256> {
         let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
-        Notarize::sign(scheme, NAMESPACE, proposal).unwrap()
+        Notarize::sign(scheme, proposal).unwrap()
     }
 
     // Helper to create a Nullify message for any signing scheme
     fn create_nullify<S: Scheme<Sha256>>(scheme: &S, round: Round) -> Nullify<S> {
-        Nullify::sign::<Sha256>(scheme, NAMESPACE, round).unwrap()
+        Nullify::sign::<Sha256>(scheme, round).unwrap()
     }
 
     // Helper to create a Finalize message for any signing scheme
@@ -517,7 +510,7 @@ mod tests {
         payload_val: u8,
     ) -> Finalize<S, Sha256> {
         let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
-        Finalize::sign(scheme, NAMESPACE, proposal).unwrap()
+        Finalize::sign(scheme, proposal).unwrap()
     }
 
     fn add_notarize<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -633,7 +626,7 @@ mod tests {
         assert!(verifier.ready_notarizes());
         assert_eq!(verifier.notarizes.len(), 4);
 
-        let (verified_bulk, failed_bulk) = verifier.verify_notarizes(&mut rng, NAMESPACE);
+        let (verified_bulk, failed_bulk) = verifier.verify_notarizes(&mut rng);
         assert_eq!(verified_bulk.len(), 4);
         assert!(failed_bulk.is_empty());
         assert_eq!(verifier.notarizes_verified, 4);
@@ -657,7 +650,7 @@ mod tests {
         }
         assert!(verifier2.ready_notarizes());
 
-        let (verified_second, failed_second) = verifier2.verify_notarizes(&mut rng, NAMESPACE);
+        let (verified_second, failed_second) = verifier2.verify_notarizes(&mut rng);
         assert!(verified_second
             .iter()
             .any(|v| matches!(v, Vote::Notarize(ref n) if n == &leader_vote)));
@@ -712,7 +705,7 @@ mod tests {
         assert!(verifier.ready_nullifies());
         assert_eq!(verifier.nullifies.len(), 3);
 
-        let (verified, failed) = verifier.verify_nullifies(&mut rng, NAMESPACE);
+        let (verified, failed) = verifier.verify_nullifies(&mut rng);
         assert_eq!(verified.len(), 3);
         assert!(failed.is_empty());
         assert_eq!(verifier.nullifies_verified, 4);
@@ -788,7 +781,7 @@ mod tests {
         verifier.add(Vote::Finalize(finalizes[3].clone()), false);
         assert!(verifier.ready_finalizes());
 
-        let (verified, failed) = verifier.verify_finalizes(&mut rng, NAMESPACE);
+        let (verified, failed) = verifier.verify_finalizes(&mut rng);
         assert_eq!(verified.len(), 3);
         assert!(failed.is_empty());
         assert_eq!(verifier.finalizes_verified, 4);
@@ -809,10 +802,10 @@ mod tests {
         let proposal_a = Proposal::new(round, View::new(0), sample_digest(10));
         let proposal_b = Proposal::new(round, View::new(0), sample_digest(20));
 
-        let notarize_a = Notarize::sign(&schemes[0], NAMESPACE, proposal_a.clone()).unwrap();
-        let notarize_b = Notarize::sign(&schemes[1], NAMESPACE, proposal_b.clone()).unwrap();
-        let finalize_a = Finalize::sign(&schemes[0], NAMESPACE, proposal_a.clone()).unwrap();
-        let finalize_b = Finalize::sign(&schemes[1], NAMESPACE, proposal_b).unwrap();
+        let notarize_a = Notarize::sign(&schemes[0], proposal_a.clone()).unwrap();
+        let notarize_b = Notarize::sign(&schemes[1], proposal_b.clone()).unwrap();
+        let finalize_a = Finalize::sign(&schemes[0], proposal_a.clone()).unwrap();
+        let finalize_b = Finalize::sign(&schemes[1], proposal_b).unwrap();
 
         verifier.add(Vote::Notarize(notarize_a.clone()), false);
         verifier.add(Vote::Notarize(notarize_b), false);
@@ -875,7 +868,7 @@ mod tests {
         }
         assert!(verifier.ready_notarizes(), "Should be ready at quorum");
 
-        let (verified, _) = verifier.verify_notarizes(&mut rng, NAMESPACE);
+        let (verified, _) = verifier.verify_notarizes(&mut rng);
         assert_eq!(verified.len(), quorum as usize);
         assert!(!verifier.ready_notarizes());
     }
@@ -973,7 +966,7 @@ mod tests {
         let mut rng = OsRng;
         assert!(verifier.nullifies.is_empty());
         assert!(!verifier.ready_nullifies());
-        let (verified, failed) = verifier.verify_nullifies(&mut rng, NAMESPACE);
+        let (verified, failed) = verifier.verify_nullifies(&mut rng);
         assert!(verified.is_empty());
         assert!(failed.is_empty());
         assert_eq!(verifier.nullifies_verified, 0);
@@ -992,7 +985,7 @@ mod tests {
         verifier.set_leader(0);
         assert!(verifier.finalizes.is_empty());
         assert!(!verifier.ready_finalizes());
-        let (verified, failed) = verifier.verify_finalizes(&mut rng, NAMESPACE);
+        let (verified, failed) = verifier.verify_finalizes(&mut rng);
         assert!(verified.is_empty());
         assert!(failed.is_empty());
         assert_eq!(verifier.finalizes_verified, 0);
@@ -1033,7 +1026,7 @@ mod tests {
             }
         }
 
-        let (verified, failed) = verifier.verify_notarizes(&mut rng, NAMESPACE);
+        let (verified, failed) = verifier.verify_notarizes(&mut rng);
         assert_eq!(verified.len(), quorum as usize - 1);
         assert!(failed.is_empty());
         assert_eq!(verifier.notarizes_verified, quorum as usize);

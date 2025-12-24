@@ -68,9 +68,6 @@ pub struct Config<
     /// Epoch for the consensus engine. Each running engine should have a unique epoch.
     pub epoch: Epoch,
 
-    /// Prefix for all signed messages to prevent replay attacks.
-    pub namespace: Vec<u8>,
-
     /// Number of bytes to buffer when replaying during startup.
     pub replay_buffer: NonZeroUsize,
 

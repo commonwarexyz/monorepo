@@ -533,12 +533,7 @@ impl<
         };
 
         // Construct vote (if a validator)
-        let Some(ack) = Ack::sign(
-            &self.namespace,
-            scheme.as_ref(),
-            tip.chunk.clone(),
-            self.epoch,
-        ) else {
+        let Some(ack) = Ack::sign(scheme.as_ref(), tip.chunk.clone(), self.epoch) else {
             return Err(Error::NotSigner(self.epoch));
         };
 
@@ -946,7 +941,7 @@ impl<
         }
 
         // Validate the vote signature
-        if !ack.verify(&self.namespace, scheme.as_ref()) {
+        if !ack.verify(scheme.as_ref()) {
             return Err(Error::InvalidAckSignature);
         }
 

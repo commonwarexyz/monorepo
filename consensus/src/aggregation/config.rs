@@ -39,10 +39,6 @@ pub struct Config<
     /// Blocking is handled by [commonware_p2p].
     pub blocker: B,
 
-    /// The application namespace used to sign over different types of messages.
-    /// Used to prevent replay attacks on other applications.
-    pub namespace: Vec<u8>,
-
     /// Whether acks are sent as priority.
     pub priority_acks: bool,
 
