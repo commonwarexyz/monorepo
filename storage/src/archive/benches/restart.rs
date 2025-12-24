@@ -39,7 +39,7 @@ fn bench_restart(c: &mut Criterion) {
                             let mut total = Duration::ZERO;
                             for _ in 0..iters {
                                 let start = Instant::now();
-                                let a = Archive::init(ctx.clone(), variant, compression).await; // replay happens inside init
+                                let _a = Archive::init(ctx.clone(), variant, compression).await; // replay happens inside init
                                 total += start.elapsed();
                             }
                             total

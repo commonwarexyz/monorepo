@@ -1019,7 +1019,6 @@ mod tests {
             journal.prune(6).await.expect("Failed to prune blobs");
 
             // Drop the journal
-            journal.sync_all().await.expect("Failed to sync journal");
             drop(journal);
 
             // Ensure no remaining blobs exist
