@@ -1,10 +1,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    mmr::{hasher::Hasher as _, Location, StandardHasher as Standard},
+    mmr::Location,
     qmdb::{
         current::{ordered::fixed::Db as Current, FixedConfig as Config},
         store::MerkleizedStore as _,
@@ -84,7 +84,7 @@ fn fuzz(data: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut hasher = Standard::<Sha256>::new();
+        let mut hasher = Sha256::new();
         let cfg = Config {
             mmr_journal_partition: "fuzz_current_mmr_journal".into(),
             mmr_metadata_partition: "fuzz_current_mmr_metadata".into(),
@@ -205,27 +205,22 @@ fn fuzz(data: FuzzInput) {
                     let current_op_count = db.op_count();
 
                     if current_op_count > 0 {
-                        // Commit first to get Durable state (range_proof requires Durable)
-                        let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                        uncommitted_ops = 0;
-                        let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
-                        last_committed_op_count = clean_db.op_count();
-
-                        let current_root = clean_db.root();
+                        let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                        let current_root = merkleized_db.root();
 
                         // Adjust start_loc and max_ops to be within the valid range
                         let start_loc = Location::new(start_loc % *current_op_count).unwrap();
 
-                        let oldest_loc = clean_db.inactivity_floor_loc();
+                        let oldest_loc = merkleized_db.inactivity_floor_loc();
                         if start_loc >= oldest_loc {
-                            let (proof, ops, chunks) = clean_db
-                                .range_proof(hasher.inner(), start_loc, *max_ops)
+                            let (proof, ops, chunks) = merkleized_db
+                                .range_proof(&mut hasher, start_loc, *max_ops)
                                 .await
                                 .expect("Range proof should not fail");
 
                             assert!(
                                 Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                                    hasher.inner(),
+                                    &mut hasher,
                                     &proof,
                                     start_loc,
                                     &ops,
@@ -235,7 +230,7 @@ fn fuzz(data: FuzzInput) {
                                 "Range proof verification failed for start_loc={start_loc}, max_ops={max_ops}"
                             );
                         }
-                        db = clean_db.into_mutable();
+                        db = merkleized_db.into_mutable();
                     }
                 }
 
@@ -243,20 +238,15 @@ fn fuzz(data: FuzzInput) {
                     if db.op_count() == 0 {
                         continue;
                     }
-                    // Commit first to get Durable state (range_proof requires Durable)
-                    let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    uncommitted_ops = 0;
-                    let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
-                    last_committed_op_count = clean_db.op_count();
+                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
 
-                    let mut hasher = Standard::<Sha256>::new();
-                    let current_op_count = clean_db.op_count();
+                    let current_op_count = merkleized_db.op_count();
 
                     let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
-                    let root = clean_db.root();
+                    let root = merkleized_db.root();
 
-                    if let Ok((range_proof, ops, chunks)) = clean_db
-                        .range_proof(hasher.inner(), start_loc, *max_ops)
+                    if let Ok((range_proof, ops, chunks)) = merkleized_db
+                        .range_proof(&mut hasher, start_loc, *max_ops)
                         .await {
                         // Try to verify the proof when providing bad proof digests.
                         let bad_digests = bad_digests.iter().map(|d| Digest::from(*d)).collect();
@@ -264,7 +254,7 @@ fn fuzz(data: FuzzInput) {
                             let mut bad_proof = range_proof.clone();
                             bad_proof.proof.digests = bad_digests;
                             assert!(!Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                                hasher.inner(),
+                                &mut hasher,
                                 &bad_proof,
                                 start_loc,
                                 &ops,
@@ -276,7 +266,7 @@ fn fuzz(data: FuzzInput) {
                         // Try to verify the proof when providing bad input chunks.
                         if &chunks != bad_chunks {
                             assert!(!Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                                hasher.inner(),
+                                &mut hasher,
                                 &range_proof,
                                 start_loc,
                                 &ops,
@@ -285,25 +275,22 @@ fn fuzz(data: FuzzInput) {
                             ), "proof with bad chunks should not verify");
                         }
                     }
-                    db = clean_db.into_mutable();
+                    db = merkleized_db.into_mutable();
                 }
 
                 CurrentOperation::KeyValueProof { key } => {
                     let k = Key::new(*key);
 
-                    // Commit first to get Durable state (key_value_proof requires Durable)
-                    let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    uncommitted_ops = 0;
-                    let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
-                    last_committed_op_count = clean_db.op_count();
+                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                    last_committed_op_count = merkleized_db.op_count();
 
-                    let current_root = clean_db.root();
+                    let current_root = merkleized_db.root();
 
-                    match clean_db.key_value_proof(hasher.inner(), k.clone()).await {
+                    match merkleized_db.key_value_proof(&mut hasher, k.clone()).await {
                         Ok(proof) => {
-                            let value = clean_db.get(&k).await.expect("get should not fail").expect("key should exist");
+                            let value = merkleized_db.get(&k).await.expect("get should not fail").expect("key should exist");
                             let verification_result = Current::<deterministic::Context, _, _, _, TwoCap, _>::verify_key_value_proof(
-                                hasher.inner(),
+                                &mut hasher,
                                 k,
                                 value,
                                 &proof,
@@ -318,24 +305,21 @@ fn fuzz(data: FuzzInput) {
                             panic!("Unexpected error during key value proof generation: {e:?}");
                         }
                     }
-                    db = clean_db.into_mutable();
+                    db = merkleized_db.into_mutable();
                 }
 
                 CurrentOperation::ExclusionProof { key } => {
                     let k = Key::new(*key);
 
-                    // Commit first to get Durable state (exclusion_proof requires Durable)
-                    let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    uncommitted_ops = 0;
-                    let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
-                    last_committed_op_count = clean_db.op_count();
+                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                    last_committed_op_count = merkleized_db.op_count();
 
-                    let current_root = clean_db.root();
+                    let current_root = merkleized_db.root();
 
-                    match clean_db.exclusion_proof(hasher.inner(), &k).await {
+                    match merkleized_db.exclusion_proof(&mut hasher, &k).await {
                         Ok(proof) => {
                             let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_exclusion_proof(
-                                hasher.inner(),
+                                &mut hasher,
                                 &k,
                                 &proof,
                                 &current_root,
@@ -349,7 +333,7 @@ fn fuzz(data: FuzzInput) {
                             panic!("Unexpected error during exclusion proof generation: {e:?}");
                         }
                     }
-                    db = clean_db.into_mutable();
+                    db = merkleized_db.into_mutable();
                 }
             }
         }

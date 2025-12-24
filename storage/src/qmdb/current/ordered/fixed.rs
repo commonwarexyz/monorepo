@@ -293,6 +293,59 @@ impl<
         self.cached_root.expect("Clean state must have cached root")
     }
 
+    /// Sync all database state to disk.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        self.any.sync().await?;
+
+        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
+        // re-Merkleize the inactive portion up to the inactivity floor.
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Close the db. Operations that have not been committed will be lost or rolled back on
+    /// restart.
+    pub async fn close(self) -> Result<(), Error> {
+        self.any.close().await
+    }
+
+    /// Destroy the db, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
+        // Clean up bitmap metadata partition.
+        CleanBitMap::<H::Digest, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
+
+        // Clean up Any components (MMR and log).
+        self.any.destroy().await
+    }
+
+    /// Transition into the mutable state.
+    pub fn into_mutable(self) -> Db<E, K, V, H, T, N, Unmerkleized, NonDurable> {
+        Db {
+            any: self.any.into_mutable(),
+            status: self.status.into_dirty(),
+            context: self.context,
+            bitmap_metadata_partition: self.bitmap_metadata_partition,
+            cached_root: None,
+        }
+    }
+}
+
+// Functionality for any Merkleized state (both Durable and NonDurable).
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+        D: crate::qmdb::store::State,
+    > Db<E, K, V, H, T, N, Merkleized<H>, D>
+{
     /// Returns a proof that the specified range of operations are part of the database, along with
     /// the operations from the range. A truncated range (from hitting the max) can be detected by
     /// looking at the length of the returned operations vector. Also returns the bitmap chunks
@@ -392,59 +445,6 @@ impl<
         })
     }
 
-    /// Sync all database state to disk.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        self.any.sync().await?;
-
-        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
-        // re-Merkleize the inactive portion up to the inactivity floor.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Close the db. Operations that have not been committed will be lost or rolled back on
-    /// restart.
-    pub async fn close(self) -> Result<(), Error> {
-        self.any.close().await
-    }
-
-    /// Destroy the db, removing all data from disk.
-    pub async fn destroy(self) -> Result<(), Error> {
-        // Clean up bitmap metadata partition.
-        CleanBitMap::<H::Digest, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
-
-        // Clean up Any components (MMR and log).
-        self.any.destroy().await
-    }
-
-    /// Transition into the mutable state.
-    pub fn into_mutable(self) -> Db<E, K, V, H, T, N, Unmerkleized, NonDurable> {
-        Db {
-            any: self.any.into_mutable(),
-            status: self.status.into_dirty(),
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
-            cached_root: None,
-        }
-    }
-}
-
-// Functionality for any Merkleized state (both Durable and NonDurable).
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        D: crate::qmdb::store::State,
-    > Db<E, K, V, H, T, N, Merkleized<H>, D>
-{
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
     /// or current snapshot.
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {

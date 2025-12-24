@@ -1,10 +1,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    mmr::{hasher::Hasher as _, Location, StandardHasher as Standard},
+    mmr::Location,
     qmdb::{
         current::{unordered::fixed::Db as Current, FixedConfig as Config},
         store::MerkleizedStore as _,
@@ -78,7 +78,7 @@ fn fuzz(data: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut hasher = Standard::<Sha256>::new();
+        let mut hasher = Sha256::new();
         let cfg = Config {
             mmr_journal_partition: "fuzz_current_mmr_journal".into(),
             mmr_metadata_partition: "fuzz_current_mmr_metadata".into(),
@@ -197,13 +197,13 @@ fn fuzz(data: FuzzInput) {
                         let oldest_loc = clean_db.inactivity_floor_loc();
                         if start_loc >= oldest_loc {
                             let (proof, ops, chunks) = clean_db
-                                .range_proof(hasher.inner(), start_loc, *max_ops)
+                                .range_proof(&mut hasher, start_loc, *max_ops)
                                 .await
                                 .expect("Range proof should not fail");
 
                             assert!(
                                 Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                                    hasher.inner(),
+                                    &mut hasher,
                                     &proof,
                                     start_loc,
                                     &ops,
@@ -218,7 +218,6 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::ArbitraryProof {start_loc, bad_digests, max_ops, bad_chunks} => {
-                    let mut hasher = Standard::<Sha256>::new();
                     let current_op_count = db.op_count();
                     if current_op_count == 0 {
                         continue;
@@ -233,7 +232,7 @@ fn fuzz(data: FuzzInput) {
                     let root = clean_db.root();
 
                     if let Ok((range_proof, ops, chunks)) = clean_db
-                        .range_proof(hasher.inner(), start_loc, *max_ops)
+                        .range_proof(&mut hasher, start_loc, *max_ops)
                         .await {
                         // Try to verify the proof when providing bad proof digests.
                         let bad_digests = bad_digests.iter().map(|d| Digest::from(*d)).collect();
@@ -241,7 +240,7 @@ fn fuzz(data: FuzzInput) {
                             let mut bad_proof = range_proof.clone();
                             bad_proof.proof.digests = bad_digests;
                             assert!(!Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                                hasher.inner(),
+                                &mut hasher,
                                 &bad_proof,
                                 start_loc,
                                 &ops,

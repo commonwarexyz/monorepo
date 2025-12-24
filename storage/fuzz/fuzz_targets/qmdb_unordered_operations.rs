@@ -113,34 +113,35 @@ fn fuzz(data: FuzzInput) {
 
                 QmdbOperation::Proof { start_loc, max_ops } => {
                     let actual_op_count = db.op_count();
-
-                    // Only generate proof if QMDB has operations and valid parameters
-                    if actual_op_count > 0 && *max_ops > 0 {
-                        let clean_db = db.into_merkleized();
-
-                        let current_root = clean_db.root();
-                        // Adjust start_loc to be within valid range
-                        // Locations are 0-indexed (first operation is at location 0)
-                        let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
-                        let adjusted_max_ops = (*max_ops % 100).max(1); // Ensure at least 1
-
-                        let (proof, log) = clean_db
-                            .proof(adjusted_start, NZU64!(adjusted_max_ops))
-                            .await
-                            .expect("proof should not fail");
-
-                        assert!(
-                            verify_proof(
-                                &mut hasher,
-                                &proof,
-                                adjusted_start,
-                                &log,
-                                &current_root
-                            ),
-                            "Proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}",
-                        );
-                        db = clean_db.into_mutable();
+                    // Only generate proof if proof will have operations.
+                    if actual_op_count == 0 || *max_ops == 0 {
+                        continue;
                     }
+
+                    let clean_db = db.into_merkleized();
+
+                    let current_root = clean_db.root();
+                    // Adjust start_loc to be within valid range
+                    // Locations are 0-indexed (first operation is at location 0)
+                    let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
+                    let adjusted_max_ops = (*max_ops % 100).max(1); // Ensure at least 1
+
+                    let (proof, log) = clean_db
+                        .proof(adjusted_start, NZU64!(adjusted_max_ops))
+                        .await
+                        .expect("proof should not fail");
+
+                    assert!(
+                        verify_proof(
+                            &mut hasher,
+                            &proof,
+                            adjusted_start,
+                            &log,
+                            &current_root
+                            ),
+                        "Proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}",
+                    );
+                    db = clean_db.into_mutable();
                 }
 
                 QmdbOperation::Get { key } => {

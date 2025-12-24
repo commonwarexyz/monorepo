@@ -227,55 +227,6 @@ impl<
         self.cached_root.expect("Clean state must have cached root")
     }
 
-    /// Returns a proof that the specified range of operations are part of the database, along with
-    /// the operations from the range. A truncated range (from hitting the max) can be detected by
-    /// looking at the length of the returned operations vector. Also returns the bitmap chunks
-    /// required to verify the proof.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
-    pub async fn range_proof(
-        &self,
-        hasher: &mut H,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
-        RangeProof::<H::Digest>::new_with_ops(
-            hasher,
-            &self.status,
-            Self::grafting_height(),
-            &self.any.log.mmr,
-            &self.any.log,
-            start_loc,
-            max_ops,
-        )
-        .await
-    }
-
-    /// Generate and return a proof of the current value of `key`, along with the other
-    /// [KeyValueProof] required to verify the proof. Returns KeyNotFound error if the key is not
-    /// currently assigned any value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
-    pub async fn key_value_proof(
-        &self,
-        hasher: &mut H,
-        key: K,
-    ) -> Result<KeyValueProof<H::Digest, N>, Error> {
-        let op_loc = self.any.get_with_loc(&key).await?;
-        let Some((_, loc)) = op_loc else {
-            return Err(Error::KeyNotFound);
-        };
-        let height = Self::grafting_height();
-        let mmr = &self.any.log.mmr;
-
-        OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await
-    }
-
     /// Sync all database state to disk.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.any.sync().await?;
@@ -343,6 +294,55 @@ impl<
             .await?;
 
         self.any.prune(prune_loc).await
+    }
+
+    /// Returns a proof that the specified range of operations are part of the database, along with
+    /// the operations from the range. A truncated range (from hitting the max) can be detected by
+    /// looking at the length of the returned operations vector. Also returns the bitmap chunks
+    /// required to verify the proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
+    pub async fn range_proof(
+        &self,
+        hasher: &mut H,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
+        RangeProof::<H::Digest>::new_with_ops(
+            hasher,
+            &self.status,
+            Self::grafting_height(),
+            &self.any.log.mmr,
+            &self.any.log,
+            start_loc,
+            max_ops,
+        )
+        .await
+    }
+
+    /// Generate and return a proof of the current value of `key`, along with the other
+    /// [KeyValueProof] required to verify the proof. Returns KeyNotFound error if the key is not
+    /// currently assigned any value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
+    pub async fn key_value_proof(
+        &self,
+        hasher: &mut H,
+        key: K,
+    ) -> Result<KeyValueProof<H::Digest, N>, Error> {
+        let op_loc = self.any.get_with_loc(&key).await?;
+        let Some((_, loc)) = op_loc else {
+            return Err(Error::KeyNotFound);
+        };
+        let height = Self::grafting_height();
+        let mmr = &self.any.log.mmr;
+
+        OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await
     }
 }
 
