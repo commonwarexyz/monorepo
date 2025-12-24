@@ -6,6 +6,10 @@
 //!
 //! See [Db] for the main database type.
 
+#[cfg(any(test, feature = "test-traits"))]
+use crate::qmdb::any::states::{
+    CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny,
+};
 use crate::{
     bitmap::CleanBitMap,
     mmr::{
@@ -18,7 +22,7 @@ use crate::{
                 fixed::{Db as AnyDb, Operation},
                 Update,
             },
-            CleanAny, FixedValue, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny,
+            FixedValue,
         },
         current::{
             merkleize_grafted_bitmap,
@@ -711,6 +715,7 @@ impl<
 }
 
 // CleanAny implementation
+#[cfg(any(test, feature = "test-traits"))]
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -774,6 +779,7 @@ impl<
 }
 
 // UnmerkleizedDurableAny implementation
+#[cfg(any(test, feature = "test-traits"))]
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -804,6 +810,7 @@ impl<
 }
 
 // MerkleizedNonDurableAny implementation
+#[cfg(any(test, feature = "test-traits"))]
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -821,6 +828,7 @@ impl<
 }
 
 // MutableAny implementation
+#[cfg(any(test, feature = "test-traits"))]
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,

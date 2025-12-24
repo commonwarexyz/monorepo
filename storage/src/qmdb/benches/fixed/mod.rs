@@ -10,9 +10,9 @@ use commonware_storage::{
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
+            states::{MutableAny, UnmerkleizedDurableAny},
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
-            FixedConfig as AConfig, MutableAny, UnmerkleizedDurableAny,
-            VariableConfig as VariableAnyConfig,
+            FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
         current::{
             ordered::fixed::Db as OCurrent, unordered::fixed::Db as UCurrent,

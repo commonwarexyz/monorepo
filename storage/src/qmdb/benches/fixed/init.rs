@@ -13,7 +13,7 @@ use commonware_runtime::{
     Runner as _,
 };
 use commonware_storage::qmdb::{
-    any::{CleanAny, MutableAny, UnmerkleizedDurableAny},
+    any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
     store::LogStore,
 };
 use criterion::{criterion_group, Criterion};

@@ -9,7 +9,7 @@ use crate::{
     mmr::{Location, Position},
     qmdb::{
         self,
-        any::CleanAny,
+        any::states::CleanAny,
         operation::Operation as OperationTrait,
         store::{LogStore as _, MerkleizedStore, PrunableStore},
         sync::{

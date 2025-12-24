@@ -7,6 +7,10 @@
 //!
 //! See [Db] for the main database type and [ExclusionProof] for proving key inactivity.
 
+#[cfg(any(test, feature = "test-traits"))]
+use crate::qmdb::any::states::{
+    CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny,
+};
 use crate::{
     bitmap::CleanBitMap,
     mmr::{
@@ -17,7 +21,7 @@ use crate::{
     qmdb::{
         any::{
             ordered::fixed::{Db as AnyDb, Operation, Update},
-            CleanAny, FixedValue, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny,
+            FixedValue,
         },
         current::{
             merkleize_grafted_bitmap,
@@ -886,6 +890,7 @@ impl<
 }
 
 // CleanAny trait implementation
+#[cfg(any(test, feature = "test-traits"))]
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -903,6 +908,7 @@ impl<
 }
 
 // UnmerkleizedDurableAny trait implementation
+#[cfg(any(test, feature = "test-traits"))]
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -933,6 +939,7 @@ impl<
 }
 
 // MerkleizedNonDurableAny trait implementation
+#[cfg(any(test, feature = "test-traits"))]
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -950,6 +957,7 @@ impl<
 }
 
 // MutableAny trait implementation
+#[cfg(any(test, feature = "test-traits"))]
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,

@@ -5,13 +5,17 @@ use crate::{
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
-            CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny, ValueEncoding,
+            ValueEncoding,
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
         operation::{Committable as _, Operation as OperationTrait},
         store::{self, Batchable},
         update_key, update_known_loc, Durable, Error, Merkleized, NonDurable, Unmerkleized,
     },
+};
+#[cfg(any(test, feature = "test-traits"))]
+use crate::{
+    qmdb::any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
     Persistable,
 };
 use commonware_codec::Codec;
@@ -336,6 +340,7 @@ where
     }
 }
 
+#[cfg(any(test, feature = "test-traits"))]
 impl<E, K, V, C, I, H> CleanAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
@@ -353,6 +358,7 @@ where
     }
 }
 
+#[cfg(any(test, feature = "test-traits"))]
 impl<E, K, V, C, I, H> UnmerkleizedDurableAny
     for Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>
 where
@@ -378,6 +384,7 @@ where
     }
 }
 
+#[cfg(any(test, feature = "test-traits"))]
 impl<E, K, V, C, I, H> MerkleizedNonDurableAny
     for Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>
 where
@@ -399,6 +406,7 @@ where
     }
 }
 
+#[cfg(any(test, feature = "test-traits"))]
 impl<E, K, V, C, I, H> MutableAny for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,

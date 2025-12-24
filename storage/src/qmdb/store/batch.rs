@@ -163,7 +163,7 @@ pub trait Batchable: Store<Key: Array, Value: Codec + Clone, Error = Error> {
 pub mod tests {
     use super::*;
     use crate::{
-        qmdb::any::{MutableAny, UnmerkleizedDurableAny as _},
+        qmdb::any::states::{MutableAny, UnmerkleizedDurableAny as _},
         Persistable as _,
     };
     use commonware_cryptography::{blake3, sha256};

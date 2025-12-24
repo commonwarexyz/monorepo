@@ -14,153 +14,23 @@ use crate::{
         authenticated,
         contiguous::fixed::{Config as JConfig, Journal},
     },
-    kv::{Store, StoreDeletable},
-    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
-    qmdb::{
-        operation::Committable,
-        store::{Batchable, LogStore, MerkleizedStore, PrunableStore},
-        Error,
-    },
+    mmr::{journaled::Config as MmrConfig, mem::Clean},
+    qmdb::{operation::Committable, Error},
     translator::Translator,
-    Persistable,
 };
-use commonware_codec::{Codec, CodecFixed};
-use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_codec::CodecFixed;
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
-use commonware_utils::Array;
-use std::{
-    future::Future,
-    num::{NonZeroU64, NonZeroUsize},
-    ops::Range,
-};
+use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod db;
 mod operation;
-
+#[cfg(any(test, feature = "test-traits"))]
+pub mod states;
 mod value;
 pub(crate) use value::{FixedValue, ValueEncoding, VariableValue};
-
 pub mod ordered;
 pub mod unordered;
-
-/// Trait for the (Merkleized,Durable) state.
-///
-/// This state allows authentication (root, proofs), pruning, and persistence operations
-/// (sync/close/destroy). Use `into_mutable` to transition to the (Unmerkleized,Non-durable) state.
-pub trait CleanAny:
-    MerkleizedStore
-    + PrunableStore
-    + Persistable<Error = Error>
-    + Store<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
-{
-    /// The mutable state type (Unmerkleized,Non-durable).
-    type Mutable: MutableAny<
-            Key = Self::Key,
-            Digest = <Self as MerkleizedStore>::Digest,
-            Operation = <Self as MerkleizedStore>::Operation,
-            // Cycle constraint for path: into_merkleized() then commit()
-            Merkleized: MerkleizedNonDurableAny<Durable = Self>,
-            // Cycle constraint for path: commit() then into_merkleized() or into_mutable()
-            Durable: UnmerkleizedDurableAny<Merkleized = Self, Mutable = Self::Mutable>,
-        > + LogStore<Value = <Self as LogStore>::Value>;
-
-    /// Convert this database into the mutable (Unmerkleized, Non-durable) state.
-    fn into_mutable(self) -> Self::Mutable;
-}
-
-/// Trait for the (Unmerkleized,Durable) state.
-///
-/// Use `into_mutable` to transition to the (Unmerkleized,NonDurable) state, or `into_merkleized` to
-/// transition to the (Merkleized,Durable) state.
-pub trait UnmerkleizedDurableAny:
-    LogStore + Store<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
-{
-    /// The digest type used by Merkleized states in this database's state machine.
-    type Digest: Digest;
-
-    /// The operation type used by Merkleized states in this database's state machine.
-    type Operation: Codec;
-
-    /// The mutable state type (Unmerkleized,NonDurable).
-    type Mutable: MutableAny<Key = Self::Key, Digest = Self::Digest, Operation = Self::Operation>
-        + LogStore<Value = <Self as LogStore>::Value>;
-
-    /// The provable state type (Merkleized,Durable).
-    type Merkleized: CleanAny<Key = Self::Key>
-        + MerkleizedStore<
-            Value = <Self as LogStore>::Value,
-            Digest = Self::Digest,
-            Operation = Self::Operation,
-        >;
-
-    /// Convert this database into the mutable state.
-    fn into_mutable(self) -> Self::Mutable;
-
-    /// Convert this database into the provable (Merkleized,Durable) state.
-    fn into_merkleized(self) -> impl Future<Output = Result<Self::Merkleized, Error>>;
-}
-
-/// Trait for the (Merkleized,NonDurable) state.
-///
-/// This state allows authentication (root, proofs) and pruning. Use `commit` to transition to the
-/// Merkleized, Durable state.
-pub trait MerkleizedNonDurableAny:
-    MerkleizedStore
-    + PrunableStore
-    + Store<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
-{
-    /// The durable state type (Merkleized,Durable).
-    type Durable: CleanAny<Key = Self::Key>
-        + MerkleizedStore<
-            Value = <Self as LogStore>::Value,
-            Digest = <Self as MerkleizedStore>::Digest,
-            Operation = <Self as MerkleizedStore>::Operation,
-        >;
-
-    /// Commit any pending operations to the database, ensuring their durability. Returns the
-    /// durable state and the location range of committed operations.
-    fn commit(
-        self,
-        metadata: Option<<Self as LogStore>::Value>,
-    ) -> impl Future<Output = Result<(Self::Durable, Range<Location>), Error>>;
-}
-
-/// Trait for the (Unmerkleized,NonDurable) state.
-///
-/// This is the only state that allows mutations (create/update/delete). Use `commit` to transition
-/// to the Unmerkleized, Durable state, or `into_merkleized` to transition to the Merkleized,
-/// NonDurable state.
-pub trait MutableAny:
-    LogStore + StoreDeletable<Key: Array, Value = <Self as LogStore>::Value, Error = Error> + Batchable
-{
-    /// The digest type used by Merkleized states in this database's state machine.
-    type Digest: Digest;
-
-    /// The operation type used by Merkleized states in this database's state machine.
-    type Operation: Codec;
-
-    /// The durable state type (Unmerkleized,Durable).
-    type Durable: UnmerkleizedDurableAny<Key = Self::Key, Digest = Self::Digest, Operation = Self::Operation>
-        + LogStore<Value = <Self as LogStore>::Value>;
-
-    /// The provable state type (Merkleized,NonDurable).
-    type Merkleized: MerkleizedNonDurableAny<Key = Self::Key>
-        + MerkleizedStore<
-            Value = <Self as LogStore>::Value,
-            Digest = Self::Digest,
-            Operation = Self::Operation,
-        >;
-
-    /// Commit any pending operations to the database, ensuring their durability. Returns the
-    /// durable state and the location range of committed operations.
-    fn commit(
-        self,
-        metadata: Option<<Self as LogStore>::Value>,
-    ) -> impl Future<Output = Result<(Self::Durable, Range<Location>), Error>>;
-
-    /// Convert this database into the provable (Merkleized, Non-durable) state.
-    fn into_merkleized(self) -> impl Future<Output = Result<Self::Merkleized, Error>>;
-}
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
 #[derive(Clone)]
