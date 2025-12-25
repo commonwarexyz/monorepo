@@ -15,6 +15,9 @@ workspace = true
 [dependencies]
 rayon = { workspace = true, optional = true }
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 [features]
 default = ["std"]
 std = ["dep:rayon"]

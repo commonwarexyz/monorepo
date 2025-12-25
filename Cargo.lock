@@ -1375,6 +1375,7 @@ dependencies = [
 name = "commonware-parallel"
 version = "0.0.64"
 dependencies = [
+ "proptest",
  "rayon",
 ]
 

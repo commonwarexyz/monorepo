@@ -1,3 +1,104 @@
+//! Abstract data parallelism over iterators and collections.
+//!
+//! This crate provides the [`Strategy`] trait, which abstracts over sequential and parallel
+//! execution of fold and join operations. This allows algorithms to be written once and
+//! executed either sequentially or in parallel depending on the chosen strategy.
+//!
+//! # Overview
+//!
+//! The core abstraction is the [`Strategy`] trait, which provides two simple operations:
+//!
+//! - [`fold`](Strategy::fold): Reduces a collection to a single value, potentially in parallel
+//! - [`join`](Strategy::join): Executes two closures, potentially in parallel
+//!
+//! Two implementations are provided:
+//!
+//! - [`Sequential`]: Executes operations sequentially on the current thread (works in `no_std`)
+//! - [`Parallel`]: Executes operations in parallel using a rayon thread pool (requires `std`)
+//!
+//! # Features
+//!
+//! - `std` (default): Enables the [`Parallel`] strategy backed by rayon
+//!
+//! When the `std` feature is disabled, only [`Sequential`] is available, making this crate
+//! suitable for `no_std` environments.
+//!
+//! # Examples
+//!
+//! ## Writing Strategy-Generic Code
+//!
+//! The main benefit of this crate is writing algorithms that can switch between sequential
+//! and parallel execution:
+//!
+//! ```
+//! use commonware_parallel::{Strategy, Sequential};
+//!
+//! fn sum_of_squares<S: Strategy>(strategy: &S, data: &[i64]) -> i64 {
+//!     strategy.fold(
+//!         data,
+//!         || 0i64,
+//!         |acc, &x| acc + x * x,
+//!         |a, b| a + b,
+//!     )
+//! }
+//!
+//! let strategy = Sequential;
+//! let data = vec![1, 2, 3, 4, 5];
+//! let result = sum_of_squares(&strategy, &data);
+//! assert_eq!(result, 55); // 1 + 4 + 9 + 16 + 25
+//! ```
+//!
+//! ## Switching to Parallel Execution
+//!
+//! The same algorithm can run in parallel by changing the strategy:
+//!
+//! ```
+//! use commonware_parallel::{Strategy, Parallel};
+//! use rayon::ThreadPoolBuilder;
+//! use std::sync::Arc;
+//!
+//! fn sum_of_squares<S: Strategy>(strategy: &S, data: &[i64]) -> i64 {
+//!     strategy.fold(
+//!         data,
+//!         || 0i64,
+//!         |acc, &x| acc + x * x,
+//!         |a, b| a + b,
+//!     )
+//! }
+//!
+//! let thread_pool = Arc::new(ThreadPoolBuilder::new().build().unwrap());
+//! let strategy = Parallel::new(thread_pool);
+//! let data: Vec<i64> = (1..=1000).collect();
+//! let result = sum_of_squares(&strategy, &data);
+//! assert_eq!(result, 333833500);
+//! ```
+//!
+//! ## Parallel Join for Divide-and-Conquer
+//!
+//! Use [`join`](Strategy::join) for divide-and-conquer algorithms:
+//!
+//! ```
+//! use commonware_parallel::{Strategy, Sequential};
+//!
+//! fn parallel_sum<S: Strategy>(strategy: &S, data: &[i32]) -> i32 {
+//!     if data.len() <= 2 {
+//!         data.iter().sum()
+//!     } else {
+//!         let mid = data.len() / 2;
+//!         let (left, right) = data.split_at(mid);
+//!         let (left_sum, right_sum) = strategy.join(
+//!             || parallel_sum(strategy, left),
+//!             || parallel_sum(strategy, right),
+//!         );
+//!         left_sum + right_sum
+//!     }
+//! }
+//!
+//! let strategy = Sequential;
+//! let data: Vec<i32> = (1..=100).collect();
+//! assert_eq!(parallel_sum(&strategy, &data), 5050);
+//! ```
+
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
 #[cfg(feature = "std")]
@@ -8,7 +109,79 @@ use rayon::{
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
+/// A strategy for executing fold and join operations.
+///
+/// This trait abstracts over sequential and parallel execution, allowing algorithms
+/// to be written generically and then executed with different strategies depending
+/// on the use case (e.g., sequential for testing/debugging, parallel for production).
 pub trait Strategy: Clone + Send + Sync {
+    /// Reduces a collection to a single value using fold and reduce operations.
+    ///
+    /// This method processes elements from the iterator, combining them into a single
+    /// result.
+    ///
+    /// # Arguments
+    ///
+    /// - `iter`: The collection to fold over
+    /// - `identity`: A closure that produces the identity value for the fold.
+    /// - `fold_op`: Combines an accumulator with a single item: `(acc, item) -> acc`
+    /// - `reduce_op`: Combines two accumulators: `(acc1, acc2) -> acc`.
+    ///
+    /// # Examples
+    ///
+    /// ## Sum of Elements
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// let strategy = Sequential;
+    /// let numbers = vec![1, 2, 3, 4, 5];
+    ///
+    /// let sum = strategy.fold(
+    ///     &numbers,
+    ///     || 0,                    // identity
+    ///     |acc, &n| acc + n,       // fold: add each number
+    ///     |a, b| a + b,            // reduce: combine partial sums
+    /// );
+    ///
+    /// assert_eq!(sum, 15);
+    /// ```
+    ///
+    /// ## Collecting into a Vec
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// let strategy = Sequential;
+    /// let numbers = vec![1, 2, 3, 4, 5];
+    ///
+    /// let doubled: Vec<i32> = strategy.fold(
+    ///     &numbers,
+    ///     Vec::new,
+    ///     |mut acc, &n| { acc.push(n * 2); acc },
+    ///     |mut a, b| { a.extend(b); a },
+    /// );
+    ///
+    /// assert_eq!(doubled, vec![2, 4, 6, 8, 10]);
+    /// ```
+    ///
+    /// ## Finding Maximum
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// let strategy = Sequential;
+    /// let numbers = vec![3, 1, 4, 1, 5, 9, 2, 6];
+    ///
+    /// let max = strategy.fold(
+    ///     &numbers,
+    ///     || i32::MIN,
+    ///     |acc, &n| acc.max(n),
+    ///     |a, b| a.max(b),
+    /// );
+    ///
+    /// assert_eq!(max, 9);
+    /// ```
     fn fold<I, T, ID, F, R>(&self, iter: I, identity: ID, fold_op: F, reduce_op: R) -> T
     where
         I: IntoParallelIterator + Send,
@@ -17,6 +190,89 @@ pub trait Strategy: Clone + Send + Sync {
         F: Fn(T, I::Item) -> T + Send + Sync,
         R: Fn(T, T) -> T + Send + Sync;
 
+    /// Executes two closures, potentially in parallel, and returns both results.
+    ///
+    /// For [`Sequential`], the closures are executed one after the other on the current
+    /// thread. For [`Parallel`], the closures may be executed concurrently on different
+    /// threads.
+    ///
+    /// This is useful for divide-and-conquer algorithms where two independent subproblems
+    /// can be solved in parallel.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `L`: The left closure type
+    /// - `LO`: The output type of the left closure
+    /// - `R`: The right closure type
+    /// - `RO`: The output type of the right closure
+    ///
+    /// # Arguments
+    ///
+    /// - `left`: The first closure to execute
+    /// - `right`: The second closure to execute
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing the results of both closures: `(left_result, right_result)`
+    ///
+    /// # Examples
+    ///
+    /// ## Independent Computations
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// let strategy = Sequential;
+    ///
+    /// let (sum, product) = strategy.join(
+    ///     || (1..=10).sum::<i32>(),
+    ///     || (1..=10).product::<i32>(),
+    /// );
+    ///
+    /// assert_eq!(sum, 55);
+    /// assert_eq!(product, 3628800);
+    /// ```
+    ///
+    /// ## Divide-and-Conquer Merge Sort
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// fn merge_sort<S: Strategy>(strategy: &S, mut data: Vec<i32>) -> Vec<i32> {
+    ///     if data.len() <= 1 {
+    ///         return data;
+    ///     }
+    ///
+    ///     let mid = data.len() / 2;
+    ///     let right_half = data.split_off(mid);
+    ///     let left_half = data;
+    ///
+    ///     let (left_sorted, right_sorted) = strategy.join(
+    ///         || merge_sort(strategy, left_half),
+    ///         || merge_sort(strategy, right_half),
+    ///     );
+    ///
+    ///     // Merge the sorted halves
+    ///     let mut result = Vec::with_capacity(left_sorted.len() + right_sorted.len());
+    ///     let (mut i, mut j) = (0, 0);
+    ///     while i < left_sorted.len() && j < right_sorted.len() {
+    ///         if left_sorted[i] <= right_sorted[j] {
+    ///             result.push(left_sorted[i]);
+    ///             i += 1;
+    ///         } else {
+    ///             result.push(right_sorted[j]);
+    ///             j += 1;
+    ///         }
+    ///     }
+    ///     result.extend_from_slice(&left_sorted[i..]);
+    ///     result.extend_from_slice(&right_sorted[j..]);
+    ///     result
+    /// }
+    ///
+    /// let data = vec![5, 2, 8, 1, 9, 3, 7, 4, 6];
+    /// let sorted = merge_sort(&Sequential, data);
+    /// assert_eq!(sorted, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    /// ```
     fn join<L, LO, R, RO>(&self, left: L, right: R) -> (LO, RO)
     where
         L: FnOnce() -> LO + Send,
@@ -25,10 +281,63 @@ pub trait Strategy: Clone + Send + Sync {
         RO: Send;
 }
 
+/// A trait for types that can be converted into a parallel iterator.
+///
+/// This trait extends [`IntoIterator`] to also support conversion into a parallel
+/// iterator when the `std` feature is enabled. It serves as a bridge between
+/// standard iterators and rayon's parallel iterators.
+///
+/// # Feature Flags
+///
+/// - With `std`: Provides [`into_par_iter`](IntoParallelIterator::into_par_iter)
+///   for parallel iteration
+/// - Without `std`: Acts as a marker trait with no additional methods
+///
+/// # Blanket Implementation
+///
+/// This trait is automatically implemented for all types that implement both
+/// [`IntoIterator`] and rayon's `IntoParallelIterator` (when `std` is enabled).
+/// This includes common collection types like `Vec<T>`, `&[T]`, ranges, etc.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_parallel::IntoParallelIterator;
+///
+/// // Vec implements IntoParallelIterator
+/// let vec = vec![1, 2, 3];
+/// let _iter = vec.into_iter(); // Can use as regular iterator
+///
+/// // Slices also implement it
+/// let slice: &[i32] = &[1, 2, 3];
+/// let _iter = slice.into_iter();
+///
+/// // Ranges work too
+/// let range = 0..100;
+/// let _iter = range.into_iter();
+/// ```
 pub trait IntoParallelIterator: IntoIterator {
+    /// The parallel iterator type that this converts into.
+    ///
+    /// This is the type returned by [`into_par_iter`](Self::into_par_iter).
     #[cfg(feature = "std")]
     type ParIter: ParallelIterator<Item = <Self as IntoIterator>::Item>;
 
+    /// Converts this type into a parallel iterator.
+    ///
+    /// This is used by [`Parallel::fold`] to enable parallel processing of the
+    /// collection.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_parallel::IntoParallelIterator;
+    /// use rayon::iter::ParallelIterator;
+    ///
+    /// let data = vec![1, 2, 3, 4, 5];
+    /// let sum: i32 = data.into_par_iter().sum();
+    /// assert_eq!(sum, 15);
+    /// ```
     #[cfg(feature = "std")]
     fn into_par_iter(self) -> Self::ParIter;
 }
@@ -49,6 +358,54 @@ where
 #[cfg(not(feature = "std"))]
 impl<T> IntoParallelIterator for T where T: IntoIterator {}
 
+/// A sequential execution strategy.
+///
+/// This strategy executes all operations on the current thread without any
+/// parallelism. It is useful for:
+///
+/// - Debugging and testing (deterministic execution)
+/// - `no_std` environments where threading is unavailable
+/// - Small workloads where parallelism overhead exceeds benefits
+/// - Comparing sequential vs parallel performance
+///
+/// # Examples
+///
+/// ## Basic Usage
+///
+/// ```
+/// use commonware_parallel::{Strategy, Sequential};
+///
+/// let strategy = Sequential;
+/// let data = vec![1, 2, 3, 4, 5];
+///
+/// let sum = strategy.fold(&data, || 0, |a, &b| a + b, |a, b| a + b);
+/// assert_eq!(sum, 15);
+/// ```
+///
+/// ## Using Default
+///
+/// ```
+/// use commonware_parallel::Sequential;
+///
+/// let strategy = Sequential::default();
+/// ```
+///
+/// ## In no_std Environments
+///
+/// `Sequential` is the only strategy available without the `std` feature,
+/// making it suitable for embedded or `no_std` contexts:
+///
+/// ```
+/// use commonware_parallel::{Strategy, Sequential};
+///
+/// // Works in no_std - no thread pool needed
+/// fn process_data<S: Strategy>(strategy: &S, data: &[u8]) -> u8 {
+///     strategy.fold(data, || 0u8, |a, &b| a.wrapping_add(b), |a, b| a.wrapping_add(b))
+/// }
+///
+/// let result = process_data(&Sequential, &[1, 2, 3]);
+/// assert_eq!(result, 6);
+/// ```
 #[derive(Default, Debug, Clone)]
 pub struct Sequential;
 
@@ -75,18 +432,148 @@ impl Strategy for Sequential {
     }
 }
 
+/// A parallel execution strategy backed by a rayon thread pool.
+///
+/// This strategy executes fold and join operations in parallel across multiple
+/// threads. It wraps a rayon [`ThreadPool`] and uses it to schedule work.
+///
+/// # Thread Pool Ownership
+///
+/// `Parallel` holds an [`Arc<ThreadPool>`], so it can be cheaply cloned and shared
+/// across threads. Multiple [`Parallel`] instances can share the same underlying
+/// thread pool.
+///
+/// # When to Use
+///
+/// Use `Parallel` when:
+///
+/// - Processing large collections where parallelism overhead is justified
+/// - The fold/reduce operations are CPU-bound
+/// - You want to utilize multiple cores
+///
+/// Consider [`Sequential`] instead when:
+///
+/// - The collection is small
+/// - Operations are I/O-bound rather than CPU-bound
+/// - Deterministic execution order is required for debugging
+///
+/// # Examples
+///
+/// ## Creating with a Thread Pool
+///
+/// ```
+/// use commonware_parallel::Parallel;
+/// use rayon::ThreadPoolBuilder;
+/// use std::sync::Arc;
+///
+/// // Create a thread pool with 4 threads
+/// let pool = ThreadPoolBuilder::new()
+///     .num_threads(4)
+///     .build()
+///     .unwrap();
+///
+/// let strategy = Parallel::new(Arc::new(pool));
+/// ```
+///
+/// ## Using From Trait
+///
+/// ```
+/// use commonware_parallel::Parallel;
+/// use rayon::ThreadPoolBuilder;
+/// use std::sync::Arc;
+///
+/// let pool = Arc::new(ThreadPoolBuilder::new().build().unwrap());
+/// let strategy: Parallel = pool.into();
+/// ```
+///
+/// ## Parallel Fold
+///
+/// ```
+/// use commonware_parallel::{Strategy, Parallel};
+/// use rayon::ThreadPoolBuilder;
+/// use std::sync::Arc;
+///
+/// let pool = Arc::new(ThreadPoolBuilder::new().build().unwrap());
+/// let strategy = Parallel::new(pool);
+///
+/// // Sum a large collection in parallel
+/// let data: Vec<i64> = (0..1_000_000).collect();
+/// let sum = strategy.fold(
+///     &data,
+///     || 0i64,
+///     |acc, &n| acc + n,
+///     |a, b| a + b,
+/// );
+///
+/// assert_eq!(sum, 499_999_500_000);
+/// ```
+///
+/// ## Parallel Join for Recursive Algorithms
+///
+/// ```
+/// use commonware_parallel::{Strategy, Parallel};
+/// use rayon::ThreadPoolBuilder;
+/// use std::sync::Arc;
+///
+/// fn fibonacci<S: Strategy>(strategy: &S, n: u64) -> u64 {
+///     if n <= 1 {
+///         return n;
+///     }
+///     // Only parallelize for larger values to avoid overhead
+///     if n < 20 {
+///         fibonacci(strategy, n - 1) + fibonacci(strategy, n - 2)
+///     } else {
+///         let (a, b) = strategy.join(
+///             || fibonacci(strategy, n - 1),
+///             || fibonacci(strategy, n - 2),
+///         );
+///         a + b
+///     }
+/// }
+///
+/// let pool = Arc::new(ThreadPoolBuilder::new().build().unwrap());
+/// let strategy = Parallel::new(pool);
+///
+/// assert_eq!(fibonacci(&strategy, 10), 55);
+/// ```
+///
+/// ## Sharing Across Threads
+///
+/// ```
+/// use commonware_parallel::{Strategy, Parallel};
+/// use rayon::ThreadPoolBuilder;
+/// use std::sync::Arc;
+/// use std::thread;
+///
+/// let pool = Arc::new(ThreadPoolBuilder::new().build().unwrap());
+/// let strategy = Parallel::new(pool);
+///
+/// // Clone is cheap - just an Arc clone
+/// let strategy_clone = strategy.clone();
+///
+/// let handle = thread::spawn(move || {
+///     let data = vec![1, 2, 3];
+///     strategy_clone.fold(&data, || 0, |a, &b| a + b, |a, b| a + b)
+/// });
+///
+/// let result = handle.join().unwrap();
+/// assert_eq!(result, 6);
+/// ```
 #[cfg(feature = "std")]
 #[derive(Debug, Clone)]
 pub struct Parallel {
     thread_pool: Arc<ThreadPool>,
 }
 
+#[cfg(feature = "std")]
 impl Parallel {
+    /// Creates a new [`Parallel`] strategy with the given [`ThreadPool`].
     pub const fn new(thread_pool: Arc<ThreadPool>) -> Self {
         Self { thread_pool }
     }
 }
 
+#[cfg(feature = "std")]
 impl From<Arc<ThreadPool>> for Parallel {
     fn from(thread_pool: Arc<ThreadPool>) -> Self {
         Self::new(thread_pool)
@@ -104,9 +591,30 @@ impl Strategy for Parallel {
         R: Fn(T, T) -> T + Send + Sync,
     {
         self.thread_pool.install(|| {
+            // Use Option<T> to track whether any elements were processed.
+            // This ensures empty iterators return identity() exactly once,
+            // matching Sequential semantics. Without this, rayon might create
+            // multiple empty partitions, each calling identity(), then reduce
+            // them together (e.g., identity=1 with reduce=add gives 1+1+1+1=4).
             iter.into_par_iter()
-                .fold(&identity, fold_op)
-                .reduce(&identity, reduce_op)
+                .fold(
+                    || None,
+                    |acc, x| {
+                        Some(match acc {
+                            Some(a) => fold_op(a, x),
+                            None => fold_op(identity(), x),
+                        })
+                    },
+                )
+                .reduce(
+                    || None,
+                    |a, b| match (a, b) {
+                        (Some(a), Some(b)) => Some(reduce_op(a, b)),
+                        (i @ Some(_), None) | (None, i @ Some(_)) => i,
+                        (None, None) => None,
+                    },
+                )
+                .unwrap_or_else(identity)
         })
     }
 
@@ -124,48 +632,199 @@ impl Strategy for Parallel {
 #[cfg(test)]
 mod test {
     use crate::{Parallel, Sequential, Strategy};
+    use proptest::prelude::*;
     use rayon::ThreadPoolBuilder;
     use std::sync::Arc;
 
-    #[test]
-    fn test_sequential_fold() {
-        let strategy = Sequential;
-        let data = vec![1, 2, 3, 4, 5];
-
-        let res = strategy.fold(&data, || 0, |acc, item| acc + item, |a, b| a + b);
-        assert_eq!(res, 15);
+    /// Creates a Parallel strategy for testing.
+    fn parallel_strategy() -> Parallel {
+        let thread_pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        Parallel::new(Arc::new(thread_pool))
     }
 
     #[test]
-    fn test_parallel_fold() {
-        let thread_pool = ThreadPoolBuilder::new().build().unwrap();
-        let strategy = Parallel {
-            thread_pool: Arc::new(thread_pool),
-        };
-        let data = vec![1, 2, 3, 4, 5];
+    fn fold_empty_with_zero_identity() {
+        let sequential = Sequential;
+        let parallel = parallel_strategy();
+        let empty: Vec<i64> = vec![];
 
-        let res = strategy.fold(&data, || 0, |acc, item| acc + item, |a, b| a + b);
-        assert_eq!(res, 15);
+        let seq_result = sequential.fold(
+            &empty,
+            || 0i64,
+            |acc, &x| acc.wrapping_add(x),
+            |a, b| a.wrapping_add(b),
+        );
+
+        let par_result = parallel.fold(
+            &empty,
+            || 0i64,
+            |acc, &x| acc.wrapping_add(x),
+            |a, b| a.wrapping_add(b),
+        );
+
+        assert_eq!(seq_result, 0i64);
+        assert_eq!(par_result, 0i64);
     }
 
-    #[test]
-    fn test_sequential_join() {
-        let strategy = Sequential;
+    proptest! {
+        #[test]
+        fn fold_range_sum(end in 0u64..10000) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+            let range: Vec<u64> = (0..end).collect();
 
-        let (a, b) = strategy.join(|| 2 + 3, || 4 + 5);
-        assert_eq!(a, 5);
-        assert_eq!(b, 9);
-    }
+            let seq_result = sequential.fold(
+                &range,
+                || 0u64,
+                |acc, &x| acc + x,
+                |a, b| a + b,
+            );
 
-    #[test]
-    fn test_parallel_join() {
-        let thread_pool = ThreadPoolBuilder::new().build().unwrap();
-        let strategy = Parallel {
-            thread_pool: Arc::new(thread_pool),
-        };
+            let par_result = parallel.fold(
+                &range,
+                || 0u64,
+                |acc, &x| acc + x,
+                |a, b| a + b,
+            );
 
-        let (a, b) = strategy.join(|| 2 + 3, || 4 + 5);
-        assert_eq!(a, 5);
-        assert_eq!(b, 9);
+            let expected = (0..end).sum::<u64>();
+            prop_assert_eq!(seq_result, expected);
+            prop_assert_eq!(par_result, expected);
+        }
+
+        #[test]
+        fn fold_empty_returns_identity(identity in any::<i64>()) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+            let empty: Vec<i64> = vec![];
+
+            let seq_result = sequential.fold(
+                &empty,
+                || identity,
+                |acc, &x| acc + x,
+                |a, b| a + b,
+            );
+
+            let par_result = parallel.fold(
+                &empty,
+                || identity,
+                |acc, &x| acc + x,
+                |a, b| a + b,
+            );
+
+            prop_assert_eq!(seq_result, identity);
+            prop_assert_eq!(par_result, identity);
+        }
+
+
+        #[test]
+        fn fold_single_element(value in any::<i64>()) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+            let single = vec![value];
+
+            let seq_result = sequential.fold(
+                &single,
+                || 0i64,
+                |acc, &x| acc.wrapping_add(x),
+                |a, b| a.wrapping_add(b),
+            );
+
+            let par_result = parallel.fold(
+                &single,
+                || 0i64,
+                |acc, &x| acc.wrapping_add(x),
+                |a, b| a.wrapping_add(b),
+            );
+
+            prop_assert_eq!(seq_result, value);
+            prop_assert_eq!(par_result, value);
+        }
+
+        #[test]
+        fn fold_collect_preserves_elements(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+
+            let seq_result: Vec<i32> = sequential.fold(
+                &data,
+                Vec::new,
+                |mut acc, &x| { acc.push(x); acc },
+                |mut a, b| { a.extend(b); a },
+            );
+
+            let par_result: Vec<i32> = parallel.fold(
+                &data,
+                Vec::new,
+                |mut acc, &x| { acc.push(x); acc },
+                |mut a, b| { a.extend(b); a },
+            );
+
+            prop_assert_eq!(seq_result, data.clone());
+            prop_assert_eq!(par_result, data);
+        }
+
+        #[test]
+        fn join_results_match(a in any::<i32>(), b in any::<i32>()) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+
+            let (seq_left, seq_right) = sequential.join(
+                || a.wrapping_mul(2),
+                || b.wrapping_add(10),
+            );
+
+            let (par_left, par_right) = parallel.join(
+                || a.wrapping_mul(2),
+                || b.wrapping_add(10),
+            );
+
+            prop_assert_eq!(seq_left, par_left);
+            prop_assert_eq!(seq_right, par_right);
+        }
+
+        #[test]
+        fn join_nested_matches(data in prop::collection::vec(any::<i32>(), 0..100)) {
+            if data.len() < 2 {
+                return Ok(());
+            }
+
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+            let mid = data.len() / 2;
+            let (left, right) = data.split_at(mid);
+
+            // Use wrapping arithmetic to avoid overflow
+            let sum_slice = |slice: &[i32]| -> i32 {
+                slice.iter().fold(0i32, |a, &b| a.wrapping_add(b))
+            };
+
+            let (seq_left_sum, seq_right_sum) = sequential.join(
+                || sum_slice(left),
+                || sum_slice(right),
+            );
+
+            let (par_left_sum, par_right_sum) = parallel.join(
+                || sum_slice(left),
+                || sum_slice(right),
+            );
+
+            prop_assert_eq!(seq_left_sum, par_left_sum);
+            prop_assert_eq!(seq_right_sum, par_right_sum);
+        }
+
+        #[test]
+        fn join_executes_both(x in any::<u32>(), y in any::<u32>()) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+
+            let (seq_a, seq_b) = sequential.join(|| x, || y);
+            let (par_a, par_b) = parallel.join(|| x, || y);
+
+            prop_assert_eq!(seq_a, x);
+            prop_assert_eq!(seq_b, y);
+            prop_assert_eq!(par_a, x);
+            prop_assert_eq!(par_b, y);
+        }
     }
 }
