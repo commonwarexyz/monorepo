@@ -12,6 +12,7 @@ members = [
     "macros",
     "math",
     "p2p",
+    "parallel",
     "resolver",
     "runtime",
     "storage",
