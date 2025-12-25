@@ -55,13 +55,20 @@
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
-#[cfg(feature = "std")]
-use rayon::{
-    iter::{IntoParallelIterator as RIntoParallelIterator, ParallelIterator},
-    ThreadPool,
-};
-#[cfg(feature = "std")]
-use std::sync::Arc;
+use cfg_if::cfg_if;
+
+cfg_if! {
+    if #[cfg(feature = "std")] {
+        use rayon::{
+            iter::{IntoParallelIterator, ParallelIterator},
+            ThreadPool,
+        };
+        use std::sync::Arc;
+    } else {
+        extern crate alloc;
+        use alloc::vec::Vec;
+    }
+}
 
 /// A strategy for executing fold and join operations.
 ///
@@ -102,7 +109,7 @@ pub trait Strategy: Clone + Send + Sync {
     /// ```
     fn fold<I, R, ID, F, RD>(&self, iter: I, identity: ID, fold_op: F, reduce_op: RD) -> R
     where
-        I: IntoParallelIterator + Send,
+        I: IntoStrategyIterator + Send,
         R: Send,
         ID: Fn() -> R + Send + Sync,
         F: Fn(R, I::Item) -> R + Send + Sync,
@@ -157,7 +164,7 @@ pub trait Strategy: Clone + Send + Sync {
         reduce_op: RD,
     ) -> R
     where
-        I: IntoParallelIterator + Send,
+        I: IntoStrategyIterator + Send,
         INIT: Fn() -> T + Send + Sync,
         T: Send,
         R: Send,
@@ -190,7 +197,7 @@ pub trait Strategy: Clone + Send + Sync {
     /// ```
     fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
     where
-        I: IntoParallelIterator + Send,
+        I: IntoStrategyIterator + Send,
         F: Fn(I::Item) -> T + Send + Sync,
         T: Send,
     {
@@ -243,7 +250,7 @@ pub trait Strategy: Clone + Send + Sync {
     /// ```
     fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
     where
-        I: IntoParallelIterator + Send,
+        I: IntoStrategyIterator + Send,
         INIT: Fn() -> T + Send + Sync,
         T: Send,
         F: Fn(&mut T, I::Item) -> R + Send + Sync,
@@ -313,22 +320,22 @@ pub trait Strategy: Clone + Send + Sync {
 ///
 /// # Feature Flags
 ///
-/// - With `std`: Provides [`into_par_iter`](IntoParallelIterator::into_par_iter)
+/// - With `std`: Provides [`into_par_iter`](IntoStrategyIterator::into_par_iter)
 ///   for parallel iteration
 /// - Without `std`: Acts as a marker trait with no additional methods
 ///
 /// # Blanket Implementation
 ///
 /// This trait is automatically implemented for all types that implement both
-/// [`IntoIterator`] and rayon's `IntoParallelIterator` (when `std` is enabled).
+/// [`IntoIterator`] and rayon's [`IntoParallelIterator`] (when `std` is enabled).
 /// This includes common collection types like `Vec<T>`, `&[T]`, ranges, etc.
 ///
 /// # Examples
 ///
 /// ```
-/// use commonware_parallel::IntoParallelIterator;
+/// use commonware_parallel::IntoStrategyIterator;
 ///
-/// // Vec implements IntoParallelIterator
+/// // Vec implements IntoStrategyIterator
 /// let vec = vec![1, 2, 3];
 /// let _iter = vec.into_iter(); // Can use as regular iterator
 ///
@@ -340,47 +347,49 @@ pub trait Strategy: Clone + Send + Sync {
 /// let range = 0..100;
 /// let _iter = range.into_iter();
 /// ```
-pub trait IntoParallelIterator: IntoIterator {
-    /// The parallel iterator type that this converts into.
-    ///
-    /// This is the type returned by [`into_par_iter`](Self::into_par_iter).
-    #[cfg(feature = "std")]
-    type ParIter: ParallelIterator<Item = <Self as IntoIterator>::Item>;
+pub trait IntoStrategyIterator: IntoIterator {
+    cfg_if! {
+        if #[cfg(feature = "std")] {
+            /// The parallel iterator type that this converts into.
+            ///
+            /// This is the type returned by [`into_par_iter`](Self::into_par_iter).
+            type ParIter: ParallelIterator<Item = <Self as IntoIterator>::Item>;
 
-    /// Converts this type into a parallel iterator.
-    ///
-    /// This is used by [`Parallel::fold`] to enable parallel processing of the
-    /// collection.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use commonware_parallel::IntoParallelIterator;
-    /// use rayon::iter::ParallelIterator;
-    ///
-    /// let data = vec![1, 2, 3, 4, 5];
-    /// let sum: i32 = data.into_par_iter().sum();
-    /// assert_eq!(sum, 15);
-    /// ```
-    #[cfg(feature = "std")]
-    fn into_par_iter(self) -> Self::ParIter;
+            /// Converts this type into a parallel iterator.
+            ///
+            /// This is used by [`Parallel::fold`] to enable parallel processing of the
+            /// collection.
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// use commonware_parallel::IntoStrategyIterator;
+            /// use rayon::iter::ParallelIterator;
+            ///
+            /// let data = vec![1, 2, 3, 4, 5];
+            /// let sum: i32 = data.into_par_iter().sum();
+            /// assert_eq!(sum, 15);
+            /// ```
+            fn into_par_iter(self) -> Self::ParIter;
+        }
+    }
 }
 
 #[cfg(feature = "std")]
-impl<T> IntoParallelIterator for T
+impl<T> IntoStrategyIterator for T
 where
     T: IntoIterator,
-    T: RIntoParallelIterator<Item = <T as IntoIterator>::Item>,
+    T: IntoParallelIterator<Item = <T as IntoIterator>::Item>,
 {
-    type ParIter = <T as RIntoParallelIterator>::Iter;
+    type ParIter = <T as IntoParallelIterator>::Iter;
 
     fn into_par_iter(self) -> Self::ParIter {
-        RIntoParallelIterator::into_par_iter(self)
+        IntoParallelIterator::into_par_iter(self)
     }
 }
 
 #[cfg(not(feature = "std"))]
-impl<T> IntoParallelIterator for T where T: IntoIterator {}
+impl<T> IntoStrategyIterator for T where T: IntoIterator {}
 
 /// A sequential execution strategy.
 ///
@@ -409,7 +418,7 @@ pub struct Sequential;
 impl Strategy for Sequential {
     fn fold<I, T, ID, F, R>(&self, iter: I, identity: ID, fold_op: F, _reduce_op: R) -> T
     where
-        I: IntoParallelIterator + Send,
+        I: IntoStrategyIterator + Send,
         T: Send,
         ID: Fn() -> T + Send + Sync,
         F: Fn(T, I::Item) -> T + Send + Sync,
@@ -427,7 +436,7 @@ impl Strategy for Sequential {
         _reduce_op: RD,
     ) -> R
     where
-        I: IntoParallelIterator + Send,
+        I: IntoStrategyIterator + Send,
         INIT: Fn() -> T + Send + Sync,
         T: Send,
         R: Send,
@@ -451,156 +460,156 @@ impl Strategy for Sequential {
     }
 }
 
-/// A parallel execution strategy backed by a rayon thread pool.
-///
-/// This strategy executes fold and join operations in parallel across multiple
-/// threads. It wraps a rayon [`ThreadPool`] and uses it to schedule work.
-///
-/// # Thread Pool Ownership
-///
-/// `Parallel` holds an [`Arc<ThreadPool>`], so it can be cheaply cloned and shared
-/// across threads. Multiple [`Parallel`] instances can share the same underlying
-/// thread pool.
-///
-/// # When to Use
-///
-/// Use `Parallel` when:
-///
-/// - Processing large collections where parallelism overhead is justified
-/// - The fold/reduce operations are CPU-bound
-/// - You want to utilize multiple cores
-///
-/// Consider [`Sequential`] instead when:
-///
-/// - The collection is small
-/// - Operations are I/O-bound rather than CPU-bound
-/// - Deterministic execution order is required for debugging
-///
-/// # Examples
-///
-/// ```
-/// use commonware_parallel::{Strategy, Parallel};
-/// use rayon::ThreadPoolBuilder;
-/// use std::sync::Arc;
-///
-/// let pool = Arc::new(ThreadPoolBuilder::new().num_threads(2).build().unwrap());
-/// let strategy = Parallel::new(pool);
-///
-/// let data: Vec<i64> = (0..1000).collect();
-/// let sum = strategy.fold(&data, || 0i64, |acc, &n| acc + n, |a, b| a + b);
-/// assert_eq!(sum, 499500);
-/// ```
-#[cfg(feature = "std")]
-#[derive(Debug, Clone)]
-pub struct Parallel {
-    thread_pool: Arc<ThreadPool>,
-}
+cfg_if! {
+    if #[cfg(feature = "std")] {
+        /// A parallel execution strategy backed by a rayon thread pool.
+        ///
+        /// This strategy executes fold and join operations in parallel across multiple
+        /// threads. It wraps a rayon [`ThreadPool`] and uses it to schedule work.
+        ///
+        /// # Thread Pool Ownership
+        ///
+        /// `Parallel` holds an [`Arc<ThreadPool>`], so it can be cheaply cloned and shared
+        /// across threads. Multiple [`Parallel`] instances can share the same underlying
+        /// thread pool.
+        ///
+        /// # When to Use
+        ///
+        /// Use `Parallel` when:
+        ///
+        /// - Processing large collections where parallelism overhead is justified
+        /// - The fold/reduce operations are CPU-bound
+        /// - You want to utilize multiple cores
+        ///
+        /// Consider [`Sequential`] instead when:
+        ///
+        /// - The collection is small
+        /// - Operations are I/O-bound rather than CPU-bound
+        /// - Deterministic execution order is required for debugging
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_parallel::{Strategy, Parallel};
+        /// use rayon::ThreadPoolBuilder;
+        /// use std::sync::Arc;
+        ///
+        /// let pool = Arc::new(ThreadPoolBuilder::new().num_threads(2).build().unwrap());
+        /// let strategy = Parallel::new(pool);
+        ///
+        /// let data: Vec<i64> = (0..1000).collect();
+        /// let sum = strategy.fold(&data, || 0i64, |acc, &n| acc + n, |a, b| a + b);
+        /// assert_eq!(sum, 499500);
+        /// ```
+        #[derive(Debug, Clone)]
+        pub struct Parallel {
+            thread_pool: Arc<ThreadPool>,
+        }
 
-#[cfg(feature = "std")]
-impl Parallel {
-    /// Creates a new [`Parallel`] strategy with the given [`ThreadPool`].
-    pub const fn new(thread_pool: Arc<ThreadPool>) -> Self {
-        Self { thread_pool }
-    }
-}
+        impl Parallel {
+            /// Creates a new [`Parallel`] strategy with the given [`ThreadPool`].
+            pub const fn new(thread_pool: Arc<ThreadPool>) -> Self {
+                Self { thread_pool }
+            }
+        }
 
-#[cfg(feature = "std")]
-impl From<Arc<ThreadPool>> for Parallel {
-    fn from(thread_pool: Arc<ThreadPool>) -> Self {
-        Self::new(thread_pool)
-    }
-}
+        impl From<Arc<ThreadPool>> for Parallel {
+            fn from(thread_pool: Arc<ThreadPool>) -> Self {
+                Self::new(thread_pool)
+            }
+        }
 
-#[cfg(feature = "std")]
-impl Strategy for Parallel {
-    fn fold<I, T, ID, F, R>(&self, iter: I, identity: ID, fold_op: F, reduce_op: R) -> T
-    where
-        I: IntoParallelIterator + Send,
-        T: Send,
-        ID: Fn() -> T + Send + Sync,
-        F: Fn(T, I::Item) -> T + Send + Sync,
-        R: Fn(T, T) -> T + Send + Sync,
-    {
-        self.thread_pool.install(|| {
-            // Use Option<T> to track whether any elements were processed.
-            // This ensures empty iterators return identity() exactly once,
-            // matching Sequential semantics. Without this, rayon might create
-            // multiple empty partitions, each calling identity(), then reduce
-            // them together (e.g., identity=1 with reduce=add gives 1+1+1+1=4).
-            iter.into_par_iter()
-                .fold(
-                    || None,
-                    |acc, x| {
-                        Some(match acc {
-                            Some(a) => fold_op(a, x),
-                            None => fold_op(identity(), x),
-                        })
-                    },
-                )
-                .reduce(
-                    || None,
-                    |a, b| match (a, b) {
-                        (Some(a), Some(b)) => Some(reduce_op(a, b)),
-                        (i @ Some(_), None) | (None, i @ Some(_)) => i,
-                        (None, None) => None,
-                    },
-                )
-                .unwrap_or_else(identity)
-        })
-    }
+        impl Strategy for Parallel {
+            fn fold<I, T, ID, F, R>(&self, iter: I, identity: ID, fold_op: F, reduce_op: R) -> T
+            where
+                I: IntoStrategyIterator + Send,
+                T: Send,
+                ID: Fn() -> T + Send + Sync,
+                F: Fn(T, I::Item) -> T + Send + Sync,
+                R: Fn(T, T) -> T + Send + Sync,
+            {
+                self.thread_pool.install(|| {
+                    // Use Option<T> to track whether any elements were processed.
+                    // This ensures empty iterators return identity() exactly once,
+                    // matching Sequential semantics. Without this, rayon might create
+                    // multiple empty partitions, each calling identity(), then reduce
+                    // them together (e.g., identity=1 with reduce=add gives 1+1+1+1=4).
+                    iter.into_par_iter()
+                        .fold(
+                            || None,
+                            |acc, x| {
+                                Some(match acc {
+                                    Some(a) => fold_op(a, x),
+                                    None => fold_op(identity(), x),
+                                })
+                            },
+                        )
+                        .reduce(
+                            || None,
+                            |a, b| match (a, b) {
+                                (Some(a), Some(b)) => Some(reduce_op(a, b)),
+                                (i @ Some(_), None) | (None, i @ Some(_)) => i,
+                                (None, None) => None,
+                            },
+                        )
+                        .unwrap_or_else(identity)
+                })
+            }
 
-    fn fold_init<I, INIT, T, R, ID, F, RD>(
-        &self,
-        iter: I,
-        init: INIT,
-        identity: ID,
-        fold_op: F,
-        reduce_op: RD,
-    ) -> R
-    where
-        I: IntoParallelIterator + Send,
-        INIT: Fn() -> T + Send + Sync,
-        T: Send,
-        R: Send,
-        ID: Fn() -> R + Send + Sync,
-        F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
-        RD: Fn(R, R) -> R + Send + Sync,
-    {
-        self.thread_pool.install(|| {
-            // Use Option<R> to track whether any elements were processed,
-            // matching the same fix applied to fold() for empty collection handling.
-            iter.into_par_iter()
-                .fold(
-                    || (None, init()),
-                    |(acc, mut init_val), item| {
-                        let new_acc = Some(match acc {
-                            Some(a) => fold_op(a, &mut init_val, item),
-                            None => fold_op(identity(), &mut init_val, item),
-                        });
-                        (new_acc, init_val)
-                    },
-                )
-                .map(|(acc, _)| acc)
-                .reduce(
-                    || None,
-                    |a, b| match (a, b) {
-                        (Some(a), Some(b)) => Some(reduce_op(a, b)),
-                        (i @ Some(_), None) | (None, i @ Some(_)) => i,
-                        (None, None) => None,
-                    },
-                )
-                .unwrap_or_else(identity)
-        })
-    }
+            fn fold_init<I, INIT, T, R, ID, F, RD>(
+                &self,
+                iter: I,
+                init: INIT,
+                identity: ID,
+                fold_op: F,
+                reduce_op: RD,
+            ) -> R
+            where
+                I: IntoStrategyIterator + Send,
+                INIT: Fn() -> T + Send + Sync,
+                T: Send,
+                R: Send,
+                ID: Fn() -> R + Send + Sync,
+                F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+                RD: Fn(R, R) -> R + Send + Sync,
+            {
+                self.thread_pool.install(|| {
+                    // Use Option<R> to track whether any elements were processed,
+                    // matching the same fix applied to fold() for empty collection handling.
+                    iter.into_par_iter()
+                        .fold(
+                            || (None, init()),
+                            |(acc, mut init_val), item| {
+                                let new_acc = Some(match acc {
+                                    Some(a) => fold_op(a, &mut init_val, item),
+                                    None => fold_op(identity(), &mut init_val, item),
+                                });
+                                (new_acc, init_val)
+                            },
+                        )
+                        .map(|(acc, _)| acc)
+                        .reduce(
+                            || None,
+                            |a, b| match (a, b) {
+                                (Some(a), Some(b)) => Some(reduce_op(a, b)),
+                                (i @ Some(_), None) | (None, i @ Some(_)) => i,
+                                (None, None) => None,
+                            },
+                        )
+                        .unwrap_or_else(identity)
+                })
+            }
 
-    fn join<L, LO, R, RO>(&self, left: L, right: R) -> (LO, RO)
-    where
-        L: FnOnce() -> LO + Send,
-        R: FnOnce() -> RO + Send,
-        LO: Send,
-        RO: Send,
-    {
-        self.thread_pool.install(|| rayon::join(left, right))
+            fn join<L, LO, R, RO>(&self, left: L, right: R) -> (LO, RO)
+            where
+                L: FnOnce() -> LO + Send,
+                R: FnOnce() -> RO + Send,
+                LO: Send,
+                RO: Send,
+            {
+                self.thread_pool.install(|| rayon::join(left, right))
+            }
+        }
     }
 }
 
@@ -634,6 +643,32 @@ mod test {
             &empty,
             || 0i64,
             |acc, &x| acc.wrapping_add(x),
+            |a, b| a.wrapping_add(b),
+        );
+
+        assert_eq!(seq_result, 0i64);
+        assert_eq!(par_result, 0i64);
+    }
+
+    #[test]
+    fn fold_init_empty_with_zero_identity() {
+        let sequential = Sequential;
+        let parallel = parallel_strategy();
+        let empty: Vec<i64> = vec![];
+
+        let seq_result = sequential.fold_init(
+            &empty,
+            || (),
+            || 0i64,
+            |acc, _, &x| acc.wrapping_add(x),
+            |a, b| a.wrapping_add(b),
+        );
+
+        let par_result = parallel.fold_init(
+            &empty,
+            || (),
+            || 0i64,
+            |acc, _, &x| acc.wrapping_add(x),
             |a, b| a.wrapping_add(b),
         );
 
