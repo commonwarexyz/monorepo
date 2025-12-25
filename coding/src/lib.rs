@@ -84,8 +84,9 @@ pub struct CodecConfig {
 /// ```
 /// use commonware_coding::{Config, ReedSolomon, Scheme as _};
 /// use commonware_cryptography::Sha256;
+/// use commonware_parallel::Sequential;
 ///
-/// const CONCURRENCY: usize = 1;
+/// const STRATEGY: Sequential = Sequential;
 ///
 /// type RS = ReedSolomon<Sha256>;
 ///
@@ -93,7 +94,7 @@ pub struct CodecConfig {
 /// let data = b"Hello!";
 /// // Turn the data into shards, and a commitment to those shards.
 /// let (commitment, shards) =
-///      RS::encode(&config, data.as_slice(), CONCURRENCY).unwrap();
+///      RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
 ///
 /// // Each person produces reshards, their own checked shard, and checking data
 /// // to check other peoples reshards.
@@ -114,11 +115,11 @@ pub struct CodecConfig {
 ///   checked_shards.push(RS::check(&config, &commitment, &checking_data, i as u16, reshard).unwrap())
 /// }
 ///
-/// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2], CONCURRENCY).unwrap();
+/// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2], &STRATEGY).unwrap();
 /// assert_eq!(&data[..], &data2[..]);
 ///
 /// // Decoding works with different shards, with a guarantee to get the same result.
-/// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..], CONCURRENCY).unwrap();
+/// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..], &STRATEGY).unwrap();
 /// assert_eq!(&data[..], &data3[..]);
 /// ```
 pub trait Scheme: Debug + Clone + Send + Sync + 'static {
