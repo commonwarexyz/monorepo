@@ -1407,6 +1407,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-parallel"
+version = "0.0.64"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
 name = "commonware-reshare"
 version = "0.0.64"
 dependencies = [

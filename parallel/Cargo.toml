@@ -1,0 +1,20 @@
+[package]
+name = "commonware-parallel"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Abstract data parallelism over iterators and collections."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/parallel"
+
+[lints]
+workspace = true
+
+[dependencies]
+rayon = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+std = ["dep:rayon"]
