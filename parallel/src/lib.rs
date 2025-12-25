@@ -714,6 +714,7 @@ mod test {
         }
 
         #[test]
+        #[allow(clippy::redundant_clone)]
         fn fold_collect_preserves_elements(data in prop::collection::vec(any::<i32>(), 0..500)) {
             let sequential = Sequential;
             let parallel = parallel_strategy();
@@ -800,6 +801,7 @@ mod test {
         }
 
         #[test]
+        #[allow(clippy::redundant_clone)]
         fn fold_init_matches(data in prop::collection::vec(any::<i32>(), 0..500)) {
             let sequential = Sequential;
             let parallel = parallel_strategy();
@@ -869,6 +871,7 @@ mod test {
         }
 
         #[test]
+        #[allow(clippy::redundant_clone)]
         fn map_collect_vec_matches(data in prop::collection::vec(any::<i32>(), 0..500)) {
             let sequential = Sequential;
             let parallel = parallel_strategy();
