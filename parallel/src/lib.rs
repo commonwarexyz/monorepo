@@ -6,10 +6,17 @@
 //!
 //! # Overview
 //!
-//! The core abstraction is the [`Strategy`] trait, which provides two simple operations:
+//! The core abstraction is the [`Strategy`] trait, which provides several operations:
 //!
-//! - [`fold`](Strategy::fold): Reduces a collection to a single value, potentially in parallel
+//! **Core Operations:**
+//! - [`fold`](Strategy::fold): Reduces a collection to a single value
+//! - [`fold_init`](Strategy::fold_init): Like `fold`, but with per-partition initialization
 //! - [`join`](Strategy::join): Executes two closures, potentially in parallel
+//!
+//! **Convenience Methods:**
+//! - [`map_collect_vec`](Strategy::map_collect_vec): Maps elements and collects into a `Vec`
+//! - [`map_init_collect_vec`](Strategy::map_init_collect_vec): Like `map_collect_vec` with
+//!   per-partition initialization
 //!
 //! Two implementations are provided:
 //!
@@ -98,6 +105,49 @@
 //! let data: Vec<i32> = (1..=100).collect();
 //! assert_eq!(parallel_sum(&strategy, &data), 5050);
 //! ```
+//!
+//! ## Mapping with Convenience Methods
+//!
+//! Use [`map_collect_vec`](Strategy::map_collect_vec) for simple transformations:
+//!
+//! ```
+//! use commonware_parallel::{Strategy, Sequential};
+//!
+//! let strategy = Sequential;
+//! let data = vec![1, 2, 3, 4, 5];
+//!
+//! let squared: Vec<i32> = strategy.map_collect_vec(&data, |&x| x * x);
+//! assert_eq!(squared, vec![1, 4, 9, 16, 25]);
+//! ```
+//!
+//! ## Per-Partition State with fold_init
+//!
+//! Use [`fold_init`](Strategy::fold_init) when you need mutable state that shouldn't be
+//! shared across parallel partitions (e.g., scratch buffers, RNGs):
+//!
+//! ```
+//! use commonware_parallel::{Strategy, Sequential};
+//!
+//! let strategy = Sequential;
+//! let data = vec![1, 2, 3, 4, 5];
+//!
+//! // Each partition gets its own buffer to avoid allocations in the inner loop
+//! let result: Vec<String> = strategy.fold_init(
+//!     &data,
+//!     || String::with_capacity(16),  // Per-partition scratch buffer
+//!     Vec::new,                      // Identity for accumulator
+//!     |mut acc, buf, &n| {
+//!         buf.clear();
+//!         use std::fmt::Write;
+//!         write!(buf, "item:{n}").unwrap();
+//!         acc.push(buf.clone());
+//!         acc
+//!     },
+//!     |mut a, b| { a.extend(b); a },
+//! );
+//!
+//! assert_eq!(result, vec!["item:1", "item:2", "item:3", "item:4", "item:5"]);
+//! ```
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
@@ -182,13 +232,169 @@ pub trait Strategy: Clone + Send + Sync {
     ///
     /// assert_eq!(max, 9);
     /// ```
-    fn fold<I, T, ID, F, R>(&self, iter: I, identity: ID, fold_op: F, reduce_op: R) -> T
+    fn fold<I, R, ID, F, RD>(&self, iter: I, identity: ID, fold_op: F, reduce_op: RD) -> R
     where
         I: IntoParallelIterator + Send,
+        R: Send,
+        ID: Fn() -> R + Send + Sync,
+        F: Fn(R, I::Item) -> R + Send + Sync,
+        RD: Fn(R, R) -> R + Send + Sync;
+
+    /// Reduces a collection to a single value with per-partition initialization.
+    ///
+    /// Similar to [`fold`](Self::fold), but provides a separate initialization value
+    /// that is created once per partition. This is useful when the fold operation
+    /// requires mutable state that should not be shared across partitions (e.g., a
+    /// scratch buffer, RNG, or expensive-to-clone resource).
+    ///
+    /// # Arguments
+    ///
+    /// - `iter`: The collection to fold over
+    /// - `init`: Creates the per-partition initialization value
+    /// - `identity`: Creates the identity value for the accumulator
+    /// - `fold_op`: Combines accumulator with init state and item: `(acc, &mut init, item) -> acc`
+    /// - `reduce_op`: Combines two accumulators: `(acc1, acc2) -> acc`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// let strategy = Sequential;
+    /// let data = vec![1u32, 2, 3, 4, 5];
+    ///
+    /// // Use a scratch buffer to avoid allocations in the inner loop
+    /// let result: Vec<String> = strategy.fold_init(
+    ///     &data,
+    ///     || String::with_capacity(16),  // Per-partition scratch buffer
+    ///     Vec::new,                       // Identity for accumulator
+    ///     |mut acc, buf, &n| {
+    ///         buf.clear();
+    ///         use std::fmt::Write;
+    ///         write!(buf, "num:{}", n).unwrap();
+    ///         acc.push(buf.clone());
+    ///         acc
+    ///     },
+    ///     |mut a, b| { a.extend(b); a },
+    /// );
+    ///
+    /// assert_eq!(result, vec!["num:1", "num:2", "num:3", "num:4", "num:5"]);
+    /// ```
+    fn fold_init<I, INIT, T, R, ID, F, RD>(
+        &self,
+        iter: I,
+        init: INIT,
+        identity: ID,
+        fold_op: F,
+        reduce_op: RD,
+    ) -> R
+    where
+        I: IntoParallelIterator + Send,
+        INIT: Fn() -> T + Send + Sync,
         T: Send,
-        ID: Fn() -> T + Send + Sync,
-        F: Fn(T, I::Item) -> T + Send + Sync,
-        R: Fn(T, T) -> T + Send + Sync;
+        R: Send,
+        ID: Fn() -> R + Send + Sync,
+        F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+        RD: Fn(R, R) -> R + Send + Sync;
+
+    /// Maps each element and collects results into a `Vec`.
+    ///
+    /// This is a convenience method that applies `map_op` to each element and
+    /// collects the results. For [`Sequential`], elements are processed in order.
+    /// For [`Parallel`], elements may be processed out of order but the final
+    /// vector preserves the original ordering.
+    ///
+    /// # Arguments
+    ///
+    /// - `iter`: The collection to map over
+    /// - `map_op`: The mapping function to apply to each element
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// let strategy = Sequential;
+    /// let data = vec![1, 2, 3, 4, 5];
+    ///
+    /// let squared: Vec<i32> = strategy.map_collect_vec(&data, |&x| x * x);
+    /// assert_eq!(squared, vec![1, 4, 9, 16, 25]);
+    /// ```
+    fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
+    where
+        I: IntoParallelIterator + Send,
+        F: Fn(I::Item) -> T + Send + Sync,
+        T: Send,
+    {
+        self.fold(
+            iter,
+            Vec::new,
+            |mut acc, item| {
+                acc.push(map_op(item));
+                acc
+            },
+            |mut a, b| {
+                a.extend(b);
+                a
+            },
+        )
+    }
+
+    /// Maps each element with per-partition state and collects results into a `Vec`.
+    ///
+    /// Combines [`map_collect_vec`](Self::map_collect_vec) with per-partition
+    /// initialization like [`fold_init`](Self::fold_init). Useful when the mapping
+    /// operation requires mutable state that should not be shared across partitions.
+    ///
+    /// # Arguments
+    ///
+    /// - `iter`: The collection to map over
+    /// - `init`: Creates the per-partition initialization value
+    /// - `map_op`: The mapping function: `(&mut init, item) -> result`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// let strategy = Sequential;
+    /// let data = vec![1, 2, 3, 4, 5];
+    ///
+    /// // Use a counter that tracks position within each partition
+    /// let indexed: Vec<(usize, i32)> = strategy.map_init_collect_vec(
+    ///     &data,
+    ///     || 0usize, // Per-partition counter
+    ///     |counter, &x| {
+    ///         let idx = *counter;
+    ///         *counter += 1;
+    ///         (idx, x * 2)
+    ///     },
+    /// );
+    ///
+    /// assert_eq!(indexed, vec![(0, 2), (1, 4), (2, 6), (3, 8), (4, 10)]);
+    /// ```
+    fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
+    where
+        I: IntoParallelIterator + Send,
+        INIT: Fn() -> T + Send + Sync,
+        T: Send,
+        F: Fn(&mut T, I::Item) -> R + Send + Sync,
+        R: Send,
+    {
+        self.fold_init(
+            iter,
+            init,
+            Vec::new,
+            |mut acc, init_val, item| {
+                acc.push(map_op(init_val, item));
+                acc
+            },
+            |mut a, b| {
+                a.extend(b);
+                a
+            },
+        )
+    }
 
     /// Executes two closures, potentially in parallel, and returns both results.
     ///
@@ -198,13 +404,6 @@ pub trait Strategy: Clone + Send + Sync {
     ///
     /// This is useful for divide-and-conquer algorithms where two independent subproblems
     /// can be solved in parallel.
-    ///
-    /// # Type Parameters
-    ///
-    /// - `L`: The left closure type
-    /// - `LO`: The output type of the left closure
-    /// - `R`: The right closure type
-    /// - `RO`: The output type of the right closure
     ///
     /// # Arguments
     ///
@@ -421,6 +620,28 @@ impl Strategy for Sequential {
         iter.into_iter().fold(identity(), fold_op)
     }
 
+    fn fold_init<I, INIT, T, R, ID, F, RD>(
+        &self,
+        iter: I,
+        init: INIT,
+        identity: ID,
+        fold_op: F,
+        _reduce_op: RD,
+    ) -> R
+    where
+        I: IntoParallelIterator + Send,
+        INIT: Fn() -> T + Send + Sync,
+        T: Send,
+        R: Send,
+        ID: Fn() -> R + Send + Sync,
+        F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+        RD: Fn(R, R) -> R + Send + Sync,
+    {
+        let mut init_val = init();
+        iter.into_iter()
+            .fold(identity(), |acc, item| fold_op(acc, &mut init_val, item))
+    }
+
     fn join<L, LO, R, RO>(&self, left: L, right: R) -> (LO, RO)
     where
         L: FnOnce() -> LO + Send,
@@ -606,6 +827,50 @@ impl Strategy for Parallel {
                         })
                     },
                 )
+                .reduce(
+                    || None,
+                    |a, b| match (a, b) {
+                        (Some(a), Some(b)) => Some(reduce_op(a, b)),
+                        (i @ Some(_), None) | (None, i @ Some(_)) => i,
+                        (None, None) => None,
+                    },
+                )
+                .unwrap_or_else(identity)
+        })
+    }
+
+    fn fold_init<I, INIT, T, R, ID, F, RD>(
+        &self,
+        iter: I,
+        init: INIT,
+        identity: ID,
+        fold_op: F,
+        reduce_op: RD,
+    ) -> R
+    where
+        I: IntoParallelIterator + Send,
+        INIT: Fn() -> T + Send + Sync,
+        T: Send,
+        R: Send,
+        ID: Fn() -> R + Send + Sync,
+        F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+        RD: Fn(R, R) -> R + Send + Sync,
+    {
+        self.thread_pool.install(|| {
+            // Use Option<R> to track whether any elements were processed,
+            // matching the same fix applied to fold() for empty collection handling.
+            iter.into_par_iter()
+                .fold(
+                    || (None, init()),
+                    |(acc, mut init_val), item| {
+                        let new_acc = Some(match acc {
+                            Some(a) => fold_op(a, &mut init_val, item),
+                            None => fold_op(identity(), &mut init_val, item),
+                        });
+                        (new_acc, init_val)
+                    },
+                )
+                .map(|(acc, _)| acc)
                 .reduce(
                     || None,
                     |a, b| match (a, b) {
@@ -825,6 +1090,170 @@ mod test {
             prop_assert_eq!(seq_b, y);
             prop_assert_eq!(par_a, x);
             prop_assert_eq!(par_b, y);
+        }
+
+        #[test]
+        fn fold_init_matches(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+
+            // Use init to track running count within each partition
+            let seq_result: Vec<(usize, i32)> = sequential.fold_init(
+                &data,
+                || 0usize,  // per-partition counter
+                Vec::new,
+                |mut acc, counter, &x| {
+                    acc.push((*counter, x.wrapping_mul(2)));
+                    *counter += 1;
+                    acc
+                },
+                |mut a, b| { a.extend(b); a },
+            );
+
+            let par_result: Vec<(usize, i32)> = parallel.fold_init(
+                &data,
+                || 0usize,
+                Vec::new,
+                |mut acc, counter, &x| {
+                    acc.push((*counter, x.wrapping_mul(2)));
+                    *counter += 1;
+                    acc
+                },
+                |mut a, b| { a.extend(b); a },
+            );
+
+            // Both should have the same length and same doubled values
+            prop_assert_eq!(seq_result.len(), data.len());
+            prop_assert_eq!(par_result.len(), data.len());
+
+            // Extract just the doubled values and compare
+            let seq_values: Vec<i32> = seq_result.iter().map(|(_, v)| *v).collect();
+            let par_values: Vec<i32> = par_result.iter().map(|(_, v)| *v).collect();
+            let expected: Vec<i32> = data.iter().map(|&x| x.wrapping_mul(2)).collect();
+
+            prop_assert_eq!(seq_values, expected.clone());
+            prop_assert_eq!(par_values, expected);
+        }
+
+        #[test]
+        fn fold_init_empty_returns_identity(identity in any::<i64>()) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+            let empty: Vec<i64> = vec![];
+
+            let seq_result = sequential.fold_init(
+                &empty,
+                || 0usize,
+                || identity,
+                |acc, _, &x| acc + x,
+                |a, b| a + b,
+            );
+
+            let par_result = parallel.fold_init(
+                &empty,
+                || 0usize,
+                || identity,
+                |acc, _, &x| acc + x,
+                |a, b| a + b,
+            );
+
+            prop_assert_eq!(seq_result, identity);
+            prop_assert_eq!(par_result, identity);
+        }
+
+        #[test]
+        fn map_collect_vec_matches(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+
+            let seq_result: Vec<i64> = sequential.map_collect_vec(
+                &data,
+                |&x| (x as i64).wrapping_mul(3),
+            );
+
+            let par_result: Vec<i64> = parallel.map_collect_vec(
+                &data,
+                |&x| (x as i64).wrapping_mul(3),
+            );
+
+            let expected: Vec<i64> = data.iter().map(|&x| (x as i64).wrapping_mul(3)).collect();
+
+            prop_assert_eq!(seq_result, expected.clone());
+            prop_assert_eq!(par_result, expected);
+        }
+
+        #[test]
+        fn map_collect_vec_empty(_unused in 0..1u8) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+            let empty: Vec<i32> = vec![];
+
+            let seq_result: Vec<i64> = sequential.map_collect_vec(&empty, |&x| x as i64);
+            let par_result: Vec<i64> = parallel.map_collect_vec(&empty, |&x| x as i64);
+
+            prop_assert!(seq_result.is_empty());
+            prop_assert!(par_result.is_empty());
+        }
+
+        #[test]
+        fn map_init_collect_vec_matches(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+
+            // Use init to track sum of previous elements within partition
+            let seq_result: Vec<i64> = sequential.map_init_collect_vec(
+                &data,
+                || 0i64,  // running sum
+                |sum, &x| {
+                    let result = *sum + x as i64;
+                    *sum = result;
+                    result
+                },
+            );
+
+            let par_result: Vec<i64> = parallel.map_init_collect_vec(
+                &data,
+                || 0i64,
+                |sum, &x| {
+                    let result = *sum + x as i64;
+                    *sum = result;
+                    result
+                },
+            );
+
+            // Both should have the same length
+            prop_assert_eq!(seq_result.len(), data.len());
+            prop_assert_eq!(par_result.len(), data.len());
+
+            // Sequential result should be cumulative sums
+            let expected: Vec<i64> = data.iter()
+                .scan(0i64, |sum, &x| {
+                    *sum += x as i64;
+                    Some(*sum)
+                })
+                .collect();
+            prop_assert_eq!(seq_result, expected);
+        }
+
+        #[test]
+        fn map_init_collect_vec_empty(_unused in 0..1u8) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+            let empty: Vec<i32> = vec![];
+
+            let seq_result: Vec<i64> = sequential.map_init_collect_vec(
+                &empty,
+                || 0usize,
+                |_, &x| x as i64,
+            );
+            let par_result: Vec<i64> = parallel.map_init_collect_vec(
+                &empty,
+                || 0usize,
+                |_, &x| x as i64,
+            );
+
+            prop_assert!(seq_result.is_empty());
+            prop_assert!(par_result.is_empty());
         }
     }
 }
