@@ -113,6 +113,7 @@
 //! ## Decoding
 //!
 //! 1. Given n checked shards, you have n S encoded rows, which can be Reed-Solomon decoded.
+
 use crate::{Config, Scheme, ValidatingScheme};
 use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
@@ -124,12 +125,12 @@ use commonware_math::{
     fields::goldilocks::F,
     ntt::{EvaluationVector, Matrix},
 };
+use commonware_parallel::Strategy;
 use commonware_storage::mmr::{
     mem::DirtyMmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
 };
 use futures::executor::block_on;
 use rand::seq::SliceRandom as _;
-use rayon::{iter::ParallelIterator, prelude::IntoParallelIterator, ThreadPoolBuilder};
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
@@ -620,10 +621,10 @@ impl<H: Hasher> Scheme for Zoda<H> {
 
     type Error = Error;
 
-    fn encode(
+    fn encode<S: Strategy>(
         config: &Config,
         data: impl bytes::Buf,
-        concurrency: usize,
+        strategy: &S,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
@@ -644,24 +645,17 @@ impl<H: Hasher> Scheme for Zoda<H> {
         // Step 3: Commit to the rows of the data.
         let mut hasher = StandardHasher::<H>::new();
         let mut mmr = DirtyMmr::new();
-        if concurrency > 1 {
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(concurrency)
-                .build()
-                .expect("failed to build thread pool");
-            let row_hashes = pool.install(|| {
-                (0..encoded_data.rows())
-                    .into_par_iter()
-                    .map(|i| row_digest::<H>(&encoded_data[i]))
-                    .collect::<Vec<_>>()
-            });
-            for hash in &row_hashes {
-                mmr.add(&mut hasher, hash);
-            }
-        } else {
-            for row in encoded_data.iter() {
-                mmr.add(&mut hasher, &row_digest::<H>(row));
-            }
+        let row_hashes = strategy.fold(
+            0..encoded_data.rows(),
+            Vec::new,
+            |mut acc, i| {
+                acc.push(row_digest::<H>(&encoded_data[i]));
+                acc
+            },
+            |a, b| a.into_iter().chain(b.into_iter()).collect(),
+        );
+        for hash in &row_hashes {
+            mmr.add(&mut hasher, hash);
         }
         let mmr = mmr.merkleize(&mut hasher, None);
         let root = *mmr.root();
@@ -738,12 +732,12 @@ impl<H: Hasher> Scheme for Zoda<H> {
         checking_data.check(index, &reshard)
     }
 
-    fn decode(
+    fn decode<S: Strategy>(
         _config: &Config,
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
-        _concurrency: usize,
+        _strategy: &S,
     ) -> Result<Vec<u8>, Self::Error> {
         let Topology {
             encoded_rows,
@@ -791,8 +785,9 @@ mod tests {
     use super::*;
     use crate::{CodecConfig, Config};
     use commonware_cryptography::Sha256;
+    use commonware_parallel::Sequential;
 
-    const CONCURRENCY: usize = 1;
+    const CONCURRENCY: Sequential = Sequential;
 
     #[test]
     fn topology_reckon_handles_small_extra_shards() {
@@ -828,7 +823,7 @@ mod tests {
         let data = vec![0xAA; 64];
 
         let (commitment, shards) =
-            Zoda::<Sha256>::encode(&config, data.as_slice(), CONCURRENCY).unwrap();
+            Zoda::<Sha256>::encode(&config, data.as_slice(), &CONCURRENCY).unwrap();
         let shard = shards.into_iter().next().unwrap();
 
         let (_, _, reshard) = Zoda::<Sha256>::reshard(&config, &commitment, 0, shard).unwrap();
@@ -854,7 +849,8 @@ mod tests {
             extra_shards: 0,
         };
         let data = b"duplicate shard coverage";
-        let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], CONCURRENCY).unwrap();
+        let (commitment, shards) =
+            Zoda::<Sha256>::encode(&config, &data[..], &CONCURRENCY).unwrap();
         let shard0 = shards[0].clone();
         let (checking_data, checked_shard0, _reshard0) =
             Zoda::<Sha256>::reshard(&config, &commitment, 0, shard0).unwrap();
@@ -864,7 +860,7 @@ mod tests {
         };
         let shards = vec![checked_shard0, duplicate];
         let result =
-            Zoda::<Sha256>::decode(&config, &commitment, checking_data, &shards, CONCURRENCY);
+            Zoda::<Sha256>::decode(&config, &commitment, checking_data, &shards, &CONCURRENCY);
         match result {
             Err(Error::InsufficientUniqueRows(actual, expected)) => {
                 assert!(actual < expected);
