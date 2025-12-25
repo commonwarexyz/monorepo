@@ -12,6 +12,7 @@
 
 use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
+use commonware_parallel::Strategy;
 use std::fmt::Debug;
 
 mod reed_solomon;
@@ -145,10 +146,10 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// Each shard and proof is intended for exactly one participant. The number of shards returned
     /// should equal `config.minimum_shards + config.extra_shards`.
     #[allow(clippy::type_complexity)]
-    fn encode(
+    fn encode<S: Strategy>(
         config: &Config,
         data: impl Buf,
-        concurrency: usize,
+        strategy: &S,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
     /// Take your own shard, check it, and produce a [Scheme::ReShard] to forward to others.
@@ -192,12 +193,12 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// In other words, when using the decoding function in a broader system, you
     /// get a guarantee that every participant decoding will see the same final
     /// data, even if they receive different shards, or receive them in a different order.
-    fn decode(
+    fn decode<S: Strategy>(
         config: &Config,
         commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
-        concurrency: usize,
+        strategy: &S,
     ) -> Result<Vec<u8>, Self::Error>;
 }
 
@@ -214,9 +215,9 @@ mod test {
     use crate::reed_solomon::ReedSolomon;
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
+    use commonware_parallel::Sequential;
     use std::cmp::Reverse;
 
-    const CONCURRENCY: usize = 1;
     const MAX_DATA_BYTES: usize = 1 << 31;
 
     fn general_test<S: Scheme>(
@@ -249,7 +250,7 @@ mod test {
         let read_cfg = CodecConfig {
             maximum_shard_size: MAX_DATA_BYTES,
         };
-        let (commitment, shards) = S::encode(&config, data, CONCURRENCY).unwrap();
+        let (commitment, shards) = S::encode(&config, data, &Sequential).unwrap();
         // Pick out the packets we want, in reverse order.
         let ((_, _, checking_data, my_checked_shard, _), other_packets) = {
             let mut out = shards
@@ -283,7 +284,7 @@ mod test {
             &commitment,
             checking_data,
             &checked_shards,
-            CONCURRENCY,
+            &Sequential,
         )
         .unwrap();
         assert_eq!(&decoded, data, "{name} failed");

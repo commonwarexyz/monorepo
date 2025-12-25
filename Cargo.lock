@@ -1020,6 +1020,7 @@ dependencies = [
  "commonware-conformance",
  "commonware-cryptography",
  "commonware-math",
+ "commonware-parallel",
  "commonware-storage",
  "commonware-utils",
  "criterion",
