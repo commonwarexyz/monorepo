@@ -76,45 +76,6 @@ cfg_if! {
 /// to be written generically and then executed with different strategies depending
 /// on the use case (e.g., sequential for testing/debugging, parallel for production).
 pub trait Strategy: Clone + Send + Sync {
-    /// Reduces a collection to a single value using fold and reduce operations.
-    ///
-    /// This method processes elements from the iterator, combining them into a single
-    /// result.
-    ///
-    /// # Arguments
-    ///
-    /// - `iter`: The collection to fold over
-    /// - `identity`: A closure that produces the identity value for the fold.
-    /// - `fold_op`: Combines an accumulator with a single item: `(acc, item) -> acc`
-    /// - `reduce_op`: Combines two accumulators: `(acc1, acc2) -> acc`.
-    ///
-    /// # Examples
-    ///
-    /// ## Sum of Elements
-    ///
-    /// ```
-    /// use commonware_parallel::{Strategy, Sequential};
-    ///
-    /// let strategy = Sequential;
-    /// let numbers = vec![1, 2, 3, 4, 5];
-    ///
-    /// let sum = strategy.fold(
-    ///     &numbers,
-    ///     || 0,                    // identity
-    ///     |acc, &n| acc + n,       // fold: add each number
-    ///     |a, b| a + b,            // reduce: combine partial sums
-    /// );
-    ///
-    /// assert_eq!(sum, 15);
-    /// ```
-    fn fold<I, R, ID, F, RD>(&self, iter: I, identity: ID, fold_op: F, reduce_op: RD) -> R
-    where
-        I: IntoStrategyIterator + Send,
-        R: Send,
-        ID: Fn() -> R + Send + Sync,
-        F: Fn(R, I::Item) -> R + Send + Sync,
-        RD: Fn(R, R) -> R + Send + Sync;
-
     /// Reduces a collection to a single value with per-partition initialization.
     ///
     /// Similar to [`fold`](Self::fold), but provides a separate initialization value
@@ -171,6 +132,54 @@ pub trait Strategy: Clone + Send + Sync {
         ID: Fn() -> R + Send + Sync,
         F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
         RD: Fn(R, R) -> R + Send + Sync;
+
+    /// Reduces a collection to a single value using fold and reduce operations.
+    ///
+    /// This method processes elements from the iterator, combining them into a single
+    /// result.
+    ///
+    /// # Arguments
+    ///
+    /// - `iter`: The collection to fold over
+    /// - `identity`: A closure that produces the identity value for the fold.
+    /// - `fold_op`: Combines an accumulator with a single item: `(acc, item) -> acc`
+    /// - `reduce_op`: Combines two accumulators: `(acc1, acc2) -> acc`.
+    ///
+    /// # Examples
+    ///
+    /// ## Sum of Elements
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// let strategy = Sequential;
+    /// let numbers = vec![1, 2, 3, 4, 5];
+    ///
+    /// let sum = strategy.fold(
+    ///     &numbers,
+    ///     || 0,                    // identity
+    ///     |acc, &n| acc + n,       // fold: add each number
+    ///     |a, b| a + b,            // reduce: combine partial sums
+    /// );
+    ///
+    /// assert_eq!(sum, 15);
+    /// ```
+    fn fold<I, R, ID, F, RD>(&self, iter: I, identity: ID, fold_op: F, reduce_op: RD) -> R
+    where
+        I: IntoStrategyIterator + Send,
+        R: Send,
+        ID: Fn() -> R + Send + Sync,
+        F: Fn(R, I::Item) -> R + Send + Sync,
+        RD: Fn(R, R) -> R + Send + Sync,
+    {
+        self.fold_init(
+            iter,
+            || (),
+            identity,
+            |acc, _, item| fold_op(acc, item),
+            reduce_op,
+        )
+    }
 
     /// Maps each element and collects results into a `Vec`.
     ///
@@ -416,17 +425,6 @@ impl<T> IntoStrategyIterator for T where T: IntoIterator {}
 pub struct Sequential;
 
 impl Strategy for Sequential {
-    fn fold<I, T, ID, F, R>(&self, iter: I, identity: ID, fold_op: F, _reduce_op: R) -> T
-    where
-        I: IntoStrategyIterator + Send,
-        T: Send,
-        ID: Fn() -> T + Send + Sync,
-        F: Fn(T, I::Item) -> T + Send + Sync,
-        R: Fn(T, T) -> T + Send + Sync,
-    {
-        iter.into_iter().fold(identity(), fold_op)
-    }
-
     fn fold_init<I, INIT, T, R, ID, F, RD>(
         &self,
         iter: I,
@@ -520,42 +518,6 @@ cfg_if! {
         }
 
         impl Strategy for Parallel {
-            fn fold<I, T, ID, F, R>(&self, iter: I, identity: ID, fold_op: F, reduce_op: R) -> T
-            where
-                I: IntoStrategyIterator + Send,
-                T: Send,
-                ID: Fn() -> T + Send + Sync,
-                F: Fn(T, I::Item) -> T + Send + Sync,
-                R: Fn(T, T) -> T + Send + Sync,
-            {
-                self.thread_pool.install(|| {
-                    // Use Option<T> to track whether any elements were processed.
-                    // This ensures empty iterators return identity() exactly once,
-                    // matching Sequential semantics. Without this, rayon might create
-                    // multiple empty partitions, each calling identity(), then reduce
-                    // them together (e.g., identity=1 with reduce=add gives 1+1+1+1=4).
-                    iter.into_par_iter()
-                        .fold(
-                            || None,
-                            |acc, x| {
-                                Some(match acc {
-                                    Some(a) => fold_op(a, x),
-                                    None => fold_op(identity(), x),
-                                })
-                            },
-                        )
-                        .reduce(
-                            || None,
-                            |a, b| match (a, b) {
-                                (Some(a), Some(b)) => Some(reduce_op(a, b)),
-                                (i @ Some(_), None) | (None, i @ Some(_)) => i,
-                                (None, None) => None,
-                            },
-                        )
-                        .unwrap_or_else(identity)
-                })
-            }
-
             fn fold_init<I, INIT, T, R, ID, F, RD>(
                 &self,
                 iter: I,
