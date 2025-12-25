@@ -93,6 +93,7 @@ pub fn create_pool<S: Spawner + Metrics>(
 ) -> Result<ThreadPool, ThreadPoolBuildError> {
     let pool = ThreadPoolBuilder::new()
         .num_threads(concurrency)
+        .use_current_thread()
         .spawn_handler(move |thread| {
             // Tasks spawned in a thread pool are expected to run longer than any single
             // task and thus should be provisioned as a dedicated thread.
@@ -282,8 +283,25 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test_traced]
-    fn test_create_pool() {
+    fn test_create_pool_tokio() {
         let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            // Create a thread pool with 4 threads
+            let pool = create_pool(context.with_label("pool"), 4).unwrap();
+
+            // Create a vector of numbers
+            let v: Vec<_> = (0..10000).collect();
+
+            // Use the thread pool to sum the numbers
+            pool.install(|| {
+                assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
+            });
+        });
+    }
+
+    #[test_traced]
+    fn test_create_pool_deterministic() {
+        let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
             let pool = create_pool(context.with_label("pool"), 4).unwrap();
