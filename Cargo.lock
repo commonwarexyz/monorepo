@@ -1376,6 +1376,7 @@ dependencies = [
 name = "commonware-parallel"
 version = "0.0.64"
 dependencies = [
+ "cfg-if",
  "proptest",
  "rayon",
 ]
