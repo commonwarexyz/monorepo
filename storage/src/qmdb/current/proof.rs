@@ -149,6 +149,16 @@ impl<D: Digest> RangeProof<D> {
             return false;
         }
 
+        // Validate the number of input chunks.
+        let chunk_bits = CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
+        let start = *start_loc / chunk_bits; // chunk that contains the very first bit.
+        let end = (*end_loc - 1) / chunk_bits; // chunk that contains the very last bit.
+        let expected_chunks = end - start + 1;
+        if expected_chunks != chunks.len() as u64 {
+            debug!("verification failed, mismatched element and chunk counts");
+            return false;
+        }
+
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();

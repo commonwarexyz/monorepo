@@ -239,7 +239,6 @@ fn fuzz(data: FuzzInput) {
                         continue;
                     }
                     let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
-
                     let current_op_count = merkleized_db.op_count();
 
                     let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
@@ -282,8 +281,6 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
 
                     let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
-                    last_committed_op_count = merkleized_db.op_count();
-
                     let current_root = merkleized_db.root();
 
                     match merkleized_db.key_value_proof(&mut hasher, k.clone()).await {
@@ -312,8 +309,6 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
 
                     let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
-                    last_committed_op_count = merkleized_db.op_count();
-
                     let current_root = merkleized_db.root();
 
                     match merkleized_db.exclusion_proof(&mut hasher, &k).await {

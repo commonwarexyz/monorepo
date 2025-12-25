@@ -147,12 +147,9 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Prune => {
-                    let (mut clean_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    clean_db
-                        .prune(clean_db.inactivity_floor_loc())
+                    db.prune(db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
-                    db = clean_db.into_dirty();
                 }
 
                 Operation::OpCount => {

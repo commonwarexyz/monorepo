@@ -181,40 +181,35 @@ fn fuzz(data: FuzzInput) {
 
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
                     let current_op_count = db.op_count();
+                    if current_op_count == 0 {
+                        continue;
+                    }
 
-                    if current_op_count > 0 {
-                        // Commit first to get Durable state (range_proof requires Durable)
-                        let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                        uncommitted_ops = 0;
-                        let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
-                        last_committed_op_count = clean_db.op_count();
+                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                    let current_root = merkleized_db.root();
 
-                        let current_root = clean_db.root();
+                    // Adjust start_loc and max_ops to be within the valid range
+                    let start_loc = Location::new(start_loc % *current_op_count).unwrap();
+                    let oldest_loc = merkleized_db.inactivity_floor_loc();
+                    if start_loc >= oldest_loc {
+                        let (proof, ops, chunks) = merkleized_db
+                            .range_proof(&mut hasher, start_loc, *max_ops)
+                            .await
+                            .expect("Range proof should not fail");
 
-                        // Adjust start_loc and max_ops to be within the valid range
-                        let start_loc = Location::new(start_loc % *current_op_count).unwrap();
-
-                        let oldest_loc = clean_db.inactivity_floor_loc();
-                        if start_loc >= oldest_loc {
-                            let (proof, ops, chunks) = clean_db
-                                .range_proof(&mut hasher, start_loc, *max_ops)
-                                .await
-                                .expect("Range proof should not fail");
-
-                            assert!(
-                                Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                                    &mut hasher,
-                                    &proof,
-                                    start_loc,
-                                    &ops,
-                                    &chunks,
-                                    &current_root
+                        assert!(
+                            Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
+                                &mut hasher,
+                                &proof,
+                                start_loc,
+                                &ops,
+                                &chunks,
+                                &current_root
                                 ),
                                 "Range proof verification failed for start_loc={start_loc}, max_ops={max_ops}"
                             );
-                        }
-                        db = clean_db.into_mutable();
                     }
+                    db = merkleized_db.into_mutable();
                 }
 
                 CurrentOperation::ArbitraryProof {start_loc, bad_digests, max_ops, bad_chunks} => {
@@ -252,7 +247,7 @@ fn fuzz(data: FuzzInput) {
                         // Try to verify the proof when providing bad input chunks.
                         if &chunks != bad_chunks {
                             assert!(!Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                                    hasher.inner(),
+                                    &mut hasher,
                                     &range_proof,
                                     start_loc,
                                     &ops,
@@ -275,11 +270,11 @@ fn fuzz(data: FuzzInput) {
 
                     let current_root = clean_db.root();
 
-                    match clean_db.key_value_proof(hasher.inner(), k.clone()).await {
+                    match clean_db.key_value_proof(&mut hasher, k.clone()).await {
                         Ok(proof) => {
                             let value = clean_db.get(&k).await.expect("get should not fail").expect("key should exist");
                             let verification_result = Current::<deterministic::Context, _, _, _, TwoCap, _>::verify_key_value_proof(
-                                hasher.inner(),
+                                &mut hasher,
                                 k,
                                 value,
                                 &proof,
