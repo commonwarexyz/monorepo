@@ -217,15 +217,10 @@ fn encode_inner<H: Hasher, S: Strategy>(
 
     // Build Merkle tree
     let mut builder = Builder::<H>::new(n);
-    let shard_hashes = strategy.fold(
-        &shards,
-        Vec::new,
-        |mut acc, shard| {
-            acc.push(H::hash(shard));
-            acc
-        },
-        |a, b| a.into_iter().chain(b.into_iter()).collect::<Vec<_>>(),
-    );
+    let shard_hashes = strategy.map_init_collect_vec(&shards, H::new, |hasher, shard| {
+        hasher.update(shard);
+        hasher.finalize()
+    });
     for hash in &shard_hashes {
         builder.add(hash);
     }
@@ -361,15 +356,10 @@ fn decode<H: Hasher, S: Strategy>(
 
     // Build Merkle tree
     let mut builder = Builder::<H>::new(n);
-    let shard_hashes = strategy.fold(
-        &shards,
-        Vec::new,
-        |mut acc, shard| {
-            acc.push(H::hash(shard));
-            acc
-        },
-        |a, b| a.into_iter().chain(b.into_iter()).collect::<Vec<_>>(),
-    );
+    let shard_hashes = strategy.map_init_collect_vec(&shards, H::new, |hasher, shard| {
+        hasher.update(shard);
+        hasher.finalize()
+    });
     for hash in &shard_hashes {
         builder.add(hash);
     }
@@ -551,7 +541,7 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
 
-    const CONCURRENCY: Sequential = Sequential;
+    const STRATEGY: Sequential = Sequential;
 
     #[test]
     fn test_recovery() {
@@ -560,7 +550,7 @@ mod tests {
         let min = 3u16;
 
         // Encode the data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &CONCURRENCY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Use a mix of original and recovery pieces
         let pieces: Vec<_> = vec![
@@ -570,7 +560,7 @@ mod tests {
         ];
 
         // Try to decode with a mix of original and recovery pieces
-        let decoded = decode::<Sha256, _>(total, min, &root, &pieces, &CONCURRENCY).unwrap();
+        let decoded = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -581,13 +571,13 @@ mod tests {
         let min = 4u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &CONCURRENCY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Try with fewer than min
         let pieces: Vec<_> = chunks.into_iter().take(2).collect();
 
         // Fail to decode
-        let result = decode::<Sha256, _>(total, min, &root, &pieces, &CONCURRENCY);
+        let result = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY);
         assert!(matches!(result, Err(Error::NotEnoughChunks)));
     }
 
@@ -598,13 +588,13 @@ mod tests {
         let min = 3u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &CONCURRENCY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Include duplicate index by cloning the first chunk
         let pieces = vec![chunks[0].clone(), chunks[0].clone(), chunks[1].clone()];
 
         // Fail to decode
-        let result = decode::<Sha256, _>(total, min, &root, &pieces, &CONCURRENCY);
+        let result = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY);
         assert!(matches!(result, Err(Error::DuplicateIndex(0))));
     }
 
@@ -615,7 +605,7 @@ mod tests {
         let min = 3u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &CONCURRENCY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Verify all proofs at invalid index
         for i in 0..total {
@@ -629,7 +619,7 @@ mod tests {
         let data = b"Test parameter validation";
 
         // total <= min should panic
-        encode::<Sha256, _>(3, 3, data.to_vec(), &CONCURRENCY).unwrap();
+        encode::<Sha256, _>(3, 3, data.to_vec(), &STRATEGY).unwrap();
     }
 
     #[test]
@@ -638,7 +628,7 @@ mod tests {
         let data = b"Test parameter validation";
 
         // min = 0 should panic
-        encode::<Sha256, _>(5, 0, data.to_vec(), &CONCURRENCY).unwrap();
+        encode::<Sha256, _>(5, 0, data.to_vec(), &STRATEGY).unwrap();
     }
 
     #[test]
@@ -648,11 +638,11 @@ mod tests {
         let min = 30u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &CONCURRENCY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Try to decode with min
         let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
-        let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &CONCURRENCY).unwrap();
+        let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -663,11 +653,11 @@ mod tests {
         let min = 4u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.clone(), &CONCURRENCY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.clone(), &STRATEGY).unwrap();
 
         // Try to decode with min
         let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
-        let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &CONCURRENCY).unwrap();
+        let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -679,7 +669,7 @@ mod tests {
 
         // Encode data correctly to get valid chunks
         let (_correct_root, chunks) =
-            encode::<Sha256, _>(total, min, data.to_vec(), &CONCURRENCY).unwrap();
+            encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Create a malicious/fake root (simulating a malicious encoder)
         let mut hasher = Sha256::new();
@@ -695,7 +685,7 @@ mod tests {
         let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
 
         // Attempt to decode with malicious root
-        let result = decode::<Sha256, _>(total, min, &malicious_root, &minimal, &CONCURRENCY);
+        let result = decode::<Sha256, _>(total, min, &malicious_root, &minimal, &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
@@ -706,8 +696,7 @@ mod tests {
         let min = 3u16;
 
         // Encode data
-        let (root, mut chunks) =
-            encode::<Sha256, _>(total, min, data.to_vec(), &CONCURRENCY).unwrap();
+        let (root, mut chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Tamper with one of the chunks by modifying the shard data
         if !chunks[1].shard.is_empty() {
@@ -715,7 +704,7 @@ mod tests {
         }
 
         // Try to decode with the tampered chunk
-        let result = decode::<Sha256, _>(total, min, &root, &chunks, &CONCURRENCY);
+        let result = decode::<Sha256, _>(total, min, &root, &chunks, &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
@@ -771,7 +760,7 @@ mod tests {
         }
 
         // Fail to decode
-        let result = decode::<Sha256, _>(total, min, &malicious_root, &pieces, &CONCURRENCY);
+        let result = decode::<Sha256, _>(total, min, &malicious_root, &pieces, &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
@@ -782,8 +771,7 @@ mod tests {
         let min = 3u16;
 
         // Encode the data
-        let (root, mut chunks) =
-            encode::<Sha256, _>(total, min, data.to_vec(), &CONCURRENCY).unwrap();
+        let (root, mut chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
 
         // Use a mix of original and recovery pieces
         chunks[1].index = 8;
@@ -794,7 +782,7 @@ mod tests {
         ];
 
         // Fail to decode
-        let result = decode::<Sha256, _>(total, min, &root, &pieces, &CONCURRENCY);
+        let result = decode::<Sha256, _>(total, min, &root, &pieces, &STRATEGY);
         assert!(matches!(result, Err(Error::InvalidIndex(8))));
     }
 
@@ -805,11 +793,11 @@ mod tests {
         let min = u16::MAX / 2;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.clone(), &CONCURRENCY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.clone(), &STRATEGY).unwrap();
 
         // Try to decode with min
         let minimal = chunks.into_iter().take(min as usize).collect::<Vec<_>>();
-        let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &CONCURRENCY).unwrap();
+        let decoded = decode::<Sha256, _>(total, min, &root, &minimal, &STRATEGY).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -820,7 +808,7 @@ mod tests {
         let min = u16::MAX / 2 - 1;
 
         // Encode data
-        let result = encode::<Sha256, _>(total, min, data, &CONCURRENCY);
+        let result = encode::<Sha256, _>(total, min, data, &STRATEGY);
         assert!(matches!(
             result,
             Err(Error::ReedSolomon(
@@ -840,7 +828,7 @@ mod tests {
                 extra_shards: u16::MAX,
             },
             [].as_slice(),
-            &CONCURRENCY,
+            &STRATEGY,
         )
         .is_err())
     }

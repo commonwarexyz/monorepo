@@ -1042,6 +1042,7 @@ dependencies = [
  "arbitrary",
  "commonware-coding",
  "commonware-cryptography",
+ "commonware-parallel",
  "libfuzzer-sys",
  "rand_chacha 0.3.1",
 ]

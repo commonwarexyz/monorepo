@@ -1,7 +1,10 @@
 use commonware_coding::{Config, Scheme};
+use commonware_parallel::{Parallel, Sequential};
 use criterion::{criterion_main, BatchSize, Criterion};
 use rand::{RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
+use rayon::ThreadPoolBuilder;
+use std::sync::Arc;
 
 mod no_coding;
 mod reed_solomon;
@@ -18,6 +21,7 @@ pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                     minimum_shards: min as u16,
                     extra_shards: (chunks - min) as u16,
                 };
+                let pool = Arc::new(ThreadPoolBuilder::new().num_threads(conc).build().unwrap());
                 c.bench_function(
                     &format!("{name}/msg_len={data_length} chunks={chunks} conc={conc}"),
                     |b| {
@@ -28,7 +32,17 @@ pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                 rng.fill_bytes(&mut data);
                                 data
                             },
-                            |data| S::encode(&config, data.as_slice(), conc),
+                            |data| {
+                                if conc > 1 {
+                                    S::encode(
+                                        &config,
+                                        data.as_slice(),
+                                        &Parallel::new(pool.clone()),
+                                    )
+                                } else {
+                                    S::encode(&config, data.as_slice(), &Sequential)
+                                }
+                            },
                             BatchSize::SmallInput,
                         );
                     },
@@ -49,6 +63,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                     minimum_shards: min as u16,
                     extra_shards: (chunks - min) as u16,
                 };
+                let pool = Arc::new(ThreadPoolBuilder::new().num_threads(conc).build().unwrap());
                 c.bench_function(
                     &format!("{name}/msg_len={data_length} chunks={chunks} conc={conc}"),
                     |b| {
@@ -59,8 +74,16 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                 rng.fill_bytes(&mut data);
 
                                 // Encode data
-                                let (commitment, mut shards) =
-                                    S::encode(&config, data.as_slice(), conc).unwrap();
+                                let (commitment, mut shards) = if conc > 1 {
+                                    S::encode(
+                                        &config,
+                                        data.as_slice(),
+                                        &Parallel::new(pool.clone()),
+                                    )
+                                    .unwrap()
+                                } else {
+                                    S::encode(&config, data.as_slice(), &Sequential).unwrap()
+                                };
 
                                 let my_shard = shards.pop().unwrap();
                                 let reshards = shards
@@ -99,14 +122,23 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                         .unwrap()
                                     })
                                     .collect::<Vec<_>>();
-                                S::decode(
-                                    &config,
-                                    &commitment,
-                                    checking_data,
-                                    &checked_shards,
-                                    conc,
-                                )
-                                .unwrap();
+                                if conc > 1 {
+                                    S::decode(
+                                        &config,
+                                        &commitment,
+                                        checking_data,
+                                        &checked_shards,
+                                        &Parallel::new(pool.clone()),
+                                    )
+                                } else {
+                                    S::decode(
+                                        &config,
+                                        &commitment,
+                                        checking_data,
+                                        &checked_shards,
+                                        &Sequential,
+                                    )
+                                }
                             },
                             BatchSize::SmallInput,
                         );
