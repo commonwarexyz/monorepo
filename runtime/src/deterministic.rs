@@ -51,7 +51,8 @@ use crate::{
         supervision::Tree,
         Panicker,
     },
-    validate_label, Clock, Error, Execution, Handle, ListenerOf, Panicked, METRICS_PREFIX,
+    validate_label, Clock, Error, Execution, Handle, ListenerOf, Panicked, ThreadPool,
+    METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
