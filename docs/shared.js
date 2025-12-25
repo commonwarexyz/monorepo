@@ -113,7 +113,6 @@ function insertFooter() {
             <a href="/hiring.html">Hiring</a>
             <a href="https://x.com/commonwarexyz">X</a>
             <a href="/podcast.html">Podcast</a>
-            <a href="/llms.txt">LLMs</a>
         </div>
         &copy; ${currentYear} Commonware, Inc. All rights reserved.
     </div>
