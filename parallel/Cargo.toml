@@ -4,7 +4,7 @@ edition.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
-description = "Abstract data parallelism over iterators and collections."
+description = "Abstract data parallelism over iterators and tasks."
 readme = "README.md"
 homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/parallel"
@@ -13,12 +13,12 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/parallel"
 workspace = true
 
 [dependencies]
-rayon = { workspace = true, optional = true }
 cfg-if.workspace = true
+rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
-proptest = { workspace = true }
+proptest.workspace = true
 
 [features]
-default = ["std"]
-std = ["dep:rayon"]
+default = [ "std" ]
+std = [ "dep:rayon" ]
