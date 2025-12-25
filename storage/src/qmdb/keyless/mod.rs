@@ -81,6 +81,7 @@ pub struct Keyless<
     _durability: PhantomData<D>,
 }
 
+// Impl block for functionality available in all states.
 impl<
         E: Storage + Clock + Metrics,
         V: VariableValue,
@@ -138,7 +139,7 @@ impl<
     }
 }
 
-/// Implementation for the (Merkleized, Durable) state.
+// Implementation for the Clean state.
 impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     Keyless<E, V, H, Merkleized<H>, Durable>
 {
@@ -265,74 +266,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     }
 }
 
-/// Implementation of LogStore for all states.
-impl<
-        E: Storage + Clock + Metrics,
-        V: VariableValue,
-        H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
-        D: DurabilityState,
-    > LogStore for Keyless<E, V, H, M, D>
-{
-    type Value = V;
-
-    fn is_empty(&self) -> bool {
-        // A keyless database is never "empty" in the traditional sense since it always
-        // has at least one commit operation. We consider it empty if there are no appends.
-        self.op_count() <= 1
-    }
-
-    fn op_count(&self) -> Location {
-        self.op_count()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-
-    async fn get_metadata(&self) -> Result<Option<Self::Value>, Error> {
-        self.get_metadata().await
-    }
-}
-
-/// Implementation of PrunableStore for the Merkleized state (any durability).
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> PrunableStore
-    for Keyless<E, V, H, Merkleized<H>, D>
-{
-    async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        if loc > self.last_commit_loc {
-            return Err(Error::PruneBeyondMinRequired(loc, self.last_commit_loc));
-        }
-        self.journal.prune(loc).await?;
-        Ok(())
-    }
-}
-
-/// Implementation of MerkleizedStore for the Merkleized state (any durability).
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> MerkleizedStore
-    for Keyless<E, V, H, Merkleized<H>, D>
-{
-    type Digest = H::Digest;
-    type Operation = Operation<V>;
-
-    fn root(&self) -> Self::Digest {
-        self.journal.root()
-    }
-
-    async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        Ok(self
-            .journal
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await?)
-    }
-}
-
-/// Implementation for the (Unmerkleized, NonDurable) state - the "Mutable" state.
+// Implementation for the Mutable state.
 impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     Keyless<E, V, H, Unmerkleized, NonDurable>
 {
@@ -367,9 +301,17 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
 
         Ok((durable, start_loc..op_count))
     }
+
+    pub fn into_merkleized(self) -> Keyless<E, V, H, Merkleized<H>, Durable> {
+        Keyless {
+            journal: self.journal.merkleize(),
+            last_commit_loc: self.last_commit_loc,
+            _durability: PhantomData,
+        }
+    }
 }
 
-/// Implementation for the (Unmerkleized, Durable) state.
+// Implementation for the (Unmerkleized, Durable) state.
 impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     Keyless<E, V, H, Unmerkleized, Durable>
 {
@@ -390,6 +332,73 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
             last_commit_loc: self.last_commit_loc,
             _durability: PhantomData,
         }
+    }
+}
+
+// Implementation of MerkleizedStore for the Merkleized state (any durability).
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> MerkleizedStore
+    for Keyless<E, V, H, Merkleized<H>, D>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<V>;
+
+    fn root(&self) -> Self::Digest {
+        self.journal.root()
+    }
+
+    async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        Ok(self
+            .journal
+            .historical_proof(historical_size, start_loc, max_ops)
+            .await?)
+    }
+}
+
+// Implementation of LogStore for all states.
+impl<
+        E: Storage + Clock + Metrics,
+        V: VariableValue,
+        H: Hasher,
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > LogStore for Keyless<E, V, H, M, D>
+{
+    type Value = V;
+
+    fn is_empty(&self) -> bool {
+        // A keyless database is never "empty" in the traditional sense since it always
+        // has at least one commit operation. We consider it empty if there are no appends.
+        self.op_count() <= 1
+    }
+
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
+    }
+
+    async fn get_metadata(&self) -> Result<Option<Self::Value>, Error> {
+        self.get_metadata().await
+    }
+}
+
+// Implementation of PrunableStore for the Merkleized state (any durability).
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> PrunableStore
+    for Keyless<E, V, H, Merkleized<H>, D>
+{
+    async fn prune(&mut self, loc: Location) -> Result<(), Error> {
+        if loc > self.last_commit_loc {
+            return Err(Error::PruneBeyondMinRequired(loc, self.last_commit_loc));
+        }
+        self.journal.prune(loc).await?;
+        Ok(())
     }
 }
 

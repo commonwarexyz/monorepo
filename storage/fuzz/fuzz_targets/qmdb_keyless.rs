@@ -148,7 +148,6 @@ fn fuzz(input: FuzzInput) {
             .expect("Failed to init keyless db")
             .into_mutable();
 
-        let mut has_uncommitted = false;
 
         for op in &input.ops {
             match op {
@@ -156,7 +155,6 @@ fn fuzz(input: FuzzInput) {
                     db.append(value_bytes.clone())
                         .await
                         .expect("Append should not fail");
-                    has_uncommitted = true;
                 }
 
                 Operation::Commit { metadata_bytes } => {
@@ -164,7 +162,6 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("Commit should not fail");
                     db = durable_db.into_mutable();
-                    has_uncommitted = false;
                 }
 
                 Operation::Get { loc_offset } => {
@@ -180,13 +177,11 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Prune => {
-                    let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    let mut clean_db = durable_db.into_merkleized();
-                    clean_db.prune(clean_db.last_commit_loc())
+                    let mut merkleized_db = db.into_merkleized();
+                    merkleized_db.prune(merkleized_db.last_commit_loc())
                         .await
                         .expect("Prune should not fail");
-                    db = clean_db.into_mutable();
-                    has_uncommitted = false;
+                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::Sync => {
@@ -194,7 +189,6 @@ fn fuzz(input: FuzzInput) {
                     let mut clean_db = durable_db.into_merkleized();
                     clean_db.sync().await.expect("Sync should not fail");
                     db = clean_db.into_mutable();
-                    has_uncommitted = false;
                 }
 
                 Operation::OpCount => {
@@ -210,12 +204,9 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Root => {
-                    if !has_uncommitted {
-                        let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                        let clean_db = durable_db.into_merkleized();
-                        let _ = clean_db.root();
-                        db = clean_db.into_mutable();
-                    }
+                    let merkleized_db = db.into_merkleized();
+                    let _ = merkleized_db.root();
+                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::Proof {
@@ -223,21 +214,21 @@ fn fuzz(input: FuzzInput) {
                     max_ops,
                 } => {
                     let op_count = db.op_count();
-                    if op_count > 0 && !has_uncommitted {
-                        let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                        let clean_db = durable_db.into_merkleized();
-                        let start_loc = (*start_offset as u64) % op_count.as_u64();
-                        let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
-                        let start_loc = Location::new(start_loc).unwrap();
-                        let root = clean_db.root();
-                        if let Ok((proof, ops)) = clean_db.proof(start_loc, NZU64!(max_ops_value)).await {
+                    if op_count == 0 {
+                        continue;
+                    }
+                    let merkleized_db = db.into_merkleized();
+                    let start_loc = (*start_offset as u64) % op_count.as_u64();
+                    let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
+                    let start_loc = Location::new(start_loc).unwrap();
+                    let root = merkleized_db.root();
+                    if let Ok((proof, ops)) = merkleized_db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
                                 "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                             );
-                        }
-                        db = clean_db.into_mutable();
                     }
+                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::HistoricalProof {
@@ -246,25 +237,25 @@ fn fuzz(input: FuzzInput) {
                     max_ops,
                 } => {
                     let op_count = db.op_count();
-                    if op_count > 0 && !has_uncommitted {
-                        let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                        let clean_db = durable_db.into_merkleized();
-                        let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
-                        let size = Location::new(size).unwrap();
-                        let start_loc = (*start_offset as u64) % *size;
-                        let start_loc = Location::new(start_loc).unwrap();
-                        let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
-                        let root = clean_db.root();
-                        if let Ok((proof, ops)) = clean_db
-                            .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
+                    if op_count == 0 {
+                        continue;
+                    }
+                    let merkleized_db = db.into_merkleized();
+                    let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
+                    let size = Location::new(size).unwrap();
+                    let start_loc = (*start_offset as u64) % *size;
+                    let start_loc = Location::new(start_loc).unwrap();
+                    let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
+                    let root = merkleized_db.root();
+                    if let Ok((proof, ops)) = merkleized_db
+                        .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
                                 "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
                             );
                         }
-                        db = clean_db.into_mutable();
-                    }
+                        db = merkleized_db.into_mutable();
                 }
 
                 Operation::SimulateFailure{} => {
@@ -274,7 +265,6 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("Failed to init keyless db")
                         .into_mutable();
-                    has_uncommitted = false;
                 }
             }
         }

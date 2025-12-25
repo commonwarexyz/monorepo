@@ -57,7 +57,7 @@ fn fuzz(data: FuzzInput) {
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
 
-        let mut db = Db::<_, Key, Value, Sha256, EightCap, _, _>::init(context.clone(), cfg.clone())
+        let mut db = Db::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
             .await
             .expect("init qmdb").into_mutable();
 

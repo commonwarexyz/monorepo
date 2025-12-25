@@ -5,10 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     kv::{Batchable as _, Store, StoreDeletable, StoreMut},
-    qmdb::{
-        any::{ordered::fixed::Db, FixedConfig as Config},
-        Durable, Merkleized,
-    },
+    qmdb::any::{ordered::fixed::Db, FixedConfig as Config},
     translator::EightCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -22,8 +19,7 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
-type OrderedDb =
-    Db<deterministic::Context, Key, Value, Sha256, EightCap, Merkleized<Sha256>, Durable>;
+type OrderedDb = Db<deterministic::Context, Key, Value, Sha256, EightCap>;
 
 const MAX_OPS: usize = 25;
 

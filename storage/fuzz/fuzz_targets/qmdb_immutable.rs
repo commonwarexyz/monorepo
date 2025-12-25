@@ -171,13 +171,15 @@ fn fuzz(input: FuzzInput) {
                     if let Some(commit_loc) = last_commit_loc {
                         let safe_loc = loc % (commit_loc + 1).as_u64();
                         let safe_loc = Location::new(safe_loc).unwrap();
-                        let (durable_db, _) = db.commit(None).await.unwrap();
-                        let mut clean_db = durable_db.into_merkleized();
-                        clean_db.prune(safe_loc).await.unwrap();
-                        let oldest = clean_db.oldest_retained_loc();
+                        let mut merkleized_db = db.into_merkleized();
+                        merkleized_db
+                            .prune(safe_loc)
+                            .await
+                            .expect("prune should not fail");
+                        let oldest = merkleized_db.oldest_retained_loc();
                         set_locations.retain(|(_, l)| *l >= oldest);
                         keys_set.retain(|(_, l)| *l >= oldest);
-                        db = clean_db.into_mutable();
+                        db = merkleized_db.into_mutable();
                     }
                 }
 

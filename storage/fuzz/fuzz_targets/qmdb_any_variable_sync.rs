@@ -153,7 +153,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap, _, _>::init(
+        let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
             context.clone(),
             test_config("qmdb_any_variable_fuzz_test"),
         )
@@ -196,13 +196,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Prune => {
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    let mut clean_db = durable_db.into_merkleized();
-                    clean_db
-                        .prune(clean_db.inactivity_floor_loc())
+                    let mut merkleized_db = db.into_merkleized();
+                    merkleized_db
+                        .prune(merkleized_db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
-                    db = clean_db.into_mutable();
+                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::Get { key } => {
@@ -295,12 +294,9 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-        durable_db
-            .into_merkleized()
-            .destroy()
-            .await
-            .expect("Destroy should not fail");
+        let db = db.commit(None).await.expect("commit should not fail").0;
+        let db = db.into_merkleized();
+        db.destroy().await.expect("Destroy should not fail");
     });
 }
 

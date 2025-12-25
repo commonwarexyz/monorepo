@@ -9,7 +9,7 @@ use commonware_storage::{
             unordered::fixed::{Db, Operation as FixedOperation},
             FixedConfig as Config,
         },
-        sync, Durable, Merkleized,
+        sync,
     },
     translator::TwoCap,
 };
@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
-type FixedDb = Db<deterministic::Context, Key, Value, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+type FixedDb = Db<deterministic::Context, Key, Value, Sha256, TwoCap>;
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -190,14 +190,12 @@ fn fuzz(mut input: FuzzInput) {
                 }
 
                 Operation::Prune => {
-                    input.commit_counter = 0;
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    let mut clean_db = durable_db.into_merkleized();
-                    clean_db
-                        .prune(clean_db.inactivity_floor_loc())
+                    let mut merkleized_db = db.into_merkleized();
+                    merkleized_db
+                        .prune(merkleized_db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
-                    db = clean_db.into_mutable();
+                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::SyncFull { fetch_batch_size } => {
@@ -246,12 +244,9 @@ fn fuzz(mut input: FuzzInput) {
             }
         }
 
-        let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-        durable_db
-            .into_merkleized()
-            .destroy()
-            .await
-            .expect("Destroy should not fail");
+        let db = db.commit(None).await.expect("commit should not fail").0;
+        let db = db.into_merkleized();
+        db.destroy().await.expect("Destroy should not fail");
     });
 }
 
