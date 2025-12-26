@@ -187,6 +187,7 @@
 //! };
 //! use commonware_cryptography::{ed25519, Signer};
 //! use commonware_math::algebra::Random;
+//! use commonware_parallel::Sequential;
 //! use commonware_utils::{ordered::Set, TryCollect};
 //! use std::collections::BTreeMap;
 //! use rand::SeedableRng;
@@ -264,17 +265,17 @@
 //! for (player_pk, player) in players {
 //!     let (output, share) = player.finalize(
 //!       dealer_logs.clone(),
-//!       1 // Increase this for parallelism.
+//!       &Sequential, // use `Parallel` for parallelism
 //!     )?;
 //!     println!("Player {:?} got share at index {}", player_pk, share.index);
 //!     player_shares.insert(player_pk, share);
 //! }
 //!
 //! // Step 5: Observer can also compute the public output
-//! let observer_output = observe::<MinSig, ed25519::PublicKey>(
+//! let observer_output = observe::<MinSig, ed25519::PublicKey, _>(
 //!     info,
 //!     dealer_logs,
-//!     1 // Increase this for parallelism.
+//!     &Sequential, // use `Parallel` for parallelism
 //! )?;
 //! println!("DKG completed with threshold {}", observer_output.quorum());
 //! # Ok(())
@@ -297,6 +298,7 @@ use commonware_math::{
     algebra::{Additive, CryptoGroup, Random},
     poly::{Interpolator, Poly},
 };
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
     TryCollect, NZU32,
@@ -564,7 +566,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         let Ok(scalar) = self.player_scalar(player) else {
             return false;
         };
-        let expected = pub_msg.commitment.eval_msm(&scalar);
+        let expected = pub_msg.commitment.eval_msm(&scalar, &Sequential);
         expected == V::Public::generator() * &priv_msg.share
     }
 }
@@ -1181,8 +1183,10 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
                 (
                     pk.clone(),
                     DealerPrivMsg {
-                        share: my_poly
-                            .eval_msm(&info.player_scalar(pk).expect("player should exist")),
+                        share: my_poly.eval_msm(
+                            &info.player_scalar(pk).expect("player should exist"),
+                            &Sequential,
+                        ),
                     },
                 )
             })
@@ -1305,10 +1309,10 @@ struct ObserveInner<V: Variant, P: PublicKey> {
 }
 
 impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
-    fn reckon(
+    fn reckon<St: Strategy>(
         info: Info<V, P>,
         selected: Map<P, DealerLog<V, P>>,
-        concurrency: usize,
+        strategy: &St,
     ) -> Result<Self, Error> {
         // Track players with too many reveals
         let max_faults = info.players.max_faults();
@@ -1355,7 +1359,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
                 .try_collect::<Map<_, _>>()
                 .expect("Map should have unique keys");
             let public = weights
-                .interpolate(&commitments, concurrency)
+                .interpolate(&commitments, strategy)
                 .expect("select checks that enough points have been provided");
             if previous.public().public() != public.constant() {
                 return Err(Error::DkgFailed);
@@ -1388,13 +1392,13 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 /// From this log, we can (potentially, as the DKG can fail) compute the public output.
 ///
 /// This will only ever return [`Error::DkgFailed`].
-pub fn observe<V: Variant, P: PublicKey>(
+pub fn observe<V: Variant, P: PublicKey, St: Strategy>(
     info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
-    concurrency: usize,
+    strategy: &St,
 ) -> Result<Output<V, P>, Error> {
     let selected = select(&info, logs)?;
-    ObserveInner::<V, P>::reckon(info, selected, concurrency).map(|x| x.output)
+    ObserveInner::<V, P>::reckon(info, selected, strategy).map(|x| x.output)
 }
 
 /// Represents a player in the DKG / reshare process.
@@ -1465,10 +1469,10 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// for finalize.
     ///
     /// This will only ever return [`Error::DkgFailed`].
-    pub fn finalize(
+    pub fn finalize<St: Strategy>(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
-        concurrency: usize,
+        strategy: &St,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
         let selected = select(&self.info, logs)?;
         let dealings = selected
@@ -1493,7 +1497,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
             .try_collect::<Map<_, _>>()
             .expect("select produces at most one entry per dealer");
         let ObserveInner { output, weights } =
-            ObserveInner::<V, S::PublicKey>::reckon(self.info, selected, concurrency)?;
+            ObserveInner::<V, S::PublicKey>::reckon(self.info, selected, strategy)?;
         let private = weights.map_or_else(
             || {
                 let mut out = <Scalar as Additive>::zero();
@@ -1504,7 +1508,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
             },
             |weights| {
                 weights
-                    .interpolate(&dealings, concurrency)
+                    .interpolate(&dealings, strategy)
                     .expect("select ensures that we can recover")
             },
         );
@@ -1536,7 +1540,10 @@ pub fn deal<V: Variant, P: Clone + Ord>(
         .enumerate()
         .map(|(i, p)| {
             let i = i as u32;
-            let eval = private.eval_msm(&mode.scalar(n, i).expect("player index should be valid"));
+            let eval = private.eval_msm(
+                &mode.scalar(n, i).expect("player index should be valid"),
+                &Sequential,
+            );
             let share = Share {
                 index: i,
                 private: eval,
@@ -1955,6 +1962,7 @@ mod test_plan {
                                     DealerPrivMsg {
                                         share: my_poly.eval_msm(
                                             &info.player_scalar(pk).expect("player should exist"),
+                                            &Sequential,
                                         ),
                                     },
                                 )
@@ -2087,7 +2095,7 @@ mod test_plan {
                     }
                 }
                 // Run observer
-                let observe_result = observe(info.clone(), dealer_logs.clone(), 1);
+                let observe_result = observe(info.clone(), dealer_logs.clone(), &Sequential);
                 if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
@@ -2172,7 +2180,7 @@ mod test_plan {
                 // Finalize each player
                 for (player_pk, player) in players.into_iter() {
                     let (player_output, share) = player
-                        .finalize(dealer_logs.clone(), 1)
+                        .finalize(dealer_logs.clone(), &Sequential)
                         .expect("Player finalize should succeed");
 
                     assert_eq!(
@@ -2227,9 +2235,10 @@ mod test_plan {
                 }
 
                 let threshold = observer_output.quorum();
-                let threshold_sig = threshold_signature_recover::<V, _>(
+                let threshold_sig = threshold_signature_recover::<V, _, _>(
                     &observer_output.public,
                     &partial_sigs[0..threshold as usize],
+                    &Sequential,
                 )
                 .expect("Should recover threshold signature");
 

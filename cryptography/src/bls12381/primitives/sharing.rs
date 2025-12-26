@@ -4,6 +4,7 @@ use alloc::sync::Arc;
 use cfg_if::cfg_if;
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::poly::{Interpolator, Poly};
+use commonware_parallel::Sequential;
 use commonware_utils::{ordered::Set, quorum, NZU32};
 use core::{iter, num::NonZeroU32};
 #[cfg(feature = "std")]
@@ -200,7 +201,7 @@ impl<V: Variant> Sharing<V> {
             .iter()
             .zip(self.all_scalars())
             .for_each(|(e, s)| {
-                e.get_or_init(|| self.poly.eval_msm(&s));
+                e.get_or_init(|| self.poly.eval_msm(&s, &Sequential));
             })
     }
 
@@ -213,11 +214,11 @@ impl<V: Variant> Sharing<V> {
                 self.evals
                     .get(i as usize)
                     .map(|e| {
-                        *e.get_or_init(|| self.poly.eval_msm(&self.scalar(i).expect("i < total")))
+                        *e.get_or_init(|| self.poly.eval_msm(&self.scalar(i).expect("i < total"), &Sequential))
                     })
                     .ok_or(Error::InvalidIndex)
             } else {
-                Ok(self.poly.eval_msm(&self.scalar(i).ok_or(Error::InvalidIndex)?))
+                Ok(self.poly.eval_msm(&self.scalar(i).ok_or(Error::InvalidIndex)?, &Sequential))
             }
         }
     }

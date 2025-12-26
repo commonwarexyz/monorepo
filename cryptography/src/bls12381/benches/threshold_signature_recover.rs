@@ -6,10 +6,12 @@ use commonware_cryptography::{
     ed25519::PrivateKey,
     Signer,
 };
+use commonware_parallel::{Parallel, Sequential};
 use commonware_utils::{quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
-use std::hint::black_box;
+use rayon::ThreadPoolBuilder;
+use std::{hint::black_box, sync::Arc};
 
 fn benchmark_threshold_signature_recover(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
@@ -17,42 +19,66 @@ fn benchmark_threshold_signature_recover(c: &mut Criterion) {
     let msg = b"hello";
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         let t = quorum(n);
-        c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {
-            b.iter_batched(
-                || {
-                    let players = (0..n)
-                        .map(|i| PrivateKey::from_seed(i as u64).public_key())
-                        .try_collect()
-                        .unwrap();
-                    let (public, shares) = deal::<MinSig, _>(&mut rng, Default::default(), players)
-                        .expect("deal should succeed");
-                    (
-                        public,
-                        shares
-                            .values()
-                            .iter()
-                            .map(|s| {
-                                primitives::ops::partial_sign_message::<MinSig>(
-                                    s,
-                                    Some(namespace),
-                                    msg,
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                },
-                |(public, partials)| {
-                    black_box(
-                        primitives::ops::threshold_signature_recover::<MinSig, _>(
-                            public.public(),
-                            &partials,
-                        )
-                        .unwrap(),
+        for concurrency in [1, 8] {
+            let pool = Arc::new(
+                ThreadPoolBuilder::new()
+                    .num_threads(concurrency)
+                    .build()
+                    .unwrap(),
+            );
+            c.bench_function(
+                &format!("{}/n={} t={} conc={}", module_path!(), n, t, concurrency),
+                |b| {
+                    b.iter_batched(
+                        || {
+                            let players = (0..n)
+                                .map(|i| PrivateKey::from_seed(i as u64).public_key())
+                                .try_collect()
+                                .unwrap();
+                            let (public, shares) =
+                                deal::<MinSig, _>(&mut rng, Default::default(), players)
+                                    .expect("deal should succeed");
+                            (
+                                public,
+                                shares
+                                    .values()
+                                    .iter()
+                                    .map(|s| {
+                                        primitives::ops::partial_sign_message::<MinSig>(
+                                            s,
+                                            Some(namespace),
+                                            msg,
+                                        )
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                        },
+                        |(public, partials)| {
+                            if concurrency > 1 {
+                                black_box(
+                                    primitives::ops::threshold_signature_recover::<MinSig, _, _>(
+                                        public.public(),
+                                        &partials,
+                                        &Parallel::new(pool.clone()),
+                                    )
+                                    .unwrap(),
+                                );
+                            } else {
+                                black_box(
+                                    primitives::ops::threshold_signature_recover::<MinSig, _, _>(
+                                        public.public(),
+                                        &partials,
+                                        &Sequential,
+                                    )
+                                    .unwrap(),
+                                );
+                            }
+                        },
+                        BatchSize::SmallInput,
                     );
                 },
-                BatchSize::SmallInput,
             );
-        });
+        }
     }
 }
 
