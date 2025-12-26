@@ -5,8 +5,9 @@ use crate::{
     dkg,
 };
 use commonware_consensus::{
-    marshal::ingress::mailbox::AncestorStream, simplex::types::Context, Block as _,
-    VerifyingApplication,
+    marshal::ancestry::{AncestorStream, AncestryProvider},
+    simplex::types::Context,
+    Block as _, VerifyingApplication,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, certificate::Scheme, Committable, Hasher, Signer,
@@ -61,10 +62,10 @@ where
         genesis_block::<H, C, V>()
     }
 
-    async fn propose(
+    async fn propose<A: AncestryProvider<Block = Self::Block>>(
         &mut self,
         _context: (E, Self::Context),
-        mut ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+        mut ancestry: AncestorStream<A, Self::Block>,
     ) -> Option<Self::Block> {
         // Fetch the parent block from the ancestry stream.
         let parent_block = ancestry.next().await?;
@@ -94,10 +95,10 @@ where
     C: Signer,
     V: Variant,
 {
-    async fn verify(
+    async fn verify<A: AncestryProvider<Block = Self::Block>>(
         &mut self,
         _: (E, Self::Context),
-        _: AncestorStream<Self::SigningScheme, Self::Block>,
+        _: AncestorStream<A, Self::Block>,
     ) -> bool {
         // We wrap this application with `Marshaled`, which handles ancestry
         // verification (parent commitment and height contiguity).

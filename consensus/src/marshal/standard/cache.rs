@@ -35,13 +35,13 @@ pub(crate) struct Config {
 /// Prunable archives for a single epoch.
 struct Cache<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> {
     /// Verified blocks stored by view
-    verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
+    verified_blocks: prunable::Archive<TwoCap, R, B::Digest, B>,
     /// Notarized blocks stored by view
-    notarized_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
+    notarized_blocks: prunable::Archive<TwoCap, R, B::Digest, B>,
     /// Notarizations stored by view
-    notarizations: prunable::Archive<TwoCap, R, B::Commitment, Notarization<S, B::Commitment>>,
+    notarizations: prunable::Archive<TwoCap, R, B::Digest, Notarization<S, B::Digest>>,
     /// Finalizations stored by view
-    finalizations: prunable::Archive<TwoCap, R, B::Commitment, Finalization<S, B::Commitment>>,
+    finalizations: prunable::Archive<TwoCap, R, B::Digest, Finalization<S, B::Digest>>,
 }
 
 impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Cache<R, B, S> {
@@ -186,7 +186,7 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
         epoch: Epoch,
         name: &str,
         codec_config: T::Cfg,
-    ) -> prunable::Archive<TwoCap, R, B::Commitment, T> {
+    ) -> prunable::Archive<TwoCap, R, B::Digest, T> {
         let start = Instant::now();
         let cfg = prunable::Config {
             partition: format!("{}-cache-{epoch}-{name}", self.cfg.partition_prefix),
@@ -206,25 +206,25 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
     }
 
     /// Add a verified block to the prunable archive.
-    pub(crate) async fn put_verified(&mut self, round: Round, commitment: B::Commitment, block: B) {
+    pub(crate) async fn put_verified(&mut self, round: Round, digest: B::Digest, block: B) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
         };
         let result = cache
             .verified_blocks
-            .put_sync(round.view().get(), commitment, block)
+            .put_sync(round.view().get(), digest, block)
             .await;
         Self::handle_result(result, round, "verified");
     }
 
     /// Add a notarized block to the prunable archive.
-    pub(crate) async fn put_block(&mut self, round: Round, commitment: B::Commitment, block: B) {
+    pub(crate) async fn put_block(&mut self, round: Round, digest: B::Digest, block: B) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
         };
         let result = cache
             .notarized_blocks
-            .put_sync(round.view().get(), commitment, block)
+            .put_sync(round.view().get(), digest, block)
             .await;
         Self::handle_result(result, round, "notarized");
     }
@@ -233,15 +233,15 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
     pub(crate) async fn put_notarization(
         &mut self,
         round: Round,
-        commitment: B::Commitment,
-        notarization: Notarization<S, B::Commitment>,
+        digest: B::Digest,
+        notarization: Notarization<S, B::Digest>,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
         };
         let result = cache
             .notarizations
-            .put_sync(round.view().get(), commitment, notarization)
+            .put_sync(round.view().get(), digest, notarization)
             .await;
         Self::handle_result(result, round, "notarization");
     }
@@ -250,15 +250,15 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
     pub(crate) async fn put_finalization(
         &mut self,
         round: Round,
-        commitment: B::Commitment,
-        finalization: Finalization<S, B::Commitment>,
+        digest: B::Digest,
+        finalization: Finalization<S, B::Digest>,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
         };
         let result = cache
             .finalizations
-            .put_sync(round.view().get(), commitment, finalization)
+            .put_sync(round.view().get(), digest, finalization)
             .await;
         Self::handle_result(result, round, "finalization");
     }
@@ -282,7 +282,7 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
     pub(crate) async fn get_notarization(
         &self,
         round: Round,
-    ) -> Option<Notarization<S, B::Commitment>> {
+    ) -> Option<Notarization<S, B::Digest>> {
         let cache = self.caches.get(&round.epoch())?;
         cache
             .notarizations
@@ -291,13 +291,13 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
             .expect("failed to get notarization")
     }
 
-    /// Get a finalization from the prunable archive by commitment.
+    /// Get a finalization from the prunable archive by digest.
     pub(crate) async fn get_finalization_for(
         &self,
-        commitment: B::Commitment,
-    ) -> Option<Finalization<S, B::Commitment>> {
+        digest: B::Digest,
+    ) -> Option<Finalization<S, B::Digest>> {
         for cache in self.caches.values().rev() {
-            match cache.finalizations.get(Identifier::Key(&commitment)).await {
+            match cache.finalizations.get(Identifier::Key(&digest)).await {
                 Ok(Some(finalization)) => return Some(finalization),
                 Ok(None) => continue,
                 Err(e) => panic!("failed to get cached finalization: {e}"),
@@ -307,13 +307,13 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
     }
 
     /// Looks for a block (verified or notarized).
-    pub(crate) async fn find_block(&self, commitment: B::Commitment) -> Option<B> {
+    pub(crate) async fn find_block(&self, digest: B::Digest) -> Option<B> {
         // Check in reverse order
         for cache in self.caches.values().rev() {
             // Check verified blocks
             if let Some(block) = cache
                 .verified_blocks
-                .get(Identifier::Key(&commitment))
+                .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get verified block")
             {
@@ -323,7 +323,7 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
             // Check notarized blocks
             if let Some(block) = cache
                 .notarized_blocks
-                .get(Identifier::Key(&commitment))
+                .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get notarized block")
             {
