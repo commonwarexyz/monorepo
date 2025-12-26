@@ -828,7 +828,7 @@ mod tests {
                 .0
                 .send(
                     Recipients::One(peers[0].clone()),
-                    response_to_peer1.encode().into(),
+                    response_to_peer1.encode(),
                     true,
                 )
                 .await

@@ -23,6 +23,7 @@
 //! This implementation is only available on Linux systems that support io_uring.
 
 use crate::iouring::{self, should_retry};
+use bytes::{Buf, BufMut, BytesMut};
 use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
@@ -224,8 +225,13 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), crate::Error> {
-        let mut msg = msg.into();
+    async fn send(&mut self, mut msg: impl Buf + Send) -> Result<(), crate::Error> {
+        // For now, collect the message into a stable buffer. In the future,
+        // we could optimize this by using writev w/ a keepalive for the iovecs.
+        let mut msg: StableBuf = {
+            let buf = msg.copy_to_bytes(msg.remaining());
+            BytesMut::from(buf).into()
+        };
         let mut bytes_sent = 0;
         let msg_len = msg.len();
 
@@ -295,20 +301,23 @@ impl Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, crate::Error> {
+    async fn recv(&mut self, mut buf: impl BufMut + Send) -> Result<(), crate::Error> {
+        // Create an owned buffer that stays alive until the kernel is done with it.
+        // After the operation completes, we copy the data to the user's buffer.
+        let buf_len = buf.remaining_mut();
+        let mut owned_buf: StableBuf = BytesMut::zeroed(buf_len).into();
         let mut bytes_received = 0;
-        let mut buf = buf.into();
-        let buf_len = buf.len();
+
         while bytes_received < buf_len {
             // Figure out how much is left to read and where to read into.
             //
-            // SAFETY: `buf` is a `StableBuf` guaranteeing the memory won't move.
+            // SAFETY: `owned_buf` is a `StableBuf` guaranteeing the memory won't move.
             // `bytes_received` is always < `buf_len` due to the loop condition, so
             // `add(bytes_received)` stays within bounds and `buf_len - bytes_received`
             // correctly represents the remaining valid bytes.
             let remaining = unsafe {
                 std::slice::from_raw_parts_mut(
-                    buf.as_mut_ptr().add(bytes_received),
+                    owned_buf.as_mut_ptr().add(bytes_received),
                     buf_len - bytes_received,
                 )
             };
@@ -327,14 +336,14 @@ impl crate::Stream for Stream {
                 .send(crate::iouring::Op {
                     work: op,
                     sender: tx,
-                    buffer: Some(buf),
+                    buffer: Some(owned_buf),
                 })
                 .await
                 .map_err(|_| crate::Error::RecvFailed)?;
 
             // Wait for the operation to complete
             let (result, got_buf) = rx.await.map_err(|_| crate::Error::RecvFailed)?;
-            buf = got_buf.unwrap();
+            owned_buf = got_buf.unwrap();
             if should_retry(result) {
                 continue;
             }
@@ -345,7 +354,10 @@ impl crate::Stream for Stream {
             }
             bytes_received += result as usize;
         }
-        Ok(buf)
+
+        // Copy the received data to the user's buffer
+        buf.put_slice(owned_buf.as_ref());
+        Ok(())
     }
 }
 

@@ -842,7 +842,7 @@ impl<
         node_sender
             .send(
                 Recipients::Some(validators.iter().cloned().collect()),
-                node.encode().into(),
+                node.encode(),
                 self.priority_proposals,
             )
             .await

@@ -58,7 +58,7 @@ impl<E: Spawner, S: Scheme<H::Digest>, H: Hasher> NullifyOnly<E, S, H> {
                 let nullify =
                     Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, notarize.round())
                         .unwrap();
-                let msg = Vote::<S, H::Digest>::Nullify(nullify).encode().into();
+                let msg = Vote::<S, H::Digest>::Nullify(nullify).encode();
                 sender.send(Recipients::All, msg, true).await.unwrap();
             }
         }

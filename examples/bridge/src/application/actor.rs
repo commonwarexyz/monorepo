@@ -83,9 +83,10 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                                 Inbound::GetFinalization::<H::Digest>(inbound::GetFinalization {
                                     network: *self.other_certificate_verifier.identity(),
                                 })
-                                .encode();
+                                .encode()
+                                .freeze();
                             indexer_sender
-                                .send(&msg)
+                                .send(msg)
                                 .await
                                 .expect("failed to send finalization to indexer");
                             let result = indexer_receiver
@@ -128,9 +129,10 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                         network: self.public,
                         block,
                     })
-                    .encode();
+                    .encode()
+                    .freeze();
                     indexer_sender
-                        .send(&msg)
+                        .send(msg)
                         .await
                         .expect("failed to send block to indexer");
                     let result = indexer_receiver
@@ -156,9 +158,10 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                         network: self.public,
                         digest: payload,
                     })
-                    .encode();
+                    .encode()
+                    .freeze();
                     indexer_sender
-                        .send(&msg)
+                        .send(msg)
                         .await
                         .expect("failed to send block to indexer");
                     let result = indexer_receiver
@@ -212,9 +215,10 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                                     network: self.public,
                                     finalization,
                                 })
-                                .encode();
+                                .encode()
+                                .freeze();
                             indexer_sender
-                                .send(&msg)
+                                .send(msg)
                                 .await
                                 .expect("failed to send finalization to indexer");
                             let result = indexer_receiver
