@@ -21,6 +21,7 @@ commonware-broadcast.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-math = { workspace = true, optional = true }
+commonware-parallel.workspace = true
 commonware-resolver.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
