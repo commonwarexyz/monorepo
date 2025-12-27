@@ -8,6 +8,7 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig, PartialSignature},
 };
 use libfuzzer_sys::fuzz_target;
+use rand::thread_rng;
 
 mod common;
 use common::{
@@ -36,12 +37,6 @@ enum FuzzOperation {
     PartialVerifyProofOfPossessionMinSig {
         public: Sharing<MinSig>,
         partial: PartialSignature<MinSig>,
-    },
-    PartialAggregateSignaturesMinPk {
-        partials: Vec<PartialSignature<MinPk>>,
-    },
-    PartialAggregateSignaturesMinSig {
-        partials: Vec<PartialSignature<MinSig>>,
     },
     PartialVerifyMultipleMessagesMinPk {
         public: Sharing<MinPk>,
@@ -99,7 +94,7 @@ enum FuzzOperation {
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=15)?;
+        let choice = u.int_in_range(0..=13)?;
 
         match choice {
             0 => Ok(FuzzOperation::PartialSignProofOfPossessionMinPk {
@@ -118,60 +113,54 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 public: u.arbitrary()?,
                 partial: arbitrary_partial_sig_g1(u)?,
             }),
-            4 => Ok(FuzzOperation::PartialAggregateSignaturesMinPk {
-                partials: arbitrary_vec_partial_sig_g2(u, 0, 10)?,
-            }),
-            5 => Ok(FuzzOperation::PartialAggregateSignaturesMinSig {
-                partials: arbitrary_vec_partial_sig_g1(u, 0, 10)?,
-            }),
-            6 => Ok(FuzzOperation::PartialVerifyMultipleMessagesMinPk {
+            4 => Ok(FuzzOperation::PartialVerifyMultipleMessagesMinPk {
                 public: u.arbitrary()?,
                 index: u.int_in_range(1..=100)?,
                 messages: arbitrary_messages(u, 0, 10)?,
                 partials: arbitrary_vec_g2(u, 0, 10)?,
             }),
-            7 => Ok(FuzzOperation::PartialVerifyMultipleMessagesMinSig {
+            5 => Ok(FuzzOperation::PartialVerifyMultipleMessagesMinSig {
                 public: u.arbitrary()?,
                 index: u.int_in_range(1..=100)?,
                 messages: arbitrary_messages(u, 0, 10)?,
                 partials: arbitrary_vec_g1(u, 0, 10)?,
             }),
-            8 => Ok(FuzzOperation::PartialVerifyMultiplePublicKeysMinPk {
+            6 => Ok(FuzzOperation::PartialVerifyMultiplePublicKeysMinPk {
                 public: u.arbitrary()?,
                 namespace: arbitrary_optional_bytes(u, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 partials: arbitrary_vec_indexed_g2(u, 0, 10)?,
             }),
-            9 => Ok(FuzzOperation::PartialVerifyMultiplePublicKeysMinSig {
+            7 => Ok(FuzzOperation::PartialVerifyMultiplePublicKeysMinSig {
                 public: u.arbitrary()?,
                 namespace: arbitrary_optional_bytes(u, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 partials: arbitrary_vec_indexed_g1(u, 0, 10)?,
             }),
-            10 => Ok(FuzzOperation::ThresholdSignatureRecoverMinSig {
+            8 => Ok(FuzzOperation::ThresholdSignatureRecoverMinSig {
                 sharing: u.arbitrary()?,
                 partials: arbitrary_vec_partial_sig_g1(u, 0, 20)?,
             }),
-            11 => Ok(FuzzOperation::ThresholdSignatureRecoverMinPk {
+            9 => Ok(FuzzOperation::ThresholdSignatureRecoverMinPk {
                 sharing: u.arbitrary()?,
                 partials: arbitrary_vec_partial_sig_g2(u, 0, 20)?,
             }),
-            12 => Ok(FuzzOperation::ThresholdSignatureRecoverMultipleMinPk {
+            10 => Ok(FuzzOperation::ThresholdSignatureRecoverMultipleMinPk {
                 sharing: u.arbitrary()?,
                 signature_groups: arbitrary_vec_of_vec_partial_sig_g2(u, 0, 5, 0, 10)?,
                 concurrency: u.int_in_range(1..=4)?,
             }),
-            13 => Ok(FuzzOperation::ThresholdSignatureRecoverMultipleMinSig {
+            11 => Ok(FuzzOperation::ThresholdSignatureRecoverMultipleMinSig {
                 sharing: u.arbitrary()?,
                 signature_groups: arbitrary_vec_of_vec_partial_sig_g1(u, 0, 5, 0, 10)?,
                 concurrency: u.int_in_range(1..=4)?,
             }),
-            14 => Ok(FuzzOperation::ThresholdSignatureRecoverPairMinPk {
+            12 => Ok(FuzzOperation::ThresholdSignatureRecoverPairMinPk {
                 sharing: u.arbitrary()?,
                 partials_1: arbitrary_vec_partial_sig_g2(u, 0, 10)?,
                 partials_2: arbitrary_vec_partial_sig_g2(u, 0, 10)?,
             }),
-            15 => Ok(FuzzOperation::ThresholdSignatureRecoverPairMinSig {
+            13 => Ok(FuzzOperation::ThresholdSignatureRecoverPairMinSig {
                 sharing: u.arbitrary()?,
                 partials_1: arbitrary_vec_partial_sig_g1(u, 0, 10)?,
                 partials_2: arbitrary_vec_partial_sig_g1(u, 0, 10)?,
@@ -209,14 +198,6 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::PartialAggregateSignaturesMinPk { partials } => {
-            let _ = partial_aggregate_signatures::<MinPk, _>(&partials);
-        }
-
-        FuzzOperation::PartialAggregateSignaturesMinSig { partials } => {
-            let _ = partial_aggregate_signatures::<MinSig, _>(&partials);
-        }
-
         FuzzOperation::PartialVerifyMultipleMessagesMinPk {
             public,
             index,
@@ -236,11 +217,13 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
-                let _ = partial_verify_multiple_messages::<MinPk, _, _>(
+                let _ = partial_aggregate_verify_multiple_messages::<_, MinPk, _, _>(
+                    &mut thread_rng(),
                     &public,
                     index,
                     &messages_refs,
                     &partials_evals,
+                    1,
                 );
             }
         }
@@ -264,11 +247,13 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
-                let _ = partial_verify_multiple_messages::<MinSig, _, _>(
+                let _ = partial_aggregate_verify_multiple_messages::<_, MinSig, _, _>(
+                    &mut thread_rng(),
                     &public,
                     index,
                     &messages_refs,
                     &partials_evals,
+                    1,
                 );
             }
         }

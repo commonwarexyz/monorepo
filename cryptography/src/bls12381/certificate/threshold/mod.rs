@@ -15,7 +15,7 @@ use crate::{
     bls12381::primitives::{
         group::Share,
         ops::{
-            aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
+            aggregate_verify_multiple_messages, partial_sign_message,
             partial_verify_multiple_public_keys, threshold_signature_recover, verify_message,
         },
         sharing::Sharing,
@@ -313,7 +313,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     /// Verifies multiple certificates in a batch.
     pub fn verify_certificates<'a, S, R, D, I>(
         &self,
-        _rng: &mut R,
+        rng: &mut R,
         namespace: &[u8],
         certificates: I,
     ) -> bool
@@ -331,21 +331,21 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         for (subject, certificate) in certificates {
             let (namespace, message) = subject.namespace_and_message(namespace);
             messages.push((Some(namespace), message));
-            signatures.push(*certificate);
+            signatures.push(certificate);
         }
 
         if messages.is_empty() {
             return true;
         }
 
-        let signature = aggregate_signatures::<V, _>(signatures.iter());
-        aggregate_verify_multiple_messages::<V, _>(
+        aggregate_verify_multiple_messages::<_, V, _, _>(
+            rng,
             identity,
             &messages
                 .iter()
                 .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
                 .collect::<Vec<_>>(),
-            &signature,
+            signatures,
             1,
         )
         .is_ok()

@@ -24,7 +24,7 @@ use commonware_cryptography::{
         primitives::{
             group::Share,
             ops::{
-                aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
+                aggregate_verify_multiple_messages, partial_sign_message,
                 partial_verify_multiple_public_keys, threshold_signature_recover_pair,
                 verify_message,
             },
@@ -451,18 +451,17 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
-        let sig = aggregate_signatures::<V, _>(&[
-            attestation.signature.vote_signature,
-            attestation.signature.seed_signature,
-        ]);
-
-        aggregate_verify_multiple_messages::<V, _>(
+        aggregate_verify_multiple_messages::<_, V, _, _>(
+            &mut rand::thread_rng(),
             &evaluated,
             &[
                 (Some(vote_namespace.as_ref()), vote_message.as_ref()),
                 (Some(seed_namespace.as_ref()), seed_message.as_ref()),
             ],
-            &sig,
+            &[
+                attestation.signature.vote_signature,
+                attestation.signature.seed_signature,
+            ],
             1,
         )
         .is_ok()
@@ -580,7 +579,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
 
     fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
         &self,
-        _rng: &mut R,
+        rng: &mut R,
         namespace: &[u8],
         subject: Subject<'_, D>,
         certificate: &Self::Certificate,
@@ -590,16 +589,14 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
-        let signature =
-            aggregate_signatures::<V, _>(&[certificate.vote_signature, certificate.seed_signature]);
-
-        aggregate_verify_multiple_messages::<V, _>(
+        aggregate_verify_multiple_messages::<_, V, _, _>(
+            rng,
             identity,
             &[
                 (Some(vote_namespace.as_ref()), vote_message.as_ref()),
                 (Some(seed_namespace.as_ref()), seed_message.as_ref()),
             ],
-            &signature,
+            &[certificate.vote_signature, certificate.seed_signature],
             1,
         )
         .is_ok()
@@ -607,7 +604,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
 
     fn verify_certificates<'a, R, D, I>(
         &self,
-        _rng: &mut R,
+        rng: &mut R,
         namespace: &[u8],
         certificates: I,
     ) -> bool
@@ -620,7 +617,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
 
         let mut seeds = HashMap::new();
         let mut messages = Vec::new();
-        let mut signatures = Vec::new();
+        let mut signatures: Vec<&V::Signature> = Vec::new();
 
         let notarize_namespace = notarize_namespace(namespace);
         let nullify_namespace = nullify_namespace(namespace);
@@ -673,15 +670,14 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             }
         }
 
-        // Aggregate signatures
-        let signature = aggregate_signatures::<V, _>(signatures);
-        aggregate_verify_multiple_messages::<V, _>(
+        aggregate_verify_multiple_messages::<_, V, _, _>(
+            rng,
             identity,
             &messages
                 .iter()
                 .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
                 .collect::<Vec<_>>(),
-            &signature,
+            signatures,
             1,
         )
         .is_ok()

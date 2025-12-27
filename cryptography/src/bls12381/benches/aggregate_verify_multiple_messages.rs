@@ -22,19 +22,20 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
                     b.iter_batched(
                         || {
                             let (private, public) = ops::keypair::<_, MinSig>(&mut thread_rng());
-                            let mut signatures = Vec::with_capacity(n);
-                            for (namespace, msg) in msgs.iter() {
-                                let signature =
-                                    ops::sign_message::<MinSig>(&private, *namespace, msg);
-                                signatures.push(signature);
-                            }
-                            (public, ops::aggregate_signatures::<MinSig, _>(&signatures))
+                            let signatures: Vec<_> = msgs
+                                .iter()
+                                .map(|(namespace, msg)| {
+                                    ops::sign_message::<MinSig>(&private, *namespace, msg)
+                                })
+                                .collect();
+                            (public, signatures)
                         },
-                        |(public, signature)| {
-                            ops::aggregate_verify_multiple_messages::<MinSig, _>(
+                        |(public, signatures)| {
+                            ops::aggregate_verify_multiple_messages::<_, MinSig, _, _>(
+                                &mut thread_rng(),
                                 &public,
                                 &msgs,
-                                &signature,
+                                &signatures,
                                 concurrency,
                             )
                             .unwrap();

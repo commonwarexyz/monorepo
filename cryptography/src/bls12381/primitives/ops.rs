@@ -16,7 +16,7 @@ use crate::bls12381::primitives::{sharing::Sharing, variant::PartialSignature};
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, vec, vec::Vec};
 use commonware_codec::Encode;
-use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Random as _};
+use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Random as _, Space as _};
 use commonware_utils::{ordered::Map, union_unique};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
@@ -209,7 +209,7 @@ pub fn partial_verify_message<V: Variant>(
 /// This function assumes a group check was already performed on each `signature` and
 /// that each `signature` is unique. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn partial_aggregate_signatures<'a, V, I>(partials: I) -> Option<(u32, V::Signature)>
+pub(crate) fn partial_aggregate_signatures<'a, V, I>(partials: I) -> Option<(u32, V::Signature)>
 where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
@@ -230,41 +230,43 @@ where
 /// Verifies the signatures from multiple partial signatures over multiple unique messages from a single
 /// signer.
 ///
+/// This function applies random scalar weights to each message/signature pair before verification
+/// to prevent signature malleability attacks where an attacker could redistribute signature
+/// components while keeping the aggregate unchanged.
+///
 /// # Warning
 ///
 /// This function assumes a group check was already performed on each `signature`.
-pub fn partial_verify_multiple_messages<'a, V, I, J>(
+pub fn partial_aggregate_verify_multiple_messages<'a, R, V, I, J>(
+    rng: &mut R,
     sharing: &Sharing<V>,
     index: u32,
     messages: I,
     signatures: J,
+    concurrency: usize,
 ) -> Result<(), Error>
 where
+    R: CryptoRngCore,
     V: Variant,
     I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>,
     J: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
 {
-    // Aggregate the partial signatures
-    let (parsed_index, signature) =
-        partial_aggregate_signatures::<V, _>(signatures).ok_or(Error::InvalidSignature)?;
-    if index != parsed_index {
-        return Err(Error::InvalidSignature);
-    }
+    // Verify all signatures have the correct index and extract values
+    let sigs: Vec<V::Signature> = signatures
+        .into_iter()
+        .map(|ps| {
+            if ps.index != index {
+                Err(Error::InvalidSignature)
+            } else {
+                Ok(ps.value)
+            }
+        })
+        .collect::<Result<_, _>>()?;
+
     let public = sharing.partial_public(index)?;
 
-    // Sum the hashed messages
-    let mut hm_sum = V::Signature::zero();
-    for (namespace, msg) in messages {
-        let hm = namespace.as_ref().map_or_else(
-            || hash_message::<V>(V::MESSAGE, msg),
-            |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-        );
-        hm_sum += &hm;
-    }
-
-    // Verify the signature
-    V::verify(&public, &hm_sum, &signature)
+    aggregate_verify_multiple_messages::<_, V, _, _>(rng, &public, messages, &sigs, concurrency)
 }
 
 /// Verify a list of [PartialSignature]s by performing aggregate verification,
@@ -502,7 +504,7 @@ where
 /// This function assumes a group check was already performed on each `signature` and
 /// that each `signature` is unique. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn aggregate_signatures<'a, V, I>(signatures: I) -> V::Signature
+pub(crate) fn aggregate_signatures<'a, V, I>(signatures: I) -> V::Signature
 where
     V: Variant,
     I: IntoIterator<Item = &'a V::Signature>,
@@ -543,78 +545,66 @@ where
     verify_message::<V>(&agg_public, namespace, message, signature)
 }
 
-/// Verifies the aggregate signature over multiple unique messages from a single public key.
+/// Verifies multiple signatures over multiple unique messages from a single public key,
+/// using random scalar weights to prevent signature malleability attacks.
+///
+/// This function is secure against signature redistribution attacks where an attacker
+/// modifies individual signatures while keeping their sum unchanged.
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on `public` and `signature`. It is not
-/// safe to provide an aggregate public key or to provide duplicate messages.
-///
-/// ## Why not aggregate public keys?
-///
-/// We rely on bilinearity to reduce pairing operations in this function, like in `aggregate_verify_multiple_public_keys`,
-/// and sum hashed messages together before performing a single pairing operation (instead of summing `len(messages)` pairings of
-/// hashed message and public key). If the public key itself is an aggregate of multiple public keys, an attacker can exploit
-/// this optimization to cause this function to return that an aggregate signature is valid when it really isn't.
-pub fn aggregate_verify_multiple_messages<'a, V, I>(
+/// This function assumes a group check was already performed on `public` and each `signature`.
+/// It is not safe to provide an aggregate public key or to provide duplicate messages.
+pub fn aggregate_verify_multiple_messages<'a, 'b, R, V, I, J>(
+    rng: &mut R,
     public: &V::Public,
     messages: I,
-    signature: &V::Signature,
-    #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
+    signatures: J,
+    concurrency: usize,
 ) -> Result<(), Error>
 where
-    V: Variant,
-    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])> + Send + Sync,
-    I::IntoIter: Send + Sync,
-{
-    #[cfg(not(feature = "std"))]
-    let hm_sum = compute_hm_sum::<V, I>(messages);
-
-    #[cfg(feature = "std")]
-    let hm_sum = if concurrency == 1 {
-        compute_hm_sum::<V, I>(messages)
-    } else {
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(concurrency)
-            .build()
-            .expect("Unable to build thread pool");
-
-        // TODO(#1496): Revisit use of `.par_bridge()`
-        pool.install(move || {
-            messages
-                .into_iter()
-                .par_bridge()
-                .map(|(namespace, msg)| {
-                    namespace.as_ref().map_or_else(
-                        || hash_message::<V>(V::MESSAGE, msg),
-                        |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-                    )
-                })
-                .reduce(V::Signature::zero, |mut sum, hm| {
-                    sum += &hm;
-                    sum
-                })
-        })
-    };
-
-    V::verify(public, &hm_sum, signature)
-}
-
-/// Computes the sum over the hash of each message.
-fn compute_hm_sum<'a, V, I>(messages: I) -> V::Signature
-where
+    R: CryptoRngCore,
     V: Variant,
     I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>,
+    J: IntoIterator<Item = &'b V::Signature>,
+    V::Signature: 'a + 'b,
 {
-    let mut hm_sum = V::Signature::zero();
-    for (namespace, msg) in messages {
-        let hm = namespace.as_ref().map_or_else(
-            || hash_message::<V>(V::MESSAGE, msg),
-            |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-        );
-        hm_sum += &hm;
+    let messages: Vec<_> = messages.into_iter().collect();
+    let signatures: Vec<_> = signatures.into_iter().collect();
+
+    if messages.len() != signatures.len() {
+        return Err(Error::InvalidSignature);
     }
-    hm_sum
+
+    if messages.is_empty() {
+        return Ok(());
+    }
+
+    // Generate random non-zero scalars for each message/signature pair
+    let scalars: Vec<group::Scalar> = (0..messages.len())
+        .map(|_| group::Scalar::random(&mut *rng))
+        .collect();
+
+    // Hash messages
+    let hms: Vec<V::Signature> = messages
+        .iter()
+        .map(|(namespace, msg)| {
+            namespace.as_ref().map_or_else(
+                || hash_message::<V>(V::MESSAGE, msg),
+                |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+            )
+        })
+        .collect();
+
+    // Compute weighted sum of hashed messages: sum(r_i * H(m_i))
+    let weighted_hm = V::Signature::msm(&hms, &scalars, concurrency);
+
+    // Compute weighted sum of signatures: sum(r_i * sig_i)
+    let sigs: Vec<V::Signature> = signatures.iter().map(|s| **s).collect();
+    let weighted_sig = V::Signature::msm(&sigs, &scalars, concurrency);
+
+    // Verify: e(pk, weighted_hm) == e(weighted_sig, G)
+    V::verify(public, &weighted_hm, &weighted_sig)
 }
 
 #[cfg(test)]
@@ -626,9 +616,9 @@ mod tests {
     };
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, ReadExt};
-    use commonware_math::algebra::{Field as _, Ring, Space};
+    use commonware_math::algebra::{CryptoGroup, Field as _, Ring, Space};
     use commonware_utils::{from_hex_formatted, quorum, NZU32};
-    use group::{Private, G1_MESSAGE, G2_MESSAGE};
+    use group::{Private, Scalar, G1_MESSAGE, G2_MESSAGE};
     use rand::{prelude::*, rngs::OsRng};
 
     fn codec<V: Variant>() {
@@ -985,42 +975,84 @@ mod tests {
         aggregate_verify_wrong_public_key_count::<MinSig>();
     }
 
-    fn blst_aggregate_verify_multiple_messages<'a, V, I>(
-        public: &V::Public,
-        msgs: I,
-        signature: &V::Signature,
-    ) -> Result<(), BLST_ERROR>
-    where
-        V: Variant,
-        I: IntoIterator<Item = &'a [u8]>,
-    {
-        match V::MESSAGE {
-            G1_MESSAGE => {
-                let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
-                let msgs = msgs.into_iter().collect::<Vec<_>>();
-                let pks = vec![&public; msgs.len()];
-                let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
-                match signature.aggregate_verify(true, &msgs, V::MESSAGE, &pks, true) {
-                    BLST_ERROR::BLST_SUCCESS => Ok(()),
-                    e => Err(e),
-                }
-            }
-            G2_MESSAGE => {
-                let public = blst::min_pk::PublicKey::from_bytes(&public.encode()).unwrap();
-                let msgs = msgs.into_iter().collect::<Vec<_>>();
-                let pks = vec![&public; msgs.len()];
-                let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
-                match signature.aggregate_verify(true, &msgs, V::MESSAGE, &pks, true) {
-                    BLST_ERROR::BLST_SUCCESS => Ok(()),
-                    e => Err(e),
-                }
-            }
-            _ => panic!("Unsupported Variant"),
-        }
+    fn aggregate_verify_malleability_vulnerability<V: Variant>() {
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let msg1: &[u8] = b"message 1";
+        let msg2: &[u8] = b"message 2";
+
+        // Create valid individual signatures
+        let sig1 = sign_message::<V>(&private, None, msg1);
+        let sig2 = sign_message::<V>(&private, None, msg2);
+
+        // Verify individual signatures are valid
+        verify_message::<V>(&public, None, msg1, &sig1).expect("sig1 should be valid");
+        verify_message::<V>(&public, None, msg2, &sig2).expect("sig2 should be valid");
+
+        // Create forged signatures by redistributing: sig1' = sig1 - delta, sig2' = sig2 + delta
+        // Use a random scalar multiplied by the generator to create delta
+        let random_scalar = Scalar::random(&mut thread_rng());
+        let delta = V::Signature::generator() * &random_scalar;
+        let forged_sig1 = sig1 - &delta;
+        let forged_sig2 = sig2 + &delta;
+
+        // Forged individual signatures are INVALID
+        assert!(
+            verify_message::<V>(&public, None, msg1, &forged_sig1).is_err(),
+            "forged sig1 should be invalid individually"
+        );
+        assert!(
+            verify_message::<V>(&public, None, msg2, &forged_sig2).is_err(),
+            "forged sig2 should be invalid individually"
+        );
+
+        // But aggregate of forged signatures = aggregate of valid signatures
+        let forged_agg = aggregate_signatures::<V, _>(&[forged_sig1, forged_sig2]);
+        let valid_agg = aggregate_signatures::<V, _>(&[sig1, sig2]);
+        assert_eq!(forged_agg, valid_agg, "aggregates should be equal");
+
+        // Inline vulnerable verification logic to demonstrate the attack.
+        // This is the naive approach that sums hashed messages and verifies the aggregate:
+        //   e(pk, H(m1) + H(m2)) == e(sig1 + sig2, G)
+        // This is vulnerable because forged_agg == valid_agg, so verification passes.
+        let hm1 = hash_message::<V>(V::MESSAGE, msg1);
+        let hm2 = hash_message::<V>(V::MESSAGE, msg2);
+        let hm_sum = hm1 + &hm2;
+        V::verify(&public, &hm_sum, &forged_agg)
+            .expect("vulnerable naive verification accepts forged aggregate");
+
+        let messages: Vec<(Option<&[u8]>, &[u8])> = vec![(None, msg1), (None, msg2)];
+
+        // New secure function rejects forged signatures
+        let result = aggregate_verify_multiple_messages::<_, V, _, _>(
+            &mut thread_rng(),
+            &public,
+            &messages,
+            &[forged_sig1, forged_sig2],
+            1,
+        );
+        assert!(
+            result.is_err(),
+            "secure function should reject forged signatures"
+        );
+
+        // New secure function accepts valid signatures
+        aggregate_verify_multiple_messages::<_, V, _, _>(
+            &mut thread_rng(),
+            &public,
+            &messages,
+            &[sig1, sig2],
+            1,
+        )
+        .expect("secure function should accept valid signatures");
+    }
+
+    #[test]
+    fn test_aggregate_verify_malleability_vulnerability() {
+        aggregate_verify_malleability_vulnerability::<MinPk>();
+        aggregate_verify_malleability_vulnerability::<MinSig>();
     }
 
     fn aggregate_verify_multiple_messages_correct<V: Variant>() {
-        // Generate signatures
         let (private, public) = keypair::<_, V>(&mut thread_rng());
         let namespace = Some(&b"test"[..]);
         let messages: Vec<(Option<&[u8]>, &[u8])> = vec![
@@ -1033,38 +1065,67 @@ mod tests {
             .map(|(namespace, msg)| sign_message::<V>(&private, *namespace, msg))
             .collect();
 
-        // Aggregate the signatures
-        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
+        // Verify with serial execution
+        aggregate_verify_multiple_messages::<_, V, _, _>(
+            &mut thread_rng(),
+            &public,
+            &messages,
+            &signatures,
+            1,
+        )
+        .expect("valid signatures should be accepted");
 
-        // Verify the aggregated signature without parallelism
-        aggregate_verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 1)
-            .expect("Aggregated signature should be valid");
-
-        // Verify the aggregated signature with parallelism
-        aggregate_verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 4)
-            .expect("Aggregated signature should be valid");
-
-        // Verify the aggregated signature using blst
-        let messages = messages
-            .iter()
-            .map(|(namespace, msg)| union_unique(namespace.unwrap(), msg))
-            .collect::<Vec<_>>();
-        let messages = messages
-            .iter()
-            .map(|msg| msg.as_slice())
-            .collect::<Vec<_>>();
-        blst_aggregate_verify_multiple_messages::<V, _>(&public, messages, &aggregate_sig)
-            .expect("Aggregated signature should be valid");
+        // Verify with parallel execution
+        aggregate_verify_multiple_messages::<_, V, _, _>(
+            &mut thread_rng(),
+            &public,
+            &messages,
+            &signatures,
+            4,
+        )
+        .expect("valid signatures should be accepted with parallelism");
     }
 
     #[test]
-    fn test_aggregate_verify_multiple_messages() {
+    fn test_aggregate_verify_multiple_messages_correct() {
         aggregate_verify_multiple_messages_correct::<MinPk>();
         aggregate_verify_multiple_messages_correct::<MinSig>();
     }
 
-    fn aggregate_verify_wrong_messages<V: Variant>() {
-        // Generate signatures
+    fn aggregate_verify_multiple_messages_wrong_signature<V: Variant>() {
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let namespace = Some(&b"test"[..]);
+        let messages: Vec<(Option<&[u8]>, &[u8])> = vec![
+            (namespace, b"Message 1"),
+            (namespace, b"Message 2"),
+            (namespace, b"Message 3"),
+        ];
+        let mut signatures: Vec<_> = messages
+            .iter()
+            .map(|(namespace, msg)| sign_message::<V>(&private, *namespace, msg))
+            .collect();
+
+        // Corrupt one signature
+        let random_scalar = Scalar::random(&mut thread_rng());
+        signatures[1] += &(V::Signature::generator() * &random_scalar);
+
+        let result = aggregate_verify_multiple_messages::<_, V, _, _>(
+            &mut thread_rng(),
+            &public,
+            &messages,
+            &signatures,
+            1,
+        );
+        assert!(result.is_err(), "corrupted signature should be rejected");
+    }
+
+    #[test]
+    fn test_aggregate_verify_multiple_messages_wrong_signature() {
+        aggregate_verify_multiple_messages_wrong_signature::<MinPk>();
+        aggregate_verify_multiple_messages_wrong_signature::<MinSig>();
+    }
+
+    fn aggregate_verify_multiple_messages_mismatched_count<V: Variant>() {
         let (private, public) = keypair::<_, V>(&mut thread_rng());
         let namespace = Some(&b"test"[..]);
         let messages: Vec<(Option<&[u8]>, &[u8])> = vec![
@@ -1074,75 +1135,27 @@ mod tests {
         ];
         let signatures: Vec<_> = messages
             .iter()
+            .take(2) // Only 2 signatures for 3 messages
             .map(|(namespace, msg)| sign_message::<V>(&private, *namespace, msg))
             .collect();
 
-        // Aggregate the signatures
-        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
-
-        // Construct wrong messages
-        let wrong_messages: Vec<(Option<&[u8]>, &[u8])> = vec![
-            (namespace, b"Message 1"),
-            (namespace, b"Message 2"),
-            (namespace, b"Message 4"),
-        ];
-
-        // Verify the aggregated signature without parallelism
-        let result =
-            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 1);
-        assert!(matches!(result, Err(Error::InvalidSignature)));
-
-        // Verify the aggregated signature with parallelism
-        let result =
-            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 4);
-        assert!(matches!(result, Err(Error::InvalidSignature)));
+        let result = aggregate_verify_multiple_messages::<_, V, _, _>(
+            &mut thread_rng(),
+            &public,
+            &messages,
+            &signatures,
+            1,
+        );
+        assert!(result.is_err(), "mismatched count should be rejected");
     }
 
     #[test]
-    fn test_aggregate_verify_wrong_messages() {
-        aggregate_verify_wrong_messages::<MinPk>();
-        aggregate_verify_wrong_messages::<MinSig>();
+    fn test_aggregate_verify_multiple_messages_mismatched_count() {
+        aggregate_verify_multiple_messages_mismatched_count::<MinPk>();
+        aggregate_verify_multiple_messages_mismatched_count::<MinSig>();
     }
 
-    fn aggregate_verify_wrong_message_count<V: Variant>() {
-        // Generate signatures
-        let (private, public) = keypair::<_, V>(&mut thread_rng());
-        let namespace = Some(&b"test"[..]);
-        let messages: Vec<(Option<&[u8]>, &[u8])> = vec![
-            (namespace, b"Message 1"),
-            (namespace, b"Message 2"),
-            (namespace, b"Message 3"),
-        ];
-        let signatures: Vec<_> = messages
-            .iter()
-            .map(|(namespace, msg)| sign_message::<V>(&private, *namespace, msg))
-            .collect();
-
-        // Aggregate the signatures
-        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
-
-        // Construct wrong messages
-        let wrong_messages: Vec<(Option<&[u8]>, &[u8])> =
-            vec![(namespace, b"Message 1"), (namespace, b"Message 2")];
-
-        // Verify the aggregated signature without parallelism
-        let result =
-            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 1);
-        assert!(matches!(result, Err(Error::InvalidSignature)));
-
-        // Verify the aggregated signature with parallelism
-        let result =
-            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 4);
-        assert!(matches!(result, Err(Error::InvalidSignature)));
-    }
-
-    #[test]
-    fn test_aggregate_verify_wrong_message_count() {
-        aggregate_verify_wrong_message_count::<MinPk>();
-        aggregate_verify_wrong_message_count::<MinSig>();
-    }
-
-    fn partial_verify_multiple_messages_correct<V: Variant>() {
+    fn partial_aggregate_verify_multiple_messages_correct<V: Variant>() {
         // Generate polynomial and shares
         let n = 5;
         let (public, shares) =
@@ -1161,8 +1174,15 @@ mod tests {
             .iter()
             .map(|(ns, msg)| partial_sign_message::<V>(signer, *ns, msg))
             .collect();
-        partial_verify_multiple_messages::<V, _, _>(&public, signer.index, &messages, &partials)
-            .expect("Verification with namespaced messages should succeed");
+        partial_aggregate_verify_multiple_messages::<_, V, _, _>(
+            &mut thread_rng(),
+            &public,
+            signer.index,
+            &messages,
+            &partials,
+            1,
+        )
+        .expect("Verification with namespaced messages should succeed");
 
         // Successful verification with non-namespaced messages
         let messages_no_ns: Vec<(Option<&[u8]>, &[u8])> =
@@ -1171,11 +1191,13 @@ mod tests {
             .iter()
             .map(|(ns, msg)| partial_sign_message::<V>(signer, *ns, msg))
             .collect();
-        partial_verify_multiple_messages::<V, _, _>(
+        partial_aggregate_verify_multiple_messages::<_, V, _, _>(
+            &mut thread_rng(),
             &public,
             signer.index,
             &messages_no_ns,
             &partials_no_ns,
+            1,
         )
         .expect("Verification with non-namespaced messages should succeed");
 
@@ -1189,39 +1211,55 @@ mod tests {
             .iter()
             .map(|(ns, msg)| partial_sign_message::<V>(signer, *ns, msg))
             .collect();
-        partial_verify_multiple_messages::<V, _, _>(
+        partial_aggregate_verify_multiple_messages::<_, V, _, _>(
+            &mut thread_rng(),
             &public,
             signer.index,
             &messages_mixed,
             &partials_mixed,
+            1,
         )
         .expect("Verification with mixed namespaces should succeed");
 
         // Failure with wrong signer index
         assert!(matches!(
-            partial_verify_multiple_messages::<V, _, _>(&public, 1, &messages, &partials),
+            partial_aggregate_verify_multiple_messages::<_, V, _, _>(
+                &mut thread_rng(),
+                &public,
+                1,
+                &messages,
+                &partials,
+                1
+            ),
             Err(Error::InvalidSignature)
         ));
 
-        // Success with swapped partial signatures
+        // Failure with swapped partial signatures (random weights make order matter)
         let mut partials_swapped = partials.clone();
         partials_swapped.swap(0, 1);
-        partial_verify_multiple_messages::<V, _, _>(
-            &public,
-            signer.index,
-            &messages,
-            &partials_swapped,
-        )
-        .expect("Verification with swapped partials should succeed");
+        assert!(
+            partial_aggregate_verify_multiple_messages::<_, V, _, _>(
+                &mut thread_rng(),
+                &public,
+                signer.index,
+                &messages,
+                &partials_swapped,
+                1,
+            )
+            .is_err(),
+            "Verification with swapped partials should fail"
+        );
 
         // Failure with fewer signatures than messages
         let partials_fewer = partials[..2].to_vec();
         assert!(matches!(
-            partial_verify_multiple_messages::<V, _, _>(
+            partial_aggregate_verify_multiple_messages::<_, V, _, _>(
+                &mut thread_rng(),
                 &public,
                 signer.index,
                 &messages,
-                &partials_fewer
+                &partials_fewer,
+                1
             ),
             Err(Error::InvalidSignature)
         ));
@@ -1232,35 +1270,39 @@ mod tests {
         let mut partials_more = partials.clone();
         partials_more.push(extra_partial);
         assert!(matches!(
-            partial_verify_multiple_messages::<V, _, _>(
+            partial_aggregate_verify_multiple_messages::<_, V, _, _>(
+                &mut thread_rng(),
                 &public,
                 signer.index,
                 &messages,
-                &partials_more
+                &partials_more,
+                1
             ),
             Err(Error::InvalidSignature)
         ));
 
-        // Failure with signatures from different public_keys
+        // Failure with signatures from different signers
         let signer2 = &shares[1];
         let partial2 = partial_sign_message::<V>(signer2, messages[0].0, messages[0].1);
-        let mut partials_mixed_public_keys = partials;
-        partials_mixed_public_keys[0] = partial2;
+        let mut partials_mixed_signers = partials;
+        partials_mixed_signers[0] = partial2;
         assert!(matches!(
-            partial_verify_multiple_messages::<V, _, _>(
+            partial_aggregate_verify_multiple_messages::<_, V, _, _>(
+                &mut thread_rng(),
                 &public,
                 signer.index,
                 &messages,
-                &partials_mixed_public_keys
+                &partials_mixed_signers,
+                1
             ),
             Err(Error::InvalidSignature)
         ));
     }
 
     #[test]
-    fn test_partial_verify_multiple_messages() {
-        partial_verify_multiple_messages_correct::<MinPk>();
-        partial_verify_multiple_messages_correct::<MinSig>();
+    fn test_partial_aggregate_verify_multiple_messages() {
+        partial_aggregate_verify_multiple_messages_correct::<MinPk>();
+        partial_aggregate_verify_multiple_messages_correct::<MinSig>();
     }
 
     fn threshold_signature_recover_with_weights_correct<V: Variant>() {

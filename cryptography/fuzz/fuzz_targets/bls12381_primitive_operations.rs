@@ -183,12 +183,6 @@ enum FuzzOperation {
     AggregatePublicKeysG2 {
         keys: Vec<G2>,
     },
-    AggregateSignaturesG1 {
-        sigs: Vec<G1>,
-    },
-    AggregateSignaturesG2 {
-        sigs: Vec<G2>,
-    },
 
     // Serialization round-trip
     SerializeScalar {
@@ -207,7 +201,7 @@ enum FuzzOperation {
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=42)?;
+        let choice = u.int_in_range(0..=40)?;
 
         match choice {
             0 => Ok(FuzzOperation::ScalarArithmetic {
@@ -359,22 +353,16 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             36 => Ok(FuzzOperation::AggregatePublicKeysG2 {
                 keys: arbitrary_vec_g2(u, 0, 10)?,
             }),
-            37 => Ok(FuzzOperation::AggregateSignaturesG1 {
-                sigs: arbitrary_vec_g1(u, 0, 10)?,
-            }),
-            38 => Ok(FuzzOperation::AggregateSignaturesG2 {
-                sigs: arbitrary_vec_g2(u, 0, 10)?,
-            }),
-            39 => Ok(FuzzOperation::SerializeScalar {
+            37 => Ok(FuzzOperation::SerializeScalar {
                 scalar: arbitrary_scalar(u)?,
             }),
-            40 => Ok(FuzzOperation::SerializeG1 {
+            38 => Ok(FuzzOperation::SerializeG1 {
                 point: arbitrary_g1(u)?,
             }),
-            41 => Ok(FuzzOperation::SerializeG2 {
+            39 => Ok(FuzzOperation::SerializeG2 {
                 point: arbitrary_g2(u)?,
             }),
-            42 => Ok(FuzzOperation::SerializeShare {
+            40 => Ok(FuzzOperation::SerializeShare {
                 share: arbitrary_share(u)?,
             }),
             _ => Ok(FuzzOperation::KeypairGeneration),
@@ -714,14 +702,6 @@ fn fuzz(op: FuzzOperation) {
 
         FuzzOperation::AggregatePublicKeysG2 { keys } => {
             let _ = aggregate_public_keys::<MinSig, _>(&keys);
-        }
-
-        FuzzOperation::AggregateSignaturesG1 { sigs } => {
-            let _ = aggregate_signatures::<MinSig, _>(&sigs);
-        }
-
-        FuzzOperation::AggregateSignaturesG2 { sigs } => {
-            let _ = aggregate_signatures::<MinPk, _>(&sigs);
         }
 
         FuzzOperation::SerializeScalar { scalar } => {
