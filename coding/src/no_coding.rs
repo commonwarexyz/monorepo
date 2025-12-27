@@ -1,6 +1,7 @@
 use crate::Config;
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use std::marker::PhantomData;
 use thiserror::Error;
 
@@ -92,10 +93,10 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
 
     type Error = Error;
 
-    fn encode(
+    fn encode<S: Strategy>(
         config: &crate::Config,
         mut data: impl bytes::Buf,
-        _concurrency: usize,
+        _strategy: &S,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         let commitment = H::new().update(&data).finalize();
@@ -128,12 +129,12 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         Ok(())
     }
 
-    fn decode(
+    fn decode<S: Strategy>(
         _config: &Config,
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         _shards: &[Self::CheckedShard],
-        _concurrency: usize,
+        _strategy: &S,
     ) -> Result<Vec<u8>, Self::Error> {
         Ok(checking_data)
     }

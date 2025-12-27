@@ -26,6 +26,7 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
+use commonware_parallel::Sequential;
 use commonware_utils::ordered::Set;
 use core::fmt::Debug;
 use rand::{CryptoRng, Rng};
@@ -283,7 +284,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
             return None;
         }
 
-        threshold_signature_recover::<V, _>(quorum, partials.iter()).ok()
+        threshold_signature_recover::<V, _, _>(quorum, partials.iter(), &Sequential).ok()
     }
 
     /// Verifies a certificate.
@@ -339,14 +340,14 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         }
 
         let signature = aggregate_signatures::<V, _>(signatures.iter());
-        aggregate_verify_multiple_messages::<V, _>(
+        aggregate_verify_multiple_messages::<V, _, _>(
             identity,
             &messages
                 .iter()
                 .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
                 .collect::<Vec<_>>(),
             &signature,
-            1,
+            &Sequential,
         )
         .is_ok()
     }

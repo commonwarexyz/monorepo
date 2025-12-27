@@ -17,10 +17,9 @@ use crate::bls12381::primitives::{sharing::Sharing, variant::PartialSignature};
 use alloc::{borrow::Cow, vec, vec::Vec};
 use commonware_codec::Encode;
 use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Random as _};
+use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Map, union_unique};
 use rand_core::CryptoRngCore;
-#[cfg(feature = "std")]
-use rayon::{prelude::*, ThreadPoolBuilder};
 #[cfg(feature = "std")]
 use std::borrow::Cow;
 
@@ -368,19 +367,21 @@ where
 /// # Warning
 ///
 /// This function assumes that each partial signature is unique.
-pub fn threshold_signature_recover<'a, V, I>(
+pub fn threshold_signature_recover<'a, V, I, S>(
     sharing: &Sharing<V>,
     partials: I,
+    strategy: &S,
 ) -> Result<V::Signature, Error>
 where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
+    S: Strategy,
 {
     let evals = prepare_evaluations::<V>(sharing.required(), partials)?;
     sharing
         .interpolator(evals.keys())?
-        .interpolate(&evals, 1)
+        .interpolate(&evals, strategy)
         .ok_or(Error::InvalidRecovery)
 }
 
@@ -396,15 +397,16 @@ where
 ///
 /// This function assumes that each partial signature is unique and that
 /// each set of partial signatures has the same indices.
-pub fn threshold_signature_recover_multiple<'a, V, I>(
+pub fn threshold_signature_recover_multiple<'a, V, I, S>(
     sharing: &Sharing<V>,
     many_evals: Vec<I>,
-    #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
+    strategy: &S,
 ) -> Result<Vec<V::Signature>, Error>
 where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
+    S: Strategy,
 {
     let prepared_evals = many_evals
         .into_iter()
@@ -422,53 +424,42 @@ where
     }
 
     let interpolator = sharing.interpolator(first_eval.keys())?;
-    #[cfg(feature = "std")]
-    {
-        let concurrency = core::cmp::min(concurrency, prepared_evals.len());
-        if concurrency != 1 {
-            // Build a thread pool with the specified concurrency
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(concurrency)
-                .build()
-                .expect("Unable to build thread pool");
-
-            // Recover signatures
-            return pool.install(move || {
-                prepared_evals
-                    .par_iter()
-                    .map(|evals| {
-                        interpolator
-                            .interpolate(evals, 1)
-                            .ok_or(Error::InvalidRecovery)
-                    })
-                    .collect()
-            });
-        }
-    }
-    prepared_evals
+    strategy
+        .fold(
+            prepared_evals,
+            Vec::new,
+            |mut acc, evals| {
+                match interpolator.interpolate(&evals, strategy) {
+                    Some(sig) => acc.push(Ok(sig)),
+                    None => acc.push(Err(Error::InvalidRecovery)),
+                }
+                acc
+            },
+            |mut a, b| {
+                a.extend(b);
+                a
+            },
+        )
         .into_iter()
-        .map(|evals| {
-            interpolator
-                .interpolate(&evals, 1)
-                .ok_or(Error::InvalidRecovery)
-        })
         .collect()
 }
 
 /// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
 ///
-/// This is just a wrapper around `threshold_signature_recover_multiple` with concurrency set to 2.
-pub fn threshold_signature_recover_pair<'a, V, I>(
+/// This is just a wrapper around `threshold_signature_recover_multiple`.
+pub fn threshold_signature_recover_pair<'a, V, I, S>(
     sharing: &Sharing<V>,
     first: I,
     second: I,
+    strategy: &S,
 ) -> Result<(V::Signature, V::Signature), Error>
 where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
+    S: Strategy,
 {
-    let mut sigs = threshold_signature_recover_multiple::<V, _>(sharing, vec![first, second], 2)?;
+    let mut sigs = threshold_signature_recover_multiple(sharing, vec![first, second], strategy)?;
     let second_sig = sigs.pop().unwrap();
     let first_sig = sigs.pop().unwrap();
     Ok((first_sig, second_sig))
@@ -556,65 +547,36 @@ where
 /// and sum hashed messages together before performing a single pairing operation (instead of summing `len(messages)` pairings of
 /// hashed message and public key). If the public key itself is an aggregate of multiple public keys, an attacker can exploit
 /// this optimization to cause this function to return that an aggregate signature is valid when it really isn't.
-pub fn aggregate_verify_multiple_messages<'a, V, I>(
+pub fn aggregate_verify_multiple_messages<'a, V, I, S>(
     public: &V::Public,
     messages: I,
     signature: &V::Signature,
-    #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
+    strategy: &S,
 ) -> Result<(), Error>
 where
     V: Variant,
-    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])> + Send + Sync,
-    I::IntoIter: Send + Sync,
+    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>,
+    S: Strategy,
 {
-    #[cfg(not(feature = "std"))]
-    let hm_sum = compute_hm_sum::<V, I>(messages);
-
-    #[cfg(feature = "std")]
-    let hm_sum = if concurrency == 1 {
-        compute_hm_sum::<V, I>(messages)
-    } else {
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(concurrency)
-            .build()
-            .expect("Unable to build thread pool");
-
-        // TODO(#1496): Revisit use of `.par_bridge()`
-        pool.install(move || {
-            messages
-                .into_iter()
-                .par_bridge()
-                .map(|(namespace, msg)| {
-                    namespace.as_ref().map_or_else(
-                        || hash_message::<V>(V::MESSAGE, msg),
-                        |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-                    )
-                })
-                .reduce(V::Signature::zero, |mut sum, hm| {
-                    sum += &hm;
-                    sum
-                })
-        })
-    };
+    let messages: Vec<_> = messages.into_iter().collect();
+    let hm_sum: V::Signature = strategy.fold(
+        &messages,
+        V::Signature::zero,
+        |mut sum, (namespace, msg)| {
+            let hm = namespace.as_ref().map_or_else(
+                || hash_message::<V>(V::MESSAGE, msg),
+                |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+            );
+            sum += &hm;
+            sum
+        },
+        |mut a, b| {
+            a += &b;
+            a
+        },
+    );
 
     V::verify(public, &hm_sum, signature)
-}
-
-/// Computes the sum over the hash of each message.
-fn compute_hm_sum<'a, V, I>(messages: I) -> V::Signature
-where
-    V: Variant,
-    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>,
-{
-    let mut hm_sum = V::Signature::zero();
-    for (namespace, msg) in messages {
-        let hm = namespace.as_ref().map_or_else(
-            || hash_message::<V>(V::MESSAGE, msg),
-            |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-        );
-        hm_sum += &hm;
-    }
-    hm_sum
 }
 
 #[cfg(test)]
@@ -627,9 +589,12 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, ReadExt};
     use commonware_math::algebra::{Field as _, Ring, Space};
+    use commonware_parallel::{Parallel, Sequential};
     use commonware_utils::{from_hex_formatted, quorum, NZU32};
     use group::{Private, G1_MESSAGE, G2_MESSAGE};
     use rand::{prelude::*, rngs::OsRng};
+    use rayon::ThreadPoolBuilder;
+    use std::sync::Arc;
 
     fn codec<V: Variant>() {
         // Encode private/public key
@@ -732,7 +697,8 @@ mod tests {
             partial_verify_proof_of_possession::<V>(&sharing, p)
                 .expect("signature should be valid");
         }
-        let threshold_sig = threshold_signature_recover::<V, _>(&sharing, &partials).unwrap();
+        let threshold_sig =
+            threshold_signature_recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
         let threshold_pub = sharing.public();
 
         // Verify PoP
@@ -825,7 +791,8 @@ mod tests {
             partial_verify_message::<V>(&sharing, Some(namespace), msg, p)
                 .expect("signature should be valid");
         }
-        let threshold_sig = threshold_signature_recover::<V, _>(&sharing, &partials).unwrap();
+        let threshold_sig =
+            threshold_signature_recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
         let threshold_pub = sharing.public();
 
         // Verify the signature
@@ -1037,12 +1004,23 @@ mod tests {
         let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
 
         // Verify the aggregated signature without parallelism
-        aggregate_verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 1)
-            .expect("Aggregated signature should be valid");
+        aggregate_verify_multiple_messages::<V, _, _>(
+            &public,
+            &messages,
+            &aggregate_sig,
+            &Sequential,
+        )
+        .expect("Aggregated signature should be valid");
 
         // Verify the aggregated signature with parallelism
-        aggregate_verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 4)
-            .expect("Aggregated signature should be valid");
+        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(4).build().unwrap());
+        aggregate_verify_multiple_messages::<V, _, _>(
+            &public,
+            &messages,
+            &aggregate_sig,
+            &Parallel::new(pool),
+        )
+        .expect("Aggregated signature should be valid");
 
         // Verify the aggregated signature using blst
         let messages = messages
@@ -1088,13 +1066,22 @@ mod tests {
         ];
 
         // Verify the aggregated signature without parallelism
-        let result =
-            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 1);
+        let result = aggregate_verify_multiple_messages::<V, _, _>(
+            &public,
+            &wrong_messages,
+            &aggregate_sig,
+            &Sequential,
+        );
         assert!(matches!(result, Err(Error::InvalidSignature)));
 
         // Verify the aggregated signature with parallelism
-        let result =
-            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 4);
+        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(4).build().unwrap());
+        let result = aggregate_verify_multiple_messages::<V, _, _>(
+            &public,
+            &wrong_messages,
+            &aggregate_sig,
+            &Parallel::new(pool),
+        );
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
@@ -1126,13 +1113,22 @@ mod tests {
             vec![(namespace, b"Message 1"), (namespace, b"Message 2")];
 
         // Verify the aggregated signature without parallelism
-        let result =
-            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 1);
+        let result = aggregate_verify_multiple_messages::<V, _, _>(
+            &public,
+            &wrong_messages,
+            &aggregate_sig,
+            &Sequential,
+        );
         assert!(matches!(result, Err(Error::InvalidSignature)));
 
         // Verify the aggregated signature with parallelism
-        let result =
-            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 4);
+        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(4).build().unwrap());
+        let result = aggregate_verify_multiple_messages::<V, _, _>(
+            &public,
+            &wrong_messages,
+            &aggregate_sig,
+            &Parallel::new(pool),
+        );
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
@@ -1276,7 +1272,8 @@ mod tests {
             .collect();
 
         // Path-1: generic recover
-        let sig1 = threshold_signature_recover::<V, _>(&sharing, &partials).unwrap();
+        let sig1 =
+            threshold_signature_recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
 
         // Verify with the aggregated public key.
         verify_message::<V>(sharing.public(), None, b"payload", &sig1).unwrap();
@@ -1306,8 +1303,13 @@ mod tests {
             .collect();
 
         // Recover signatures
-        let (sig_1, sig_2) =
-            threshold_signature_recover_pair::<V, _>(&sharing, &partials_1, &partials_2).unwrap();
+        let (sig_1, sig_2) = threshold_signature_recover_pair::<V, _, _>(
+            &sharing,
+            &partials_1,
+            &partials_2,
+            &Sequential,
+        )
+        .unwrap();
 
         // Verify with the aggregated public key.
         verify_message::<V>(sharing.public(), None, b"payload1", &sig_1).unwrap();
@@ -1345,7 +1347,8 @@ mod tests {
         });
 
         // Generate and verify the threshold sig
-        let threshold_sig = threshold_signature_recover::<V, _>(&sharing, &partials).unwrap();
+        let threshold_sig =
+            threshold_signature_recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
         verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 
@@ -1384,7 +1387,8 @@ mod tests {
         });
 
         // Generate and verify the threshold sig
-        let threshold_sig = threshold_signature_recover::<V, _>(&sharing, &partials).unwrap();
+        let threshold_sig =
+            threshold_signature_recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
         assert!(matches!(
             verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap_err(),
             Error::InvalidSignature
@@ -1423,7 +1427,7 @@ mod tests {
 
         // Generate the threshold sig
         assert!(matches!(
-            threshold_signature_recover::<V, _>(&group, &partials).unwrap_err(),
+            threshold_signature_recover::<V, _, _>(&group, &partials, &Sequential).unwrap_err(),
             Error::NotEnoughPartialSignatures(4, 3)
         ));
     }
@@ -1461,7 +1465,8 @@ mod tests {
         });
 
         // Generate and verify the threshold sig
-        let threshold_sig = threshold_signature_recover::<V, _>(&sharing, &partials).unwrap();
+        let threshold_sig =
+            threshold_signature_recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
         verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 
@@ -2249,7 +2254,8 @@ mod tests {
 
             // We then use MSM (Multi-Scalar Multiplication) to compute the sum efficiently.
             let points: Vec<_> = recovery_partials.iter().map(|p| p.value).collect();
-            let derived = <<V as Variant>::Signature as Space<Scalar>>::msm(&points, &weights, 1);
+            let derived =
+                <<V as Variant>::Signature as Space<Scalar>>::msm(&points, &weights, &Sequential);
             let derived = PartialSignature {
                 index: target,
                 value: derived,

@@ -1,6 +1,9 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
+use commonware_parallel::{Parallel, Sequential};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
+use rayon::ThreadPoolBuilder;
+use std::sync::Arc;
 
 fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
     let namespace = b"namespace";
@@ -16,6 +19,12 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
             .map(|msg| (Some(&namespace[..]), msg.as_ref()))
             .collect::<Vec<_>>();
         for concurrency in [1, 8].into_iter() {
+            let pool = Arc::new(
+                ThreadPoolBuilder::new()
+                    .num_threads(concurrency)
+                    .build()
+                    .unwrap(),
+            );
             c.bench_function(
                 &format!("{}/conc={} msgs={}", module_path!(), concurrency, n,),
                 |b| {
@@ -31,13 +40,23 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
                             (public, ops::aggregate_signatures::<MinSig, _>(&signatures))
                         },
                         |(public, signature)| {
-                            ops::aggregate_verify_multiple_messages::<MinSig, _>(
-                                &public,
-                                &msgs,
-                                &signature,
-                                concurrency,
-                            )
-                            .unwrap();
+                            if concurrency > 1 {
+                                ops::aggregate_verify_multiple_messages::<MinSig, _, _>(
+                                    &public,
+                                    &msgs,
+                                    &signature,
+                                    &Parallel::new(pool.clone()),
+                                )
+                                .unwrap();
+                            } else {
+                                ops::aggregate_verify_multiple_messages::<MinSig, _, _>(
+                                    &public,
+                                    &msgs,
+                                    &signature,
+                                    &Sequential,
+                                )
+                                .unwrap();
+                            }
                         },
                         BatchSize::SmallInput,
                     );

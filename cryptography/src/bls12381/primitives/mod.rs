@@ -16,6 +16,7 @@
 //!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, variant::MinSig, sharing::Mode},
 //!     dkg,
 //! };
+//! use commonware_parallel::Sequential;
 //! use commonware_utils::NZU32;
 //! use rand::rngs::OsRng;
 //!
@@ -36,7 +37,8 @@
 //! }
 //!
 //! // Aggregate partial signatures
-//! let threshold_sig = threshold_signature_recover::<MinSig, _>(&sharing, &partials).unwrap();
+//! // Use `Parallel` as the strategy rather than `Sequential` for parallelism
+//! let threshold_sig = threshold_signature_recover::<MinSig, _, _>(&sharing, &partials, &Sequential).unwrap();
 //!
 //! // Verify threshold signature
 //! let threshold_pub = sharing.public();

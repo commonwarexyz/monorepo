@@ -15,10 +15,12 @@ blst = { workspace = true, features = ["no-threads"] }
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std", "arbitrary"] }
 commonware-math.workspace = true
+commonware-parallel.workspace = true
 ed25519-zebra.workspace = true
 libfuzzer-sys.workspace = true
 p256 = { workspace = true, features = ["ecdsa"] }
 rand.workspace = true
+rayon.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
 

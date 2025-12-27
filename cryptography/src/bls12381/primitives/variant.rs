@@ -18,6 +18,7 @@ use commonware_codec::{
     varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
 use commonware_math::algebra::{Additive, HashToGroup, Random as _, Space};
+use commonware_parallel::Sequential;
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
@@ -168,7 +169,7 @@ impl Variant for MinPk {
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
-        let s_agg = G2::msm(signatures, &scalars, 1);
+        let s_agg = G2::msm(signatures, &scalars, &Sequential);
 
         // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);
@@ -319,7 +320,7 @@ impl Variant for MinSig {
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
-        let s_agg = G1::msm(signatures, &scalars, 1);
+        let s_agg = G1::msm(signatures, &scalars, &Sequential);
 
         // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);

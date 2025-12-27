@@ -36,6 +36,7 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Verification},
     Digest, PublicKey,
 };
+use commonware_parallel::Sequential;
 use commonware_utils::ordered::Set;
 use rand::{CryptoRng, Rng};
 use std::{
@@ -456,14 +457,14 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             attestation.signature.seed_signature,
         ]);
 
-        aggregate_verify_multiple_messages::<V, _>(
+        aggregate_verify_multiple_messages::<V, _, _>(
             &evaluated,
             &[
                 (Some(vote_namespace.as_ref()), vote_message.as_ref()),
                 (Some(seed_namespace.as_ref()), seed_message.as_ref()),
             ],
             &sig,
-            1,
+            &Sequential,
         )
         .is_ok()
     }
@@ -565,10 +566,11 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             return None;
         }
 
-        let (vote_signature, seed_signature) = threshold_signature_recover_pair::<V, _>(
+        let (vote_signature, seed_signature) = threshold_signature_recover_pair::<V, _, _>(
             quorum,
             vote_partials.iter(),
             seed_partials.iter(),
+            &Sequential,
         )
         .ok()?;
 
@@ -593,14 +595,14 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let signature =
             aggregate_signatures::<V, _>(&[certificate.vote_signature, certificate.seed_signature]);
 
-        aggregate_verify_multiple_messages::<V, _>(
+        aggregate_verify_multiple_messages::<V, _, _>(
             identity,
             &[
                 (Some(vote_namespace.as_ref()), vote_message.as_ref()),
                 (Some(seed_namespace.as_ref()), seed_message.as_ref()),
             ],
             &signature,
-            1,
+            &Sequential,
         )
         .is_ok()
     }
@@ -675,14 +677,14 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
 
         // Aggregate signatures
         let signature = aggregate_signatures::<V, _>(signatures);
-        aggregate_verify_multiple_messages::<V, _>(
+        aggregate_verify_multiple_messages::<V, _, _>(
             identity,
             &messages
                 .iter()
                 .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
                 .collect::<Vec<_>>(),
             &signature,
-            1,
+            &Sequential,
         )
         .is_ok()
     }

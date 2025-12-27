@@ -7,11 +7,13 @@ use commonware_cryptography::{
     Signer as _,
 };
 use commonware_math::algebra::Random;
+use commonware_parallel::{Parallel, Sequential};
 use commonware_utils::{ordered::Set, quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, hint::black_box};
+use rayon::ThreadPoolBuilder;
+use std::{collections::BTreeMap, hint::black_box, sync::Arc};
 
 type V = MinSig;
 
@@ -121,6 +123,12 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
         let t = quorum(n);
         let bench = Bench::new(&mut rng, reshare, n);
         for &concurrency in CONCURRENCY {
+            let pool = Arc::new(
+                ThreadPoolBuilder::new()
+                    .num_threads(concurrency)
+                    .build()
+                    .unwrap(),
+            );
             c.bench_function(
                 &format!(
                     "{}{}/n={} t={} conc={}",
@@ -134,7 +142,13 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
                     b.iter_batched(
                         || bench.pre_finalize(),
                         |(player, logs)| {
-                            black_box(player.finalize(logs, concurrency).unwrap());
+                            if concurrency > 1 {
+                                black_box(
+                                    player.finalize(logs, &Parallel::new(pool.clone())).unwrap(),
+                                );
+                            } else {
+                                black_box(player.finalize(logs, &Sequential).unwrap());
+                            }
                         },
                         BatchSize::SmallInput,
                     );

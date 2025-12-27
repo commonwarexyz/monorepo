@@ -6,7 +6,10 @@ use commonware_cryptography::bls12381::primitives::{
     ops::*,
     variant::{MinPk, MinSig},
 };
+use commonware_parallel::{Parallel, Sequential};
 use libfuzzer_sys::fuzz_target;
+use rayon::ThreadPoolBuilder;
+use std::sync::Arc;
 
 mod common;
 use common::{
@@ -168,18 +171,33 @@ fn fuzz(op: FuzzOperation) {
             signature,
             concurrency,
         } => {
-            if !messages.is_empty() && concurrency > 0 {
+            if !messages.is_empty() {
                 let messages_refs: Vec<(Option<&[u8]>, &[u8])> = messages
                     .iter()
                     .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
                     .collect();
 
-                let _ = aggregate_verify_multiple_messages::<MinPk, _>(
-                    &public_key,
-                    &messages_refs,
-                    &signature,
-                    concurrency,
-                );
+                if concurrency > 1 {
+                    let pool = Arc::new(
+                        ThreadPoolBuilder::new()
+                            .num_threads(concurrency)
+                            .build()
+                            .unwrap(),
+                    );
+                    let _ = aggregate_verify_multiple_messages::<MinPk, _, _>(
+                        &public_key,
+                        &messages_refs,
+                        &signature,
+                        &Parallel::new(pool),
+                    );
+                } else {
+                    let _ = aggregate_verify_multiple_messages::<MinPk, _, _>(
+                        &public_key,
+                        &messages_refs,
+                        &signature,
+                        &Sequential,
+                    );
+                }
             }
         }
 
@@ -189,18 +207,33 @@ fn fuzz(op: FuzzOperation) {
             signature,
             concurrency,
         } => {
-            if !messages.is_empty() && concurrency > 0 {
+            if !messages.is_empty() {
                 let messages_refs: Vec<(Option<&[u8]>, &[u8])> = messages
                     .iter()
                     .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
                     .collect();
 
-                let _ = aggregate_verify_multiple_messages::<MinSig, _>(
-                    &public_key,
-                    &messages_refs,
-                    &signature,
-                    concurrency,
-                );
+                if concurrency > 1 {
+                    let pool = Arc::new(
+                        ThreadPoolBuilder::new()
+                            .num_threads(concurrency)
+                            .build()
+                            .unwrap(),
+                    );
+                    let _ = aggregate_verify_multiple_messages::<MinSig, _, _>(
+                        &public_key,
+                        &messages_refs,
+                        &signature,
+                        &Parallel::new(pool),
+                    );
+                } else {
+                    let _ = aggregate_verify_multiple_messages::<MinSig, _, _>(
+                        &public_key,
+                        &messages_refs,
+                        &signature,
+                        &Sequential,
+                    );
+                }
             }
         }
     }
