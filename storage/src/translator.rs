@@ -1,6 +1,9 @@
 //! Primitive implementations of [Translator].
 
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::{
+    hash::{BuildHasher, Hash, Hasher},
+    marker::PhantomData,
+};
 
 /// Translate keys into a new representation (often a smaller one).
 ///
@@ -134,7 +137,6 @@ pub struct UnhashedArray<const N: usize> {
 impl<const N: usize> Hash for UnhashedArray<N> {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        const { assert!(N <= 8 && N > 0) };
         state.write(&self.inner);
     }
 }
@@ -148,13 +150,16 @@ impl<const N: usize> PartialEq<[u8; N]> for UnhashedArray<N> {
 /// Translators for keys that are not the length of a standard integer.
 #[derive(Clone, Copy)]
 pub struct Cap<const N: usize> {
-    _marker: UnhashedArray<N>,
+    _phantom: PhantomData<[u8; N]>,
 }
 
 impl<const N: usize> Cap<N> {
     pub const fn new() -> Self {
+        const {
+            assert!(N <= 8 && N > 0, "Cap must be between 1 and 8");
+        };
         Self {
-            _marker: UnhashedArray { inner: [0; N] },
+            _phantom: PhantomData,
         }
     }
 }
@@ -170,7 +175,9 @@ impl<const N: usize> Translator for Cap<N> {
 
     #[inline]
     fn transform(&self, key: &[u8]) -> Self::Key {
-        const { assert!(N <= 8 && N > 0) };
+        const {
+            assert!(N <= 8 && N > 0, "Cap must be between 1 and 8");
+        };
         UnhashedArray {
             inner: cap::<N>(key),
         }

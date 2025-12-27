@@ -120,7 +120,7 @@ fn bench_insert(c: &mut Criterion) {
                             Variant::PartitionedOrdered2 => {
                                 let mut index = partitioned::ordered::Index::<_, _, 2>::new(
                                     DummyMetrics,
-                                    TwoCap,
+                                    Cap::<2>::new(),
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
