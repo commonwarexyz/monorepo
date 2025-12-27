@@ -1,4 +1,4 @@
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::Sha256;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::PoolRef,
@@ -6,9 +6,9 @@ use commonware_runtime::{
     tokio::{Config, Context},
     ThreadPool,
 };
-use commonware_storage::{
-    mmr::mem::Clean,
-    qmdb::keyless::{Config as KConfig, Keyless},
+use commonware_storage::qmdb::{
+    keyless::{Config as KConfig, Keyless},
+    NonDurable, Unmerkleized,
 };
 use commonware_utils::{NZUsize, NZU64};
 use criterion::{criterion_group, Criterion};
@@ -49,12 +49,21 @@ fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, 
     }
 }
 
+/// Clean (Merkleized, Durable) db type alias for Keyless.
+type KeylessDb = Keyless<Context, Vec<u8>, Sha256>;
+
+/// Mutable (Unmerkleized, NonDurable) type alias for Keyless.
+type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, Unmerkleized, NonDurable>;
+
 /// Generate a keyless db by appending `num_operations` random values in total. The database is
 /// committed after every `COMMIT_FREQUENCY` operations.
 async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let keyless_cfg = keyless_cfg(pool);
-    let mut db = Keyless::init(ctx, keyless_cfg).await.unwrap();
+    let clean = KeylessDb::init(ctx, keyless_cfg).await.unwrap();
+
+    // Convert to mutable state for operations.
+    let mut db: KeylessMutable = clean.into_mutable();
 
     // Randomly append.
     let mut rng = StdRng::seed_from_u64(42);
@@ -62,16 +71,16 @@ async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 300) + 10) as usize];
         db.append(v).await.unwrap();
         if rng.next_u32() % COMMIT_FREQUENCY == 0 {
-            db.commit(None).await.unwrap();
+            let (durable, _) = db.commit(None).await.unwrap();
+            db = durable.into_mutable();
         }
     }
-    db.commit(None).await.unwrap();
-    db.sync().await.unwrap();
+    let (durable, _) = db.commit(None).await.unwrap();
+    let mut clean = durable.into_merkleized();
+    clean.sync().await.unwrap();
 
-    db
+    clean
 }
-
-type KeylessDb = Keyless<Context, Vec<u8>, Sha256, Clean<<Sha256 as Hasher>::Digest>>;
 
 /// Benchmark the generation of a large randomly generated keyless db.
 fn bench_keyless_generate(c: &mut Criterion) {

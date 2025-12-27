@@ -1,99 +1,36 @@
-//! Authenticated databases that provides succinct proofs of _any_ value ever associated with
-//! a key. The submodules provide two classes of variants, one specialized for fixed-size values and
-//! the other allowing variable-size values.
+//! An _Any_ authenticated database provides succinct proofs of any value ever associated with a
+//! key.
+//!
+//! The specific variants provided within this module include:
+//! - Unordered: The database does not maintain or require any ordering over the key space.
+//!   - Fixed-size values
+//!   - Variable-size values
+//! - Ordered: The database maintains a total order over active keys.
+//!   - Fixed-size values
+//!   - Variable-size values
 
 use crate::{
     journal::{
         authenticated,
         contiguous::fixed::{Config as JConfig, Journal},
     },
-    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
-    qmdb::{
-        operation::Committable,
-        store::{CleanStore, DirtyStore},
-        Error,
-    },
+    mmr::journaled::Config as MmrConfig,
+    qmdb::{operation::Committable, Error, Merkleized},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
-use commonware_utils::Array;
-use std::{
-    future::Future,
-    num::{NonZeroU64, NonZeroUsize},
-    ops::Range,
-};
+use std::num::{NonZeroU64, NonZeroUsize};
 
-pub(crate) mod db;
+pub mod db;
 mod operation;
-
+#[cfg(any(test, feature = "test-traits"))]
+pub mod states;
 mod value;
 pub(crate) use value::{FixedValue, ValueEncoding, VariableValue};
-
-mod ext;
 pub mod ordered;
 pub mod unordered;
-
-pub use ext::AnyExt;
-
-/// Extension trait for "Any" QMDBs in a clean (merkleized) state.
-pub trait CleanAny:
-    CleanStore<Dirty: DirtyAny<Key = Self::Key, Value = Self::Value, Clean = Self>>
-{
-    /// The key type for this database.
-    type Key: Array;
-
-    /// Get the value for a given key, or None if it has no value.
-    fn get(&self, key: &Self::Key) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
-
-    /// Commit pending operations to the database, ensuring durability.
-    /// Returns the location range of committed operations.
-    fn commit(
-        &mut self,
-        metadata: Option<Self::Value>,
-    ) -> impl Future<Output = Result<Range<Location>, Error>>;
-
-    /// Sync all database state to disk.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
-
-    /// Prune historical operations prior to `prune_loc`.
-    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
-
-    /// Close the db. Uncommitted operations will be lost or rolled back on restart.
-    fn close(self) -> impl Future<Output = Result<(), Error>>;
-
-    /// Destroy the db, removing all data from disk.
-    fn destroy(self) -> impl Future<Output = Result<(), Error>>;
-}
-
-/// Extension trait for "Any" QMDBs in a dirty (deferred merkleization) state.
-pub trait DirtyAny: DirtyStore {
-    /// The key type for this database.
-    type Key: Array;
-
-    /// Get the value for a given key, or None if it has no value.
-    fn get(&self, key: &Self::Key) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
-
-    /// Update `key` to have value `value`. Subject to rollback until next `commit`.
-    fn update(
-        &mut self,
-        key: Self::Key,
-        value: Self::Value,
-    ) -> impl Future<Output = Result<(), Error>>;
-
-    /// Create a new key-value pair. Returns true if created, false if key already existed.
-    /// Subject to rollback until next `commit`.
-    fn create(
-        &mut self,
-        key: Self::Key,
-        value: Self::Value,
-    ) -> impl Future<Output = Result<bool, Error>>;
-
-    /// Delete `key` and its value. Returns true if deleted, false if already inactive.
-    /// Subject to rollback until next `commit`.
-    fn delete(&mut self, key: Self::Key) -> impl Future<Output = Result<bool, Error>>;
-}
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
 #[derive(Clone)]
@@ -169,8 +106,7 @@ pub struct VariableConfig<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-type AuthenticatedLog<E, O, H, S = Clean<DigestOf<H>>> =
-    authenticated::Journal<E, Journal<E, O>, H, S>;
+type AuthenticatedLog<E, O, H, S = Merkleized<H>> = authenticated::Journal<E, Journal<E, O>, H, S>;
 
 /// Initialize the authenticated log from the given config, returning it along with the inactivity
 /// floor specified by the last commit.

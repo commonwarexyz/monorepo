@@ -10,11 +10,7 @@ use commonware_runtime::{
 };
 use commonware_storage::qmdb::sync;
 use commonware_sync::{
-    any, crate_version,
-    databases::{DatabaseType, Syncable},
-    immutable,
-    net::Resolver,
-    Digest, Error, Key,
+    any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
 };
 use commonware_utils::DurationExt;
 use futures::channel::mpsc;

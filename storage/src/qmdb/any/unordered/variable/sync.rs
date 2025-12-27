@@ -5,7 +5,7 @@ use crate::{
     index::unordered::Index,
     journal::{authenticated, contiguous::variable},
     mmr::{mem::Clean, Location, Position, StandardHasher},
-    qmdb::{self, any::VariableValue},
+    qmdb::{self, any::VariableValue, Durable, Merkleized},
     translator::Translator,
 };
 use commonware_codec::Read;
@@ -14,7 +14,7 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
 
-impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T>
+impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -124,7 +124,10 @@ where
 mod tests {
     use super::*;
     use crate::{
-        qmdb::any::unordered::{sync_tests::SyncTestHarness, Update},
+        qmdb::{
+            any::unordered::{sync_tests::SyncTestHarness, Update},
+            NonDurable, Unmerkleized,
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -162,7 +165,8 @@ mod tests {
     }
 
     /// Type alias for tests
-    type AnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    type AnyTest =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
 
     fn test_value(i: u64) -> Vec<u8> {
         let len = ((i % 13) + 7) as usize;
@@ -194,8 +198,14 @@ mod tests {
         ops
     }
 
+    type DirtyAnyTest =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
+
     /// Applies the given operations to the database.
-    async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Vec<u8>>>) {
+    async fn apply_ops_inner(
+        mut db: DirtyAnyTest,
+        ops: Vec<Operation<Digest, Vec<u8>>>,
+    ) -> DirtyAnyTest {
         for op in ops {
             match op {
                 Operation::Update(Update(key, value)) => {
@@ -205,10 +215,11 @@ mod tests {
                     db.delete(key).await.unwrap();
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    db.commit(metadata).await.unwrap();
+                    db = db.commit(metadata).await.unwrap().0.into_mutable();
                 }
             }
         }
+        db
     }
 
     /// Harness for sync tests.
@@ -237,8 +248,14 @@ mod tests {
             AnyTest::init(ctx, config).await.unwrap()
         }
 
-        async fn apply_ops(db: &mut Self::Db, ops: Vec<Operation<Digest, Vec<u8>>>) {
-            apply_ops(db, ops).await
+        async fn apply_ops(db: Self::Db, ops: Vec<Operation<Digest, Vec<u8>>>) -> Self::Db {
+            apply_ops_inner(db.into_mutable(), ops)
+                .await
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized()
         }
     }
 

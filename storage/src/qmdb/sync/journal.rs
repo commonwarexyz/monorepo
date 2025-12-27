@@ -28,7 +28,23 @@ where
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        Self::append(self, op).await?;
-        Ok(())
+        self.append(op).await.map(|_| ())
+    }
+}
+
+impl<E, A> Journal for crate::journal::contiguous::fixed::Journal<E, A>
+where
+    E: commonware_runtime::Storage + commonware_runtime::Metrics,
+    A: commonware_codec::CodecFixed<Cfg = ()>,
+{
+    type Op = A;
+    type Error = crate::journal::Error;
+
+    async fn size(&self) -> u64 {
+        Self::size(self)
+    }
+
+    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
+        self.append(op).await.map(|_| ())
     }
 }

@@ -211,6 +211,15 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
         &self.nodes[self.pos_to_index(pos)]
     }
 
+    /// Return the requested node or None if it is not stored in the MMR.
+    pub fn get_node(&self, pos: Position) -> Option<D> {
+        if pos < self.pruned_to_pos {
+            return self.pinned_nodes.get(&pos).copied();
+        }
+
+        self.nodes.get(self.pos_to_index(pos)).copied()
+    }
+
     /// Return the index of the element in the current nodes vector given its position in the MMR.
     ///
     /// # Panics
@@ -300,15 +309,6 @@ impl<D: Digest> CleanMmr<D> {
         pinned_nodes: Vec<D>,
     ) -> Self {
         DirtyMmr::from_components(nodes, pruned_to_pos, pinned_nodes).merkleize(hasher, None)
-    }
-
-    /// Return the requested node or None if it is not stored in the MMR.
-    pub fn get_node(&self, pos: Position) -> Option<D> {
-        if pos < self.pruned_to_pos {
-            return self.pinned_nodes.get(&pos).copied();
-        }
-
-        self.nodes.get(self.pos_to_index(pos)).copied()
     }
 
     /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the

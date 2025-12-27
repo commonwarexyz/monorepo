@@ -7,7 +7,6 @@ use commonware_storage::{
     mmr::{self, hasher::Standard, MAX_LOCATION},
     qmdb::{
         any::{unordered::variable::Db, VariableConfig as Config},
-        store::CleanStore as _,
         verify_proof,
     },
     translator::TwoCap,
@@ -51,9 +50,7 @@ enum Operation {
     InactivityFloorLoc,
     OpCount,
     Root,
-    SimulateFailure {
-        sync_log: bool,
-    },
+    SimulateFailure,
 }
 
 impl<'a> Arbitrary<'a> for Operation {
@@ -111,10 +108,7 @@ impl<'a> Arbitrary<'a> for Operation {
             9 => Ok(Operation::InactivityFloorLoc),
             10 => Ok(Operation::OpCount),
             11 => Ok(Operation::Root),
-            12 | 13 => {
-                let sync_log: bool = u.arbitrary()?;
-                Ok(Operation::SimulateFailure { sync_log })
-            }
+            12 | 13 => Ok(Operation::SimulateFailure {}),
             _ => unreachable!(),
         }
     }
@@ -164,7 +158,8 @@ fn fuzz(input: FuzzInput) {
             test_config("qmdb_any_variable_fuzz_test"),
         )
         .await
-        .expect("Failed to init source db");
+        .expect("Failed to init source db")
+        .into_mutable();
 
         let mut historical_roots: HashMap<
             Location,
@@ -190,17 +185,23 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    db.commit(metadata_bytes.clone())
+                    let (durable_db, _) = db
+                        .commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
-                    historical_roots.insert(db.op_count(), db.root());
+                    let clean_db = durable_db.into_merkleized();
+                    historical_roots.insert(clean_db.op_count(), clean_db.root());
+                    db = clean_db.into_mutable();
                     has_uncommitted = false;
                 }
 
                 Operation::Prune => {
-                    db.prune(db.inactivity_floor_loc())
+                    let mut merkleized_db = db.into_merkleized();
+                    merkleized_db
+                        .prune(merkleized_db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
+                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::Get { key } => {
@@ -219,11 +220,12 @@ fn fuzz(input: FuzzInput) {
                             continue;
                         }
 
-                        db.sync().await.expect("Sync should not fail");
-                        if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
-                            let root = db.root();
+                        let clean_db = db.into_merkleized();
+                        if let Ok((proof, log)) = clean_db.proof(*start_loc, *max_ops).await {
+                            let root = clean_db.root();
                             assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
                         }
+                        db = clean_db.into_mutable();
                     }
                 }
 
@@ -240,18 +242,24 @@ fn fuzz(input: FuzzInput) {
                             continue;
                         }
 
-                        if let Ok((proof, log)) =
-                            db.historical_proof(op_count, *start_loc, *max_ops).await
+                        let clean_db = db.into_merkleized();
+                        if let Ok((proof, log)) = clean_db
+                            .historical_proof(op_count, *start_loc, *max_ops)
+                            .await
                         {
                             if let Some(root) = historical_roots.get(&op_count) {
                                 assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, root));
                             }
                         }
+                        db = clean_db.into_mutable();
                     }
                 }
 
                 Operation::Sync => {
-                    db.sync().await.expect("Sync should not fail");
+                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+                    let mut clean_db = durable_db.into_merkleized();
+                    clean_db.sync().await.expect("Sync should not fail");
+                    db = clean_db.into_mutable();
                 }
 
                 Operation::InactivityFloorLoc => {
@@ -264,26 +272,30 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Root => {
                     if !has_uncommitted {
-                        let _ = db.root();
+                        let clean_db = db.into_merkleized();
+                        let _ = clean_db.root();
+                        db = clean_db.into_mutable();
                     }
                 }
 
-                Operation::SimulateFailure { sync_log } => {
-                    db.simulate_failure(*sync_log)
-                        .await
-                        .expect("Simulate failure should not fail");
+                Operation::SimulateFailure => {
+                    // Simulate unclean shutdown by dropping the db without committing
+                    drop(db);
 
-                    db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
+                    db = Db::<_, Key, Vec<u8>, Sha256, TwoCap, _, _>::init(
                         context.clone(),
-                        test_config("src"),
+                        test_config("qmdb_any_variable_fuzz_test"),
                     )
                     .await
-                    .expect("Failed to init source db");
+                    .expect("Failed to init source db")
+                    .into_mutable();
                     has_uncommitted = false;
                 }
             }
         }
 
+        let db = db.commit(None).await.expect("commit should not fail").0;
+        let db = db.into_merkleized();
         db.destroy().await.expect("Destroy should not fail");
     });
 }
