@@ -214,7 +214,7 @@ pub fn partial_verify_message<V: Variant>(
 /// # Warning
 ///
 /// This function assumes a group check was already performed on each `signature`.
-pub fn partial_aggregate_verify_multiple_messages<'a, R, V, I>(
+pub fn partial_verify_multiple_messages<'a, R, V, I>(
     rng: &mut R,
     sharing: &Sharing<V>,
     index: u32,
@@ -240,7 +240,7 @@ where
 
     let public = sharing.partial_public(index)?;
 
-    aggregate_verify_multiple_messages::<_, V, _>(rng, &public, &combined, concurrency)
+    verify_multiple_messages::<_, V, _>(rng, &public, &combined, concurrency)
 }
 
 /// Verify a list of [PartialSignature]s by performing aggregate verification with random
@@ -552,7 +552,8 @@ where
 ///
 /// This function assumes a group check was already performed on `public` and each `signature`.
 /// It is not safe to provide an aggregate public key or to provide duplicate messages.
-pub fn aggregate_verify_multiple_messages<'a, R, V, I>(
+#[cfg(feature = "std")]
+pub fn verify_multiple_messages<'a, R, V, I>(
     rng: &mut R,
     public: &V::Public,
     entries: I,
@@ -569,28 +570,108 @@ where
         return Ok(());
     }
 
-    // Generate random non-zero scalars for each message/signature pair
+    // Generate random scalars for each message/signature pair
     let scalars: Vec<group::Scalar> = (0..entries.len())
         .map(|_| group::Scalar::random(&mut *rng))
         .collect();
 
-    // Hash messages
-    let hms: Vec<V::Signature> = entries
-        .iter()
-        .map(|(namespace, msg, _)| {
-            namespace.as_ref().map_or_else(
+    // Hash messages and apply scalar weights in parallel
+    let (weighted_hm, weighted_sig) = if concurrency == 1 {
+        // Sequential path
+        let mut weighted_hm = V::Signature::zero();
+        let mut weighted_sig = V::Signature::zero();
+        for ((namespace, msg, sig), scalar) in entries.iter().zip(&scalars) {
+            let hm = namespace.as_ref().map_or_else(
                 || hash_message::<V>(V::MESSAGE, msg),
                 |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-            )
+            );
+            let weighted_hm_term = hm * scalar;
+            let weighted_sig_term = *sig * scalar;
+            weighted_hm += &weighted_hm_term;
+            weighted_sig += &weighted_sig_term;
+        }
+        (weighted_hm, weighted_sig)
+    } else {
+        // Parallel path
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(concurrency)
+            .build()
+            .expect("Unable to build thread pool");
+
+        pool.install(|| {
+            entries
+                .par_iter()
+                .zip(scalars.par_iter())
+                .map(|((namespace, msg, sig), scalar)| {
+                    let hm = namespace.as_ref().map_or_else(
+                        || hash_message::<V>(V::MESSAGE, msg),
+                        |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+                    );
+                    (hm * scalar, *sig * scalar)
+                })
+                .reduce(
+                    || (V::Signature::zero(), V::Signature::zero()),
+                    |(mut hm_acc, mut sig_acc), (hm, sig)| {
+                        hm_acc += &hm;
+                        sig_acc += &sig;
+                        (hm_acc, sig_acc)
+                    },
+                )
         })
+    };
+
+    // Verify: e(pk, weighted_hm) == e(weighted_sig, G)
+    V::verify(public, &weighted_hm, &weighted_sig)
+}
+
+/// Verifies multiple signatures over multiple unique messages from a single public key,
+/// using random scalar weights to prevent signature malleability attacks.
+///
+/// This function is secure against signature redistribution attacks where an attacker
+/// modifies individual signatures while keeping their sum unchanged.
+///
+/// Each entry is a tuple of (namespace, message, signature).
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on `public` and each `signature`.
+/// It is not safe to provide an aggregate public key or to provide duplicate messages.
+#[cfg(not(feature = "std"))]
+pub fn verify_multiple_messages<'a, R, V, I>(
+    rng: &mut R,
+    public: &V::Public,
+    entries: I,
+    _concurrency: usize,
+) -> Result<(), Error>
+where
+    R: CryptoRngCore,
+    V: Variant,
+    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8], V::Signature)>,
+{
+    let entries: Vec<_> = entries.into_iter().collect();
+
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    // Generate random scalars for each message/signature pair
+    let scalars: Vec<group::Scalar> = (0..entries.len())
+        .map(|_| group::Scalar::random(&mut *rng))
         .collect();
 
-    // Compute weighted sum of hashed messages: sum(r_i * H(m_i))
-    let weighted_hm = V::Signature::msm(&hms, &scalars, concurrency);
-
-    // Compute weighted sum of signatures: sum(r_i * sig_i)
-    let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, s)| *s).collect();
-    let weighted_sig = V::Signature::msm(&sigs, &scalars, concurrency);
+    // Hash messages and apply scalar weights
+    let mut weighted_hm = V::Signature::zero();
+    let mut weighted_sig = V::Signature::zero();
+    for ((namespace, msg, sig), scalar) in entries.iter().zip(&scalars) {
+        let hm = namespace.as_ref().map_or_else(
+            || hash_message::<V>(V::MESSAGE, msg),
+            |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+        );
+        let weighted_hm_term = hm * scalar;
+        let weighted_sig_term = *sig * scalar;
+        weighted_hm += &weighted_hm_term;
+        weighted_sig += &weighted_sig_term;
+    }
 
     // Verify: e(pk, weighted_hm) == e(weighted_sig, G)
     V::verify(public, &weighted_hm, &weighted_sig)
@@ -1011,12 +1092,8 @@ mod tests {
 
         // New secure function rejects forged signatures
         let forged_entries = vec![(None, msg1, forged_sig1), (None, msg2, forged_sig2)];
-        let result = aggregate_verify_multiple_messages::<_, V, _>(
-            &mut thread_rng(),
-            &public,
-            &forged_entries,
-            1,
-        );
+        let result =
+            verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &forged_entries, 1);
         assert!(
             result.is_err(),
             "secure function should reject forged signatures"
@@ -1024,13 +1101,8 @@ mod tests {
 
         // New secure function accepts valid signatures
         let valid_entries = vec![(None, msg1, sig1), (None, msg2, sig2)];
-        aggregate_verify_multiple_messages::<_, V, _>(
-            &mut thread_rng(),
-            &public,
-            &valid_entries,
-            1,
-        )
-        .expect("secure function should accept valid signatures");
+        verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &valid_entries, 1)
+            .expect("secure function should accept valid signatures");
     }
 
     #[test]
@@ -1039,7 +1111,7 @@ mod tests {
         aggregate_verify_malleability_vulnerability::<MinSig>();
     }
 
-    fn aggregate_verify_multiple_messages_correct<V: Variant>() {
+    fn verify_multiple_messages_correct<V: Variant>() {
         let (private, public) = keypair::<_, V>(&mut thread_rng());
         let namespace = Some(&b"test"[..]);
         let messages: &[(Option<&[u8]>, &[u8])] = &[
@@ -1053,21 +1125,21 @@ mod tests {
             .collect();
 
         // Verify with serial execution
-        aggregate_verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &entries, 1)
+        verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &entries, 1)
             .expect("valid signatures should be accepted");
 
         // Verify with parallel execution
-        aggregate_verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &entries, 4)
+        verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &entries, 4)
             .expect("valid signatures should be accepted with parallelism");
     }
 
     #[test]
-    fn test_aggregate_verify_multiple_messages_correct() {
-        aggregate_verify_multiple_messages_correct::<MinPk>();
-        aggregate_verify_multiple_messages_correct::<MinSig>();
+    fn test_verify_multiple_messages_correct() {
+        verify_multiple_messages_correct::<MinPk>();
+        verify_multiple_messages_correct::<MinSig>();
     }
 
-    fn aggregate_verify_multiple_messages_wrong_signature<V: Variant>() {
+    fn verify_multiple_messages_wrong_signature<V: Variant>() {
         let (private, public) = keypair::<_, V>(&mut thread_rng());
         let namespace = Some(&b"test"[..]);
         let messages: &[(Option<&[u8]>, &[u8])] = &[
@@ -1084,18 +1156,17 @@ mod tests {
         let random_scalar = Scalar::random(&mut thread_rng());
         entries[1].2 += &(V::Signature::generator() * &random_scalar);
 
-        let result =
-            aggregate_verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &entries, 1);
+        let result = verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &entries, 1);
         assert!(result.is_err(), "corrupted signature should be rejected");
     }
 
     #[test]
-    fn test_aggregate_verify_multiple_messages_wrong_signature() {
-        aggregate_verify_multiple_messages_wrong_signature::<MinPk>();
-        aggregate_verify_multiple_messages_wrong_signature::<MinSig>();
+    fn test_verify_multiple_messages_wrong_signature() {
+        verify_multiple_messages_wrong_signature::<MinPk>();
+        verify_multiple_messages_wrong_signature::<MinSig>();
     }
 
-    fn partial_aggregate_verify_multiple_messages_correct<V: Variant>() {
+    fn partial_verify_multiple_messages_correct<V: Variant>() {
         // Generate polynomial and shares
         let n = 5;
         let (public, shares) =
@@ -1114,7 +1185,7 @@ mod tests {
             .iter()
             .map(|(ns, msg)| (*ns, *msg, partial_sign_message::<V>(signer, *ns, msg)))
             .collect();
-        partial_aggregate_verify_multiple_messages::<_, V, _>(
+        partial_verify_multiple_messages::<_, V, _>(
             &mut thread_rng(),
             &public,
             signer.index,
@@ -1130,7 +1201,7 @@ mod tests {
             .iter()
             .map(|(ns, msg)| (*ns, *msg, partial_sign_message::<V>(signer, *ns, msg)))
             .collect();
-        partial_aggregate_verify_multiple_messages::<_, V, _>(
+        partial_verify_multiple_messages::<_, V, _>(
             &mut thread_rng(),
             &public,
             signer.index,
@@ -1149,7 +1220,7 @@ mod tests {
             .iter()
             .map(|(ns, msg)| (*ns, *msg, partial_sign_message::<V>(signer, *ns, msg)))
             .collect();
-        partial_aggregate_verify_multiple_messages::<_, V, _>(
+        partial_verify_multiple_messages::<_, V, _>(
             &mut thread_rng(),
             &public,
             signer.index,
@@ -1160,13 +1231,7 @@ mod tests {
 
         // Failure with wrong signer index
         assert!(matches!(
-            partial_aggregate_verify_multiple_messages::<_, V, _>(
-                &mut thread_rng(),
-                &public,
-                1,
-                &entries,
-                1
-            ),
+            partial_verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, 1, &entries, 1),
             Err(Error::InvalidSignature)
         ));
 
@@ -1176,7 +1241,7 @@ mod tests {
         entries_swapped[0].2 = entries_swapped[1].2.clone();
         entries_swapped[1].2 = temp_sig;
         assert!(
-            partial_aggregate_verify_multiple_messages::<_, V, _>(
+            partial_verify_multiple_messages::<_, V, _>(
                 &mut thread_rng(),
                 &public,
                 signer.index,
@@ -1193,7 +1258,7 @@ mod tests {
         let mut entries_mixed_signers = entries;
         entries_mixed_signers[0].2 = partial2;
         assert!(matches!(
-            partial_aggregate_verify_multiple_messages::<_, V, _>(
+            partial_verify_multiple_messages::<_, V, _>(
                 &mut thread_rng(),
                 &public,
                 signer.index,
@@ -1205,9 +1270,9 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_aggregate_verify_multiple_messages() {
-        partial_aggregate_verify_multiple_messages_correct::<MinPk>();
-        partial_aggregate_verify_multiple_messages_correct::<MinSig>();
+    fn test_partial_verify_multiple_messages() {
+        partial_verify_multiple_messages_correct::<MinPk>();
+        partial_verify_multiple_messages_correct::<MinSig>();
     }
 
     fn threshold_signature_recover_with_weights_correct<V: Variant>() {
@@ -2346,7 +2411,7 @@ mod tests {
         partial_verify_multiple_public_keys_malleability_vulnerability::<MinSig>();
     }
 
-    fn partial_aggregate_verify_multiple_messages_malleability_vulnerability<V: Variant>() {
+    fn partial_verify_multiple_messages_malleability_vulnerability<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(54321);
         let n = 5;
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
@@ -2412,7 +2477,7 @@ mod tests {
             (namespace, msg1, forged_partial1),
             (namespace, msg2, forged_partial2),
         ];
-        let result = partial_aggregate_verify_multiple_messages::<_, V, _>(
+        let result = partial_verify_multiple_messages::<_, V, _>(
             &mut thread_rng(),
             &sharing,
             signer.index,
@@ -2426,7 +2491,7 @@ mod tests {
 
         // Secure function accepts valid partial signatures
         let valid_entries = vec![(namespace, msg1, partial1), (namespace, msg2, partial2)];
-        partial_aggregate_verify_multiple_messages::<_, V, _>(
+        partial_verify_multiple_messages::<_, V, _>(
             &mut thread_rng(),
             &sharing,
             signer.index,
@@ -2437,8 +2502,8 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_aggregate_verify_multiple_messages_malleability_vulnerability() {
-        partial_aggregate_verify_multiple_messages_malleability_vulnerability::<MinPk>();
-        partial_aggregate_verify_multiple_messages_malleability_vulnerability::<MinSig>();
+    fn test_partial_verify_multiple_messages_malleability_vulnerability() {
+        partial_verify_multiple_messages_malleability_vulnerability::<MinPk>();
+        partial_verify_multiple_messages_malleability_vulnerability::<MinSig>();
     }
 }

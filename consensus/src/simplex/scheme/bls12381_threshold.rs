@@ -24,9 +24,8 @@ use commonware_cryptography::{
         primitives::{
             group::Share,
             ops::{
-                aggregate_verify_multiple_messages, partial_sign_message,
-                partial_verify_multiple_public_keys, threshold_signature_recover_pair,
-                verify_message,
+                partial_sign_message, partial_verify_multiple_public_keys,
+                threshold_signature_recover_pair, verify_message, verify_multiple_messages,
             },
             sharing::Sharing,
             variant::{PartialSignature, Variant},
@@ -456,7 +455,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
-        aggregate_verify_multiple_messages::<_, V, _>(
+        verify_multiple_messages::<_, V, _>(
             rng,
             &evaluated,
             &[
@@ -600,7 +599,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
-        aggregate_verify_multiple_messages::<_, V, _>(
+        verify_multiple_messages::<_, V, _>(
             rng,
             identity,
             &[
@@ -700,7 +699,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_ref(), *sig))
             .collect();
 
-        aggregate_verify_multiple_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
+        verify_multiple_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
     }
 
     fn is_attributable(&self) -> bool {

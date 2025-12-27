@@ -230,7 +230,7 @@ fn fuzz(op: FuzzOperation) {
                         )
                     })
                     .collect();
-                let _ = partial_aggregate_verify_multiple_messages::<_, MinPk, _>(
+                let _ = partial_verify_multiple_messages::<_, MinPk, _>(
                     &mut thread_rng(),
                     &public,
                     index,
@@ -260,7 +260,7 @@ fn fuzz(op: FuzzOperation) {
                         )
                     })
                     .collect();
-                let _ = partial_aggregate_verify_multiple_messages::<_, MinSig, _>(
+                let _ = partial_verify_multiple_messages::<_, MinSig, _>(
                     &mut thread_rng(),
                     &public,
                     index,

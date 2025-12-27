@@ -15,8 +15,8 @@ use crate::{
     bls12381::primitives::{
         group::Share,
         ops::{
-            aggregate_verify_multiple_messages, partial_sign_message,
-            partial_verify_multiple_public_keys, threshold_signature_recover, verify_message,
+            partial_sign_message, partial_verify_multiple_public_keys, threshold_signature_recover,
+            verify_message, verify_multiple_messages,
         },
         sharing::Sharing,
         variant::{PartialSignature, Variant},
@@ -342,7 +342,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
             .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_ref(), *sig))
             .collect();
 
-        aggregate_verify_multiple_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
+        verify_multiple_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
     }
 
     pub const fn is_attributable(&self) -> bool {

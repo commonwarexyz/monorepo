@@ -186,7 +186,7 @@ fn fuzz(op: FuzzOperation) {
                     .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_slice(), *sig))
                     .collect();
 
-                let _ = aggregate_verify_multiple_messages::<_, MinPk, _>(
+                let _ = verify_multiple_messages::<_, MinPk, _>(
                     &mut thread_rng(),
                     &public_key,
                     &entries_refs,
@@ -206,7 +206,7 @@ fn fuzz(op: FuzzOperation) {
                     .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_slice(), *sig))
                     .collect();
 
-                let _ = aggregate_verify_multiple_messages::<_, MinSig, _>(
+                let _ = verify_multiple_messages::<_, MinSig, _>(
                     &mut thread_rng(),
                     &public_key,
                     &entries_refs,
