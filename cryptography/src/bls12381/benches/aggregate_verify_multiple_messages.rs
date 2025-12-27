@@ -5,16 +5,12 @@ use rand::{thread_rng, Rng};
 fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
     let namespace = b"namespace";
     for n in [2, 10, 100, 1000, 10000].into_iter() {
-        let mut msgs = Vec::with_capacity(n);
+        let mut msgs: Vec<[u8; 32]> = Vec::with_capacity(n);
         for _ in 0..n {
             let mut msg = [0u8; 32];
             thread_rng().fill(&mut msg);
             msgs.push(msg);
         }
-        let msgs = msgs
-            .iter()
-            .map(|msg| (Some(&namespace[..]), msg.as_ref()))
-            .collect::<Vec<_>>();
         for concurrency in [1, 8].into_iter() {
             c.bench_function(
                 &format!("{}/conc={} msgs={}", module_path!(), concurrency, n,),
@@ -22,20 +18,21 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
                     b.iter_batched(
                         || {
                             let (private, public) = ops::keypair::<_, MinSig>(&mut thread_rng());
-                            let signatures: Vec<_> = msgs
+                            let entries: Vec<_> = msgs
                                 .iter()
-                                .map(|(namespace, msg)| {
-                                    ops::sign_message::<MinSig>(&private, *namespace, msg)
+                                .map(|msg| {
+                                    let ns: Option<&[u8]> = Some(&namespace[..]);
+                                    let sig = ops::sign_message::<MinSig>(&private, ns, msg);
+                                    (ns, msg.as_ref(), sig)
                                 })
                                 .collect();
-                            (public, signatures)
+                            (public, entries)
                         },
-                        |(public, signatures)| {
-                            ops::aggregate_verify_multiple_messages::<_, MinSig, _, _>(
+                        |(public, entries)| {
+                            ops::aggregate_verify_multiple_messages::<_, MinSig, _>(
                                 &mut thread_rng(),
                                 &public,
-                                &msgs,
-                                &signatures,
+                                &entries,
                                 concurrency,
                             )
                             .unwrap();

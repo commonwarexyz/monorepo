@@ -326,30 +326,23 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     {
         let identity = self.identity();
 
-        let mut messages = Vec::new();
-        let mut signatures = Vec::new();
+        let mut entries: Vec<_> = Vec::new();
 
         for (subject, certificate) in certificates {
-            let (namespace, message) = subject.namespace_and_message(namespace);
-            messages.push((Some(namespace), message));
-            signatures.push(certificate);
+            let (ns, message) = subject.namespace_and_message(namespace);
+            entries.push((Some(ns.to_vec()), message.to_vec(), *certificate));
         }
 
-        if messages.is_empty() {
+        if entries.is_empty() {
             return true;
         }
 
-        aggregate_verify_multiple_messages::<_, V, _, _>(
-            rng,
-            identity,
-            &messages
-                .iter()
-                .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
-                .collect::<Vec<_>>(),
-            signatures,
-            1,
-        )
-        .is_ok()
+        let entries_refs: Vec<_> = entries
+            .iter()
+            .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_ref(), *sig))
+            .collect();
+
+        aggregate_verify_multiple_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
     }
 
     pub const fn is_attributable(&self) -> bool {

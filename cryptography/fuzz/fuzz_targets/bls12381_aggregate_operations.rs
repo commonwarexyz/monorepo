@@ -15,8 +15,6 @@ use common::{
     arbitrary_vec_g1, arbitrary_vec_g2,
 };
 
-type Message = (Option<Vec<u8>>, Vec<u8>);
-
 #[derive(Debug)]
 enum FuzzOperation {
     PublicKeysMinPk {
@@ -45,14 +43,12 @@ enum FuzzOperation {
     },
     VerifyMultipleMessagesMinPk {
         public_key: G1,
-        messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
-        signatures: Vec<G2>,
+        entries: Vec<(Option<Vec<u8>>, Vec<u8>, G2)>,
         concurrency: usize,
     },
     VerifyMultipleMessagesMinSig {
         public_key: G2,
-        messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
-        signatures: Vec<G1>,
+        entries: Vec<(Option<Vec<u8>>, Vec<u8>, G1)>,
         concurrency: usize,
     },
 }
@@ -89,20 +85,28 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             6 => {
                 let messages = arbitrary_messages(u, 0, 20)?;
                 let signatures = arbitrary_vec_g2(u, messages.len(), messages.len())?;
+                let entries = messages
+                    .into_iter()
+                    .zip(signatures)
+                    .map(|((ns, msg), sig)| (ns, msg, sig))
+                    .collect();
                 Ok(FuzzOperation::VerifyMultipleMessagesMinPk {
                     public_key: arbitrary_g1(u)?,
-                    messages,
-                    signatures,
+                    entries,
                     concurrency: u.int_in_range(1..=8)?,
                 })
             }
             7 => {
                 let messages = arbitrary_messages(u, 0, 20)?;
                 let signatures = arbitrary_vec_g1(u, messages.len(), messages.len())?;
+                let entries = messages
+                    .into_iter()
+                    .zip(signatures)
+                    .map(|((ns, msg), sig)| (ns, msg, sig))
+                    .collect();
                 Ok(FuzzOperation::VerifyMultipleMessagesMinSig {
                     public_key: arbitrary_g2(u)?,
-                    messages,
-                    signatures,
+                    entries,
                     concurrency: u.int_in_range(1..=8)?,
                 })
             }
@@ -173,21 +177,19 @@ fn fuzz(op: FuzzOperation) {
 
         FuzzOperation::VerifyMultipleMessagesMinPk {
             public_key,
-            messages,
-            signatures,
+            entries,
             concurrency,
         } => {
-            if !messages.is_empty() && concurrency > 0 && messages.len() == signatures.len() {
-                let messages_refs: Vec<(Option<&[u8]>, &[u8])> = messages
+            if !entries.is_empty() && concurrency > 0 {
+                let entries_refs: Vec<_> = entries
                     .iter()
-                    .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
+                    .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_slice(), *sig))
                     .collect();
 
-                let _ = aggregate_verify_multiple_messages::<_, MinPk, _, _>(
+                let _ = aggregate_verify_multiple_messages::<_, MinPk, _>(
                     &mut thread_rng(),
                     &public_key,
-                    &messages_refs,
-                    &signatures,
+                    &entries_refs,
                     concurrency,
                 );
             }
@@ -195,21 +197,19 @@ fn fuzz(op: FuzzOperation) {
 
         FuzzOperation::VerifyMultipleMessagesMinSig {
             public_key,
-            messages,
-            signatures,
+            entries,
             concurrency,
         } => {
-            if !messages.is_empty() && concurrency > 0 && messages.len() == signatures.len() {
-                let messages_refs: Vec<(Option<&[u8]>, &[u8])> = messages
+            if !entries.is_empty() && concurrency > 0 {
+                let entries_refs: Vec<_> = entries
                     .iter()
-                    .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
+                    .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_slice(), *sig))
                     .collect();
 
-                let _ = aggregate_verify_multiple_messages::<_, MinSig, _, _>(
+                let _ = aggregate_verify_multiple_messages::<_, MinSig, _>(
                     &mut thread_rng(),
                     &public_key,
-                    &messages_refs,
-                    &signatures,
+                    &entries_refs,
                     concurrency,
                 );
             }

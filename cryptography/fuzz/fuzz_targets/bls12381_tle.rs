@@ -19,8 +19,6 @@ use commonware_cryptography::bls12381::{
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
-type Message = (Option<Vec<u8>>, Vec<u8>);
-
 #[derive(Debug, Clone)]
 enum FuzzOperation {
     EncryptDecryptMinPk {

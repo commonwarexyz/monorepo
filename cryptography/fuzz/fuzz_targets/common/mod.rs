@@ -1,5 +1,6 @@
-use crate::Message;
 use arbitrary::Unstructured;
+
+pub type Message = (Option<Vec<u8>>, Vec<u8>);
 use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::{
     primitives::{

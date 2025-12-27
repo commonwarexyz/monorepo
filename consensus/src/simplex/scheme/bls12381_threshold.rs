@@ -456,16 +456,20 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
-        aggregate_verify_multiple_messages::<_, V, _, _>(
+        aggregate_verify_multiple_messages::<_, V, _>(
             rng,
             &evaluated,
             &[
-                (Some(vote_namespace.as_ref()), vote_message.as_ref()),
-                (Some(seed_namespace.as_ref()), seed_message.as_ref()),
-            ],
-            &[
-                attestation.signature.vote_signature,
-                attestation.signature.seed_signature,
+                (
+                    Some(vote_namespace.as_ref()),
+                    vote_message.as_ref(),
+                    attestation.signature.vote_signature,
+                ),
+                (
+                    Some(seed_namespace.as_ref()),
+                    seed_message.as_ref(),
+                    attestation.signature.seed_signature,
+                ),
             ],
             1,
         )
@@ -596,14 +600,21 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
-        aggregate_verify_multiple_messages::<_, V, _, _>(
+        aggregate_verify_multiple_messages::<_, V, _>(
             rng,
             identity,
             &[
-                (Some(vote_namespace.as_ref()), vote_message.as_ref()),
-                (Some(seed_namespace.as_ref()), seed_message.as_ref()),
+                (
+                    Some(vote_namespace.as_ref()),
+                    vote_message.as_ref(),
+                    certificate.vote_signature,
+                ),
+                (
+                    Some(seed_namespace.as_ref()),
+                    seed_message.as_ref(),
+                    certificate.seed_signature,
+                ),
             ],
-            &[certificate.vote_signature, certificate.seed_signature],
             1,
         )
         .is_ok()
@@ -623,8 +634,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let identity = self.identity();
 
         let mut seeds = HashMap::new();
-        let mut messages = Vec::new();
-        let mut signatures: Vec<&V::Signature> = Vec::new();
+        let mut entries: Vec<_> = Vec::new();
 
         let notarize_namespace = notarize_namespace(namespace);
         let nullify_namespace = nullify_namespace(namespace);
@@ -632,35 +642,40 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let seed_namespace = seed_namespace(namespace);
 
         for (context, certificate) in certificates {
-            match context {
+            let vote_entry = match context {
                 Subject::Notarize { proposal } => {
-                    // Prepare notarize message
                     let notarize_message = proposal.encode();
-                    let notarize_message = (Some(notarize_namespace.as_slice()), notarize_message);
-                    messages.push(notarize_message);
+                    (
+                        Some(notarize_namespace.clone()),
+                        notarize_message,
+                        certificate.vote_signature,
+                    )
                 }
                 Subject::Nullify { round } => {
-                    // Prepare nullify message
-                    let nullify_encoded = round.encode();
-                    let nullify_message =
-                        (Some(nullify_namespace.as_slice()), nullify_encoded.clone());
-                    messages.push(nullify_message);
+                    let nullify_message = round.encode();
+                    (
+                        Some(nullify_namespace.clone()),
+                        nullify_message,
+                        certificate.vote_signature,
+                    )
                 }
                 Subject::Finalize { proposal } => {
-                    // Prepare finalize message
                     let finalize_message = proposal.encode();
-                    let finalize_message = (Some(finalize_namespace.as_slice()), finalize_message);
-                    messages.push(finalize_message);
+                    (
+                        Some(finalize_namespace.clone()),
+                        finalize_message,
+                        certificate.vote_signature,
+                    )
                 }
-            }
-            signatures.push(&certificate.vote_signature);
+            };
+            entries.push(vote_entry);
 
             // Seed signatures are per-view, so multiple certificates for the same view
             // (e.g., notarization and finalization) share the same seed. We only include
             // each unique seed once in the aggregate, but verify all certificates for a
             // view have matching seeds.
             if let Some(previous) = seeds.get(&context.view()) {
-                if *previous != &certificate.seed_signature {
+                if *previous != certificate.seed_signature {
                     return false;
                 }
             } else {
@@ -671,23 +686,21 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
                     Subject::Nullify { round } => round.encode(),
                 };
 
-                messages.push((Some(seed_namespace.as_slice()), seed_message));
-                signatures.push(&certificate.seed_signature);
-                seeds.insert(context.view(), &certificate.seed_signature);
+                entries.push((
+                    Some(seed_namespace.clone()),
+                    seed_message,
+                    certificate.seed_signature,
+                ));
+                seeds.insert(context.view(), certificate.seed_signature);
             }
         }
 
-        aggregate_verify_multiple_messages::<_, V, _, _>(
-            rng,
-            identity,
-            &messages
-                .iter()
-                .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
-                .collect::<Vec<_>>(),
-            signatures,
-            1,
-        )
-        .is_ok()
+        let entries_refs: Vec<_> = entries
+            .iter()
+            .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_ref(), *sig))
+            .collect();
+
+        aggregate_verify_multiple_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
     }
 
     fn is_attributable(&self) -> bool {

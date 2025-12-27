@@ -19,8 +19,6 @@ use common::{
     arbitrary_vec_partial_sig_g2,
 };
 
-type Message = (Option<Vec<u8>>, Vec<u8>);
-
 enum FuzzOperation {
     PartialSignProofOfPossessionMinPk {
         public: Sharing<MinPk>,
@@ -41,14 +39,12 @@ enum FuzzOperation {
     PartialVerifyMultipleMessagesMinPk {
         public: Sharing<MinPk>,
         index: u32,
-        messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
-        partials: Vec<G2>,
+        entries: Vec<(Option<Vec<u8>>, Vec<u8>, G2)>,
     },
     PartialVerifyMultipleMessagesMinSig {
         public: Sharing<MinSig>,
         index: u32,
-        messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
-        partials: Vec<G1>,
+        entries: Vec<(Option<Vec<u8>>, Vec<u8>, G1)>,
     },
     PartialVerifyMultiplePublicKeysMinPk {
         public: Sharing<MinPk>,
@@ -113,18 +109,34 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 public: u.arbitrary()?,
                 partial: arbitrary_partial_sig_g1(u)?,
             }),
-            4 => Ok(FuzzOperation::PartialVerifyMultipleMessagesMinPk {
-                public: u.arbitrary()?,
-                index: u.int_in_range(1..=100)?,
-                messages: arbitrary_messages(u, 0, 10)?,
-                partials: arbitrary_vec_g2(u, 0, 10)?,
-            }),
-            5 => Ok(FuzzOperation::PartialVerifyMultipleMessagesMinSig {
-                public: u.arbitrary()?,
-                index: u.int_in_range(1..=100)?,
-                messages: arbitrary_messages(u, 0, 10)?,
-                partials: arbitrary_vec_g1(u, 0, 10)?,
-            }),
+            4 => {
+                let messages = arbitrary_messages(u, 0, 10)?;
+                let partials = arbitrary_vec_g2(u, messages.len(), messages.len())?;
+                let entries = messages
+                    .into_iter()
+                    .zip(partials)
+                    .map(|((ns, msg), sig)| (ns, msg, sig))
+                    .collect();
+                Ok(FuzzOperation::PartialVerifyMultipleMessagesMinPk {
+                    public: u.arbitrary()?,
+                    index: u.int_in_range(1..=100)?,
+                    entries,
+                })
+            }
+            5 => {
+                let messages = arbitrary_messages(u, 0, 10)?;
+                let partials = arbitrary_vec_g1(u, messages.len(), messages.len())?;
+                let entries = messages
+                    .into_iter()
+                    .zip(partials)
+                    .map(|((ns, msg), sig)| (ns, msg, sig))
+                    .collect();
+                Ok(FuzzOperation::PartialVerifyMultipleMessagesMinSig {
+                    public: u.arbitrary()?,
+                    index: u.int_in_range(1..=100)?,
+                    entries,
+                })
+            }
             6 => Ok(FuzzOperation::PartialVerifyMultiplePublicKeysMinPk {
                 public: u.arbitrary()?,
                 namespace: arbitrary_optional_bytes(u, 50)?,
@@ -201,28 +213,28 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::PartialVerifyMultipleMessagesMinPk {
             public,
             index,
-            messages,
-            partials,
+            entries,
         } => {
-            if index <= public.required() && messages.len() == partials.len() {
-                let messages_refs: Vec<(Option<&[u8]>, &[u8])> = messages
+            if index <= public.required() && !entries.is_empty() {
+                let entries_refs: Vec<_> = entries
                     .iter()
-                    .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
-                    .collect();
-                let partials_evals: Vec<PartialSignature<MinPk>> = partials
-                    .into_iter()
                     .enumerate()
-                    .map(|(i, sig)| PartialSignature {
-                        index: index + i as u32,
-                        value: sig,
+                    .map(|(i, (ns, msg, sig))| {
+                        (
+                            ns.as_deref(),
+                            msg.as_slice(),
+                            PartialSignature {
+                                index: index + i as u32,
+                                value: *sig,
+                            },
+                        )
                     })
                     .collect();
-                let _ = partial_aggregate_verify_multiple_messages::<_, MinPk, _, _>(
+                let _ = partial_aggregate_verify_multiple_messages::<_, MinPk, _>(
                     &mut thread_rng(),
                     &public,
                     index,
-                    &messages_refs,
-                    &partials_evals,
+                    &entries_refs,
                     1,
                 );
             }
@@ -231,28 +243,28 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::PartialVerifyMultipleMessagesMinSig {
             public,
             index,
-            messages,
-            partials,
+            entries,
         } => {
-            if index <= public.required() && messages.len() == partials.len() {
-                let messages_refs: Vec<(Option<&[u8]>, &[u8])> = messages
+            if index <= public.required() && !entries.is_empty() {
+                let entries_refs: Vec<_> = entries
                     .iter()
-                    .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
-                    .collect();
-                let partials_evals: Vec<PartialSignature<MinSig>> = partials
-                    .into_iter()
                     .enumerate()
-                    .map(|(i, sig)| PartialSignature {
-                        index: index + i as u32,
-                        value: sig,
+                    .map(|(i, (ns, msg, sig))| {
+                        (
+                            ns.as_deref(),
+                            msg.as_slice(),
+                            PartialSignature {
+                                index: index + i as u32,
+                                value: *sig,
+                            },
+                        )
                     })
                     .collect();
-                let _ = partial_aggregate_verify_multiple_messages::<_, MinSig, _, _>(
+                let _ = partial_aggregate_verify_multiple_messages::<_, MinSig, _>(
                     &mut thread_rng(),
                     &public,
                     index,
-                    &messages_refs,
-                    &partials_evals,
+                    &entries_refs,
                     1,
                 );
             }
