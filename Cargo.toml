@@ -62,6 +62,7 @@ undocumented_unsafe_blocks = "deny"
 suspicious_op_assign_impl = "allow"
 
 [workspace.dependencies]
+ahash = { version = "0.8.12", default-features = false }
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
 async-lock = "3.4.0"

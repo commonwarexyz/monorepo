@@ -14,6 +14,7 @@ documentation = "https://docs.rs/commonware-runtime"
 workspace = true
 
 [dependencies]
+ahash.workspace = true
 async-lock.workspace = true
 bytes.workspace = true
 cfg-if.workspace = true
@@ -22,6 +23,7 @@ commonware-macros.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
 futures.workspace = true
 governor.workspace = true
+hashbrown.workspace = true
 io-uring = { workspace = true, optional = true }
 libc.workspace = true
 opentelemetry.workspace = true

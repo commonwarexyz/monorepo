@@ -15,8 +15,8 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Quota,
-    Spawner,
+    spawn_cell, Clock, ContextCell, Handle, HashMap, HashSet, Listener as _, Metrics,
+    Network as RNetwork, Quota, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{channels::ring, ordered::Set, NZUsize, TryCollect};
@@ -29,7 +29,7 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::BTreeMap,
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::{Duration, SystemTime},
@@ -133,13 +133,13 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     links: HashMap<(P, P), Link>,
 
     // A map from a public key to a peer
-    peers: BTreeMap<P, Peer<P>>,
+    peers: HashMap<P, Peer<P>>,
 
     // Peer sets indexed by their ID
     peer_sets: BTreeMap<u64, Set<P>>,
 
     // Reference count for each peer (number of peer sets they belong to)
-    peer_refs: BTreeMap<P, usize>,
+    peer_refs: HashMap<P, usize>,
 
     // Maximum number of peer sets to track
     tracked_peer_sets: Option<usize>,
@@ -193,11 +193,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 oracle_sender: oracle_sender.clone(),
                 sender,
                 receiver,
-                links: HashMap::new(),
-                peers: BTreeMap::new(),
-                peer_sets: BTreeMap::new(),
-                peer_refs: BTreeMap::new(),
-                blocks: HashSet::new(),
+                links: HashMap::default(),
+                peers: HashMap::default(),
+                peer_sets: BTreeMap::default(),
+                peer_refs: HashMap::default(),
+                blocks: HashSet::default(),
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
                 peer_subscribers: Vec::new(),
@@ -363,7 +363,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                             .keys()
                             .cloned()
                             .try_collect()
-                            .expect("BTreeMap keys are unique"),
+                            .expect("HashMap keys are unique"),
                     ));
                 } else {
                     // Return the peer set at the given index
@@ -525,13 +525,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .keys()
                 .cloned()
                 .try_collect()
-                .expect("BTreeMap keys are unique")
+                .expect("HashMap keys are unique")
         } else {
             self.peer_refs
                 .keys()
                 .cloned()
                 .try_collect()
-                .expect("BTreeMap keys are unique")
+                .expect("HashMap keys are unique")
         }
     }
 }
@@ -1096,7 +1096,7 @@ impl<P: PublicKey> Peer<P> {
         // Spawn router
         context.with_label("router").spawn(|context| async move {
             // Map of channels to mailboxes (senders to particular channels)
-            let mut mailboxes = HashMap::new();
+            let mut mailboxes = HashMap::default();
 
             // Continually listen for control messages and outbound messages
             select_loop! {

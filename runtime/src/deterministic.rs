@@ -37,6 +37,7 @@
 //! ```
 
 use crate::{
+    hash,
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
@@ -365,6 +366,7 @@ pub struct Checkpoint {
     storage: Arc<Storage>,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
+    hash_seed: u64,
 }
 
 impl Checkpoint {
@@ -393,6 +395,9 @@ impl From<Config> for Runner {
 
 impl From<Checkpoint> for Runner {
     fn from(checkpoint: Checkpoint) -> Self {
+        // Restore TLS hash seed for deterministic HashMap/HashSet iteration order
+        hash::set_seed(checkpoint.hash_seed);
+
         Self {
             state: State::Checkpoint(checkpoint),
         }
@@ -404,6 +409,10 @@ impl Runner {
     pub fn new(cfg: Config) -> Self {
         // Ensure config is valid
         cfg.assert();
+
+        // Set TLS hash seed for deterministic HashMap/HashSet iteration order
+        hash::set_seed(cfg.seed);
+
         Self {
             state: State::Config(cfg),
         }
@@ -606,6 +615,7 @@ impl Runner {
             storage,
             dns: executor.dns,
             catch_panics: executor.panicker.catch(),
+            hash_seed: hash::get_seed().expect("hash seed not set"),
         };
 
         (output, checkpoint)
@@ -1810,5 +1820,70 @@ mod tests {
                 .expect("missing runtime_iterations_total metric");
             assert!(iterations > 500);
         });
+    }
+
+    #[test]
+    fn test_hashmap_deterministic_iteration() {
+        use crate::HashMap;
+
+        // Helper to create a HashMap and collect iteration order
+        fn collect_iteration_order(seed: u64) -> Vec<i32> {
+            let executor = deterministic::Runner::seeded(seed);
+            executor.start(|_context| async move {
+                let mut map: HashMap<i32, &str> = HashMap::default();
+                for i in 0..100 {
+                    map.insert(i, "value");
+                }
+                map.keys().copied().collect()
+            })
+        }
+
+        // Same seed should produce same iteration order
+        let order1 = collect_iteration_order(42);
+        let order2 = collect_iteration_order(42);
+        assert_eq!(
+            order1, order2,
+            "same seed should produce same iteration order"
+        );
+
+        // Different seeds should produce different iteration order
+        let order3 = collect_iteration_order(12345);
+        assert_ne!(
+            order1, order3,
+            "different seeds should produce different iteration order"
+        );
+    }
+
+    #[test]
+    fn test_hashmap_deterministic_after_checkpoint() {
+        use crate::HashMap;
+
+        // Create a HashMap, checkpoint, and verify iteration order is preserved
+        let seed = 42u64;
+        let executor = deterministic::Runner::seeded(seed);
+
+        let (order_before, checkpoint) = executor.start_and_recover(|_context| async move {
+            let mut map: HashMap<i32, &str> = HashMap::default();
+            for i in 0..50 {
+                map.insert(i, "value");
+            }
+            map.keys().copied().collect::<Vec<_>>()
+        });
+
+        // Recover from checkpoint and create another HashMap
+        let executor = deterministic::Runner::from(checkpoint);
+        let order_after = executor.start(|_context| async move {
+            let mut map: HashMap<i32, &str> = HashMap::default();
+            for i in 0..50 {
+                map.insert(i, "value");
+            }
+            map.keys().copied().collect::<Vec<_>>()
+        });
+
+        // Both should have the same iteration order (same seed preserved through checkpoint)
+        assert_eq!(
+            order_before, order_after,
+            "iteration order should be preserved through checkpoint"
+        );
     }
 }
