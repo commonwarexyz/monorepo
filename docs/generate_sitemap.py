@@ -6,13 +6,12 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-import os
 from urllib.parse import urljoin
 from xml.sax.saxutils import escape
 
 
 DOCS_ROOT = Path(__file__).resolve().parent
-BASE_URL = os.getenv("BASE_URL", "https://commonware.xyz")
+BASE_URL = "https://commonware.xyz"
 EXCLUDED_FILES = {"template.html"}
 EXCLUDED_DIRS = {".venv"}
 EXTRA_FILES = ["llms.txt", "robots.txt"]
@@ -69,6 +68,8 @@ def collect_code(version: str) -> list[Path]:
             continue
 
         rel = path.relative_to(DOCS_ROOT)
+        if rel.parts[2] == "docs":
+            continue
         if any(part.startswith(".") for part in rel.parts):
             continue
 
