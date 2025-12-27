@@ -81,7 +81,7 @@ where
             match msg {
                 Message::Ack(ack) => {
                     // Verify properly constructed (not needed in production)
-                    assert!(ack.verify(&self.scheme, &self.namespace));
+                    assert!(ack.verify(&mut self.rng, &self.scheme, &self.namespace));
 
                     // Test encoding/decoding
                     let encoded = ack.encode();

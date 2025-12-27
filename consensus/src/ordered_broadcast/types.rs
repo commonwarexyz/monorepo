@@ -706,8 +706,9 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     /// using the provided scheme.
     ///
     /// Returns true if the attestation is valid, false otherwise.
-    pub fn verify(&self, namespace: &[u8], scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
     where
+        R: Rng + CryptoRng,
         S: scheme::Scheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
@@ -715,7 +716,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_attestation::<D>(&ack_namespace, ctx, &self.attestation)
+        scheme.verify_attestation::<_, D>(rng, &ack_namespace, ctx, &self.attestation)
     }
 
     /// Generate a new Ack by signing with the provided scheme.
@@ -1611,10 +1612,10 @@ mod tests {
         let epoch = Epoch::new(5);
 
         let ack = Ack::sign(NAMESPACE, &fixture.schemes[0], chunk, epoch).expect("Should sign ack");
-        assert!(ack.verify(NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut rand::thread_rng(), NAMESPACE, &fixture.verifier));
 
         // Test that verification fails with wrong namespace
-        assert!(!ack.verify(b"wrong", &fixture.verifier));
+        assert!(!ack.verify(&mut rand::thread_rng(), b"wrong", &fixture.verifier));
     }
 
     #[test]
@@ -1900,7 +1901,7 @@ mod tests {
         .expect("Should sign ack");
 
         // Verification should succeed
-        assert!(ack.verify(NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut rand::thread_rng(), NAMESPACE, &fixture.verifier));
 
         // Create an ack with tampered signature by signing with a different scheme
         let ctx = AckSubject {
@@ -1916,7 +1917,7 @@ mod tests {
         let invalid_ack = Ack::<PublicKey, S, Sha256Digest>::new(chunk, epoch, tampered_vote);
 
         // Verification should fail because the signer index doesn't match the signature
-        assert!(!invalid_ack.verify(NAMESPACE, &fixture.verifier));
+        assert!(!invalid_ack.verify(&mut rand::thread_rng(), NAMESPACE, &fixture.verifier));
     }
 
     #[test]
@@ -1946,10 +1947,10 @@ mod tests {
                 .expect("Should sign ack");
 
         // Verification should succeed with correct verifier
-        assert!(ack.verify(NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut rand::thread_rng(), NAMESPACE, &fixture.verifier));
 
         // Verification should fail with wrong verifier
-        assert!(!ack.verify(NAMESPACE, &wrong_fixture.verifier));
+        assert!(!ack.verify(&mut rand::thread_rng(), NAMESPACE, &wrong_fixture.verifier));
     }
 
     #[test]

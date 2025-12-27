@@ -438,12 +438,17 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         })
     }
 
-    fn verify_attestation<D: Digest>(
+    fn verify_attestation<R, D>(
         &self,
+        rng: &mut R,
         namespace: &[u8],
         subject: Subject<'_, D>,
         attestation: &Attestation<Self>,
-    ) -> bool {
+    ) -> bool
+    where
+        R: Rng + CryptoRng,
+        D: Digest,
+    {
         let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
             return false;
         };
@@ -452,7 +457,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
         aggregate_verify_multiple_messages::<_, V, _, _>(
-            &mut rand::thread_rng(),
+            rng,
             &evaluated,
             &[
                 (Some(vote_namespace.as_ref()), vote_message.as_ref()),
@@ -815,7 +820,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(scheme.verify_attestation(
+        assert!(scheme.verify_attestation::<_, Sha256Digest>(
+            &mut rand::thread_rng(),
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -831,7 +837,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(scheme.verify_attestation::<Sha256Digest>(
+        assert!(scheme.verify_attestation::<_, Sha256Digest>(
+            &mut rand::thread_rng(),
             NAMESPACE,
             Subject::Nullify {
                 round: proposal.round,
@@ -847,7 +854,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(scheme.verify_attestation(
+        assert!(scheme.verify_attestation::<_, Sha256Digest>(
+            &mut rand::thread_rng(),
             NAMESPACE,
             Subject::Finalize {
                 proposal: &proposal,
@@ -896,7 +904,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(verifier.verify_attestation(
+        assert!(verifier.verify_attestation::<_, Sha256Digest>(
+            &mut rand::thread_rng(),
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1317,7 +1326,8 @@ mod tests {
             )
             .unwrap();
 
-        certificate_verifier.verify_attestation(
+        certificate_verifier.verify_attestation::<_, Sha256Digest>(
+            &mut rand::thread_rng(),
             NAMESPACE,
             Subject::Finalize {
                 proposal: &proposal,

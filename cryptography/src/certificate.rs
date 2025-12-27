@@ -183,12 +183,16 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     ) -> Option<Attestation<Self>>;
 
     /// Verifies a single attestation against the participant material managed by the scheme.
-    fn verify_attestation<D: Digest>(
+    fn verify_attestation<R, D>(
         &self,
+        rng: &mut R,
         namespace: &[u8],
         subject: Self::Subject<'_, D>,
         attestation: &Attestation<Self>,
-    ) -> bool;
+    ) -> bool
+    where
+        R: Rng + CryptoRng,
+        D: Digest;
 
     /// Batch-verifies attestations and separates valid attestations from signer indices that failed
     /// verification.
@@ -196,7 +200,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Callers must not include duplicate attestations from the same signer.
     fn verify_attestations<R, D, I>(
         &self,
-        _rng: &mut R,
+        rng: &mut R,
         namespace: &[u8],
         subject: Self::Subject<'_, D>,
         attestations: I,
@@ -209,7 +213,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         let mut invalid = BTreeSet::new();
 
         let verified = attestations.into_iter().filter_map(|attestation| {
-            if self.verify_attestation(namespace, subject.clone(), &attestation) {
+            if self.verify_attestation(&mut *rng, namespace, subject.clone(), &attestation) {
                 Some(attestation)
             } else {
                 invalid.insert(attestation.signer);

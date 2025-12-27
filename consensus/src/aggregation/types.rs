@@ -158,11 +158,12 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     ///
     /// Returns `true` if the attestation is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
+        R: Rng + CryptoRng,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<D>(namespace, &self.item, &self.attestation)
+        scheme.verify_attestation::<_, D>(rng, namespace, &self.item, &self.attestation)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -486,7 +487,7 @@ mod tests {
         // Verify the restored ack
         assert_eq!(restored_ack.item, item);
         assert_eq!(restored_ack.epoch, Epoch::new(1));
-        assert!(restored_ack.verify(&schemes[0], NAMESPACE));
+        assert!(restored_ack.verify(&mut rand::thread_rng(), &schemes[0], NAMESPACE));
 
         // Test TipAck codec
         let tip_ack = TipAck {

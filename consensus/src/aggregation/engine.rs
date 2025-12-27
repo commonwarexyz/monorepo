@@ -665,7 +665,7 @@ impl<
         }
 
         // Validate signature
-        if !ack.verify(&*scheme, &self.namespace) {
+        if !ack.verify(&mut rand::thread_rng(), &*scheme, &self.namespace) {
             return Err(Error::InvalidAckSignature);
         }
 

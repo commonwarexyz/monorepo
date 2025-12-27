@@ -789,11 +789,13 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Verifies the notarize vote against the provided signing scheme.
     ///
     /// This ensures that the notarize signature is valid for the claimed proposal.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
+        R: Rng + CryptoRng,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<D>(
+        scheme.verify_attestation::<_, D>(
+            rng,
             namespace,
             Subject::Notarize {
                 proposal: &self.proposal,
@@ -1046,11 +1048,13 @@ impl<S: Scheme> Nullify<S> {
     /// Verifies the nullify vote against the provided signing scheme.
     ///
     /// This ensures that the nullify signature is valid for the given round.
-    pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R, D: Digest>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
+        R: Rng + CryptoRng,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<D>(
+        scheme.verify_attestation::<_, D>(
+            rng,
             namespace,
             Subject::Nullify { round: self.round },
             &self.attestation,
@@ -1262,11 +1266,13 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     /// Verifies the finalize vote against the provided signing scheme.
     ///
     /// This ensures that the finalize signature is valid for the claimed proposal.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
+        R: Rng + CryptoRng,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<D>(
+        scheme.verify_attestation::<_, D>(
+            rng,
             namespace,
             Subject::Finalize {
                 proposal: &self.proposal,
@@ -1899,16 +1905,16 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
         S: scheme::Scheme<D>,
     {
         match self {
-            Self::Notarize(n) => n.verify(scheme, namespace),
+            Self::Notarize(n) => n.verify(rng, scheme, namespace),
             Self::Notarization(n) => n.verify(rng, scheme, namespace),
             Self::Certification(n) => n.verify(rng, scheme, namespace),
-            Self::Nullify(n) => n.verify(scheme, namespace),
+            Self::Nullify(n) => n.verify(rng, scheme, namespace),
             Self::Nullification(n) => n.verify(rng, scheme, namespace),
-            Self::Finalize(f) => f.verify(scheme, namespace),
+            Self::Finalize(f) => f.verify(rng, scheme, namespace),
             Self::Finalization(f) => f.verify(rng, scheme, namespace),
-            Self::ConflictingNotarize(c) => c.verify(scheme, namespace),
-            Self::ConflictingFinalize(c) => c.verify(scheme, namespace),
-            Self::NullifyFinalize(c) => c.verify(scheme, namespace),
+            Self::ConflictingNotarize(c) => c.verify(rng, scheme, namespace),
+            Self::ConflictingFinalize(c) => c.verify(rng, scheme, namespace),
+            Self::NullifyFinalize(c) => c.verify(rng, scheme, namespace),
         }
     }
 }
@@ -2158,11 +2164,13 @@ impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
+        R: Rng + CryptoRng,
         S: scheme::Scheme<D>,
     {
-        self.notarize_1.verify(scheme, namespace) && self.notarize_2.verify(scheme, namespace)
+        self.notarize_1.verify(rng, scheme, namespace)
+            && self.notarize_2.verify(rng, scheme, namespace)
     }
 }
 
@@ -2272,11 +2280,13 @@ impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
+        R: Rng + CryptoRng,
         S: scheme::Scheme<D>,
     {
-        self.finalize_1.verify(scheme, namespace) && self.finalize_2.verify(scheme, namespace)
+        self.finalize_1.verify(rng, scheme, namespace)
+            && self.finalize_2.verify(rng, scheme, namespace)
     }
 }
 
@@ -2384,11 +2394,12 @@ impl<S: Scheme, D: Digest> NullifyFinalize<S, D> {
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
+        R: Rng + CryptoRng,
         S: scheme::Scheme<D>,
     {
-        self.nullify.verify(scheme, namespace) && self.finalize.verify(scheme, namespace)
+        self.nullify.verify(rng, scheme, namespace) && self.finalize.verify(rng, scheme, namespace)
     }
 }
 
@@ -2521,7 +2532,7 @@ mod tests {
         let decoded = Notarize::decode(encoded).unwrap();
 
         assert_eq!(notarize, decoded);
-        assert!(decoded.verify(&fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
     }
 
     #[test]
@@ -2577,7 +2588,11 @@ mod tests {
         let encoded = nullify.encode();
         let decoded = Nullify::decode(encoded).unwrap();
         assert_eq!(nullify, decoded);
-        assert!(decoded.verify::<Sha256>(&fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify::<_, Sha256>(
+            &mut rand::thread_rng(),
+            &fixture.schemes[0],
+            NAMESPACE
+        ));
     }
 
     #[test]
@@ -2630,7 +2645,7 @@ mod tests {
         let encoded = finalize.encode();
         let decoded = Finalize::decode(encoded).unwrap();
         assert_eq!(finalize, decoded);
-        assert!(decoded.verify(&fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
     }
 
     #[test]
@@ -2808,7 +2823,7 @@ mod tests {
         let decoded = ConflictingNotarize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting, decoded);
-        assert!(decoded.verify(&fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
     }
 
     #[test]
@@ -2844,7 +2859,7 @@ mod tests {
         let decoded = ConflictingFinalize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting, decoded);
-        assert!(decoded.verify(&fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
     }
 
     #[test]
@@ -2872,7 +2887,7 @@ mod tests {
         let decoded = NullifyFinalize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflict, decoded);
-        assert!(decoded.verify(&fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
     }
 
     #[test]
@@ -2894,8 +2909,12 @@ mod tests {
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let notarize = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
 
-        assert!(notarize.verify(&fixture.schemes[0], NAMESPACE));
-        assert!(!notarize.verify(&fixture.schemes[0], b"wrong_namespace"));
+        assert!(notarize.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(!notarize.verify(
+            &mut rand::thread_rng(),
+            &fixture.schemes[0],
+            b"wrong_namespace"
+        ));
     }
 
     #[test]
@@ -2918,8 +2937,8 @@ mod tests {
         let proposal = Proposal::new(round, View::new(5), sample_digest(2));
         let notarize = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
 
-        assert!(notarize.verify(&fixture.schemes[0], NAMESPACE));
-        assert!(!notarize.verify(&wrong_fixture.verifier, NAMESPACE));
+        assert!(notarize.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(!notarize.verify(&mut rand::thread_rng(), &wrong_fixture.verifier, NAMESPACE));
     }
 
     #[test]
@@ -3047,9 +3066,13 @@ mod tests {
         let notarize2 = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal2).unwrap();
         let conflict = ConflictingNotarize::new(notarize1, notarize2);
 
-        assert!(conflict.verify(&fixture.schemes[0], NAMESPACE));
-        assert!(!conflict.verify(&fixture.schemes[0], b"wrong_namespace"));
-        assert!(!conflict.verify(&wrong_fixture.verifier, NAMESPACE));
+        assert!(conflict.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(!conflict.verify(
+            &mut rand::thread_rng(),
+            &fixture.schemes[0],
+            b"wrong_namespace"
+        ));
+        assert!(!conflict.verify(&mut rand::thread_rng(), &wrong_fixture.verifier, NAMESPACE));
     }
 
     #[test]
@@ -3075,9 +3098,13 @@ mod tests {
         let finalize = Finalize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
         let conflict = NullifyFinalize::new(nullify, finalize);
 
-        assert!(conflict.verify(&fixture.schemes[0], NAMESPACE));
-        assert!(!conflict.verify(&fixture.schemes[0], b"wrong_namespace"));
-        assert!(!conflict.verify(&wrong_fixture.verifier, NAMESPACE));
+        assert!(conflict.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(!conflict.verify(
+            &mut rand::thread_rng(),
+            &fixture.schemes[0],
+            b"wrong_namespace"
+        ));
+        assert!(!conflict.verify(&mut rand::thread_rng(), &wrong_fixture.verifier, NAMESPACE));
     }
 
     #[test]

@@ -946,7 +946,7 @@ impl<
         }
 
         // Validate the vote signature
-        if !ack.verify(&self.namespace, scheme.as_ref()) {
+        if !ack.verify(&mut rand::thread_rng(), &self.namespace, scheme.as_ref()) {
             return Err(Error::InvalidAckSignature);
         }
 

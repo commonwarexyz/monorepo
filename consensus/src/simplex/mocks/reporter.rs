@@ -122,7 +122,7 @@ where
         let verified = activity.verified();
         match &activity {
             Activity::Notarize(notarize) => {
-                if !notarize.verify(&self.scheme, &self.namespace) {
+                if !notarize.verify(&mut self.context, &self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -164,7 +164,7 @@ where
                 self.certified(notarization.round(), &notarization.certificate);
             }
             Activity::Nullify(nullify) => {
-                if !nullify.verify(&self.scheme, &self.namespace) {
+                if !nullify.verify(&mut self.context, &self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -204,7 +204,7 @@ where
                 self.certified(nullification.round, &nullification.certificate);
             }
             Activity::Finalize(finalize) => {
-                if !finalize.verify(&self.scheme, &self.namespace) {
+                if !finalize.verify(&mut self.context, &self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -254,7 +254,7 @@ where
             }
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.scheme, &self.namespace) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -273,7 +273,7 @@ where
             }
             Activity::ConflictingFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.scheme, &self.namespace) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -292,7 +292,7 @@ where
             }
             Activity::NullifyFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.scheme, &self.namespace) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;

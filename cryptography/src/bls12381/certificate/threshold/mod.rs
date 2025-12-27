@@ -483,12 +483,17 @@ mod macros {
                     self.generic.sign::<_, D>(namespace, subject)
                 }
 
-                fn verify_attestation<D: $crate::Digest>(
+                fn verify_attestation<R, D>(
                     &self,
+                    _rng: &mut R,
                     namespace: &[u8],
                     subject: Self::Subject<'_, D>,
                     attestation: &$crate::certificate::Attestation<Self>,
-                ) -> bool {
+                ) -> bool
+                where
+                    R: rand::Rng + rand::CryptoRng,
+                    D: $crate::Digest,
+                {
                     self.generic.verify_attestation::<_, D>(namespace, subject, attestation)
                 }
 
@@ -643,7 +648,8 @@ mod tests {
         let attestation = scheme
             .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
-        assert!(scheme.verify_attestation::<Sha256Digest>(
+        assert!(scheme.verify_attestation::<_, Sha256Digest>(
+            &mut rand::thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &attestation
@@ -1001,7 +1007,8 @@ mod tests {
         let vote = schemes[1]
             .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
-        assert!(verifier.verify_attestation::<Sha256Digest>(
+        assert!(verifier.verify_attestation::<_, Sha256Digest>(
+            &mut rand::thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &vote
@@ -1051,7 +1058,8 @@ mod tests {
             .unwrap();
 
         // CertificateVerifier should panic when trying to verify a vote
-        certificate_verifier.verify_attestation::<Sha256Digest>(
+        certificate_verifier.verify_attestation::<_, Sha256Digest>(
+            &mut rand::thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &vote,
