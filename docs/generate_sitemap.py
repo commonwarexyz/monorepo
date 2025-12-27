@@ -68,6 +68,8 @@ def collect_code(version: str) -> list[Path]:
             continue
 
         rel = path.relative_to(DOCS_ROOT)
+        if rel.parts[2] == "docs":
+            continue
         if any(part.startswith(".") for part in rel.parts):
             continue
 
@@ -81,6 +83,9 @@ def build_url(rel: Path, base_url: str) -> str:
     normalized = base_url.rstrip("/") + "/"
     if rel == Path("index.html"):
         return normalized
+    # Use extensionless URLs so sitemap entries match pretty URL redirects.
+    if rel.suffix == ".html":
+        rel = rel.with_suffix("")
     return urljoin(normalized, rel.as_posix())
 
 
