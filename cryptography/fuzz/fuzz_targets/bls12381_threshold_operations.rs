@@ -272,7 +272,8 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
-                let _ = partial_verify_multiple_public_keys::<MinPk, _>(
+                let _ = partial_verify_multiple_public_keys::<_, MinPk, _>(
+                    &mut thread_rng(),
                     &public,
                     namespace.as_deref(),
                     &message,
@@ -295,7 +296,8 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
-                let _ = partial_verify_multiple_public_keys::<MinSig, _>(
+                let _ = partial_verify_multiple_public_keys::<_, MinSig, _>(
+                    &mut thread_rng(),
                     &public,
                     namespace.as_deref(),
                     &message,

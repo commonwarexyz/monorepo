@@ -62,10 +62,15 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                             // Verify
                             let result =
                                 black_box(primitives::ops::partial_verify_multiple_public_keys::<
+                                    _,
                                     MinSig,
                                     _,
                                 >(
-                                    &polynomial, Some(namespace), msg, &signatures
+                                    &mut rng,
+                                    &polynomial,
+                                    Some(namespace),
+                                    msg,
+                                    &signatures,
                                 ));
                             if invalid == 0 {
                                 assert!(result.is_ok());

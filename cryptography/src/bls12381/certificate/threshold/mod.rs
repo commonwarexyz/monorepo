@@ -219,7 +219,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     /// Batch-verifies attestations and returns verified attestations and invalid signers.
     pub fn verify_attestations<S, R, D, I>(
         &self,
-        _rng: &mut R,
+        rng: &mut R,
         namespace: &[u8],
         subject: S::Subject<'_, D>,
         attestations: I,
@@ -241,7 +241,8 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         let polynomial = self.polynomial();
         let (namespace, message) = subject.namespace_and_message(namespace);
-        if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(errs) = partial_verify_multiple_public_keys::<_, V, _>(
+            rng,
             polynomial,
             Some(namespace.as_ref()),
             message.as_ref(),

@@ -469,7 +469,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
 
     fn verify_attestations<R, D, I>(
         &self,
-        _rng: &mut R,
+        rng: &mut R,
         namespace: &[u8],
         subject: Subject<'_, D>,
         attestations: I,
@@ -498,7 +498,8 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
 
         let polynomial = self.polynomial();
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
-        if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(errs) = partial_verify_multiple_public_keys::<_, V, _>(
+            rng,
             polynomial,
             Some(vote_namespace.as_ref()),
             vote_message.as_ref(),
@@ -510,7 +511,8 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         }
 
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
-        if let Err(errs) = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(errs) = partial_verify_multiple_public_keys::<_, V, _>(
+            rng,
             polynomial,
             Some(seed_namespace.as_ref()),
             seed_message.as_ref(),

@@ -202,31 +202,6 @@ pub fn partial_verify_message<V: Variant>(
     )
 }
 
-/// Aggregates multiple partial signatures into a single signature.
-///
-/// # Warning
-///
-/// This function assumes a group check was already performed on each `signature` and
-/// that each `signature` is unique. If any of these assumptions are violated, an attacker can
-/// exploit this function to verify an incorrect aggregate signature.
-pub(crate) fn partial_aggregate_signatures<'a, V, I>(partials: I) -> Option<(u32, V::Signature)>
-where
-    V: Variant,
-    I: IntoIterator<Item = &'a PartialSignature<V>>,
-    V::Signature: 'a,
-{
-    let mut iter = partials.into_iter().peekable();
-    let index = iter.peek()?.index;
-    let mut s = V::Signature::zero();
-    for partial in iter {
-        if partial.index != index {
-            return None;
-        }
-        s += &partial.value;
-    }
-    Some((index, s))
-}
-
 /// Verifies the signatures from multiple partial signatures over multiple unique messages from a single
 /// signer.
 ///
@@ -269,19 +244,30 @@ where
     aggregate_verify_multiple_messages::<_, V, _, _>(rng, &public, messages, &sigs, concurrency)
 }
 
-/// Verify a list of [PartialSignature]s by performing aggregate verification,
-/// performing repeated bisection to find invalid signatures (if any exist).
+/// Verify a list of [PartialSignature]s by performing aggregate verification with random
+/// scalar weights, performing repeated bisection to find invalid signatures (if any exist).
+///
+/// Random scalar weights prevent signature malleability attacks where an attacker could
+/// redistribute signature components while keeping the aggregate unchanged.
 ///
 /// TODO (#903): parallelize this
-fn partial_verify_multiple_public_keys_bisect<'a, V>(
+fn partial_verify_multiple_public_keys_bisect<'a, R, V>(
+    rng: &mut R,
     pending: &[(V::Public, &'a PartialSignature<V>)],
     mut invalid: Vec<&'a PartialSignature<V>>,
     namespace: Option<&[u8]>,
     message: &[u8],
 ) -> Result<(), Vec<&'a PartialSignature<V>>>
 where
+    R: CryptoRngCore,
     V: Variant,
 {
+    // Hash the message once
+    let hm = namespace.map_or_else(
+        || hash_message::<V>(V::MESSAGE, message),
+        |ns| hash_message_namespace::<V>(V::MESSAGE, ns, message),
+    );
+
     // Iteratively bisect to find invalid signatures
     let mut stack = vec![(0, pending.len())];
     while let Some((start, end)) = stack.pop() {
@@ -291,16 +277,19 @@ where
             continue;
         }
 
-        // Create aggregate public key and signature
-        let mut agg_pk = V::Public::zero();
-        let mut agg_sig = V::Signature::zero();
-        for (pk, partial) in slice {
-            agg_pk += pk;
-            agg_sig += &partial.value;
-        }
+        // Generate random scalars for each signature in this slice
+        let scalars: Vec<Scalar> = (0..slice.len())
+            .map(|_| Scalar::random(&mut *rng))
+            .collect();
 
-        // If aggregate signature is invalid, bisect. Otherwise, continue.
-        if verify_message::<V>(&agg_pk, namespace, message, &agg_sig).is_err() {
+        // Compute weighted sums: sum(r_i * pk_i) and sum(r_i * sig_i)
+        let pks: Vec<V::Public> = slice.iter().map(|(pk, _)| *pk).collect();
+        let sigs: Vec<V::Signature> = slice.iter().map(|(_, partial)| partial.value).collect();
+        let weighted_pk = V::Public::msm(&pks, &scalars, 1);
+        let weighted_sig = V::Signature::msm(&sigs, &scalars, 1);
+
+        // Verify: e(weighted_pk, H(m)) == e(weighted_sig, G)
+        if V::verify(&weighted_pk, &hm, &weighted_sig).is_err() {
             if slice.len() == 1 {
                 invalid.push(slice[0].1);
             } else {
@@ -321,16 +310,22 @@ where
 /// Attempts to verify multiple [PartialSignature]s over the same message as a single
 /// aggregate signature (or returns any invalid signature found).
 ///
+/// This function applies random scalar weights to prevent signature malleability attacks
+/// where an attacker could redistribute signature components while keeping the aggregate
+/// unchanged.
+///
 /// # Warning
 ///
 /// This function assumes a group check was already performed on each `signature`.
-pub fn partial_verify_multiple_public_keys<'a, V, I>(
+pub fn partial_verify_multiple_public_keys<'a, R, V, I>(
+    rng: &mut R,
     sharing: &Sharing<V>,
     namespace: Option<&[u8]>,
     message: &[u8],
     partials: I,
 ) -> Result<(), Vec<&'a PartialSignature<V>>>
 where
+    R: CryptoRngCore,
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
 {
@@ -345,7 +340,8 @@ where
     }
 
     // Find any invalid partial signatures
-    if let Err(bad) = partial_verify_multiple_public_keys_bisect::<V>(
+    if let Err(bad) = partial_verify_multiple_public_keys_bisect::<_, V>(
+        rng,
         pending.as_slice(),
         Vec::new(),
         namespace,
@@ -504,7 +500,7 @@ where
 /// This function assumes a group check was already performed on each `signature` and
 /// that each `signature` is unique. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub(crate) fn aggregate_signatures<'a, V, I>(signatures: I) -> V::Signature
+pub fn aggregate_signatures<'a, V, I>(signatures: I) -> V::Signature
 where
     V: Variant,
     I: IntoIterator<Item = &'a V::Signature>,
@@ -1531,8 +1527,14 @@ mod tests {
         sharing.precompute_partial_publics();
 
         // Verify all signatures
-        partial_verify_multiple_public_keys::<MinSig, _>(&sharing, namespace, msg, &partials)
-            .expect("all signatures should be valid");
+        partial_verify_multiple_public_keys::<_, MinSig, _>(
+            &mut thread_rng(),
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+        )
+        .expect("all signatures should be valid");
     }
 
     #[test]
@@ -1556,8 +1558,13 @@ mod tests {
 
         sharing.precompute_partial_publics();
         // Attempt verification and expect failure with bisection identifying the invalid signature
-        let result =
-            partial_verify_multiple_public_keys::<MinSig, _>(&sharing, namespace, msg, &partials);
+        let result = partial_verify_multiple_public_keys::<_, MinSig, _>(
+            &mut thread_rng(),
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+        );
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(
@@ -1597,8 +1604,13 @@ mod tests {
         sharing.precompute_partial_publics();
 
         // Attempt verification and expect failure with bisection identifying invalid signatures
-        let result =
-            partial_verify_multiple_public_keys::<MinSig, _>(&sharing, namespace, msg, &partials);
+        let result = partial_verify_multiple_public_keys::<_, MinSig, _>(
+            &mut thread_rng(),
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+        );
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(
@@ -1638,8 +1650,13 @@ mod tests {
 
         // Attempt verification and expect failure with bisection identifying the invalid signature
         sharing.precompute_partial_publics();
-        let result =
-            partial_verify_multiple_public_keys::<MinSig, _>(&sharing, namespace, msg, &partials);
+        let result = partial_verify_multiple_public_keys::<_, MinSig, _>(
+            &mut thread_rng(),
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+        );
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(
@@ -1669,8 +1686,14 @@ mod tests {
             .map(|s| partial_sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        partial_verify_multiple_public_keys::<MinSig, _>(&sharing, namespace, msg, &partials)
-            .expect("signature should be valid");
+        partial_verify_multiple_public_keys::<_, MinSig, _>(
+            &mut thread_rng(),
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+        )
+        .expect("signature should be valid");
     }
 
     #[test]
@@ -1688,8 +1711,13 @@ mod tests {
             .map(|s| partial_sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        let result =
-            partial_verify_multiple_public_keys::<MinSig, _>(&sharing, namespace, msg, &partials);
+        let result = partial_verify_multiple_public_keys::<_, MinSig, _>(
+            &mut thread_rng(),
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+        );
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(invalid_sigs.len(), 1);
@@ -1716,8 +1744,13 @@ mod tests {
             .map(|s| partial_sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        let result =
-            partial_verify_multiple_public_keys::<MinSig, _>(&sharing, namespace, msg, &partials);
+        let result = partial_verify_multiple_public_keys::<_, MinSig, _>(
+            &mut thread_rng(),
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+        );
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(invalid_sigs.len(), 1);
