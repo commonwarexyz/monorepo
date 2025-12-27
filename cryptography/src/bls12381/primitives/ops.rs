@@ -2345,4 +2345,192 @@ mod tests {
         threshold_derive_missing_partials::<MinPk>();
         threshold_derive_missing_partials::<MinSig>();
     }
+
+    fn partial_verify_multiple_public_keys_malleability_vulnerability<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(12345);
+        let n = 5;
+        let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+        let namespace_bytes: &[u8] = b"test";
+        let namespace = Some(namespace_bytes);
+        let msg = b"message";
+
+        // Create valid partial signatures from two different signers
+        let partial1 = partial_sign_message::<V>(&shares[0], namespace, msg);
+        let partial2 = partial_sign_message::<V>(&shares[1], namespace, msg);
+
+        // Verify individual partial signatures are valid
+        partial_verify_message::<V>(&sharing, namespace, msg, &partial1)
+            .expect("partial1 should be valid");
+        partial_verify_message::<V>(&sharing, namespace, msg, &partial2)
+            .expect("partial2 should be valid");
+
+        // Create forged partial signatures by redistributing:
+        // partial1' = partial1 - delta, partial2' = partial2 + delta
+        let random_scalar = Scalar::random(&mut rng);
+        let delta = V::Signature::generator() * &random_scalar;
+        let forged_partial1 = PartialSignature {
+            index: partial1.index,
+            value: partial1.value - &delta,
+        };
+        let forged_partial2 = PartialSignature {
+            index: partial2.index,
+            value: partial2.value + &delta,
+        };
+
+        // Forged individual partial signatures are INVALID
+        assert!(
+            partial_verify_message::<V>(&sharing, namespace, msg, &forged_partial1).is_err(),
+            "forged partial1 should be invalid individually"
+        );
+        assert!(
+            partial_verify_message::<V>(&sharing, namespace, msg, &forged_partial2).is_err(),
+            "forged partial2 should be invalid individually"
+        );
+
+        // But sum of forged signature values = sum of valid signature values
+        let forged_sum = forged_partial1.value + &forged_partial2.value;
+        let valid_sum = partial1.value + &partial2.value;
+        assert_eq!(
+            forged_sum, valid_sum,
+            "signature value sums should be equal"
+        );
+
+        // Demonstrate vulnerable naive verification (without random scalars) accepts forged signatures.
+        // The naive approach computes: e(pk1 + pk2, H(m)) == e(sig1 + sig2, G)
+        // This is vulnerable because forged_sum == valid_sum.
+        let pk1 = sharing.partial_public(partial1.index).unwrap();
+        let pk2 = sharing.partial_public(partial2.index).unwrap();
+        let pk_sum = pk1 + &pk2;
+        let hm = hash_message_namespace::<V>(V::MESSAGE, namespace_bytes, msg);
+        V::verify(&pk_sum, &hm, &forged_sum)
+            .expect("vulnerable naive verification accepts forged aggregate");
+
+        // Secure function rejects forged partial signatures
+        let forged_partials = [forged_partial1, forged_partial2];
+        let result = partial_verify_multiple_public_keys::<_, V, _>(
+            &mut thread_rng(),
+            &sharing,
+            namespace,
+            msg,
+            &forged_partials,
+        );
+        assert!(
+            result.is_err(),
+            "secure function should reject forged partial signatures"
+        );
+
+        // Secure function accepts valid partial signatures
+        let valid_partials = [partial1, partial2];
+        partial_verify_multiple_public_keys::<_, V, _>(
+            &mut thread_rng(),
+            &sharing,
+            namespace,
+            msg,
+            &valid_partials,
+        )
+        .expect("secure function should accept valid partial signatures");
+    }
+
+    #[test]
+    fn test_partial_verify_multiple_public_keys_malleability_vulnerability() {
+        partial_verify_multiple_public_keys_malleability_vulnerability::<MinPk>();
+        partial_verify_multiple_public_keys_malleability_vulnerability::<MinSig>();
+    }
+
+    fn partial_aggregate_verify_multiple_messages_malleability_vulnerability<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(54321);
+        let n = 5;
+        let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+        let namespace_bytes: &[u8] = b"test";
+        let namespace = Some(namespace_bytes);
+        let msg1: &[u8] = b"message 1";
+        let msg2: &[u8] = b"message 2";
+
+        // Create valid partial signatures from a single signer on two different messages
+        let signer = &shares[0];
+        let partial1 = partial_sign_message::<V>(signer, namespace, msg1);
+        let partial2 = partial_sign_message::<V>(signer, namespace, msg2);
+
+        // Verify individual partial signatures are valid
+        partial_verify_message::<V>(&sharing, namespace, msg1, &partial1)
+            .expect("partial1 should be valid");
+        partial_verify_message::<V>(&sharing, namespace, msg2, &partial2)
+            .expect("partial2 should be valid");
+
+        // Create forged partial signatures by redistributing:
+        // partial1' = partial1 - delta, partial2' = partial2 + delta
+        let random_scalar = Scalar::random(&mut rng);
+        let delta = V::Signature::generator() * &random_scalar;
+        let forged_partial1 = PartialSignature {
+            index: partial1.index,
+            value: partial1.value - &delta,
+        };
+        let forged_partial2 = PartialSignature {
+            index: partial2.index,
+            value: partial2.value + &delta,
+        };
+
+        // Forged individual partial signatures are INVALID
+        assert!(
+            partial_verify_message::<V>(&sharing, namespace, msg1, &forged_partial1).is_err(),
+            "forged partial1 should be invalid individually"
+        );
+        assert!(
+            partial_verify_message::<V>(&sharing, namespace, msg2, &forged_partial2).is_err(),
+            "forged partial2 should be invalid individually"
+        );
+
+        // But sum of forged signature values = sum of valid signature values
+        let forged_sum = forged_partial1.value + &forged_partial2.value;
+        let valid_sum = partial1.value + &partial2.value;
+        assert_eq!(
+            forged_sum, valid_sum,
+            "signature value sums should be equal"
+        );
+
+        // Demonstrate vulnerable naive verification (without random scalars) accepts forged signatures.
+        // The naive approach computes: e(pk, H(m1) + H(m2)) == e(sig1 + sig2, G)
+        // This is vulnerable because forged_sum == valid_sum.
+        let pk = sharing.partial_public(signer.index).unwrap();
+        let hm1 = hash_message_namespace::<V>(V::MESSAGE, namespace_bytes, msg1);
+        let hm2 = hash_message_namespace::<V>(V::MESSAGE, namespace_bytes, msg2);
+        let hm_sum = hm1 + &hm2;
+        V::verify(&pk, &hm_sum, &forged_sum)
+            .expect("vulnerable naive verification accepts forged aggregate");
+
+        let messages: Vec<(Option<&[u8]>, &[u8])> = vec![(namespace, msg1), (namespace, msg2)];
+
+        // Secure function rejects forged partial signatures
+        let forged_partials = [forged_partial1, forged_partial2];
+        let result = partial_aggregate_verify_multiple_messages::<_, V, _, _>(
+            &mut thread_rng(),
+            &sharing,
+            signer.index,
+            &messages,
+            &forged_partials,
+            1,
+        );
+        assert!(
+            result.is_err(),
+            "secure function should reject forged partial signatures"
+        );
+
+        // Secure function accepts valid partial signatures
+        let valid_partials = [partial1, partial2];
+        partial_aggregate_verify_multiple_messages::<_, V, _, _>(
+            &mut thread_rng(),
+            &sharing,
+            signer.index,
+            &messages,
+            &valid_partials,
+            1,
+        )
+        .expect("secure function should accept valid partial signatures");
+    }
+
+    #[test]
+    fn test_partial_aggregate_verify_multiple_messages_malleability_vulnerability() {
+        partial_aggregate_verify_multiple_messages_malleability_vulnerability::<MinPk>();
+        partial_aggregate_verify_multiple_messages_malleability_vulnerability::<MinSig>();
+    }
 }
