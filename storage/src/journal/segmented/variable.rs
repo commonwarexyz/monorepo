@@ -94,7 +94,7 @@
 //! });
 //! ```
 
-use crate::journal::Error;
+use crate::{crc32, journal::Error, Crc32};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
@@ -136,10 +136,10 @@ pub struct Config<C> {
 
 pub(crate) const ITEM_ALIGNMENT: u64 = 16;
 
-/// Minimum size of any item: 1 byte varint (size=0) + 0 bytes data + 4 bytes checksum.
+/// Minimum size of any item: 1 byte varint (size=0) + 0 bytes data + crc32::SIZE bytes checksum.
 /// This is also the max varint size for u32, so we can always read this many bytes
 /// at the start of an item to get the complete varint.
-const MIN_ITEM_SIZE: usize = 5;
+const MIN_ITEM_SIZE: usize = 1 + crc32::SIZE;
 
 /// Computes the next offset for an item using the underlying `u64`
 /// offset of `Blob`.
@@ -239,7 +239,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         offset: u32,
     ) -> Result<(u32, u32, V), Error> {
         // Read varint size (max 5 bytes for u32)
-        let mut hasher = crc32fast::Hasher::new();
+        let mut hasher = Crc32::new();
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let varint_buf = blob.read_at(vec![0; MIN_ITEM_SIZE], offset).await?;
         let mut varint = varint_buf.as_ref();
@@ -251,7 +251,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             .ok_or(Error::OffsetOverflow)?;
 
         // Read remaining
-        let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
+        let buf_size = size.checked_add(crc32::SIZE).ok_or(Error::OffsetOverflow)?;
         let buf = blob.read_at(vec![0u8; buf_size], offset).await?;
         let buf = buf.as_ref();
         let offset = offset
@@ -301,7 +301,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         }
 
         // Read varint size (max 5 bytes for u32, and min item size is 5 bytes)
-        let mut hasher = crc32fast::Hasher::new();
+        let mut hasher = Crc32::new();
         let mut varint_buf = [0u8; MIN_ITEM_SIZE];
         reader
             .read_exact(&mut varint_buf, MIN_ITEM_SIZE)
@@ -526,7 +526,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Err(_) => return Err(Error::ItemTooLarge(item_len)),
         };
         let size_len = UInt(item_len).encode_size();
-        let entry_len = size_len + item_len as usize + 4;
+        let entry_len = size_len + item_len as usize + crc32::SIZE;
 
         // Get existing blob or create new one
         let blob = match self.blobs.entry(section) {
@@ -566,7 +566,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         buf.put_slice(&encoded);
 
         // Calculate checksum only for the entry data (without padding)
-        let checksum = crc32fast::hash(&buf[entry_start..]);
+        let checksum = Crc32::checksum(&buf[entry_start..]);
         buf.put_u32(checksum);
         assert_eq!(buf[entry_start..].len(), entry_len);
 
@@ -2152,7 +2152,7 @@ mod tests {
             let digest = Sha256::hash(buf.as_ref());
             assert_eq!(
                 hex(&digest),
-                "f55bf27a59118603466fcf6a507ab012eea4cb2d6bdd06ce8f515513729af847",
+                "dd945d1b3d7058730f79c7eabecad6dac42ce737ed1c367ea0f4cf71e74970e7",
             );
         });
     }

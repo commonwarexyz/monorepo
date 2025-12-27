@@ -55,12 +55,16 @@
 //!
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
-use crate::journal::{
-    contiguous::{MutableContiguous, PersistableContiguous},
-    Error,
+use crate::{
+    crc32,
+    journal::{
+        contiguous::{MutableContiguous, PersistableContiguous},
+        Error,
+    },
+    Crc32,
 };
 use bytes::BufMut;
-use commonware_codec::{CodecFixed, DecodeExt as _, FixedSize};
+use commonware_codec::{CodecFixed, DecodeExt as _};
 use commonware_runtime::{
     buffer::{Append, PoolRef, Read},
     telemetry::metrics::status::GaugeExt,
@@ -137,7 +141,7 @@ pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
 }
 
 impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
-    pub(crate) const CHUNK_SIZE: usize = u32::SIZE + A::SIZE;
+    pub(crate) const CHUNK_SIZE: usize = crc32::SIZE + A::SIZE;
     pub(crate) const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
     /// Initialize a new `Journal` instance.
@@ -334,7 +338,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         assert_eq!(size % Self::CHUNK_SIZE_U64, 0);
         let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
         let item = item.encode();
-        let checksum = crc32fast::hash(&item);
+        let checksum = Crc32::checksum(&item);
         buf.extend_from_slice(&item);
         buf.put_u32(checksum);
 
@@ -469,7 +473,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     ///  Error::Codec likely indicates a logic error rather than a corruption issue.
     fn verify_integrity(buf: &[u8]) -> Result<A, Error> {
         let stored_checksum = u32::from_be_bytes(buf[A::SIZE..].try_into().unwrap());
-        let checksum = crc32fast::hash(&buf[..A::SIZE]);
+        let checksum = Crc32::checksum(&buf[..A::SIZE]);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
@@ -709,6 +713,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> PersistableContiguous for Jo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -982,7 +987,7 @@ mod tests {
 
             // Corrupt one of the checksums and make sure it's detected.
             let checksum_offset = Digest::SIZE as u64
-                + (ITEMS_PER_BLOB.get() / 2) * (Digest::SIZE + u32::SIZE) as u64;
+                + (ITEMS_PER_BLOB.get() / 2) * (Digest::SIZE + crc32::SIZE) as u64;
             let (blob, _) = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
@@ -1119,7 +1124,7 @@ mod tests {
 
             // Write incorrect checksum into the second item in the blob, which should result in the
             // second item being trimmed.
-            let checksum_offset = Digest::SIZE + u32::SIZE + Digest::SIZE;
+            let checksum_offset = Digest::SIZE + crc32::SIZE + Digest::SIZE;
 
             let bad_checksum = 123456789u32;
             blob.write_at(bad_checksum.to_be_bytes().to_vec(), checksum_offset as u64)
@@ -1536,7 +1541,7 @@ mod tests {
             let digest = Sha256::hash(buf.as_ref());
             assert_eq!(
                 hex(&digest),
-                "ed2ea67208cde2ee8c16cca5aa4f369f55b1402258c6b7760e5baf134e38944a",
+                "0d6e882dae02b8df8d7dd8396fa0305450ffdf3061a8781bffa791315dd30ec9",
             );
             blob.sync().await.expect("Failed to sync blob");
             let (blob, size) = context
@@ -1551,7 +1556,7 @@ mod tests {
             let digest = Sha256::hash(buf.as_ref());
             assert_eq!(
                 hex(&digest),
-                "cc7efd4fc999aff36b9fd4213ba8da5810dc1849f92ae2ddf7c6dc40545f9aff",
+                "e0f4c82f12a7635a3bc6af7fa37f98a56f73a33c906202b07d66dc70003120e5",
             );
             blob.sync().await.expect("Failed to sync blob");
 
