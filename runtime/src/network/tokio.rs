@@ -350,4 +350,41 @@ mod tests {
         // Allow some margin for timing variance
         assert!(elapsed < read_timeout * 2);
     }
+
+    #[tokio::test]
+    async fn test_unbuffered_mode() {
+        // Set read_buffer_size to 0 to disable buffering
+        let network = TokioNetwork::Network::from(
+            TokioNetwork::Config::default()
+                .with_read_buffer_size(0)
+                .with_read_timeout(Duration::from_secs(5))
+                .with_write_timeout(Duration::from_secs(5)),
+        );
+
+        // Bind a listener
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn a task to accept and read
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+
+            // Read messages without buffering
+            let buf1 = stream.recv(vec![0u8; 5]).await.unwrap();
+            let buf2 = stream.recv(vec![0u8; 5]).await.unwrap();
+            (buf1, buf2)
+        });
+
+        // Connect and send two messages
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send(vec![1u8, 2, 3, 4, 5]).await.unwrap();
+        sink.send(vec![6u8, 7, 8, 9, 10]).await.unwrap();
+
+        // Wait for the reader to complete
+        let (buf1, buf2) = reader.await.unwrap();
+
+        // Verify we got the right data
+        assert_eq!(buf1.as_ref(), &[1u8, 2, 3, 4, 5]);
+        assert_eq!(buf2.as_ref(), &[6u8, 7, 8, 9, 10]);
+    }
 }
