@@ -6,12 +6,13 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+import os
 from urllib.parse import urljoin
 from xml.sax.saxutils import escape
 
 
 DOCS_ROOT = Path(__file__).resolve().parent
-BASE_URL = "https://commonware.xyz"
+BASE_URL = os.getenv("BASE_URL", "https://commonware.xyz")
 EXCLUDED_FILES = {"template.html"}
 EXCLUDED_DIRS = {".venv"}
 EXTRA_FILES = ["llms.txt", "robots.txt"]
