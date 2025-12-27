@@ -1,4 +1,4 @@
-SITEMAP := sitemap.xml
+SITEMAPS := sitemap.xml sitemap-pages.xml sitemap-code.xml
 MD_SOURCES := $(shell find . -name "*.md" -type f -not -path "./code/*")
 MD_TARGETS := $(MD_SOURCES:.md=.html)
 HTML_DEPS := $(shell find . -name "*.html" -type f ! -name "template.html")
@@ -41,6 +41,6 @@ all: markdown mirror sitemap
 
 # Clean all generated files
 clean:
-	rm -rf code $(MD_TARGETS) $(SITEMAP)
+	rm -rf code $(MD_TARGETS) $(SITEMAPS)
 
 .PHONY: markdown mirror sitemap deploy all clean

@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 
-"""Generate a deterministic sitemap.xml for the static docs site."""
+"""Generate a deterministic sitemap index for the static docs site.
+
+Creates a sitemap index with separate sitemaps for pages (high priority for
+search engines) and code files (lower priority, primarily for LLMs). This
+split helps search engines prioritize crawling the main content pages.
+"""
 
 from __future__ import annotations
 
@@ -84,8 +89,10 @@ def build_url(rel: Path, base_url: str) -> str:
     return urljoin(normalized, rel.as_posix())
 
 
-def write_sitemap(urls: list[str]) -> None:
-    """Write sitemap.xml with the provided URLs."""
+def write_sitemap_with_priority(
+    filename: str, urls: list[str], priority: str = "0.5"
+) -> None:
+    """Write a sitemap file with priority tags."""
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
@@ -95,9 +102,30 @@ def write_sitemap(urls: list[str]) -> None:
         escaped_url = escape(url)
         lines.append("  <url>")
         lines.append(f"    <loc>{escaped_url}</loc>")
+        lines.append(f"    <priority>{priority}</priority>")
         lines.append("  </url>")
 
     lines.append("</urlset>")
+
+    content = "\n".join(lines) + "\n"
+    (DOCS_ROOT / filename).write_text(content, encoding="utf-8")
+
+
+def write_sitemap_index(sitemaps: list[str]) -> None:
+    """Write sitemap index that references individual sitemaps."""
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ]
+
+    for sitemap in sitemaps:
+        url = urljoin(BASE_URL.rstrip("/") + "/", sitemap)
+        escaped_url = escape(url)
+        lines.append("  <sitemap>")
+        lines.append(f"    <loc>{escaped_url}</loc>")
+        lines.append("  </sitemap>")
+
+    lines.append("</sitemapindex>")
 
     content = "\n".join(lines) + "\n"
     (DOCS_ROOT / "sitemap.xml").write_text(content, encoding="utf-8")
@@ -130,13 +158,24 @@ def main() -> None:
     # Write llms.txt with versioned paths
     write_llms_txt(versions)
 
-    # Collect URLs - include all version paths in sitemap
-    urls = [build_url(rel, BASE_URL) for rel in collect_html()]
-    for version in versions:
-        urls += [build_url(rel, BASE_URL) for rel in collect_code(version)]
+    # Collect page URLs (high priority for search engines)
+    page_urls = [build_url(rel, BASE_URL) for rel in collect_html()]
     for extra in EXTRA_FILES:
-        urls.append(urljoin(BASE_URL.rstrip("/") + "/", extra))
-    write_sitemap(urls)
+        page_urls.append(urljoin(BASE_URL.rstrip("/") + "/", extra))
+
+    # Collect code URLs (lower priority, primarily for LLMs)
+    code_urls = []
+    for version in versions:
+        code_urls += [build_url(rel, BASE_URL) for rel in collect_code(version)]
+
+    # Write separate sitemaps with appropriate priorities
+    # Pages get high priority (1.0) to signal importance to search engines
+    write_sitemap_with_priority("sitemap-pages.xml", page_urls, priority="1.0")
+    # Code files get low priority (0.1) - still discoverable but deprioritized
+    write_sitemap_with_priority("sitemap-code.xml", code_urls, priority="0.1")
+
+    # Write sitemap index referencing both (pages listed first for priority)
+    write_sitemap_index(["sitemap-pages.xml", "sitemap-code.xml"])
 
 
 if __name__ == "__main__":
