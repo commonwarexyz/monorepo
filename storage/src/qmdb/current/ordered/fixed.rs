@@ -1244,8 +1244,25 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "range_proofs";
             let mut hasher = StandardHasher::<Sha256>::new();
-            let db = open_db(context.clone(), partition).await.into_dirty();
-            let db = apply_random_ops(200, true, context.next_u64(), db)
+            let db = open_db(context.clone(), partition).await;
+            let root = db.root();
+
+            // Empty range proof should not crash or verify, since even an empty db has a single
+            // commit op.
+            let proof = RangeProof {
+                proof: Proof::default(),
+                partial_chunk_digest: None,
+            };
+            assert!(!CleanCurrentTest::verify_range_proof(
+                hasher.inner(),
+                &proof,
+                Location::new_unchecked(0),
+                &[],
+                &[],
+                &root,
+            ));
+
+            let db = apply_random_ops(200, true, context.next_u64(), db.into_dirty())
                 .await
                 .unwrap();
             let root = db.root();
@@ -1273,6 +1290,17 @@ pub mod test {
                     ),
                     "failed to verify range at start_loc {start_loc}",
                 );
+                // Proof should not verify if we include extra chunks.
+                let mut chunks_with_extra = chunks.clone();
+                chunks_with_extra.push(chunks[chunks.len() - 1]);
+                assert!(!CleanCurrentTest::verify_range_proof(
+                    hasher.inner(),
+                    &proof,
+                    loc,
+                    &ops,
+                    &chunks_with_extra,
+                    &root,
+                ));
             }
 
             db.destroy().await.unwrap();
