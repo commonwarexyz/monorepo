@@ -16,7 +16,7 @@ use super::{
     core::{hash_message, hash_message_namespace},
 };
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use commonware_math::algebra::{Random, Space};
 use rand_core::CryptoRngCore;
 

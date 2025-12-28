@@ -19,7 +19,7 @@ use super::{
     core::{sign, sign_message, verify, verify_message},
 };
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
 use commonware_math::algebra::Additive;
 use commonware_utils::ordered::Map;
