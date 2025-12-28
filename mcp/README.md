@@ -15,9 +15,28 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server for the Comm
 
 ## Connecting
 
-### Claude Desktop (via mcp-remote)
+### Claude Code
 
-Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+```bash
+claude mcp add --transport http commonware https://commonware-mcp.<your-account>.workers.dev/mcp
+```
+
+Or add to `.mcp.json` in your project:
+
+```json
+{
+  "mcpServers": {
+    "commonware": {
+      "type": "http",
+      "url": "https://commonware-mcp.<your-account>.workers.dev/mcp"
+    }
+  }
+}
+```
+
+### Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
 
 ```json
 {
@@ -34,8 +53,6 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
 ```
 
 ### Cursor
-
-Add to your Cursor MCP settings:
 
 ```json
 {
