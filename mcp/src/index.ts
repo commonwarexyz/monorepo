@@ -32,8 +32,26 @@ interface CrateInfo {
 }
 
 interface CratesCache {
+  version: string;
   crates: CrateInfo[];
   timestamp: number;
+}
+
+// Constants
+const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+const MAX_SEARCH_RESULTS = 50;
+const SEARCH_BATCH_SIZE = 10;
+
+// Helper: Sort versions newest first (e.g., v0.0.64, v0.0.63, v0.0.62)
+function sortVersionsDesc(versions: string[]): void {
+  versions.sort((a, b) => {
+    const partsA = a.replace(/^v/, "").split(".").map(Number);
+    const partsB = b.replace(/^v/, "").split(".").map(Number);
+    for (let i = 0; i < 3; i++) {
+      if (partsA[i] !== partsB[i]) return partsB[i] - partsA[i];
+    }
+    return 0;
+  });
 }
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
@@ -41,14 +59,19 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
   private sitemapCache: SitemapCache | null = null;
   private cratesCache: CratesCache | null = null;
-  private readonly CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
   async init() {
     // Initialize server with version from workspace Cargo.toml
-    const latestVersion = await this.getLatestVersion();
+    let version = "0.0.0";
+    try {
+      const latestVersion = await this.getLatestVersion();
+      version = latestVersion.replace(/^v/, "");
+    } catch {
+      // Fall back to default version if sitemap unavailable
+    }
     this.server = new McpServer({
       name: "commonware",
-      version: latestVersion.replace(/^v/, ""), // Remove 'v' prefix
+      version,
     });
 
     // Tool: Get a specific file by path
@@ -67,6 +90,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           .describe("Version tag (e.g., 'v0.0.64'). Defaults to latest."),
       },
       async ({ path, version }) => {
+        // Basic path validation - no path traversal
+        if (path.includes("..") || path.startsWith("/")) {
+          return {
+            content: [{ type: "text", text: `Error: Invalid path '${path}'` }],
+            isError: true,
+          };
+        }
+
         const ver = version || (await this.getLatestVersion());
         const url = `${this.env.BASE_URL}/code/${ver}/${path}`;
 
@@ -117,9 +148,12 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           .number()
           .optional()
           .default(10)
-          .describe("Maximum number of results to return (default: 10)"),
+          .describe(`Maximum number of results to return (default: 10, max: ${MAX_SEARCH_RESULTS})`),
       },
       async ({ query, crate, file_type, version, max_results }) => {
+        // Clamp max_results to prevent excessive fetching
+        const limit = Math.min(max_results, MAX_SEARCH_RESULTS);
+
         const ver = version || (await this.getLatestVersion());
         const files = await this.getFileList(ver);
 
@@ -136,9 +170,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         const queryLower = query.toLowerCase();
 
         // Search through files (limit concurrent requests)
-        const batchSize = 5;
-        for (let i = 0; i < filtered.length && results.length < max_results; i += batchSize) {
-          const batch = filtered.slice(i, i + batchSize);
+        for (let i = 0; i < filtered.length && results.length < limit; i += SEARCH_BATCH_SIZE) {
+          const batch = filtered.slice(i, i + SEARCH_BATCH_SIZE);
           const responses = await Promise.all(
             batch.map(async (file) => {
               const url = `${this.env.BASE_URL}/code/${ver}/${file}`;
@@ -154,7 +187,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           );
 
           for (const resp of responses) {
-            if (!resp || results.length >= max_results) continue;
+            if (!resp || results.length >= limit) continue;
 
             const lines = resp.content.split("\n");
             const matches: string[] = [];
@@ -354,8 +387,12 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
   // Helper: Get crates list with descriptions
   private async getCrates(version: string): Promise<CrateInfo[]> {
-    // Check cache (keyed by version in a simple way - just check if latest)
-    if (this.cratesCache && Date.now() - this.cratesCache.timestamp < this.CACHE_TTL) {
+    // Check cache - must match version
+    if (
+      this.cratesCache &&
+      this.cratesCache.version === version &&
+      Date.now() - this.cratesCache.timestamp < CACHE_TTL
+    ) {
       return this.cratesCache.crates;
     }
 
@@ -420,6 +457,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     crates.sort((a, b) => a.name.localeCompare(b.name));
 
     this.cratesCache = {
+      version,
       crates,
       timestamp: Date.now(),
     };
@@ -429,7 +467,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
   // Helper: Refresh sitemap cache
   private async refreshSitemapCache(): Promise<void> {
-    if (this.sitemapCache && Date.now() - this.sitemapCache.timestamp < this.CACHE_TTL) {
+    if (this.sitemapCache && Date.now() - this.sitemapCache.timestamp < CACHE_TTL) {
       return;
     }
 
@@ -461,15 +499,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       }
     }
 
-    // Sort versions (newest first)
-    versions.sort((a, b) => {
-      const partsA = a.slice(1).split(".").map(Number);
-      const partsB = b.slice(1).split(".").map(Number);
-      for (let i = 0; i < 3; i++) {
-        if (partsA[i] !== partsB[i]) return partsB[i] - partsA[i];
-      }
-      return 0;
-    });
+    sortVersionsDesc(versions);
 
     this.sitemapCache = {
       versions,
@@ -487,7 +517,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   }
 }
 
-// Helper: Fetch latest version from sitemap
+// Helper: Fetch latest version from sitemap (for health check)
 async function getLatestVersion(baseUrl: string): Promise<string> {
   const response = await fetch(`${baseUrl}/sitemap.xml`);
   if (!response.ok) {
@@ -505,16 +535,7 @@ async function getLatestVersion(baseUrl: string): Promise<string> {
     }
   }
 
-  // Sort versions (newest first)
-  versions.sort((a, b) => {
-    const partsA = a.slice(1).split(".").map(Number);
-    const partsB = b.slice(1).split(".").map(Number);
-    for (let i = 0; i < 3; i++) {
-      if (partsA[i] !== partsB[i]) return partsB[i] - partsA[i];
-    }
-    return 0;
-  });
-
+  sortVersionsDesc(versions);
   return versions[0]?.replace(/^v/, "") || "unknown";
 }
 
