@@ -966,6 +966,7 @@ dependencies = [
  "futures",
  "prometheus-client",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1191,6 +1192,7 @@ dependencies = [
  "futures",
  "libfuzzer-sys",
  "rand 0.8.5",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -1384,6 +1386,7 @@ dependencies = [
  "num-traits",
  "prometheus-client",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "rand_distr",
  "thiserror 2.0.17",
  "tracing",

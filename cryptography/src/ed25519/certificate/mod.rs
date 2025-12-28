@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_utils::ordered::{Quorum, Set};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
@@ -110,7 +110,7 @@ impl Generic {
     ) -> Verification<S>
     where
         S: Scheme<Signature = Ed25519Signature>,
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
     {
@@ -171,7 +171,7 @@ impl Generic {
     ) -> crate::certificate::Verification<S>
     where
         S: Scheme<Signature = Ed25519Signature>,
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
     {
@@ -280,7 +280,7 @@ impl Generic {
     ) -> bool
     where
         S: Scheme,
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
     {
         let mut batch = Batch::new();
@@ -302,7 +302,7 @@ impl Generic {
     ) -> bool
     where
         S: Scheme,
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
     {
         if certificate.signers.len() != self.participants.len() {
@@ -338,7 +338,7 @@ impl Generic {
     ) -> bool
     where
         S: Scheme,
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate)>,
     {
@@ -362,7 +362,7 @@ impl Generic {
     ) -> bool
     where
         S: Scheme,
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate)>,
     {

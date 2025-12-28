@@ -21,12 +21,12 @@ use commonware_runtime::{
 use commonware_utils::ordered::{Quorum, Set};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace, warn};
 
 pub struct Actor<
-    E: Spawner + Metrics + Clock + Rng + CryptoRng,
+    E: Spawner + Metrics + Clock + CryptoRngCore,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
@@ -56,7 +56,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Spawner + Metrics + Clock + Rng + CryptoRng,
+        E: Spawner + Metrics + Clock + CryptoRngCore,
         S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
