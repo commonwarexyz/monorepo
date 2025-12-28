@@ -8,7 +8,7 @@
  * - get_file: Retrieve a specific file by path
  * - search_code: Search across source code files
  * - list_versions: List available code versions
- * - list_crates: List all crates in the workspace
+ * - list_crates: List all crates in the workspace (from Cargo.toml)
  * - get_crate_readme: Get the README for a specific crate
  * - get_overview: Get the repository overview
  */
@@ -18,35 +18,23 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Env } from "./env.d.ts";
 
-// Cached sitemap data structure
+// Cached data structures
 interface SitemapCache {
   versions: string[];
   files: Map<string, string[]>; // version -> file paths
   timestamp: number;
 }
 
-// Known crates in the workspace (from Cargo.toml)
-const CRATES = [
-  "broadcast",
-  "codec",
-  "coding",
-  "collector",
-  "conformance",
-  "consensus",
-  "cryptography",
-  "deployer",
-  "macros",
-  "math",
-  "p2p",
-  "pipeline",
-  "resolver",
-  "runtime",
-  "storage",
-  "stream",
-  "utils",
-] as const;
+interface CrateInfo {
+  name: string;
+  path: string;
+  description: string;
+}
 
-type CrateName = (typeof CRATES)[number];
+interface CratesCache {
+  crates: CrateInfo[];
+  timestamp: number;
+}
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server = new McpServer({
@@ -55,6 +43,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   });
 
   private sitemapCache: SitemapCache | null = null;
+  private cratesCache: CratesCache | null = null;
   private readonly CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
   async init() {
@@ -200,7 +189,10 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         }
 
         const output = results
-          .map((r) => `## ${r.file}\n\n\`\`\`${this.getLanguage(r.file)}\n${r.matches.join("\n---\n")}\n\`\`\``)
+          .map(
+            (r) =>
+              `## ${r.file}\n\n\`\`\`${this.getLanguage(r.file)}\n${r.matches.join("\n---\n")}\n\`\`\``
+          )
           .join("\n\n");
 
         return {
@@ -234,39 +226,31 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       }
     );
 
-    // Tool: List crates
+    // Tool: List crates (dynamically from Cargo.toml)
     this.server.tool(
       "list_crates",
       "List all crates (primitives) in the Commonware workspace with their descriptions.",
-      {},
-      async () => {
-        const descriptions: Record<CrateName, string> = {
-          broadcast: "Disseminate data over a wide-area network",
-          codec: "Serialize structured data",
-          coding: "Encode data for recovery from a subset of fragments (Reed-Solomon/ZODA)",
-          collector: "Collect responses to committable requests",
-          conformance: "Assert stability of encoding and mechanisms over time",
-          consensus: "Order opaque messages in a Byzantine environment",
-          cryptography: "Generate keys, sign messages, verify signatures (BLS, Ed25519)",
-          deployer: "Deploy infrastructure across cloud providers",
-          macros: "Procedural macros for the workspace",
-          math: "Mathematical objects and operations",
-          p2p: "Communicate with authenticated peers over encrypted connections",
-          pipeline: "Mechanisms under development",
-          resolver: "Resolve data identified by a fixed-length key",
-          runtime: "Execute asynchronous tasks with configurable scheduler",
-          storage: "Persist and retrieve data from an abstract store",
-          stream: "Exchange messages over arbitrary transport",
-          utils: "Common utilities shared across crates",
-        };
+      {
+        version: z.string().optional().describe("Version tag. Defaults to latest."),
+      },
+      async ({ version }) => {
+        const ver = version || (await this.getLatestVersion());
+        const crates = await this.getCrates(ver);
 
-        const output = CRATES.map((c) => `- **${c}**: ${descriptions[c]}`).join("\n");
+        if (crates.length === 0) {
+          return {
+            content: [{ type: "text", text: "Error: Could not fetch crate information" }],
+            isError: true,
+          };
+        }
+
+        const output = crates.map((c) => `- **${c.name}**: ${c.description}`).join("\n");
 
         return {
           content: [
             {
               type: "text",
-              text: `# Commonware Crates\n\n${output}\n\nUse \`get_crate_readme\` to get detailed documentation for any crate.`,
+              text: `# Commonware Crates (${ver})\n\n${output}\n\nUse \`get_crate_readme\` to get detailed documentation for any crate.`,
             },
           ],
         };
@@ -278,15 +262,29 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       "get_crate_readme",
       "Get the README documentation for a specific Commonware crate.",
       {
-        crate: z
-          .enum(CRATES)
-          .describe("Crate name (e.g., 'cryptography', 'consensus', 'p2p')"),
+        crate: z.string().describe("Crate name (e.g., 'cryptography', 'consensus', 'p2p')"),
         version: z.string().optional().describe("Version tag. Defaults to latest."),
       },
       async ({ crate, version }) => {
         const ver = version || (await this.getLatestVersion());
-        const url = `${this.env.BASE_URL}/code/${ver}/${crate}/README.md`;
 
+        // Validate crate exists
+        const crates = await this.getCrates(ver);
+        const crateInfo = crates.find((c) => c.name === crate || c.path === crate);
+        if (!crateInfo) {
+          const names = crates.map((c) => c.name).join(", ");
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error: Unknown crate '${crate}'. Available crates: ${names}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const url = `${this.env.BASE_URL}/code/${ver}/${crateInfo.path}/README.md`;
         const response = await fetch(url);
         if (!response.ok) {
           return {
@@ -348,6 +346,85 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   private async getFileList(version: string): Promise<string[]> {
     await this.refreshSitemapCache();
     return this.sitemapCache!.files.get(version) || [];
+  }
+
+  // Helper: Get crates list with descriptions
+  private async getCrates(version: string): Promise<CrateInfo[]> {
+    // Check cache (keyed by version in a simple way - just check if latest)
+    if (this.cratesCache && Date.now() - this.cratesCache.timestamp < this.CACHE_TTL) {
+      return this.cratesCache.crates;
+    }
+
+    const crates: CrateInfo[] = [];
+
+    // Fetch workspace Cargo.toml to get members
+    const workspaceUrl = `${this.env.BASE_URL}/code/${version}/Cargo.toml`;
+    const workspaceResp = await fetch(workspaceUrl);
+    if (!workspaceResp.ok) {
+      return [];
+    }
+
+    const workspaceToml = await workspaceResp.text();
+
+    // Parse members from workspace Cargo.toml
+    // Format: members = [\n    "crate1",\n    "crate2",\n    ...]
+    const membersMatch = workspaceToml.match(/members\s*=\s*\[([\s\S]*?)\]/);
+    if (!membersMatch) {
+      return [];
+    }
+
+    const membersBlock = membersMatch[1];
+    const memberPaths: string[] = [];
+
+    // Extract quoted strings from members array
+    const pathMatches = membersBlock.matchAll(/"([^"]+)"/g);
+    for (const match of pathMatches) {
+      const path = match[1];
+      // Filter out examples and fuzz targets - only include top-level crates
+      if (!path.includes("/")) {
+        memberPaths.push(path);
+      }
+    }
+
+    // Fetch each crate's Cargo.toml to get description
+    const cratePromises = memberPaths.map(async (path) => {
+      const cargoUrl = `${this.env.BASE_URL}/code/${version}/${path}/Cargo.toml`;
+      try {
+        const resp = await fetch(cargoUrl);
+        if (!resp.ok) return null;
+
+        const cargoToml = await resp.text();
+
+        // Extract package name
+        const nameMatch = cargoToml.match(/name\s*=\s*"([^"]+)"/);
+        const name = nameMatch ? nameMatch[1].replace("commonware-", "") : path;
+
+        // Extract description
+        const descMatch = cargoToml.match(/description\s*=\s*"([^"]+)"/);
+        const description = descMatch ? descMatch[1] : "No description available";
+
+        return { name, path, description };
+      } catch {
+        return null;
+      }
+    });
+
+    const results = await Promise.all(cratePromises);
+    for (const result of results) {
+      if (result) {
+        crates.push(result);
+      }
+    }
+
+    // Sort alphabetically by name
+    crates.sort((a, b) => a.name.localeCompare(b.name));
+
+    this.cratesCache = {
+      crates,
+      timestamp: Date.now(),
+    };
+
+    return crates;
   }
 
   // Helper: Refresh sitemap cache
