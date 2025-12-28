@@ -49,7 +49,7 @@ interface CratesCache {
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 const MAX_SEARCH_RESULTS = 50;
 const SEARCH_BATCH_SIZE = 10;
-const FILE_CACHE_MAX_ENTRIES = 1000; // ~1000 files cached max
+const FILE_CACHE_MAX_ENTRIES = 2500;
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
