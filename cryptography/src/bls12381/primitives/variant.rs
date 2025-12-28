@@ -17,7 +17,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
-use commonware_math::algebra::{Additive, HashToGroup, Random as _, Space};
+use commonware_math::algebra::{HashToGroup, Random as _, Space};
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
@@ -157,14 +157,9 @@ impl Variant for MinPk {
             return Ok(());
         }
 
-        // Generate random non-zero scalars.
+        // Generate random scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
-            .map(|_| loop {
-                let scalar = Scalar::random(&mut *rng);
-                if scalar != Scalar::zero() {
-                    return scalar;
-                }
-            })
+            .map(|_| Scalar::random(&mut *rng))
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
@@ -308,14 +303,9 @@ impl Variant for MinSig {
             return Ok(());
         }
 
-        // Generate random non-zero scalars.
+        // Generate random scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
-            .map(|_| loop {
-                let scalar = Scalar::random(&mut *rng);
-                if scalar != Scalar::zero() {
-                    return scalar;
-                }
-            })
+            .map(|_| Scalar::random(&mut *rng))
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
@@ -412,5 +402,108 @@ impl<'a, V: Variant> arbitrary::Arbitrary<'a> for PartialSignature<V> {
             index: u.arbitrary()?,
             value: <V::Signature as CryptoGroup>::generator() * &u.arbitrary::<Scalar>()?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bls12381::primitives::{group::Scalar, ops};
+    use commonware_math::algebra::{CryptoGroup, Random};
+    use rand::prelude::*;
+
+    fn batch_verify_correct<V: Variant>() {
+        let (private1, public1) = ops::keypair::<_, V>(&mut thread_rng());
+        let (private2, public2) = ops::keypair::<_, V>(&mut thread_rng());
+        let (private3, public3) = ops::keypair::<_, V>(&mut thread_rng());
+
+        let msg1: &[u8] = b"message 1";
+        let msg2: &[u8] = b"message 2";
+        let msg3: &[u8] = b"message 3";
+
+        let sig1 = ops::sign_message::<V>(&private1, None, msg1);
+        let sig2 = ops::sign_message::<V>(&private2, None, msg2);
+        let sig3 = ops::sign_message::<V>(&private3, None, msg3);
+
+        let hm1 = ops::hash_message::<V>(V::MESSAGE, msg1);
+        let hm2 = ops::hash_message::<V>(V::MESSAGE, msg2);
+        let hm3 = ops::hash_message::<V>(V::MESSAGE, msg3);
+
+        V::batch_verify(
+            &mut thread_rng(),
+            &[public1, public2, public3],
+            &[hm1, hm2, hm3],
+            &[sig1, sig2, sig3],
+        )
+        .expect("valid batch should pass");
+    }
+
+    #[test]
+    fn test_batch_verify_correct() {
+        batch_verify_correct::<MinPk>();
+        batch_verify_correct::<MinSig>();
+    }
+
+    fn batch_verify_rejects_malleability<V: Variant>() {
+        let (private1, public1) = ops::keypair::<_, V>(&mut thread_rng());
+        let (private2, public2) = ops::keypair::<_, V>(&mut thread_rng());
+
+        let msg1: &[u8] = b"message 1";
+        let msg2: &[u8] = b"message 2";
+
+        let sig1 = ops::sign_message::<V>(&private1, None, msg1);
+        let sig2 = ops::sign_message::<V>(&private2, None, msg2);
+
+        let hm1 = ops::hash_message::<V>(V::MESSAGE, msg1);
+        let hm2 = ops::hash_message::<V>(V::MESSAGE, msg2);
+
+        // Forge signatures by redistributing: sig1' = sig1 - delta, sig2' = sig2 + delta
+        let random_scalar = Scalar::random(&mut thread_rng());
+        let delta = V::Signature::generator() * &random_scalar;
+        let forged_sig1 = sig1 - &delta;
+        let forged_sig2 = sig2 + &delta;
+
+        // Individual verification should fail for forged signatures
+        assert!(
+            V::verify(&public1, &hm1, &forged_sig1).is_err(),
+            "forged sig1 should be invalid individually"
+        );
+        assert!(
+            V::verify(&public2, &hm2, &forged_sig2).is_err(),
+            "forged sig2 should be invalid individually"
+        );
+
+        // Naive aggregate verification would accept forged signatures because:
+        // sig1' + sig2' = (sig1 - delta) + (sig2 + delta) = sig1 + sig2
+        let forged_agg = forged_sig1 + &forged_sig2;
+        let valid_agg = sig1 + &sig2;
+        assert_eq!(forged_agg, valid_agg, "aggregates should be equal");
+
+        // batch_verify with random weights should reject forged signatures
+        let result = V::batch_verify(
+            &mut thread_rng(),
+            &[public1, public2],
+            &[hm1, hm2],
+            &[forged_sig1, forged_sig2],
+        );
+        assert!(
+            result.is_err(),
+            "batch_verify should reject forged signatures"
+        );
+
+        // Valid signatures should still pass
+        V::batch_verify(
+            &mut thread_rng(),
+            &[public1, public2],
+            &[hm1, hm2],
+            &[sig1, sig2],
+        )
+        .expect("valid signatures should pass batch_verify");
+    }
+
+    #[test]
+    fn test_batch_verify_rejects_malleability() {
+        batch_verify_rejects_malleability::<MinPk>();
+        batch_verify_rejects_malleability::<MinSig>();
     }
 }
