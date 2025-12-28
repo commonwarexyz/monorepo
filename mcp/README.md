@@ -1,6 +1,6 @@
 # Commonware MCP Server
 
-A [Model Context Protocol](https://modelcontextprotocol.io/) server for the Commonware Library, deployed on Cloudflare Workers. This server exposes Commonware source code and documentation to AI assistants like Claude, Cursor, and other MCP-compatible clients.
+A [Model Context Protocol](https://modelcontextprotocol.io/) server for the Commonware Library, deployed on Cloudflare Workers. This server exposes Commonware source code to AI assistants like Claude, Cursor, and other MCP-compatible clients.
 
 ## Tools
 
@@ -11,8 +11,6 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server for the Comm
 | `list_versions` | List all available code versions |
 | `list_crates` | List all crates with descriptions |
 | `get_crate_readme` | Get README documentation for a specific crate |
-| `get_blog_post` | Get a technical blog post by slug |
-| `list_blog_posts` | List all available blog posts |
 | `get_overview` | Get the repository README/overview |
 
 ## Connecting
@@ -114,7 +112,7 @@ Once connected, you can ask your AI assistant questions like:
 - "Find where threshold signatures are implemented"
 - "Explain how the deterministic runtime works"
 
-The assistant will use the MCP tools to fetch actual source code and documentation rather than relying on training data.
+The assistant will use the MCP tools to fetch actual source code rather than relying on training data.
 
 ## License
 

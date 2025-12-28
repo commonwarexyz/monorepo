@@ -2,7 +2,7 @@
  * Commonware MCP Server
  *
  * A Model Context Protocol server for the Commonware Library that exposes
- * source code and documentation to AI assistants like Claude, Cursor, etc.
+ * source code to AI assistants like Claude, Cursor, etc.
  *
  * Tools:
  * - get_file: Retrieve a specific file by path
@@ -10,7 +10,7 @@
  * - list_versions: List available code versions
  * - list_crates: List all crates in the workspace
  * - get_crate_readme: Get the README for a specific crate
- * - get_blog_post: Get a technical blog post by slug
+ * - get_overview: Get the repository overview
  */
 
 import { McpAgent } from "agents/mcp";
@@ -22,7 +22,6 @@ import type { Env } from "./env.d.ts";
 interface SitemapCache {
   versions: string[];
   files: Map<string, string[]>; // version -> file paths
-  blogPosts: string[];
   timestamp: number;
 }
 
@@ -308,89 +307,6 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       }
     );
 
-    // Tool: Get blog post
-    this.server.tool(
-      "get_blog_post",
-      "Get a technical blog post from the Commonware documentation. " +
-        "Blog posts contain deep dives into design decisions and implementation details.",
-      {
-        slug: z
-          .string()
-          .describe(
-            "Blog post slug (e.g., 'zoda', 'mmr', 'threshold-simplex', 'commonware-runtime')"
-          ),
-      },
-      async ({ slug }) => {
-        // Try both .md and direct fetch
-        const url = `${this.env.BASE_URL}/blogs/${slug}`;
-
-        const response = await fetch(url);
-        if (!response.ok) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Error: Blog post '${slug}' not found. Available posts include: ` +
-                  "zoda, mmr, minimmit, adb-current, adb-any, buffered-signatures, " +
-                  "conformance, introducing-commonware, commonware-the-anti-framework, " +
-                  "commonware-runtime, commonware-cryptography, commonware-broadcast, " +
-                  "commonware-deployer, reshare, threshold-simplex, qmdb, only-time-will-tell",
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        // The response is HTML, extract text content
-        const html = await response.text();
-        // Simple HTML to text extraction for blog content
-        const text = this.htmlToText(html);
-
-        return {
-          content: [{ type: "text", text }],
-        };
-      }
-    );
-
-    // Tool: List blog posts
-    this.server.tool(
-      "list_blog_posts",
-      "List all available technical blog posts from Commonware documentation.",
-      {},
-      async () => {
-        const posts = [
-          { slug: "introducing-commonware", title: "Introducing Commonware" },
-          { slug: "commonware-the-anti-framework", title: "The Anti-Framework Philosophy" },
-          { slug: "commonware-runtime", title: "Abstract Runtime Design" },
-          { slug: "commonware-cryptography", title: "Cryptographic Primitives" },
-          { slug: "commonware-broadcast", title: "Reliable Broadcast Protocol" },
-          { slug: "commonware-deployer", title: "Infrastructure Deployment" },
-          { slug: "zoda", title: "Fast Block Dissemination with ZODA" },
-          { slug: "mmr", title: "Merkle Mountain Range Implementation" },
-          { slug: "minimmit", title: "Minimal Commit Protocol" },
-          { slug: "adb-current", title: "Authenticated Data Broadcast (Current)" },
-          { slug: "adb-any", title: "Authenticated Data Broadcast (Any)" },
-          { slug: "buffered-signatures", title: "Efficient Signature Aggregation" },
-          { slug: "conformance", title: "Format Stability Testing" },
-          { slug: "reshare", title: "Threshold Secret Resharing" },
-          { slug: "threshold-simplex", title: "Threshold Consensus Mechanism" },
-          { slug: "qmdb", title: "Query-able Merkle Database" },
-          { slug: "only-time-will-tell", title: "Time and Consensus" },
-        ];
-
-        const output = posts.map((p) => `- **${p.slug}**: ${p.title}`).join("\n");
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: `# Commonware Blog Posts\n\n${output}\n\nUse \`get_blog_post\` with a slug to read a specific post.`,
-            },
-          ],
-        };
-      }
-    );
-
     // Tool: Get repository overview
     this.server.tool(
       "get_overview",
@@ -448,7 +364,6 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     const xml = await response.text();
     const versions: string[] = [];
     const files = new Map<string, string[]>();
-    const blogPosts: string[] = [];
 
     // Parse sitemap XML (simple regex-based parsing)
     const urlMatches = xml.matchAll(/<loc>([^<]+)<\/loc>/g);
@@ -467,12 +382,6 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         }
         files.get(version)!.push(path);
       }
-
-      // Extract blog posts
-      const blogMatch = url.match(/\/blogs\/([^/]+)$/);
-      if (blogMatch) {
-        blogPosts.push(blogMatch[1]);
-      }
     }
 
     // Sort versions (newest first)
@@ -488,7 +397,6 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.sitemapCache = {
       versions,
       files,
-      blogPosts,
       timestamp: Date.now(),
     };
   }
@@ -499,62 +407,6 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     if (path.endsWith(".toml")) return "toml";
     if (path.endsWith(".md")) return "markdown";
     return "";
-  }
-
-  // Helper: Extract text from HTML
-  private htmlToText(html: string): string {
-    // Remove script and style elements
-    let text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "");
-    text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
-
-    // Extract main content (between article tags if present)
-    const articleMatch = text.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
-    if (articleMatch) {
-      text = articleMatch[1];
-    } else {
-      // Try main tag
-      const mainMatch = text.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
-      if (mainMatch) {
-        text = mainMatch[1];
-      }
-    }
-
-    // Convert headers
-    text = text.replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, "\n# $1\n");
-    text = text.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, "\n## $1\n");
-    text = text.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, "\n### $1\n");
-    text = text.replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, "\n#### $1\n");
-
-    // Convert code blocks
-    text = text.replace(/<pre[^>]*><code[^>]*>([\s\S]*?)<\/code><\/pre>/gi, "\n```\n$1\n```\n");
-    text = text.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, "`$1`");
-
-    // Convert paragraphs and line breaks
-    text = text.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, "\n$1\n");
-    text = text.replace(/<br\s*\/?>/gi, "\n");
-
-    // Convert lists
-    text = text.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, "- $1\n");
-
-    // Convert links
-    text = text.replace(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, "[$2]($1)");
-
-    // Remove remaining HTML tags
-    text = text.replace(/<[^>]+>/g, "");
-
-    // Decode HTML entities
-    text = text.replace(/&lt;/g, "<");
-    text = text.replace(/&gt;/g, ">");
-    text = text.replace(/&amp;/g, "&");
-    text = text.replace(/&quot;/g, '"');
-    text = text.replace(/&#39;/g, "'");
-    text = text.replace(/&nbsp;/g, " ");
-
-    // Clean up whitespace
-    text = text.replace(/\n\s*\n\s*\n/g, "\n\n");
-    text = text.trim();
-
-    return text;
   }
 }
 
