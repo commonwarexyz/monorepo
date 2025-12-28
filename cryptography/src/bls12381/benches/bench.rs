@@ -2,6 +2,7 @@ use criterion::criterion_main;
 
 mod aggregate_public_keys;
 mod aggregate_signatures;
+mod aggregate_verify_multiple_messages;
 mod aggregate_verify_multiple_public_keys;
 mod batch_verify_multiple_messages;
 mod batch_verify_multiple_public_keys;
@@ -21,6 +22,7 @@ criterion_main!(
     threshold_signature_recover::benches,
     aggregate_public_keys::benches,
     aggregate_signatures::benches,
+    aggregate_verify_multiple_messages::benches,
     signature_generation::benches,
     signature_verification::benches,
     verify_multiple_messages::benches,

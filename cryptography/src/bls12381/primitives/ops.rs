@@ -677,6 +677,106 @@ where
     V::verify(public, &weighted_hm, &weighted_sig)
 }
 
+/// Verifies an aggregate signature over multiple unique messages from a single public key.
+///
+/// Each entry is a tuple of (namespace, message). The signature must be the aggregate
+/// of all individual signatures.
+///
+/// # Warning
+///
+/// This function is vulnerable to signature malleability when used with signatures
+/// that were aggregated from different messages. An attacker can redistribute
+/// signature components between messages while keeping the aggregate unchanged.
+/// Use [`verify_multiple_messages`] instead when signatures are provided individually.
+///
+/// This function assumes a group check was already performed on `public` and `signature`.
+/// It is not safe to provide an aggregate public key or to provide duplicate messages.
+#[cfg(feature = "std")]
+pub fn aggregate_verify_multiple_messages<'a, V, I>(
+    public: &V::Public,
+    messages: I,
+    signature: &V::Signature,
+    concurrency: usize,
+) -> Result<(), Error>
+where
+    V: Variant,
+    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])> + Send + Sync,
+    I::IntoIter: Send + Sync,
+{
+    let hm_sum = if concurrency == 1 {
+        compute_hm_sum::<V, I>(messages)
+    } else {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(concurrency)
+            .build()
+            .expect("Unable to build thread pool");
+
+        pool.install(move || {
+            messages
+                .into_iter()
+                .par_bridge()
+                .map(|(namespace, msg)| {
+                    namespace.as_ref().map_or_else(
+                        || hash_message::<V>(V::MESSAGE, msg),
+                        |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+                    )
+                })
+                .reduce(V::Signature::zero, |mut sum, hm| {
+                    sum += &hm;
+                    sum
+                })
+        })
+    };
+
+    V::verify(public, &hm_sum, signature)
+}
+
+/// Verifies an aggregate signature over multiple unique messages from a single public key.
+///
+/// Each entry is a tuple of (namespace, message). The signature must be the aggregate
+/// of all individual signatures.
+///
+/// # Warning
+///
+/// This function is vulnerable to signature malleability when used with signatures
+/// that were aggregated from different messages. An attacker can redistribute
+/// signature components between messages while keeping the aggregate unchanged.
+/// Use [`verify_multiple_messages`] instead when signatures are provided individually.
+///
+/// This function assumes a group check was already performed on `public` and `signature`.
+/// It is not safe to provide an aggregate public key or to provide duplicate messages.
+#[cfg(not(feature = "std"))]
+pub fn aggregate_verify_multiple_messages<'a, V, I>(
+    public: &V::Public,
+    messages: I,
+    signature: &V::Signature,
+    _concurrency: usize,
+) -> Result<(), Error>
+where
+    V: Variant,
+    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>,
+{
+    let hm_sum = compute_hm_sum::<V, I>(messages);
+    V::verify(public, &hm_sum, signature)
+}
+
+/// Computes the sum over the hash of each message.
+fn compute_hm_sum<'a, V, I>(messages: I) -> V::Signature
+where
+    V: Variant,
+    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>,
+{
+    let mut hm_sum = V::Signature::zero();
+    for (namespace, msg) in messages {
+        let hm = namespace.as_ref().map_or_else(
+            || hash_message::<V>(V::MESSAGE, msg),
+            |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+        );
+        hm_sum += &hm;
+    }
+    hm_sum
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

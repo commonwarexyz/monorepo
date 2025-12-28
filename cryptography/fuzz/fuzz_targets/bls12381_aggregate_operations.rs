@@ -7,7 +7,6 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig},
 };
 use libfuzzer_sys::fuzz_target;
-use rand::thread_rng;
 
 mod common;
 use common::{
@@ -41,14 +40,16 @@ enum FuzzOperation {
         message: Vec<u8>,
         signature: G1,
     },
-    VerifyMultipleMessagesMinPk {
+    AggregateVerifyMultipleMessagesMinPk {
         public_key: G1,
-        entries: Vec<(Option<Vec<u8>>, Vec<u8>, G2)>,
+        messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
+        signature: G2,
         concurrency: usize,
     },
-    VerifyMultipleMessagesMinSig {
+    AggregateVerifyMultipleMessagesMinSig {
         public_key: G2,
-        entries: Vec<(Option<Vec<u8>>, Vec<u8>, G1)>,
+        messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
+        signature: G1,
         concurrency: usize,
     },
 }
@@ -82,34 +83,18 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g1(u)?,
             }),
-            6 => {
-                let messages = arbitrary_messages(u, 0, 20)?;
-                let signatures = arbitrary_vec_g2(u, messages.len(), messages.len())?;
-                let entries = messages
-                    .into_iter()
-                    .zip(signatures)
-                    .map(|((ns, msg), sig)| (ns, msg, sig))
-                    .collect();
-                Ok(FuzzOperation::VerifyMultipleMessagesMinPk {
-                    public_key: arbitrary_g1(u)?,
-                    entries,
-                    concurrency: u.int_in_range(1..=8)?,
-                })
-            }
-            7 => {
-                let messages = arbitrary_messages(u, 0, 20)?;
-                let signatures = arbitrary_vec_g1(u, messages.len(), messages.len())?;
-                let entries = messages
-                    .into_iter()
-                    .zip(signatures)
-                    .map(|((ns, msg), sig)| (ns, msg, sig))
-                    .collect();
-                Ok(FuzzOperation::VerifyMultipleMessagesMinSig {
-                    public_key: arbitrary_g2(u)?,
-                    entries,
-                    concurrency: u.int_in_range(1..=8)?,
-                })
-            }
+            6 => Ok(FuzzOperation::AggregateVerifyMultipleMessagesMinPk {
+                public_key: arbitrary_g1(u)?,
+                messages: arbitrary_messages(u, 0, 20)?,
+                signature: arbitrary_g2(u)?,
+                concurrency: u.int_in_range(1..=8)?,
+            }),
+            7 => Ok(FuzzOperation::AggregateVerifyMultipleMessagesMinSig {
+                public_key: arbitrary_g2(u)?,
+                messages: arbitrary_messages(u, 0, 20)?,
+                signature: arbitrary_g1(u)?,
+                concurrency: u.int_in_range(1..=8)?,
+            }),
             _ => Ok(FuzzOperation::PublicKeysMinPk {
                 public_keys: Vec::new(),
             }),
@@ -175,41 +160,43 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::VerifyMultipleMessagesMinPk {
+        FuzzOperation::AggregateVerifyMultipleMessagesMinPk {
             public_key,
-            entries,
+            messages,
+            signature,
             concurrency,
         } => {
-            if !entries.is_empty() && concurrency > 0 {
-                let entries_refs: Vec<_> = entries
+            if !messages.is_empty() && concurrency > 0 {
+                let messages_refs: Vec<_> = messages
                     .iter()
-                    .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_slice(), *sig))
+                    .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
                     .collect();
 
-                let _ = verify_multiple_messages::<_, MinPk, _>(
-                    &mut thread_rng(),
+                let _ = aggregate_verify_multiple_messages::<MinPk, _>(
                     &public_key,
-                    &entries_refs,
+                    &messages_refs,
+                    &signature,
                     concurrency,
                 );
             }
         }
 
-        FuzzOperation::VerifyMultipleMessagesMinSig {
+        FuzzOperation::AggregateVerifyMultipleMessagesMinSig {
             public_key,
-            entries,
+            messages,
+            signature,
             concurrency,
         } => {
-            if !entries.is_empty() && concurrency > 0 {
-                let entries_refs: Vec<_> = entries
+            if !messages.is_empty() && concurrency > 0 {
+                let messages_refs: Vec<_> = messages
                     .iter()
-                    .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_slice(), *sig))
+                    .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
                     .collect();
 
-                let _ = verify_multiple_messages::<_, MinSig, _>(
-                    &mut thread_rng(),
+                let _ = aggregate_verify_multiple_messages::<MinSig, _>(
                     &public_key,
-                    &entries_refs,
+                    &messages_refs,
+                    &signature,
                     concurrency,
                 );
             }

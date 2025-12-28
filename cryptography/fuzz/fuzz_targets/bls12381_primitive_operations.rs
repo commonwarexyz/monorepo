@@ -12,7 +12,7 @@ use commonware_math::{
     poly::Poly,
 };
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{rngs::StdRng, thread_rng, SeedableRng};
 
 #[derive(Debug, Clone)]
 enum FuzzOperation {
@@ -176,12 +176,16 @@ enum FuzzOperation {
         use_g1: bool,
     },
 
-    // Simple aggregate operations
-    AggregatePublicKeysG1 {
-        keys: Vec<G1>,
+    // Verify multiple messages (individual signatures)
+    VerifyMultipleMessagesMinPk {
+        public_key: G1,
+        entries: Vec<(Option<Vec<u8>>, Vec<u8>, G2)>,
+        concurrency: usize,
     },
-    AggregatePublicKeysG2 {
-        keys: Vec<G2>,
+    VerifyMultipleMessagesMinSig {
+        public_key: G2,
+        entries: Vec<(Option<Vec<u8>>, Vec<u8>, G1)>,
+        concurrency: usize,
     },
 
     // Serialization round-trip
@@ -347,24 +351,46 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 scalar_poly: arbitrary_poly_scalar(u)?,
                 use_g1: u.arbitrary()?,
             }),
-            35 => Ok(FuzzOperation::AggregatePublicKeysG1 {
-                keys: arbitrary_vec_g1(u, 0, 10)?,
-            }),
-            36 => Ok(FuzzOperation::AggregatePublicKeysG2 {
-                keys: arbitrary_vec_g2(u, 0, 10)?,
-            }),
-            37 => Ok(FuzzOperation::SerializeScalar {
+            35 => Ok(FuzzOperation::SerializeScalar {
                 scalar: arbitrary_scalar(u)?,
             }),
-            38 => Ok(FuzzOperation::SerializeG1 {
+            36 => Ok(FuzzOperation::SerializeG1 {
                 point: arbitrary_g1(u)?,
             }),
-            39 => Ok(FuzzOperation::SerializeG2 {
+            37 => Ok(FuzzOperation::SerializeG2 {
                 point: arbitrary_g2(u)?,
             }),
-            40 => Ok(FuzzOperation::SerializeShare {
+            38 => Ok(FuzzOperation::SerializeShare {
                 share: arbitrary_share(u)?,
             }),
+            39 => {
+                let messages = arbitrary_messages(u, 0, 20)?;
+                let signatures = arbitrary_vec_g2(u, messages.len(), messages.len())?;
+                let entries = messages
+                    .into_iter()
+                    .zip(signatures)
+                    .map(|((ns, msg), sig)| (ns, msg, sig))
+                    .collect();
+                Ok(FuzzOperation::VerifyMultipleMessagesMinPk {
+                    public_key: arbitrary_g1(u)?,
+                    entries,
+                    concurrency: u.int_in_range(1..=8)?,
+                })
+            }
+            40 => {
+                let messages = arbitrary_messages(u, 0, 20)?;
+                let signatures = arbitrary_vec_g1(u, messages.len(), messages.len())?;
+                let entries = messages
+                    .into_iter()
+                    .zip(signatures)
+                    .map(|((ns, msg), sig)| (ns, msg, sig))
+                    .collect();
+                Ok(FuzzOperation::VerifyMultipleMessagesMinSig {
+                    public_key: arbitrary_g2(u)?,
+                    entries,
+                    concurrency: u.int_in_range(1..=8)?,
+                })
+            }
             _ => Ok(FuzzOperation::KeypairGeneration),
         }
     }
@@ -453,6 +479,33 @@ fn arbitrary_bytes(
 ) -> Result<Vec<u8>, arbitrary::Error> {
     let len = u.int_in_range(min..=max)?;
     u.bytes(len).map(|b| b.to_vec())
+}
+
+fn arbitrary_optional_bytes(
+    u: &mut Unstructured,
+    max_len: usize,
+) -> Result<Option<Vec<u8>>, arbitrary::Error> {
+    if u.arbitrary()? {
+        Ok(Some(arbitrary_bytes(u, 0, max_len)?))
+    } else {
+        Ok(None)
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn arbitrary_messages(
+    u: &mut Unstructured,
+    min: usize,
+    max: usize,
+) -> Result<Vec<(Option<Vec<u8>>, Vec<u8>)>, arbitrary::Error> {
+    let len = u.int_in_range(min..=max)?;
+    (0..len)
+        .map(|_| {
+            let ns = arbitrary_optional_bytes(u, 50)?;
+            let msg = arbitrary_bytes(u, 0, 100)?;
+            Ok((ns, msg))
+        })
+        .collect()
 }
 
 fn fuzz(op: FuzzOperation) {
@@ -696,14 +749,6 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::AggregatePublicKeysG1 { keys } => {
-            let _ = aggregate_public_keys::<MinPk, _>(&keys);
-        }
-
-        FuzzOperation::AggregatePublicKeysG2 { keys } => {
-            let _ = aggregate_public_keys::<MinSig, _>(&keys);
-        }
-
         FuzzOperation::SerializeScalar { scalar } => {
             let mut encoded = Vec::new();
             scalar.write(&mut encoded);
@@ -733,6 +778,46 @@ fn fuzz(op: FuzzOperation) {
             share.write(&mut encoded);
             if let Ok(decoded) = Share::read(&mut encoded.as_slice()) {
                 assert_eq!(share, decoded);
+            }
+        }
+
+        FuzzOperation::VerifyMultipleMessagesMinPk {
+            public_key,
+            entries,
+            concurrency,
+        } => {
+            if !entries.is_empty() && concurrency > 0 {
+                let entries_refs: Vec<_> = entries
+                    .iter()
+                    .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_slice(), *sig))
+                    .collect();
+
+                let _ = verify_multiple_messages::<_, MinPk, _>(
+                    &mut thread_rng(),
+                    &public_key,
+                    &entries_refs,
+                    concurrency,
+                );
+            }
+        }
+
+        FuzzOperation::VerifyMultipleMessagesMinSig {
+            public_key,
+            entries,
+            concurrency,
+        } => {
+            if !entries.is_empty() && concurrency > 0 {
+                let entries_refs: Vec<_> = entries
+                    .iter()
+                    .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_slice(), *sig))
+                    .collect();
+
+                let _ = verify_multiple_messages::<_, MinSig, _>(
+                    &mut thread_rng(),
+                    &public_key,
+                    &entries_refs,
+                    concurrency,
+                );
             }
         }
     }
