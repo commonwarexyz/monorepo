@@ -354,11 +354,11 @@ mod tests {
         variant::{MinPk, MinSig},
     };
     use commonware_math::algebra::Random as _;
-    use rand::thread_rng;
+    use commonware_utils::test_rng;
 
     #[test]
     fn test_encrypt_decrypt_minpk() {
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
 
         // Generate master keypair
         let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_encrypt_decrypt_minsig() {
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
 
         // Generate master ops::keypair
         let (master_secret, master_public) = ops::keypair::<_, MinSig>(&mut rng);
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_wrong_private_key() {
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
 
         // Generate two different master ops::keypairs
         let (_, master_public1) = ops::keypair::<_, MinPk>(&mut rng);
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_tampered_ciphertext() {
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
 
         let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
         let target = 40u64.to_be_bytes();
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn test_encrypt_decrypt_with_namespace() {
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
 
         // Generate master ops::keypair
         let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_namespace_variance() {
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
 
         // Generate master ops::keypair
         let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn test_cca_modified_v() {
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
 
         let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
         let target = 110u64.to_be_bytes();
@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn test_cca_modified_u() {
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
 
         let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
         let target = 70u64.to_be_bytes();

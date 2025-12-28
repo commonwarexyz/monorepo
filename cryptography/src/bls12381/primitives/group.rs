@@ -1127,8 +1127,8 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::test_suites;
+    use commonware_utils::test_rng;
     use proptest::prelude::*;
-    use rand::prelude::*;
     use std::collections::{BTreeSet, HashMap};
 
     impl Arbitrary for Scalar {
@@ -1196,7 +1196,7 @@ mod tests {
     #[test]
     fn basic_group() {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
-        let s = Scalar::random(&mut thread_rng());
+        let s = Scalar::random(&mut test_rng());
         let mut s2 = s.clone();
         s2.double();
 
@@ -1211,7 +1211,7 @@ mod tests {
 
     #[test]
     fn test_scalar_codec() {
-        let original = Scalar::random(&mut thread_rng());
+        let original = Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), Scalar::SIZE);
         let decoded = Scalar::decode(&mut encoded).unwrap();
@@ -1220,7 +1220,7 @@ mod tests {
 
     #[test]
     fn test_g1_codec() {
-        let original = G1::generator() * &Scalar::random(&mut thread_rng());
+        let original = G1::generator() * &Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G1::SIZE);
         let decoded = G1::decode(&mut encoded).unwrap();
@@ -1229,7 +1229,7 @@ mod tests {
 
     #[test]
     fn test_g2_codec() {
-        let original = G2::generator() * &Scalar::random(&mut thread_rng());
+        let original = G2::generator() * &Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G2::SIZE);
         let decoded = G2::decode(&mut encoded).unwrap();
@@ -1253,7 +1253,7 @@ mod tests {
 
     #[test]
     fn test_g1_msm() {
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
         let n = 10; // Number of points/scalars
 
         // Case 1: Random points and scalars
@@ -1345,7 +1345,7 @@ mod tests {
 
     #[test]
     fn test_g2_msm() {
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
         let n = 10; // Number of points/scalars
 
         // Case 1: Random points and scalars
@@ -1438,7 +1438,7 @@ mod tests {
     #[test]
     fn test_trait_implementations() {
         // Generate a set of unique items to test.
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
         const NUM_ITEMS: usize = 10;
         let mut scalar_set = BTreeSet::new();
         let mut g1_set = BTreeSet::new();

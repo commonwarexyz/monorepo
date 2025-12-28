@@ -389,13 +389,13 @@ mod tests {
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_utils::hostname;
+    use commonware_utils::{hostname, test_rng};
     use std::{net::SocketAddr, time::Duration};
 
     const NAMESPACE: &[u8] = b"test";
 
     fn signed_peer_info() -> Info<PublicKey> {
-        let mut rng = rand::thread_rng();
+        let mut rng = test_rng();
         let c = PrivateKey::random(&mut rng);
         Info {
             ingress: Ingress::Socket(SocketAddr::from(([127, 0, 0, 1], 8080))),

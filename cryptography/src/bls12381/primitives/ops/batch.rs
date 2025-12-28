@@ -144,10 +144,11 @@ mod tests {
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
     use commonware_math::algebra::CryptoGroup;
-    use rand::prelude::*;
+    use commonware_utils::test_rng;
 
     fn verify_multiple_messages_correct<V: Variant>() {
-        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let mut rng = test_rng();
+        let (private, public) = keypair::<_, V>(&mut rng);
         let namespace = Some(&b"test"[..]);
         let messages: &[(Option<&[u8]>, &[u8])] = &[
             (namespace, b"Message 1"),
@@ -159,10 +160,10 @@ mod tests {
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(&private, *ns, msg)))
             .collect();
 
-        verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &entries, 1)
+        verify_multiple_messages::<_, V, _>(&mut rng, &public, &entries, 1)
             .expect("valid signatures should be accepted");
 
-        verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &entries, 4)
+        verify_multiple_messages::<_, V, _>(&mut rng, &public, &entries, 4)
             .expect("valid signatures should be accepted with parallelism");
     }
 
@@ -173,7 +174,8 @@ mod tests {
     }
 
     fn verify_multiple_messages_wrong_signature<V: Variant>() {
-        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let mut rng = test_rng();
+        let (private, public) = keypair::<_, V>(&mut rng);
         let namespace = Some(&b"test"[..]);
         let messages: &[(Option<&[u8]>, &[u8])] = &[
             (namespace, b"Message 1"),
@@ -185,10 +187,10 @@ mod tests {
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(&private, *ns, msg)))
             .collect();
 
-        let random_scalar = Scalar::random(&mut thread_rng());
+        let random_scalar = Scalar::random(&mut rng);
         entries[1].2 += &(V::Signature::generator() * &random_scalar);
 
-        let result = verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &entries, 1);
+        let result = verify_multiple_messages::<_, V, _>(&mut rng, &public, &entries, 1);
         assert!(result.is_err(), "corrupted signature should be rejected");
     }
 

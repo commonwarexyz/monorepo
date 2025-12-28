@@ -645,8 +645,8 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
-    use commonware_utils::{ordered::Set, quorum, TryCollect};
-    use rand::{rngs::StdRng, thread_rng, SeedableRng};
+    use commonware_utils::{ordered::Set, quorum, test_rng, TryCollect};
+    use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test-ed25519";
     const MESSAGE: &[u8] = b"test message";
@@ -694,7 +694,7 @@ mod tests {
             .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
         assert!(scheme.verify_attestation::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &attestation
@@ -849,7 +849,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -859,7 +859,7 @@ mod tests {
         let mut corrupted = certificate;
         corrupted.signatures[0] = corrupted.signatures[1].clone();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &corrupted
@@ -946,7 +946,7 @@ mod tests {
         certificate.signatures.pop();
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -972,7 +972,7 @@ mod tests {
         certificate.signatures.pop();
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -1160,7 +1160,7 @@ mod tests {
             .push(certificate.signatures[0].clone());
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,
@@ -1185,7 +1185,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,
@@ -1197,7 +1197,7 @@ mod tests {
 
         // Certificate verification should fail due to size mismatch
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,

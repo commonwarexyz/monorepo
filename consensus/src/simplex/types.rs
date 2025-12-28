@@ -2475,10 +2475,10 @@ mod tests {
         certificate::mocks::Fixture,
         sha256::Digest as Sha256,
     };
-    use commonware_utils::{quorum, quorum_from_slice};
+    use commonware_utils::{quorum, quorum_from_slice, test_rng};
     use rand::{
         rngs::{OsRng, StdRng},
-        thread_rng, SeedableRng,
+        SeedableRng,
     };
 
     const NAMESPACE: &[u8] = b"test";
@@ -2486,15 +2486,6 @@ mod tests {
     // Helper function to create a sample digest
     fn sample_digest(v: u8) -> Sha256 {
         Sha256::from([v; 32]) // Simple fixed digest for testing
-    }
-
-    /// Generate a fixture using the provided generator function.
-    fn setup<S, F>(n: u32, fixture: F) -> Fixture<S>
-    where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
-    {
-        let mut rng = StdRng::seed_from_u64(0);
-        fixture(&mut rng, n)
     }
 
     /// Generate a fixture using the provided generator function with a specific seed.
@@ -2523,7 +2514,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let notarize = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
@@ -2532,7 +2523,7 @@ mod tests {
         let decoded = Notarize::decode(encoded).unwrap();
 
         assert_eq!(notarize, decoded);
-        assert!(decoded.verify(&mut thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut test_rng(), &fixture.schemes[0], NAMESPACE));
     }
 
     #[test]
@@ -2549,7 +2540,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let proposal = Proposal::new(
             Round::new(Epoch::new(0), View::new(10)),
             View::new(5),
@@ -2582,13 +2573,13 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], NAMESPACE, round).unwrap();
         let encoded = nullify.encode();
         let decoded = Nullify::decode(encoded).unwrap();
         assert_eq!(nullify, decoded);
-        assert!(decoded.verify::<_, Sha256>(&mut thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify::<_, Sha256>(&mut test_rng(), &fixture.schemes[0], NAMESPACE));
     }
 
     #[test]
@@ -2605,7 +2596,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(333), View::new(10));
         let nullifies: Vec<_> = fixture
             .schemes
@@ -2634,14 +2625,14 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let finalize = Finalize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
         let encoded = finalize.encode();
         let decoded = Finalize::decode(encoded).unwrap();
         assert_eq!(finalize, decoded);
-        assert!(decoded.verify(&mut thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut test_rng(), &fixture.schemes[0], NAMESPACE));
     }
 
     #[test]
@@ -2658,7 +2649,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let finalizes: Vec<_> = fixture
@@ -2688,7 +2679,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let cfg = fixture.schemes[0].certificate_codec_config();
         let request = Request::new(
             1,
@@ -2750,7 +2741,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
 
@@ -2800,7 +2791,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let proposal1 = Proposal::new(
             Round::new(Epoch::new(0), View::new(10)),
             View::new(5),
@@ -2819,7 +2810,7 @@ mod tests {
         let decoded = ConflictingNotarize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting, decoded);
-        assert!(decoded.verify(&mut thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut test_rng(), &fixture.schemes[0], NAMESPACE));
     }
 
     #[test]
@@ -2836,7 +2827,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let proposal1 = Proposal::new(
             Round::new(Epoch::new(0), View::new(10)),
             View::new(5),
@@ -2855,7 +2846,7 @@ mod tests {
         let decoded = ConflictingFinalize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting, decoded);
-        assert!(decoded.verify(&mut thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut test_rng(), &fixture.schemes[0], NAMESPACE));
     }
 
     #[test]
@@ -2872,7 +2863,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], NAMESPACE, round).unwrap();
@@ -2883,7 +2874,7 @@ mod tests {
         let decoded = NullifyFinalize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflict, decoded);
-        assert!(decoded.verify(&mut thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut test_rng(), &fixture.schemes[0], NAMESPACE));
     }
 
     #[test]
@@ -2900,13 +2891,13 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let notarize = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
 
-        assert!(notarize.verify(&mut thread_rng(), &fixture.schemes[0], NAMESPACE));
-        assert!(!notarize.verify(&mut thread_rng(), &fixture.schemes[0], b"wrong_namespace"));
+        assert!(notarize.verify(&mut test_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(!notarize.verify(&mut test_rng(), &fixture.schemes[0], b"wrong_namespace"));
     }
 
     #[test]
@@ -2929,8 +2920,8 @@ mod tests {
         let proposal = Proposal::new(round, View::new(5), sample_digest(2));
         let notarize = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
 
-        assert!(notarize.verify(&mut thread_rng(), &fixture.schemes[0], NAMESPACE));
-        assert!(!notarize.verify(&mut thread_rng(), &wrong_fixture.verifier, NAMESPACE));
+        assert!(notarize.verify(&mut test_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(!notarize.verify(&mut test_rng(), &wrong_fixture.verifier, NAMESPACE));
     }
 
     #[test]
@@ -2982,7 +2973,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(4));
         let quorum = quorum_from_slice(&fixture.schemes) as usize;
@@ -3016,7 +3007,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let quorum_size = quorum(fixture.schemes.len() as u32) as usize;
         assert!(quorum_size > 1, "test requires quorum larger than one");
         let round = Round::new(Epoch::new(0), View::new(10));
@@ -3058,9 +3049,9 @@ mod tests {
         let notarize2 = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal2).unwrap();
         let conflict = ConflictingNotarize::new(notarize1, notarize2);
 
-        assert!(conflict.verify(&mut thread_rng(), &fixture.schemes[0], NAMESPACE));
-        assert!(!conflict.verify(&mut thread_rng(), &fixture.schemes[0], b"wrong_namespace"));
-        assert!(!conflict.verify(&mut thread_rng(), &wrong_fixture.verifier, NAMESPACE));
+        assert!(conflict.verify(&mut test_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(!conflict.verify(&mut test_rng(), &fixture.schemes[0], b"wrong_namespace"));
+        assert!(!conflict.verify(&mut test_rng(), &wrong_fixture.verifier, NAMESPACE));
     }
 
     #[test]
@@ -3086,9 +3077,9 @@ mod tests {
         let finalize = Finalize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
         let conflict = NullifyFinalize::new(nullify, finalize);
 
-        assert!(conflict.verify(&mut thread_rng(), &fixture.schemes[0], NAMESPACE));
-        assert!(!conflict.verify(&mut thread_rng(), &fixture.schemes[0], b"wrong_namespace"));
-        assert!(!conflict.verify(&mut thread_rng(), &wrong_fixture.verifier, NAMESPACE));
+        assert!(conflict.verify(&mut test_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(!conflict.verify(&mut test_rng(), &fixture.schemes[0], b"wrong_namespace"));
+        assert!(!conflict.verify(&mut test_rng(), &wrong_fixture.verifier, NAMESPACE));
     }
 
     #[test]

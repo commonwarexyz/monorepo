@@ -737,8 +737,8 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
-    use commonware_utils::{quorum_from_slice, NZU32};
-    use rand::{rngs::StdRng, thread_rng, SeedableRng};
+    use commonware_utils::{quorum_from_slice, test_rng, NZU32};
+    use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
 
@@ -919,7 +919,7 @@ mod tests {
             )
             .unwrap();
         assert!(verifier.verify_attestation::<_, Sha256Digest>(
-            &mut rand::thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -955,7 +955,7 @@ mod tests {
             .collect();
 
         let verification = schemes[0].verify_attestations(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -967,7 +967,7 @@ mod tests {
 
         votes[0].signer = 999;
         let verification = schemes[0].verify_attestations(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1036,7 +1036,7 @@ mod tests {
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         assert!(verifier.verify_certificate(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             Subject::Finalize {
                 proposal: &proposal,
@@ -1074,7 +1074,7 @@ mod tests {
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         assert!(verifier.verify_certificate(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1085,7 +1085,7 @@ mod tests {
         let mut corrupted = certificate;
         corrupted.vote_signature = corrupted.seed_signature;
         assert!(!verifier.verify_certificate(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1312,7 +1312,7 @@ mod tests {
             "certificate verifier should not produce votes"
         );
         assert!(certificate_verifier.verify_certificate(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             Subject::Finalize {
                 proposal: &proposal,
@@ -1341,7 +1341,7 @@ mod tests {
             .unwrap();
 
         certificate_verifier.verify_attestation::<_, Sha256Digest>(
-            &mut rand::thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             Subject::Finalize {
                 proposal: &proposal,
@@ -1494,7 +1494,7 @@ mod tests {
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             Subject::Nullify {
                 round: proposal.round,
@@ -1505,7 +1505,7 @@ mod tests {
         let mut corrupted = certificate;
         corrupted.seed_signature = corrupted.vote_signature;
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             Subject::Nullify {
                 round: proposal.round,
@@ -1531,10 +1531,10 @@ mod tests {
         let target = Round::new(Epoch::new(333), View::new(10));
 
         // Encrypt using the scheme
-        let ciphertext = schemes[0].encrypt(&mut thread_rng(), NAMESPACE, target, *message);
+        let ciphertext = schemes[0].encrypt(&mut test_rng(), NAMESPACE, target, *message);
 
         // Can also encrypt with the verifier scheme
-        let ciphertext_verifier = verifier.encrypt(&mut thread_rng(), NAMESPACE, target, *message);
+        let ciphertext_verifier = verifier.encrypt(&mut test_rng(), NAMESPACE, target, *message);
 
         // Generate notarization for the target round to get the seed
         let proposal = sample_proposal(target.epoch(), target.view(), 14);

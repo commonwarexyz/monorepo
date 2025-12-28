@@ -276,8 +276,7 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
     use commonware_math::algebra::{CryptoGroup, Random};
-    use commonware_utils::union_unique;
-    use rand::prelude::*;
+    use commonware_utils::{test_rng, union_unique};
 
     fn blst_aggregate_verify_multiple_public_keys<'a, V, I>(
         public: I,
@@ -321,9 +320,10 @@ mod tests {
     }
 
     fn aggregate_verify_multiple_public_keys_correct<V: Variant>() {
-        let (private1, public1) = keypair::<_, V>(&mut thread_rng());
-        let (private2, public2) = keypair::<_, V>(&mut thread_rng());
-        let (private3, public3) = keypair::<_, V>(&mut thread_rng());
+        let mut rng = test_rng();
+        let (private1, public1) = keypair::<_, V>(&mut rng);
+        let (private2, public2) = keypair::<_, V>(&mut rng);
+        let (private3, public3) = keypair::<_, V>(&mut rng);
         let namespace = b"test";
         let message = b"message";
         let sig1 = sign_message::<V>(&private1, Some(namespace), message);
@@ -349,9 +349,10 @@ mod tests {
     }
 
     fn aggregate_verify_wrong_public_keys<V: Variant>() {
-        let (private1, public1) = keypair::<_, V>(&mut thread_rng());
-        let (private2, public2) = keypair::<_, V>(&mut thread_rng());
-        let (private3, _) = keypair::<_, V>(&mut thread_rng());
+        let mut rng = test_rng();
+        let (private1, public1) = keypair::<_, V>(&mut rng);
+        let (private2, public2) = keypair::<_, V>(&mut rng);
+        let (private3, _) = keypair::<_, V>(&mut rng);
         let namespace = b"test";
         let message = b"message";
         let sig1 = sign_message::<V>(&private1, Some(namespace), message);
@@ -361,7 +362,7 @@ mod tests {
 
         let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
 
-        let (_, public4) = keypair::<_, V>(&mut thread_rng());
+        let (_, public4) = keypair::<_, V>(&mut rng);
         let wrong_pks = vec![public1, public2, public4];
         let result = verify_multiple_public_keys::<V, _>(
             &wrong_pks,
@@ -379,9 +380,10 @@ mod tests {
     }
 
     fn aggregate_verify_wrong_public_key_count<V: Variant>() {
-        let (private1, public1) = keypair::<_, V>(&mut thread_rng());
-        let (private2, public2) = keypair::<_, V>(&mut thread_rng());
-        let (private3, _) = keypair::<_, V>(&mut thread_rng());
+        let mut rng = test_rng();
+        let (private1, public1) = keypair::<_, V>(&mut rng);
+        let (private2, public2) = keypair::<_, V>(&mut rng);
+        let (private3, _) = keypair::<_, V>(&mut rng);
         let namespace = b"test";
         let message = b"message";
         let sig1 = sign_message::<V>(&private1, Some(namespace), message);
@@ -444,7 +446,7 @@ mod tests {
     }
 
     fn aggregate_verify_multiple_messages_correct<V: Variant>() {
-        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let (private, public) = keypair::<_, V>(&mut test_rng());
         let namespace = Some(&b"test"[..]);
         let messages: Vec<(Option<&[u8]>, &[u8])> = vec![
             (namespace, b"Message 1"),
@@ -480,7 +482,8 @@ mod tests {
     }
 
     fn aggregate_verify_fail_on_malleability<V: Variant>() {
-        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let mut rng = test_rng();
+        let (private, public) = keypair::<_, V>(&mut rng);
         let msg1: &[u8] = b"message 1";
         let msg2: &[u8] = b"message 2";
 
@@ -490,7 +493,7 @@ mod tests {
         verify_message::<V>(&public, None, msg1, &sig1).expect("sig1 should be valid");
         verify_message::<V>(&public, None, msg2, &sig2).expect("sig2 should be valid");
 
-        let random_scalar = Scalar::random(&mut thread_rng());
+        let random_scalar = Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let forged_sig1 = sig1 - &delta;
         let forged_sig2 = sig2 + &delta;
@@ -515,15 +518,14 @@ mod tests {
             .expect("vulnerable naive verification accepts forged aggregate");
 
         let forged_entries = vec![(None, msg1, forged_sig1), (None, msg2, forged_sig2)];
-        let result =
-            verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &forged_entries, 1);
+        let result = verify_multiple_messages::<_, V, _>(&mut rng, &public, &forged_entries, 1);
         assert!(
             result.is_err(),
             "secure function should reject forged signatures"
         );
 
         let valid_entries = vec![(None, msg1, sig1), (None, msg2, sig2)];
-        verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &valid_entries, 1)
+        verify_multiple_messages::<_, V, _>(&mut rng, &public, &valid_entries, 1)
             .expect("secure function should accept valid signatures");
     }
 

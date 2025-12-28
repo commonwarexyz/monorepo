@@ -439,21 +439,12 @@ mod tests {
         certificate::mocks::Fixture,
         Hasher, Sha256,
     };
-    use commonware_utils::ordered::Quorum;
-    use rand::{rngs::StdRng, thread_rng, SeedableRng};
+    use commonware_utils::{ordered::Quorum, test_rng};
+    use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test";
 
     type Sha256Digest = <Sha256 as Hasher>::Digest;
-
-    /// Generate a fixture using the provided generator function.
-    fn setup<S, F>(n: u32, fixture: F) -> Fixture<S>
-    where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
-    {
-        let mut rng = StdRng::seed_from_u64(0);
-        fixture(&mut rng, n)
-    }
 
     #[test]
     fn test_ack_namespace() {
@@ -467,7 +458,7 @@ mod tests {
         S: Scheme<Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let schemes = &fixture.schemes;
         let item = Item {
             index: 100,
@@ -487,7 +478,7 @@ mod tests {
         // Verify the restored ack
         assert_eq!(restored_ack.item, item);
         assert_eq!(restored_ack.epoch, Epoch::new(1));
-        assert!(restored_ack.verify(&mut thread_rng(), &schemes[0], NAMESPACE));
+        assert!(restored_ack.verify(&mut test_rng(), &schemes[0], NAMESPACE));
 
         // Test TipAck codec
         let tip_ack = TipAck {
@@ -561,7 +552,7 @@ mod tests {
         S: Scheme<Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut buf = BytesMut::new();
         3u8.write(&mut buf); // Invalid discriminant
 

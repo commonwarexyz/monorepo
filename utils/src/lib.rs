@@ -74,6 +74,14 @@ pub use stable_buf::StableBuf;
 #[cfg(feature = "std")]
 pub mod concurrency;
 
+/// Returns a seeded RNG for deterministic testing.
+///
+/// Uses seed 0 by default to ensure reproducible test results.
+#[cfg(feature = "std")]
+pub fn test_rng() -> rand::rngs::StdRng {
+    rand::SeedableRng::seed_from_u64(0)
+}
+
 /// Alias for boxed errors that are `Send` and `Sync`.
 pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;
 
