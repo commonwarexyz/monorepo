@@ -13,7 +13,9 @@ export function sortVersionsDesc(versions: string[]): void {
     const partsA = a.replace(/^v/, "").split(".").map(Number);
     const partsB = b.replace(/^v/, "").split(".").map(Number);
     for (let i = 0; i < 3; i++) {
-      if (partsA[i] !== partsB[i]) return partsB[i] - partsA[i];
+      if (partsA[i] !== partsB[i]) {
+        return partsB[i] - partsA[i];
+      }
     }
     return 0;
   });
@@ -23,9 +25,15 @@ export function sortVersionsDesc(versions: string[]): void {
  * Get the language identifier for syntax highlighting based on file extension.
  */
 export function getLanguage(path: string): string {
-  if (path.endsWith(".rs")) return "rust";
-  if (path.endsWith(".toml")) return "toml";
-  if (path.endsWith(".md")) return "markdown";
+  if (path.endsWith(".rs")) {
+    return "rust";
+  }
+  if (path.endsWith(".toml")) {
+    return "toml";
+  }
+  if (path.endsWith(".md")) {
+    return "markdown";
+  }
   return "";
 }
 
@@ -33,8 +41,12 @@ export function getLanguage(path: string): string {
  * Validate a file path - no path traversal or absolute paths allowed.
  */
 export function isValidPath(path: string): boolean {
-  if (path.includes("..")) return false;
-  if (path.startsWith("/")) return false;
+  if (path.includes("..")) {
+    return false;
+  }
+  if (path.startsWith("/")) {
+    return false;
+  }
   return true;
 }
 

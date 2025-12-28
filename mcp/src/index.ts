@@ -127,7 +127,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           .number()
           .optional()
           .default(10)
-          .describe(`Maximum number of results to return (default: 10, max: ${MAX_SEARCH_RESULTS})`),
+          .describe(
+            `Maximum number of results to return (default: 10, max: ${MAX_SEARCH_RESULTS})`
+          ),
       },
       async ({ query, crate, file_type, version, max_results }) => {
         // Clamp max_results to prevent excessive fetching
@@ -154,13 +156,17 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           const responses = await Promise.all(
             batch.map(async (file) => {
               const content = await this.fetchFile(ver, file);
-              if (content === null) return null;
+              if (content === null) {
+                return null;
+              }
               return { file, content };
             })
           );
 
           for (const resp of responses) {
-            if (!resp || results.length >= limit) continue;
+            if (!resp || results.length >= limit) {
+              continue;
+            }
 
             const lines = resp.content.split("\n");
             const matches: string[] = [];
@@ -177,7 +183,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
                 matches.push(snippet);
 
                 // Limit matches per file
-                if (matches.length >= 3) break;
+                if (matches.length >= 3) {
+                  break;
+                }
               }
             }
 
@@ -449,7 +457,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     // Fetch each crate's Cargo.toml to get description
     const cratePromises = memberPaths.map(async (path) => {
       const cargoToml = await this.fetchFile(version, `${path}/Cargo.toml`);
-      if (cargoToml === null) return null;
+      if (cargoToml === null) {
+        return null;
+      }
 
       const { name, description } = parseCrateInfo(cargoToml, path);
       return { name, path, description };
@@ -493,7 +503,7 @@ async function getLatestVersionFromSitemap(baseUrl: string): Promise<string> {
 
 // Worker fetch handler
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     // Health check endpoint
@@ -513,9 +523,6 @@ export default {
 
     // Route to MCP agent using the agents SDK helper
     // Maps requests to /agents/:agent/:name pattern for proper session handling
-    return (
-      (await routeAgentRequest(request, env)) ||
-      new Response("Not found", { status: 404 })
-    );
+    return (await routeAgentRequest(request, env)) || new Response("Not found", { status: 404 });
   },
 };

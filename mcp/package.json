@@ -9,7 +9,12 @@
     "build": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "cf-typegen": "wrangler types"
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "format": "prettier --write src/",
+    "format:check": "prettier --check src/",
+    "cf-typegen": "wrangler types",
+    "ci": "npm run format:check && npm run lint && npm run build && npm run test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
@@ -18,6 +23,10 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250620.0",
+    "@typescript-eslint/eslint-plugin": "^8.33.0",
+    "@typescript-eslint/parser": "^8.33.0",
+    "eslint": "^9.28.0",
+    "prettier": "^3.5.3",
     "typescript": "^5.8.0",
     "vitest": "^3.2.3",
     "wrangler": "^4.19.1"
