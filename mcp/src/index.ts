@@ -14,6 +14,7 @@
  */
 
 import { McpAgent } from "agents/mcp";
+import { routeAgentRequest } from "agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Env } from "./env.d.ts";
@@ -510,10 +511,11 @@ export default {
       );
     }
 
-    // Route to a new MCP agent instance per request
-    // Each client session gets its own DO to avoid interleaving streams
-    const id = env.MCP_OBJECT.newUniqueId();
-    const stub = env.MCP_OBJECT.get(id);
-    return stub.fetch(request);
+    // Route to MCP agent using the agents SDK helper
+    // Maps requests to /agents/:agent/:name pattern for proper session handling
+    return (
+      (await routeAgentRequest(request, env)) ||
+      new Response("Not found", { status: 404 })
+    );
   },
 };
