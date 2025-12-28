@@ -487,7 +487,8 @@ mod tests {
         // Verify the restored ack
         assert_eq!(restored_ack.item, item);
         assert_eq!(restored_ack.epoch, Epoch::new(1));
-        assert!(restored_ack.verify(&mut rand::thread_rng(), &schemes[0], NAMESPACE));
+        let mut rng = StdRng::seed_from_u64(0);
+        assert!(restored_ack.verify(&mut rng, &schemes[0], NAMESPACE));
 
         // Test TipAck codec
         let tip_ack = TipAck {

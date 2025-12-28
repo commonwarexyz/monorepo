@@ -13,12 +13,7 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
         }
         for concurrency in [1, 8].into_iter() {
             c.bench_function(
-                &format!(
-                    "{}::aggregate_verify_multiple_messages/conc={} msgs={}",
-                    module_path!(),
-                    concurrency,
-                    n,
-                ),
+                &format!("{}/conc={} msgs={}", module_path!(), concurrency, n),
                 |b| {
                     b.iter_batched(
                         || {

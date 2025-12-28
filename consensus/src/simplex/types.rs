@@ -2532,7 +2532,11 @@ mod tests {
         let decoded = Notarize::decode(encoded).unwrap();
 
         assert_eq!(notarize, decoded);
-        assert!(decoded.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(
+            &mut StdRng::seed_from_u64(0),
+            &fixture.schemes[0],
+            NAMESPACE
+        ));
     }
 
     #[test]
@@ -2589,7 +2593,7 @@ mod tests {
         let decoded = Nullify::decode(encoded).unwrap();
         assert_eq!(nullify, decoded);
         assert!(decoded.verify::<_, Sha256>(
-            &mut rand::thread_rng(),
+            &mut StdRng::seed_from_u64(0),
             &fixture.schemes[0],
             NAMESPACE
         ));
@@ -2645,7 +2649,11 @@ mod tests {
         let encoded = finalize.encode();
         let decoded = Finalize::decode(encoded).unwrap();
         assert_eq!(finalize, decoded);
-        assert!(decoded.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(
+            &mut StdRng::seed_from_u64(0),
+            &fixture.schemes[0],
+            NAMESPACE
+        ));
     }
 
     #[test]
@@ -2823,7 +2831,8 @@ mod tests {
         let decoded = ConflictingNotarize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting, decoded);
-        assert!(decoded.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
+        let mut rng = StdRng::seed_from_u64(0);
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0], NAMESPACE));
     }
 
     #[test]
@@ -2859,7 +2868,11 @@ mod tests {
         let decoded = ConflictingFinalize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting, decoded);
-        assert!(decoded.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(
+            &mut StdRng::seed_from_u64(0),
+            &fixture.schemes[0],
+            NAMESPACE
+        ));
     }
 
     #[test]
@@ -2887,7 +2900,11 @@ mod tests {
         let decoded = NullifyFinalize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflict, decoded);
-        assert!(decoded.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(
+            &mut StdRng::seed_from_u64(0),
+            &fixture.schemes[0],
+            NAMESPACE
+        ));
     }
 
     #[test]
@@ -2909,9 +2926,13 @@ mod tests {
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let notarize = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
 
-        assert!(notarize.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(notarize.verify(
+            &mut StdRng::seed_from_u64(0),
+            &fixture.schemes[0],
+            NAMESPACE
+        ));
         assert!(!notarize.verify(
-            &mut rand::thread_rng(),
+            &mut StdRng::seed_from_u64(0),
             &fixture.schemes[0],
             b"wrong_namespace"
         ));
@@ -2937,8 +2958,16 @@ mod tests {
         let proposal = Proposal::new(round, View::new(5), sample_digest(2));
         let notarize = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
 
-        assert!(notarize.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
-        assert!(!notarize.verify(&mut rand::thread_rng(), &wrong_fixture.verifier, NAMESPACE));
+        assert!(notarize.verify(
+            &mut StdRng::seed_from_u64(0),
+            &fixture.schemes[0],
+            NAMESPACE
+        ));
+        assert!(!notarize.verify(
+            &mut StdRng::seed_from_u64(0),
+            &wrong_fixture.verifier,
+            NAMESPACE
+        ));
     }
 
     #[test]
@@ -3066,13 +3095,21 @@ mod tests {
         let notarize2 = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal2).unwrap();
         let conflict = ConflictingNotarize::new(notarize1, notarize2);
 
-        assert!(conflict.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(conflict.verify(
+            &mut StdRng::seed_from_u64(0),
+            &fixture.schemes[0],
+            NAMESPACE
+        ));
         assert!(!conflict.verify(
-            &mut rand::thread_rng(),
+            &mut StdRng::seed_from_u64(0),
             &fixture.schemes[0],
             b"wrong_namespace"
         ));
-        assert!(!conflict.verify(&mut rand::thread_rng(), &wrong_fixture.verifier, NAMESPACE));
+        assert!(!conflict.verify(
+            &mut StdRng::seed_from_u64(0),
+            &wrong_fixture.verifier,
+            NAMESPACE
+        ));
     }
 
     #[test]
@@ -3098,13 +3135,21 @@ mod tests {
         let finalize = Finalize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
         let conflict = NullifyFinalize::new(nullify, finalize);
 
-        assert!(conflict.verify(&mut rand::thread_rng(), &fixture.schemes[0], NAMESPACE));
+        assert!(conflict.verify(
+            &mut StdRng::seed_from_u64(0),
+            &fixture.schemes[0],
+            NAMESPACE
+        ));
         assert!(!conflict.verify(
-            &mut rand::thread_rng(),
+            &mut StdRng::seed_from_u64(0),
             &fixture.schemes[0],
             b"wrong_namespace"
         ));
-        assert!(!conflict.verify(&mut rand::thread_rng(), &wrong_fixture.verifier, NAMESPACE));
+        assert!(!conflict.verify(
+            &mut StdRng::seed_from_u64(0),
+            &wrong_fixture.verifier,
+            NAMESPACE
+        ));
     }
 
     #[test]

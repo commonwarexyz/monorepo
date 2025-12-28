@@ -822,6 +822,7 @@ mod tests {
     fn sign_vote_roundtrip_for_each_context<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 7);
         let scheme = &schemes[0];
+        let mut rng = StdRng::seed_from_u64(0);
 
         let proposal = sample_proposal(Epoch::new(0), View::new(2), 1);
         let notarize_vote = scheme
@@ -833,7 +834,7 @@ mod tests {
             )
             .unwrap();
         assert!(scheme.verify_attestation::<_, Sha256Digest>(
-            &mut rand::thread_rng(),
+            &mut rng,
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -850,7 +851,7 @@ mod tests {
             )
             .unwrap();
         assert!(scheme.verify_attestation::<_, Sha256Digest>(
-            &mut rand::thread_rng(),
+            &mut rng,
             NAMESPACE,
             Subject::Nullify {
                 round: proposal.round,
@@ -867,7 +868,7 @@ mod tests {
             )
             .unwrap();
         assert!(scheme.verify_attestation::<_, Sha256Digest>(
-            &mut rand::thread_rng(),
+            &mut rng,
             NAMESPACE,
             Subject::Finalize {
                 proposal: &proposal,

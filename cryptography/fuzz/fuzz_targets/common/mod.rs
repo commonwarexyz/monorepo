@@ -1,6 +1,4 @@
 use arbitrary::Unstructured;
-
-pub type Message = (Option<Vec<u8>>, Vec<u8>);
 use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::{
     primitives::{
@@ -60,6 +58,8 @@ pub fn arbitrary_vec_g2(
     let len = u.int_in_range(min..=max)?;
     (0..len).map(|_| arbitrary_g2(u)).collect()
 }
+
+pub type Message = (Option<Vec<u8>>, Vec<u8>);
 
 #[allow(unused)]
 pub fn arbitrary_messages(

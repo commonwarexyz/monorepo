@@ -69,7 +69,7 @@ struct DigestRequest<D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + Storage + Metrics,
+    E: Clock + Spawner + Storage + Metrics + rand::RngCore + rand::CryptoRng,
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Index, Digest = D> + Clone,
@@ -154,7 +154,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Storage + Metrics,
+        E: Clock + Spawner + Storage + Metrics + rand::RngCore + rand::CryptoRng,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
         A: Automaton<Context = Index, Digest = D> + Clone,
@@ -605,7 +605,7 @@ impl<
     ///
     /// Returns an error if the ack is invalid.
     fn validate_ack(
-        &self,
+        &mut self,
         ack: &Ack<P::Scheme, D>,
         sender: &<P::Scheme as Scheme>::PublicKey,
     ) -> Result<(), Error> {
@@ -665,7 +665,7 @@ impl<
         }
 
         // Validate signature
-        if !ack.verify(&mut rand::thread_rng(), &*scheme, &self.namespace) {
+        if !ack.verify(&mut self.context, &*scheme, &self.namespace) {
             return Err(Error::InvalidAckSignature);
         }
 

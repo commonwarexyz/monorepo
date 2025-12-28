@@ -1612,10 +1612,11 @@ mod tests {
         let epoch = Epoch::new(5);
 
         let ack = Ack::sign(NAMESPACE, &fixture.schemes[0], chunk, epoch).expect("Should sign ack");
-        assert!(ack.verify(&mut rand::thread_rng(), NAMESPACE, &fixture.verifier));
+        let mut rng = StdRng::seed_from_u64(0);
+        assert!(ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Test that verification fails with wrong namespace
-        assert!(!ack.verify(&mut rand::thread_rng(), b"wrong", &fixture.verifier));
+        assert!(!ack.verify(&mut rng, b"wrong", &fixture.verifier));
     }
 
     #[test]
@@ -1901,7 +1902,8 @@ mod tests {
         .expect("Should sign ack");
 
         // Verification should succeed
-        assert!(ack.verify(&mut rand::thread_rng(), NAMESPACE, &fixture.verifier));
+        let mut rng = StdRng::seed_from_u64(0);
+        assert!(ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Create an ack with tampered signature by signing with a different scheme
         let ctx = AckSubject {
@@ -1917,7 +1919,7 @@ mod tests {
         let invalid_ack = Ack::<PublicKey, S, Sha256Digest>::new(chunk, epoch, tampered_vote);
 
         // Verification should fail because the signer index doesn't match the signature
-        assert!(!invalid_ack.verify(&mut rand::thread_rng(), NAMESPACE, &fixture.verifier));
+        assert!(!invalid_ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
     }
 
     #[test]

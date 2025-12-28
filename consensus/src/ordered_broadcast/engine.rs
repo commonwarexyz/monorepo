@@ -897,7 +897,7 @@ impl<
     /// Returns the chunk, epoch, and vote if the ack is valid.
     /// Returns an error if the ack is invalid.
     fn validate_ack(
-        &self,
+        &mut self,
         ack: &Ack<C::PublicKey, P::Scheme, D>,
         sender: &<P::Scheme as Scheme>::PublicKey,
     ) -> Result<(), Error> {
@@ -946,7 +946,7 @@ impl<
         }
 
         // Validate the vote signature
-        if !ack.verify(&mut rand::thread_rng(), &self.namespace, scheme.as_ref()) {
+        if !ack.verify(&mut self.context, &self.namespace, scheme.as_ref()) {
             return Err(Error::InvalidAckSignature);
         }
 
