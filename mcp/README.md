@@ -34,24 +34,6 @@ Or add to `.mcp.json` in your project:
 }
 ```
 
-### Claude Desktop
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
-
-```json
-{
-  "mcpServers": {
-    "commonware": {
-      "command": "npx",
-      "args": [
-        "mcp-remote",
-        "https://commonware-mcp.<your-account>.workers.dev/sse"
-      ]
-    }
-  }
-}
-```
-
 ### Cursor
 
 ```json
@@ -92,7 +74,7 @@ npm run dev
 The server will be available at `http://localhost:8787`. Use the MCP inspector to test:
 
 ```bash
-npx @modelcontextprotocol/inspector@latest http://localhost:8787/sse
+npx @modelcontextprotocol/inspector@latest http://localhost:8787/mcp
 ```
 
 ### Deploy
@@ -109,15 +91,14 @@ npm run deploy
 
 The server uses Cloudflare's [Agents SDK](https://developers.cloudflare.com/agents/) with the `McpAgent` class:
 
-- **Durable Objects**: Maintains persistent SSE connections for MCP clients
+- **Durable Objects**: Maintains persistent connections for MCP clients
 - **Sitemap-based discovery**: Parses `commonware.xyz/sitemap.xml` to discover available files
-- **Caching**: Sitemap data is cached for 1 hour to reduce upstream requests
+- **Caching**: Sitemap and crate data cached for 1 hour to reduce upstream requests
 
 ### Endpoints
 
 - `/` - Health check (JSON status)
-- `/sse` - SSE transport for MCP connections (legacy)
-- `/mcp` - Streamable HTTP transport (recommended)
+- `/mcp` - Streamable HTTP transport
 
 ## Example Usage
 

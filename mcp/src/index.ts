@@ -495,10 +495,7 @@ export default {
           name: "commonware-mcp",
           version: "0.0.1",
           status: "ok",
-          endpoints: {
-            sse: "/sse",
-            mcp: "/mcp",
-          },
+          endpoint: "/mcp",
         }),
         {
           headers: { "Content-Type": "application/json" },
@@ -506,8 +503,8 @@ export default {
       );
     }
 
-    // Route to MCP agent for SSE and MCP endpoints
-    if (url.pathname === "/sse" || url.pathname === "/mcp") {
+    // Route to MCP agent
+    if (url.pathname === "/mcp") {
       // Get or create durable object instance
       const id = env.MCP_OBJECT.idFromName("singleton");
       const stub = env.MCP_OBJECT.get(id);
