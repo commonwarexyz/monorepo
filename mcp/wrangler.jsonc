@@ -22,11 +22,6 @@
     }
   ],
 
-  // Optional: uncomment to use KV for caching fetched content
-  // "kv_namespaces": [
-  //   { "binding": "CACHE", "id": "<your-kv-namespace-id>" }
-  // ],
-
   // Environment variables for the base URL
   "vars": {
     "BASE_URL": "https://commonware.xyz"

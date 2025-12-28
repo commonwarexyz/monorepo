@@ -510,8 +510,9 @@ export default {
       );
     }
 
-    // Route all other requests to MCP agent
-    const id = env.MCP_OBJECT.idFromName("singleton");
+    // Route to a new MCP agent instance per request
+    // Each client session gets its own DO to avoid interleaving streams
+    const id = env.MCP_OBJECT.newUniqueId();
     const stub = env.MCP_OBJECT.get(id);
     return stub.fetch(request);
   },
