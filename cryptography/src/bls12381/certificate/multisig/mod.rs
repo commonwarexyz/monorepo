@@ -11,7 +11,7 @@ use crate::{
         group::Private,
         ops::{
             aggregate_signatures, aggregate_verify_multiple_public_keys, compute_public,
-            sign_message, verify_message,
+            sign_message, verify_message, verify_multiple_public_keys,
         },
         variant::Variant,
     },
@@ -130,7 +130,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     /// Batch-verifies attestations and returns verified attestations and invalid signers.
     pub fn verify_attestations<S, R, D, I>(
         &self,
-        _rng: &mut R,
+        rng: &mut R,
         namespace: &[u8],
         subject: S::Subject<'_, D>,
         attestations: I,
@@ -143,16 +143,14 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     {
         let mut invalid = BTreeSet::new();
         let mut candidates = Vec::new();
-        let mut publics = Vec::new();
-        let mut sigs = Vec::new();
+        let mut entries = Vec::new();
         for attestation in attestations.into_iter() {
             let Some(public_key) = self.participants.value(attestation.signer as usize) else {
                 invalid.insert(attestation.signer);
                 continue;
             };
 
-            publics.push(*public_key);
-            sigs.push(attestation.signature);
+            entries.push((*public_key, attestation.signature));
             candidates.push(attestation);
         }
 
@@ -161,28 +159,18 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
             return Verification::new(candidates, invalid.into_iter().collect());
         }
 
-        // Verify the aggregate signature.
+        // Verify attestations and return any invalid ones.
         let (namespace, message) = subject.namespace_and_message(namespace);
-        if aggregate_verify_multiple_public_keys::<V, _>(
-            publics.iter(),
+        let invalid_indices = verify_multiple_public_keys::<_, V>(
+            rng,
             Some(namespace.as_ref()),
             message.as_ref(),
-            &aggregate_signatures::<V, _>(sigs.iter()),
-        )
-        .is_err()
-        {
-            for (attestation, public_key) in candidates.iter().zip(publics.iter()) {
-                if verify_message::<V>(
-                    public_key,
-                    Some(namespace.as_ref()),
-                    message.as_ref(),
-                    &attestation.signature,
-                )
-                .is_err()
-                {
-                    invalid.insert(attestation.signer);
-                }
-            }
+            &entries,
+        );
+
+        // Mark invalid attestations.
+        for idx in invalid_indices {
+            invalid.insert(candidates[idx].signer);
         }
 
         // Collect the verified attestations.

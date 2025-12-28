@@ -268,24 +268,33 @@ where
     verify_multiple_messages::<_, V, _>(rng, &public, &combined, concurrency)
 }
 
-/// Verify a list of [PartialSignature]s by performing aggregate verification with random
-/// scalar weights, performing repeated bisection to find invalid signatures (if any exist).
+/// Verifies multiple signatures over the same message from different public keys,
+/// using random scalar weights to prevent signature malleability attacks.
 ///
-/// Random scalar weights prevent signature malleability attacks where an attacker could
+/// This function performs batch verification with bisection to identify invalid
+/// signatures. Random scalar weights prevent attacks where an attacker could
 /// redistribute signature components while keeping the aggregate unchanged.
 ///
-/// TODO (#903): parallelize this
-fn partial_verify_multiple_public_keys_bisect<'a, R, V>(
+/// Returns the indices of any invalid signatures found.
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on each public key
+/// and signature.
+pub fn verify_multiple_public_keys<R, V>(
     rng: &mut R,
-    pending: &[(V::Public, &'a PartialSignature<V>)],
-    mut invalid: Vec<&'a PartialSignature<V>>,
     namespace: Option<&[u8]>,
     message: &[u8],
-) -> Result<(), Vec<&'a PartialSignature<V>>>
+    entries: &[(V::Public, V::Signature)],
+) -> Vec<usize>
 where
     R: CryptoRngCore,
     V: Variant,
 {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
     // Hash the message once
     let hm = namespace.map_or_else(
         || hash_message::<V>(V::MESSAGE, message),
@@ -293,10 +302,10 @@ where
     );
 
     // Iteratively bisect to find invalid signatures
-    let mut stack = vec![(0, pending.len())];
+    let mut invalid = Vec::new();
+    let mut stack = vec![(0, entries.len())];
     while let Some((start, end)) = stack.pop() {
-        // Skip if range is empty
-        let slice = &pending[start..end];
+        let slice = &entries[start..end];
         if slice.is_empty() {
             continue;
         }
@@ -308,14 +317,14 @@ where
 
         // Compute weighted sums: sum(r_i * pk_i) and sum(r_i * sig_i)
         let pks: Vec<V::Public> = slice.iter().map(|(pk, _)| *pk).collect();
-        let sigs: Vec<V::Signature> = slice.iter().map(|(_, partial)| partial.value).collect();
+        let sigs: Vec<V::Signature> = slice.iter().map(|(_, sig)| *sig).collect();
         let weighted_pk = V::Public::msm(&pks, &scalars, 1);
         let weighted_sig = V::Signature::msm(&sigs, &scalars, 1);
 
         // Verify: e(weighted_pk, H(m)) == e(weighted_sig, G)
         if V::verify(&weighted_pk, &hm, &weighted_sig).is_err() {
             if slice.len() == 1 {
-                invalid.push(slice[0].1);
+                invalid.push(start);
             } else {
                 let mid = slice.len() / 2;
                 stack.push((start + mid, end));
@@ -324,11 +333,38 @@ where
         }
     }
 
-    // Return invalid partial signatures, if any
-    if !invalid.is_empty() {
-        return Err(invalid);
-    }
-    Ok(())
+    invalid
+}
+
+/// Verify a list of [PartialSignature]s by performing aggregate verification with random
+/// scalar weights, performing repeated bisection to find invalid signatures (if any exist).
+///
+/// Random scalar weights prevent signature malleability attacks where an attacker could
+/// redistribute signature components while keeping the aggregate unchanged.
+fn partial_verify_multiple_public_keys_bisect<'a, R, V>(
+    rng: &mut R,
+    pending: &[(V::Public, &'a PartialSignature<V>)],
+    namespace: Option<&[u8]>,
+    message: &[u8],
+) -> Vec<&'a PartialSignature<V>>
+where
+    R: CryptoRngCore,
+    V: Variant,
+{
+    // Convert to the format expected by verify_multiple_public_keys
+    let entries: Vec<(V::Public, V::Signature)> = pending
+        .iter()
+        .map(|(pk, partial)| (*pk, partial.value))
+        .collect();
+
+    // Use the generic verification function
+    let invalid_indices = verify_multiple_public_keys::<_, V>(rng, namespace, message, &entries);
+
+    // Map indices back to PartialSignature references
+    invalid_indices
+        .into_iter()
+        .map(|idx| pending[idx].1)
+        .collect()
 }
 
 /// Attempts to verify multiple [PartialSignature]s over the same message as a single
@@ -364,15 +400,14 @@ where
     }
 
     // Find any invalid partial signatures
-    if let Err(bad) = partial_verify_multiple_public_keys_bisect::<_, V>(
+    let bad = partial_verify_multiple_public_keys_bisect::<_, V>(
         rng,
         pending.as_slice(),
-        Vec::new(),
         namespace,
         message,
-    ) {
-        invalid.extend(bad);
-    }
+    );
+    invalid.extend(bad);
+
     if invalid.is_empty() {
         Ok(())
     } else {
