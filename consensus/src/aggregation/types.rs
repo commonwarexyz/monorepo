@@ -439,8 +439,8 @@ mod tests {
         certificate::mocks::Fixture,
         Hasher, Sha256,
     };
-    use commonware_utils::ordered::Quorum;
-    use rand::{rngs::StdRng, thread_rng, SeedableRng};
+    use commonware_utils::{ordered::Quorum, test_rng};
+    use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -487,7 +487,7 @@ mod tests {
         // Verify the restored ack
         assert_eq!(restored_ack.item, item);
         assert_eq!(restored_ack.epoch, Epoch::new(1));
-        assert!(restored_ack.verify(&mut thread_rng(), &schemes[0], NAMESPACE));
+        assert!(restored_ack.verify(&mut test_rng(), &schemes[0], NAMESPACE));
 
         // Test TipAck codec
         let tip_ack = TipAck {

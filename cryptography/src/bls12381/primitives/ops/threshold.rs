@@ -387,8 +387,8 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
     use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
-    use commonware_utils::{quorum, union_unique, NZU32};
-    use rand::prelude::*;
+    use commonware_utils::{quorum, test_rng, union_unique, NZU32};
+    use rand::{rngs::StdRng, SeedableRng};
 
     fn blst_verify_proof_of_possession<V: Variant>(
         public: &V::Public,
@@ -503,7 +503,7 @@ mod tests {
     fn verify_multiple_messages_correct<V: Variant>() {
         let n = 5;
         let (public, shares) =
-            dkg::deal_anonymous::<V>(&mut thread_rng(), Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V>(&mut test_rng(), Default::default(), NZU32!(n));
 
         let signer = &shares[0];
 
@@ -516,7 +516,7 @@ mod tests {
             .iter()
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, *ns, msg)))
             .collect();
-        verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, signer.index, &entries, 1)
+        verify_multiple_messages::<_, V, _>(&mut test_rng(), &public, signer.index, &entries, 1)
             .expect("Verification with namespaced messages should succeed");
 
         let messages_no_ns: &[(Option<&[u8]>, &[u8])] =
@@ -526,7 +526,7 @@ mod tests {
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, *ns, msg)))
             .collect();
         verify_multiple_messages::<_, V, _>(
-            &mut thread_rng(),
+            &mut test_rng(),
             &public,
             signer.index,
             &entries_no_ns,
@@ -544,7 +544,7 @@ mod tests {
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, *ns, msg)))
             .collect();
         verify_multiple_messages::<_, V, _>(
-            &mut thread_rng(),
+            &mut test_rng(),
             &public,
             signer.index,
             &entries_mixed,
@@ -553,7 +553,7 @@ mod tests {
         .expect("Verification with mixed namespaces should succeed");
 
         assert!(matches!(
-            verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, 1, &entries, 1),
+            verify_multiple_messages::<_, V, _>(&mut test_rng(), &public, 1, &entries, 1),
             Err(Error::InvalidSignature)
         ));
 
@@ -563,7 +563,7 @@ mod tests {
         entries_swapped[1].2 = temp_sig;
         assert!(
             verify_multiple_messages::<_, V, _>(
-                &mut thread_rng(),
+                &mut test_rng(),
                 &public,
                 signer.index,
                 &entries_swapped,
@@ -579,7 +579,7 @@ mod tests {
         entries_mixed_signers[0].2 = partial2;
         assert!(matches!(
             verify_multiple_messages::<_, V, _>(
-                &mut thread_rng(),
+                &mut test_rng(),
                 &public,
                 signer.index,
                 &entries_mixed_signers,
@@ -745,7 +745,7 @@ mod tests {
             dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
 
         let share = shares.get_mut(3).unwrap();
-        share.private = Private::random(&mut rand::thread_rng());
+        share.private = Private::random(&mut test_rng());
 
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
@@ -785,7 +785,7 @@ mod tests {
         sharing.precompute_partial_publics();
 
         verify_multiple_public_keys::<_, MinSig, _>(
-            &mut thread_rng(),
+            &mut test_rng(),
             &sharing,
             namespace,
             msg,
@@ -813,7 +813,7 @@ mod tests {
 
         sharing.precompute_partial_publics();
         let result = verify_multiple_public_keys::<_, MinSig, _>(
-            &mut thread_rng(),
+            &mut test_rng(),
             &sharing,
             namespace,
             msg,
@@ -856,7 +856,7 @@ mod tests {
         sharing.precompute_partial_publics();
 
         let result = verify_multiple_public_keys::<_, MinSig, _>(
-            &mut thread_rng(),
+            &mut test_rng(),
             &sharing,
             namespace,
             msg,
@@ -899,7 +899,7 @@ mod tests {
 
         sharing.precompute_partial_publics();
         let result = verify_multiple_public_keys::<_, MinSig, _>(
-            &mut thread_rng(),
+            &mut test_rng(),
             &sharing,
             namespace,
             msg,
@@ -935,7 +935,7 @@ mod tests {
             .collect();
 
         verify_multiple_public_keys::<_, MinSig, _>(
-            &mut thread_rng(),
+            &mut test_rng(),
             &sharing,
             namespace,
             msg,
@@ -960,7 +960,7 @@ mod tests {
             .collect();
 
         let result = verify_multiple_public_keys::<_, MinSig, _>(
-            &mut thread_rng(),
+            &mut test_rng(),
             &sharing,
             namespace,
             msg,
@@ -993,7 +993,7 @@ mod tests {
             .collect();
 
         let result = verify_multiple_public_keys::<_, MinSig, _>(
-            &mut thread_rng(),
+            &mut test_rng(),
             &sharing,
             namespace,
             msg,
@@ -1132,7 +1132,7 @@ mod tests {
 
         let forged_partials = [forged_partial1, forged_partial2];
         let result = verify_multiple_public_keys::<_, V, _>(
-            &mut thread_rng(),
+            &mut test_rng(),
             &sharing,
             namespace,
             msg,
@@ -1145,7 +1145,7 @@ mod tests {
 
         let valid_partials = [partial1, partial2];
         verify_multiple_public_keys::<_, V, _>(
-            &mut thread_rng(),
+            &mut test_rng(),
             &sharing,
             namespace,
             msg,
@@ -1217,7 +1217,7 @@ mod tests {
             (namespace, msg2, forged_partial2),
         ];
         let result = verify_multiple_messages::<_, V, _>(
-            &mut thread_rng(),
+            &mut test_rng(),
             &sharing,
             signer.index,
             &forged_entries,
@@ -1230,7 +1230,7 @@ mod tests {
 
         let valid_entries = vec![(namespace, msg1, partial1), (namespace, msg2, partial2)];
         verify_multiple_messages::<_, V, _>(
-            &mut thread_rng(),
+            &mut test_rng(),
             &sharing,
             signer.index,
             &valid_entries,

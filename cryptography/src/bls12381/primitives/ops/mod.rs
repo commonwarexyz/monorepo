@@ -155,11 +155,11 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, Encode, ReadExt};
     use commonware_math::algebra::CryptoGroup;
-    use commonware_utils::{from_hex_formatted, union_unique};
-    use rand::{prelude::*, rngs::OsRng};
+    use commonware_utils::{from_hex_formatted, test_rng, union_unique};
+    use rand::rngs::OsRng;
 
     fn codec<V: Variant>() {
-        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let (private, public) = keypair::<_, V>(&mut test_rng());
         let (private_bytes, public_bytes) = (private.encode(), public.encode());
 
         let (private_decoded, public_decoded) = (
@@ -224,7 +224,7 @@ mod tests {
     }
 
     fn single_proof_of_possession<V: Variant>() {
-        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let (private, public) = keypair::<_, V>(&mut test_rng());
         let pop = sign_proof_of_possession::<V>(&private);
 
         verify_proof_of_possession::<V>(&public, &pop).expect("PoP should be valid");
@@ -264,7 +264,7 @@ mod tests {
     }
 
     fn bad_namespace<V: Variant>() {
-        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let (private, public) = keypair::<_, V>(&mut test_rng());
         let msg = &[1, 9, 6, 9];
         let sig = sign_message::<V>(&private, Some(b"good"), msg);
         assert!(matches!(
@@ -280,7 +280,7 @@ mod tests {
     }
 
     fn single_message<V: Variant>() {
-        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let (private, public) = keypair::<_, V>(&mut test_rng());
         let msg = &[1, 9, 6, 9];
         let namespace = b"test";
         let sig = sign_message::<V>(&private, Some(namespace), msg);

@@ -536,8 +536,8 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
-    use commonware_utils::{ordered::BiMap, quorum, TryCollect};
-    use rand::{rngs::StdRng, thread_rng, SeedableRng};
+    use commonware_utils::{ordered::BiMap, quorum, test_rng, TryCollect};
+    use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test-bls12381-multisig";
     const MESSAGE: &[u8] = b"test message";
@@ -598,7 +598,7 @@ mod tests {
             .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
         assert!(scheme.verify_attestation::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &attestation
@@ -777,7 +777,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -787,7 +787,7 @@ mod tests {
         let mut corrupted = certificate;
         corrupted.signature = aggregate::Signature::zero();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &corrupted
@@ -894,7 +894,7 @@ mod tests {
         certificate.signers = Signers::from(participants_len, signers);
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -927,7 +927,7 @@ mod tests {
         certificate.signers = Signers::from(participants_len + 1, signers);
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -1105,7 +1105,7 @@ mod tests {
         certificate.signers = Signers::from(participants_len + 1, signers);
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,

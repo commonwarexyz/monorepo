@@ -410,12 +410,13 @@ mod tests {
     use super::*;
     use crate::bls12381::primitives::{group::Scalar, ops};
     use commonware_math::algebra::{CryptoGroup, Random};
-    use rand::prelude::*;
+    use commonware_utils::test_rng;
 
     fn batch_verify_correct<V: Variant>() {
-        let (private1, public1) = ops::keypair::<_, V>(&mut thread_rng());
-        let (private2, public2) = ops::keypair::<_, V>(&mut thread_rng());
-        let (private3, public3) = ops::keypair::<_, V>(&mut thread_rng());
+        let mut rng = test_rng();
+        let (private1, public1) = ops::keypair::<_, V>(&mut rng);
+        let (private2, public2) = ops::keypair::<_, V>(&mut rng);
+        let (private3, public3) = ops::keypair::<_, V>(&mut rng);
 
         let msg1: &[u8] = b"message 1";
         let msg2: &[u8] = b"message 2";
@@ -430,7 +431,7 @@ mod tests {
         let hm3 = ops::hash_message::<V>(V::MESSAGE, msg3);
 
         V::batch_verify(
-            &mut thread_rng(),
+            &mut rng,
             &[public1, public2, public3],
             &[hm1, hm2, hm3],
             &[sig1, sig2, sig3],
@@ -445,8 +446,9 @@ mod tests {
     }
 
     fn batch_verify_rejects_malleability<V: Variant>() {
-        let (private1, public1) = ops::keypair::<_, V>(&mut thread_rng());
-        let (private2, public2) = ops::keypair::<_, V>(&mut thread_rng());
+        let mut rng = test_rng();
+        let (private1, public1) = ops::keypair::<_, V>(&mut rng);
+        let (private2, public2) = ops::keypair::<_, V>(&mut rng);
 
         let msg1: &[u8] = b"message 1";
         let msg2: &[u8] = b"message 2";
@@ -458,7 +460,7 @@ mod tests {
         let hm2 = ops::hash_message::<V>(V::MESSAGE, msg2);
 
         // Forge signatures by redistributing: sig1' = sig1 - delta, sig2' = sig2 + delta
-        let random_scalar = Scalar::random(&mut thread_rng());
+        let random_scalar = Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let forged_sig1 = sig1 - &delta;
         let forged_sig2 = sig2 + &delta;
@@ -481,7 +483,7 @@ mod tests {
 
         // batch_verify with random weights should reject forged signatures
         let result = V::batch_verify(
-            &mut thread_rng(),
+            &mut rng,
             &[public1, public2],
             &[hm1, hm2],
             &[forged_sig1, forged_sig2],
@@ -493,7 +495,7 @@ mod tests {
 
         // Valid signatures should still pass
         V::batch_verify(
-            &mut thread_rng(),
+            &mut rng,
             &[public1, public2],
             &[hm1, hm2],
             &[sig1, sig2],
