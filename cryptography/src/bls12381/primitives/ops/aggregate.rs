@@ -30,7 +30,7 @@ pub struct PublicKey<V: Variant>(V::Public);
 
 impl<V: Variant> PublicKey<V> {
     /// Returns the inner public key value.
-    pub fn inner(&self) -> &V::Public {
+    pub const fn inner(&self) -> &V::Public {
         &self.0
     }
 }
@@ -53,6 +53,16 @@ impl<V: Variant> FixedSize for PublicKey<V> {
     const SIZE: usize = V::Public::SIZE;
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for PublicKey<V>
+where
+    V::Public: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self(V::Public::arbitrary(u)?))
+    }
+}
+
 /// An aggregated signature from multiple individual signatures.
 ///
 /// This type is returned by [`combine_signatures`] and ensures that
@@ -62,7 +72,7 @@ pub struct Signature<V: Variant>(V::Signature);
 
 impl<V: Variant> Signature<V> {
     /// Returns the inner signature value.
-    pub fn inner(&self) -> &V::Signature {
+    pub const fn inner(&self) -> &V::Signature {
         &self.0
     }
 
@@ -521,5 +531,16 @@ mod tests {
     fn test_aggregate_verify_fail_on_malleability() {
         aggregate_verify_fail_on_malleability::<MinPk>();
         aggregate_verify_fail_on_malleability::<MinSig>();
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<PublicKey<MinSig>>,
+            CodecConformance<Signature<MinSig>>,
+        }
     }
 }

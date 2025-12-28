@@ -1073,7 +1073,7 @@ mod tests {
         signers.push(participants_len as u32);
         let extended = Certificate::<V> {
             signers: Signers::from(participants_len + 1, signers),
-            signature: certificate.signature.clone(),
+            signature: certificate.signature,
         };
         assert!(Certificate::<V>::decode_cfg(extended.encode(), &participants_len).is_err());
     }
