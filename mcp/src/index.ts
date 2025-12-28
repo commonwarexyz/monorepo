@@ -37,16 +37,20 @@ interface CratesCache {
 }
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
-  server = new McpServer({
-    name: "commonware",
-    version: "0.0.1",
-  });
+  server!: McpServer;
 
   private sitemapCache: SitemapCache | null = null;
   private cratesCache: CratesCache | null = null;
   private readonly CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
   async init() {
+    // Initialize server with version from workspace Cargo.toml
+    const latestVersion = await this.getLatestVersion();
+    this.server = new McpServer({
+      name: "commonware",
+      version: latestVersion.replace(/^v/, ""), // Remove 'v' prefix
+    });
+
     // Tool: Get a specific file by path
     this.server.tool(
       "get_file",
@@ -483,6 +487,37 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   }
 }
 
+// Helper: Fetch latest version from sitemap
+async function getLatestVersion(baseUrl: string): Promise<string> {
+  const response = await fetch(`${baseUrl}/sitemap.xml`);
+  if (!response.ok) {
+    return "unknown";
+  }
+
+  const xml = await response.text();
+  const versions: string[] = [];
+
+  const urlMatches = xml.matchAll(/<loc>([^<]+)<\/loc>/g);
+  for (const match of urlMatches) {
+    const codeMatch = match[1].match(/\/code\/(v[\d.]+)\//);
+    if (codeMatch && !versions.includes(codeMatch[1])) {
+      versions.push(codeMatch[1]);
+    }
+  }
+
+  // Sort versions (newest first)
+  versions.sort((a, b) => {
+    const partsA = a.slice(1).split(".").map(Number);
+    const partsB = b.slice(1).split(".").map(Number);
+    for (let i = 0; i < 3; i++) {
+      if (partsA[i] !== partsB[i]) return partsB[i] - partsA[i];
+    }
+    return 0;
+  });
+
+  return versions[0]?.replace(/^v/, "") || "unknown";
+}
+
 // Worker fetch handler
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -490,10 +525,11 @@ export default {
 
     // Health check endpoint
     if (url.pathname === "/" || url.pathname === "/health") {
+      const version = await getLatestVersion(env.BASE_URL);
       return new Response(
         JSON.stringify({
           name: "commonware-mcp",
-          version: "0.0.1",
+          version,
           status: "ok",
           endpoint: "/mcp",
         }),
