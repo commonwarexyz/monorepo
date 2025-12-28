@@ -739,13 +739,13 @@ mod tests {
 
     fn partial_aggregate_signature_bad_share<V: Variant>() {
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = test_rng();
 
         let (sharing, mut shares) =
             dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
 
         let share = shares.get_mut(3).unwrap();
-        share.private = Private::random(&mut test_rng());
+        share.private = Private::random(&mut rng);
 
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";

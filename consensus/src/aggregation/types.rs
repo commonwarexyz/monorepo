@@ -446,15 +446,6 @@ mod tests {
 
     type Sha256Digest = <Sha256 as Hasher>::Digest;
 
-    /// Generate a fixture using the provided generator function.
-    fn setup<S, F>(n: u32, fixture: F) -> Fixture<S>
-    where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
-    {
-        let mut rng = StdRng::seed_from_u64(0);
-        fixture(&mut rng, n)
-    }
-
     #[test]
     fn test_ack_namespace() {
         let namespace = b"test_namespace";
@@ -467,7 +458,7 @@ mod tests {
         S: Scheme<Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let schemes = &fixture.schemes;
         let item = Item {
             index: 100,
@@ -561,7 +552,7 @@ mod tests {
         S: Scheme<Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut buf = BytesMut::new();
         3u8.write(&mut buf); // Invalid discriminant
 

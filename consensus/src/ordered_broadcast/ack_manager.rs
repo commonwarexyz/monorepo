@@ -160,6 +160,7 @@ mod tests {
         ed25519::PublicKey,
         Hasher, Sha256,
     };
+    use commonware_utils::test_rng;
     use helpers::Sha256Digest;
     use rand::{rngs::StdRng, SeedableRng as _};
 
@@ -233,15 +234,6 @@ mod tests {
             }
             certificate
         }
-
-        /// Generate a fixture using the provided generator function.
-        pub fn setup<S, F>(num_validators: u32, fixture: F) -> Fixture<S>
-        where
-            F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
-        {
-            let mut rng = StdRng::seed_from_u64(0);
-            fixture(&mut rng, num_validators)
-        }
     }
 
     /// Different payloads for the same chunk produce distinct certificates.
@@ -252,7 +244,7 @@ mod tests {
     {
         // Use 8 validators so quorum is 6
         let num_validators = 8;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(&mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let height = 10;
@@ -300,7 +292,7 @@ mod tests {
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(&mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(10);
@@ -346,7 +338,7 @@ mod tests {
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(&mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(10);
@@ -394,7 +386,7 @@ mod tests {
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(&mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let height = 30;
@@ -440,7 +432,7 @@ mod tests {
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(&mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let epoch = Epoch::new(99);
         let sequencer = fixture.participants[1].clone();
@@ -480,7 +472,7 @@ mod tests {
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(&mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
@@ -508,7 +500,7 @@ mod tests {
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(&mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
@@ -545,7 +537,7 @@ mod tests {
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(&mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
 
         let sequencer1 = fixture.participants[1].clone();
@@ -584,7 +576,7 @@ mod tests {
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(&mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
@@ -617,7 +609,7 @@ mod tests {
         // We'll have validators [0-13] vote for payload1 and [6-19] vote for payload2
         // This gives us overlapping sets but each reaches quorum
         let num_validators = 20;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(&mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);

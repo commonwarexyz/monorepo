@@ -2488,15 +2488,6 @@ mod tests {
         Sha256::from([v; 32]) // Simple fixed digest for testing
     }
 
-    /// Generate a fixture using the provided generator function.
-    fn setup<S, F>(n: u32, fixture: F) -> Fixture<S>
-    where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
-    {
-        let mut rng = StdRng::seed_from_u64(0);
-        fixture(&mut rng, n)
-    }
-
     /// Generate a fixture using the provided generator function with a specific seed.
     fn setup_seeded<S, F>(n: u32, seed: u64, fixture: F) -> Fixture<S>
     where
@@ -2523,7 +2514,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let notarize = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
@@ -2549,7 +2540,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let proposal = Proposal::new(
             Round::new(Epoch::new(0), View::new(10)),
             View::new(5),
@@ -2582,7 +2573,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], NAMESPACE, round).unwrap();
         let encoded = nullify.encode();
@@ -2605,7 +2596,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(333), View::new(10));
         let nullifies: Vec<_> = fixture
             .schemes
@@ -2634,7 +2625,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let finalize = Finalize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
@@ -2658,7 +2649,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let finalizes: Vec<_> = fixture
@@ -2688,7 +2679,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let cfg = fixture.schemes[0].certificate_codec_config();
         let request = Request::new(
             1,
@@ -2750,7 +2741,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
 
@@ -2800,7 +2791,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let proposal1 = Proposal::new(
             Round::new(Epoch::new(0), View::new(10)),
             View::new(5),
@@ -2836,7 +2827,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let proposal1 = Proposal::new(
             Round::new(Epoch::new(0), View::new(10)),
             View::new(5),
@@ -2872,7 +2863,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], NAMESPACE, round).unwrap();
@@ -2900,7 +2891,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let notarize = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
@@ -2982,7 +2973,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(4));
         let quorum = quorum_from_slice(&fixture.schemes) as usize;
@@ -3016,7 +3007,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let fixture = fixture(&mut test_rng(), 5);
         let quorum_size = quorum(fixture.schemes.len() as u32) as usize;
         assert!(quorum_size > 1, "test requires quorum larger than one");
         let round = Round::new(Epoch::new(0), View::new(10));

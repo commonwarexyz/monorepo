@@ -494,13 +494,8 @@ mod tests {
         );
 
         // Valid signatures should still pass
-        V::batch_verify(
-            &mut rng,
-            &[public1, public2],
-            &[hm1, hm2],
-            &[sig1, sig2],
-        )
-        .expect("valid signatures should pass batch_verify");
+        V::batch_verify(&mut rng, &[public1, public2], &[hm1, hm2], &[sig1, sig2])
+            .expect("valid signatures should pass batch_verify");
     }
 
     #[test]
