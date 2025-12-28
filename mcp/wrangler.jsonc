@@ -1,0 +1,34 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "commonware-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Durable Objects are used by the MCP agent for maintaining SSE connections
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP_OBJECT",
+        "class_name": "CommonwareMCP"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["CommonwareMCP"]
+    }
+  ],
+
+  // Optional: uncomment to use KV for caching fetched content
+  // "kv_namespaces": [
+  //   { "binding": "CACHE", "id": "<your-kv-namespace-id>" }
+  // ],
+
+  // Environment variables for the base URL
+  "vars": {
+    "BASE_URL": "https://commonware.xyz"
+  }
+}
