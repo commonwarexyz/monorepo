@@ -18,7 +18,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server for the Comm
 ### Claude Code
 
 ```bash
-claude mcp add --transport http commonware https://commonware-mcp.<your-account>.workers.dev/mcp
+claude mcp add --transport http commonware https://mcp.commonware.xyz/mcp
 ```
 
 Or add to `.mcp.json` in your project:
@@ -28,7 +28,7 @@ Or add to `.mcp.json` in your project:
   "mcpServers": {
     "commonware": {
       "type": "http",
-      "url": "https://commonware-mcp.<your-account>.workers.dev/mcp"
+      "url": "https://mcp.commonware.xyz/mcp"
     }
   }
 }
@@ -40,7 +40,7 @@ Or add to `.mcp.json` in your project:
 {
   "mcpServers": {
     "commonware": {
-      "url": "https://commonware-mcp.<your-account>.workers.dev/mcp"
+      "url": "https://mcp.commonware.xyz/mcp"
     }
   }
 }
@@ -48,7 +48,7 @@ Or add to `.mcp.json` in your project:
 
 ### Cloudflare AI Playground
 
-Visit [ai.cloudflare.com](https://ai.cloudflare.com) and connect to your deployed worker URL.
+Visit [ai.cloudflare.com](https://ai.cloudflare.com) and connect to `https://mcp.commonware.xyz/mcp`.
 
 ## Development
 
