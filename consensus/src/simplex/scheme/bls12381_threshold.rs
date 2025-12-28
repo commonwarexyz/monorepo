@@ -694,11 +694,12 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             }
         }
 
+        // We care about the correctness of each signature, so we use batch verification rather
+        // than computing the aggregate signature and verifying it.
         let entries_refs: Vec<_> = entries
             .iter()
             .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_ref(), *sig))
             .collect();
-
         verify_multiple_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
     }
 
