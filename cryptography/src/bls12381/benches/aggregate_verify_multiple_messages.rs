@@ -25,7 +25,7 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
                                     ops::sign_message::<MinSig>(&private, ns, msg)
                                 })
                                 .collect();
-                            let agg_sig = ops::aggregate_signatures::<MinSig, _>(&sigs);
+                            let agg_sig = ops::aggregate::combine_signatures::<MinSig, _>(&sigs);
                             let messages: Vec<_> = msgs
                                 .iter()
                                 .map(|msg| {
@@ -36,7 +36,7 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
                             (public, messages, agg_sig)
                         },
                         |(public, messages, agg_sig)| {
-                            ops::aggregate_verify_multiple_messages::<MinSig, _>(
+                            ops::aggregate::verify_multiple_messages::<MinSig, _>(
                                 &public,
                                 &messages,
                                 &agg_sig,

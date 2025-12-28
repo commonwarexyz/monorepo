@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::bls12381::primitives::{
     group::{Share, G1, G2},
-    ops::*,
+    ops::threshold,
     sharing::Sharing,
     variant::{MinPk, MinSig, PartialSignature},
 };
@@ -188,25 +188,25 @@ fn fuzz(op: FuzzOperation) {
     match op {
         FuzzOperation::PartialSignProofOfPossessionMinPk { public, share } => {
             if share.index <= public.required() {
-                let _ = partial_sign_proof_of_possession::<MinPk>(&public, &share);
+                let _ = threshold::sign_proof_of_possession::<MinPk>(&public, &share);
             }
         }
 
         FuzzOperation::PartialSignProofOfPossessionMinSig { public, share } => {
             if share.index <= public.required() {
-                let _ = partial_sign_proof_of_possession::<MinSig>(&public, &share);
+                let _ = threshold::sign_proof_of_possession::<MinSig>(&public, &share);
             }
         }
 
         FuzzOperation::PartialVerifyProofOfPossessionMinPk { public, partial } => {
             if partial.index <= public.required() {
-                let _ = partial_verify_proof_of_possession::<MinPk>(&public, &partial);
+                let _ = threshold::verify_proof_of_possession::<MinPk>(&public, &partial);
             }
         }
 
         FuzzOperation::PartialVerifyProofOfPossessionMinSig { public, partial } => {
             if partial.index <= public.required() {
-                let _ = partial_verify_proof_of_possession::<MinSig>(&public, &partial);
+                let _ = threshold::verify_proof_of_possession::<MinSig>(&public, &partial);
             }
         }
 
@@ -230,7 +230,7 @@ fn fuzz(op: FuzzOperation) {
                         )
                     })
                     .collect();
-                let _ = partial_verify_multiple_messages::<_, MinPk, _>(
+                let _ = threshold::verify_multiple_messages::<_, MinPk, _>(
                     &mut thread_rng(),
                     &public,
                     index,
@@ -260,7 +260,7 @@ fn fuzz(op: FuzzOperation) {
                         )
                     })
                     .collect();
-                let _ = partial_verify_multiple_messages::<_, MinSig, _>(
+                let _ = threshold::verify_multiple_messages::<_, MinSig, _>(
                     &mut thread_rng(),
                     &public,
                     index,
@@ -284,7 +284,7 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
-                let _ = partial_verify_multiple_public_keys::<_, MinPk, _>(
+                let _ = threshold::verify_multiple_public_keys::<_, MinPk, _>(
                     &mut thread_rng(),
                     &public,
                     namespace.as_deref(),
@@ -308,7 +308,7 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
-                let _ = partial_verify_multiple_public_keys::<_, MinSig, _>(
+                let _ = threshold::verify_multiple_public_keys::<_, MinSig, _>(
                     &mut thread_rng(),
                     &public,
                     namespace.as_deref(),
@@ -319,11 +319,11 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::ThresholdSignatureRecoverMinPk { sharing, partials } => {
-            let _ = threshold_signature_recover::<MinPk, _>(&sharing, &partials);
+            let _ = threshold::recover::<MinPk, _>(&sharing, &partials);
         }
 
         FuzzOperation::ThresholdSignatureRecoverMinSig { sharing, partials } => {
-            let _ = threshold_signature_recover::<MinSig, _>(&sharing, &partials);
+            let _ = threshold::recover::<MinSig, _>(&sharing, &partials);
         }
 
         FuzzOperation::ThresholdSignatureRecoverMultipleMinPk {
@@ -336,11 +336,7 @@ fn fuzz(op: FuzzOperation) {
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();
-                let _ = threshold_signature_recover_multiple::<MinPk, _>(
-                    &sharing,
-                    groups_refs,
-                    concurrency,
-                );
+                let _ = threshold::recover_multiple::<MinPk, _>(&sharing, groups_refs, concurrency);
             }
         }
 
@@ -354,11 +350,8 @@ fn fuzz(op: FuzzOperation) {
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();
-                let _ = threshold_signature_recover_multiple::<MinSig, _>(
-                    &sharing,
-                    groups_refs,
-                    concurrency,
-                );
+                let _ =
+                    threshold::recover_multiple::<MinSig, _>(&sharing, groups_refs, concurrency);
             }
         }
 
@@ -367,8 +360,7 @@ fn fuzz(op: FuzzOperation) {
             partials_1,
             partials_2,
         } => {
-            let _ =
-                threshold_signature_recover_pair::<MinPk, _>(&sharing, &partials_1, &partials_2);
+            let _ = threshold::recover_pair::<MinPk, _>(&sharing, &partials_1, &partials_2);
         }
 
         FuzzOperation::ThresholdSignatureRecoverPairMinSig {
@@ -376,8 +368,7 @@ fn fuzz(op: FuzzOperation) {
             partials_1,
             partials_2,
         } => {
-            let _ =
-                threshold_signature_recover_pair::<MinSig, _>(&sharing, &partials_1, &partials_2);
+            let _ = threshold::recover_pair::<MinSig, _>(&sharing, &partials_1, &partials_2);
         }
     }
 }

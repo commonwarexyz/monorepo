@@ -39,11 +39,11 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                                 .enumerate()
                                 .map(|(idx, s)| {
                                     if idx < invalid as usize {
-                                        primitives::ops::partial_sign_message::<MinSig>(
+                                        primitives::ops::threshold::sign_message::<MinSig>(
                                             s, None, msg,
                                         )
                                     } else {
-                                        primitives::ops::partial_sign_message::<MinSig>(
+                                        primitives::ops::threshold::sign_message::<MinSig>(
                                             s,
                                             Some(namespace),
                                             msg,
@@ -60,18 +60,15 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                             }
 
                             // Verify
-                            let result =
-                                black_box(primitives::ops::partial_verify_multiple_public_keys::<
+                            let result = black_box(
+                                primitives::ops::threshold::verify_multiple_public_keys::<
                                     _,
                                     MinSig,
                                     _,
                                 >(
-                                    &mut rng,
-                                    &polynomial,
-                                    Some(namespace),
-                                    msg,
-                                    &signatures,
-                                ));
+                                    &mut rng, &polynomial, Some(namespace), msg, &signatures
+                                ),
+                            );
                             if invalid == 0 {
                                 assert!(result.is_ok());
                             } else {

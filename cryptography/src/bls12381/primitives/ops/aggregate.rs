@@ -11,15 +11,106 @@
 
 use super::{
     super::{variant::Variant, Error},
-    core::{hash_message, hash_message_namespace, verify_message},
+    hash_message, hash_message_namespace,
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use bytes::{Buf, BufMut};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Additive;
 #[cfg(feature = "std")]
 use rayon::{prelude::*, ThreadPoolBuilder};
 
-/// Aggregates multiple public keys.
+/// An aggregated public key from multiple individual public keys.
+///
+/// This type is returned by [`combine_public_keys`] and ensures that
+/// aggregated public keys are not confused with individual public keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicKey<V: Variant>(V::Public);
+
+impl<V: Variant> PublicKey<V> {
+    /// Returns the inner public key value.
+    pub const fn inner(&self) -> &V::Public {
+        &self.0
+    }
+}
+
+impl<V: Variant> Write for PublicKey<V> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.0.write(writer);
+    }
+}
+
+impl<V: Variant> Read for PublicKey<V> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self(V::Public::read(reader)?))
+    }
+}
+
+impl<V: Variant> FixedSize for PublicKey<V> {
+    const SIZE: usize = V::Public::SIZE;
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for PublicKey<V>
+where
+    V::Public: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self(V::Public::arbitrary(u)?))
+    }
+}
+
+/// An aggregated signature from multiple individual signatures.
+///
+/// This type is returned by [`combine_signatures`] and ensures that
+/// aggregated signatures are not confused with individual signatures.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Signature<V: Variant>(V::Signature);
+
+impl<V: Variant> Signature<V> {
+    /// Returns the inner signature value.
+    pub const fn inner(&self) -> &V::Signature {
+        &self.0
+    }
+
+    /// Creates a zero aggregate signature.
+    pub fn zero() -> Self {
+        Self(V::Signature::zero())
+    }
+}
+
+impl<V: Variant> Write for Signature<V> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.0.write(writer);
+    }
+}
+
+impl<V: Variant> Read for Signature<V> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self(V::Signature::read(reader)?))
+    }
+}
+
+impl<V: Variant> FixedSize for Signature<V> {
+    const SIZE: usize = V::Signature::SIZE;
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for Signature<V>
+where
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self(V::Signature::arbitrary(u)?))
+    }
+}
+
+/// Combines multiple public keys into an aggregate public key.
 ///
 /// # Warning
 ///
@@ -27,7 +118,7 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 /// that each `public_key` is unique, and that the caller has a Proof-of-Possession (PoP)
 /// for each `public_key`. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn aggregate_public_keys<'a, V, I>(public_keys: I) -> V::Public
+pub fn combine_public_keys<'a, V, I>(public_keys: I) -> PublicKey<V>
 where
     V: Variant,
     I: IntoIterator<Item = &'a V::Public>,
@@ -37,17 +128,17 @@ where
     for pk in public_keys {
         p += pk;
     }
-    p
+    PublicKey(p)
 }
 
-/// Aggregates multiple signatures.
+/// Combines multiple signatures into an aggregate signature.
 ///
 /// # Warning
 ///
 /// This function assumes a group check was already performed on each `signature` and
 /// that each `signature` is unique. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn aggregate_signatures<'a, V, I>(signatures: I) -> V::Signature
+pub fn combine_signatures<'a, V, I>(signatures: I) -> Signature<V>
 where
     V: Variant,
     I: IntoIterator<Item = &'a V::Signature>,
@@ -57,7 +148,7 @@ where
     for sig in signatures {
         s += sig;
     }
-    s
+    Signature(s)
 }
 
 /// Verifies the aggregate signature over a single message from multiple public keys.
@@ -67,11 +158,11 @@ where
 /// This function assumes the caller has performed a group check and collected a proof-of-possession
 /// for all provided `public`. This function assumes a group check was already performed on the
 /// `signature`. It is not safe to provide duplicate public keys.
-pub fn aggregate_verify_multiple_public_keys<'a, V, I>(
+pub fn verify_multiple_public_keys<'a, V, I>(
     public: I,
     namespace: Option<&[u8]>,
     message: &[u8],
-    signature: &V::Signature,
+    signature: &Signature<V>,
 ) -> Result<(), Error>
 where
     V: Variant,
@@ -82,10 +173,16 @@ where
     //
     // We can take advantage of the bilinearity property of pairings to aggregate public keys
     // that have all signed the same message (as long as all public keys are unique).
-    let agg_public = aggregate_public_keys::<V, _>(public);
+    let agg_public = combine_public_keys::<V, _>(public);
+
+    // Compute the hash of the message
+    let hm = namespace.map_or_else(
+        || hash_message::<V>(V::MESSAGE, message),
+        |ns| hash_message_namespace::<V>(V::MESSAGE, ns, message),
+    );
 
     // Verify the signature
-    verify_message::<V>(&agg_public, namespace, message, signature)
+    V::verify(agg_public.inner(), &hm, signature.inner())
 }
 
 /// Verifies an aggregate signature over multiple unique messages from a single public key.
@@ -102,10 +199,10 @@ where
 ///
 /// This function assumes a group check was already performed on `public` and `signature`.
 /// It is not safe to provide an aggregate public key or to provide duplicate messages.
-pub fn aggregate_verify_multiple_messages<'a, V, I>(
+pub fn verify_multiple_messages<'a, V, I>(
     public: &V::Public,
     messages: I,
-    signature: &V::Signature,
+    signature: &Signature<V>,
     #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
 ) -> Result<(), Error>
 where
@@ -142,7 +239,7 @@ where
         })
     };
 
-    V::verify(public, &hm_sum, signature)
+    V::verify(public, &hm_sum, signature.inner())
 }
 
 /// Computes the sum over the hash of each message.
@@ -166,8 +263,8 @@ where
 mod tests {
     use super::{
         super::{
-            batch::verify_multiple_messages,
-            core::{hash_message, keypair, sign_message, verify_message},
+            aggregate, batch::verify_multiple_messages, hash_message, keypair, sign_message,
+            verify_message,
         },
         *,
     };
@@ -185,7 +282,7 @@ mod tests {
     fn blst_aggregate_verify_multiple_public_keys<'a, V, I>(
         public: I,
         message: &[u8],
-        signature: &V::Signature,
+        signature: &Signature<V>,
     ) -> Result<(), BLST_ERROR>
     where
         V: Variant,
@@ -199,7 +296,8 @@ mod tests {
                     .map(|pk| blst::min_sig::PublicKey::from_bytes(&pk.encode()).unwrap())
                     .collect::<Vec<_>>();
                 let public = public.iter().collect::<Vec<_>>();
-                let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
+                let signature =
+                    blst::min_sig::Signature::from_bytes(&signature.inner().encode()).unwrap();
                 match signature.fast_aggregate_verify(true, message, V::MESSAGE, &public) {
                     BLST_ERROR::BLST_SUCCESS => Ok(()),
                     e => Err(e),
@@ -211,7 +309,8 @@ mod tests {
                     .map(|pk| blst::min_pk::PublicKey::from_bytes(&pk.encode()).unwrap())
                     .collect::<Vec<_>>();
                 let public = public.iter().collect::<Vec<_>>();
-                let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
+                let signature =
+                    blst::min_pk::Signature::from_bytes(&signature.inner().encode()).unwrap();
                 match signature.fast_aggregate_verify(true, message, V::MESSAGE, &public) {
                     BLST_ERROR::BLST_SUCCESS => Ok(()),
                     e => Err(e),
@@ -233,15 +332,10 @@ mod tests {
         let pks = vec![public1, public2, public3];
         let signatures = vec![sig1, sig2, sig3];
 
-        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
+        let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
 
-        aggregate_verify_multiple_public_keys::<V, _>(
-            &pks,
-            Some(namespace),
-            message,
-            &aggregate_sig,
-        )
-        .expect("Aggregated signature should be valid");
+        verify_multiple_public_keys::<V, _>(&pks, Some(namespace), message, &aggregate_sig)
+            .expect("Aggregated signature should be valid");
 
         let payload = union_unique(namespace, message);
         blst_aggregate_verify_multiple_public_keys::<V, _>(&pks, &payload, &aggregate_sig)
@@ -265,11 +359,11 @@ mod tests {
         let sig3 = sign_message::<V>(&private3, Some(namespace), message);
         let signatures = vec![sig1, sig2, sig3];
 
-        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
+        let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
 
         let (_, public4) = keypair::<_, V>(&mut thread_rng());
         let wrong_pks = vec![public1, public2, public4];
-        let result = aggregate_verify_multiple_public_keys::<V, _>(
+        let result = verify_multiple_public_keys::<V, _>(
             &wrong_pks,
             Some(namespace),
             message,
@@ -295,10 +389,10 @@ mod tests {
         let sig3 = sign_message::<V>(&private3, Some(namespace), message);
         let signatures = vec![sig1, sig2, sig3];
 
-        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
+        let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
 
         let wrong_pks = vec![public1, public2];
-        let result = aggregate_verify_multiple_public_keys::<V, _>(
+        let result = verify_multiple_public_keys::<V, _>(
             &wrong_pks,
             Some(namespace),
             message,
@@ -316,7 +410,7 @@ mod tests {
     fn blst_aggregate_verify_multiple_messages<'a, V, I>(
         public: &V::Public,
         msgs: I,
-        signature: &V::Signature,
+        signature: &Signature<V>,
     ) -> Result<(), BLST_ERROR>
     where
         V: Variant,
@@ -327,7 +421,8 @@ mod tests {
                 let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
                 let msgs = msgs.into_iter().collect::<Vec<_>>();
                 let pks = vec![&public; msgs.len()];
-                let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
+                let signature =
+                    blst::min_sig::Signature::from_bytes(&signature.inner().encode()).unwrap();
                 match signature.aggregate_verify(true, &msgs, V::MESSAGE, &pks, true) {
                     BLST_ERROR::BLST_SUCCESS => Ok(()),
                     e => Err(e),
@@ -337,7 +432,8 @@ mod tests {
                 let public = blst::min_pk::PublicKey::from_bytes(&public.encode()).unwrap();
                 let msgs = msgs.into_iter().collect::<Vec<_>>();
                 let pks = vec![&public; msgs.len()];
-                let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
+                let signature =
+                    blst::min_pk::Signature::from_bytes(&signature.inner().encode()).unwrap();
                 match signature.aggregate_verify(true, &msgs, V::MESSAGE, &pks, true) {
                     BLST_ERROR::BLST_SUCCESS => Ok(()),
                     e => Err(e),
@@ -360,12 +456,12 @@ mod tests {
             .map(|(namespace, msg)| sign_message::<V>(&private, *namespace, msg))
             .collect();
 
-        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
+        let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
 
-        aggregate_verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 1)
+        aggregate::verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 1)
             .expect("Aggregated signature should be valid");
 
-        aggregate_verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 4)
+        aggregate::verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 4)
             .expect("Aggregated signature should be valid with parallelism");
 
         let payload_msgs: Vec<_> = messages
@@ -408,14 +504,14 @@ mod tests {
             "forged sig2 should be invalid individually"
         );
 
-        let forged_agg = aggregate_signatures::<V, _>(&[forged_sig1, forged_sig2]);
-        let valid_agg = aggregate_signatures::<V, _>(&[sig1, sig2]);
+        let forged_agg = aggregate::combine_signatures::<V, _>(&[forged_sig1, forged_sig2]);
+        let valid_agg = aggregate::combine_signatures::<V, _>(&[sig1, sig2]);
         assert_eq!(forged_agg, valid_agg, "aggregates should be equal");
 
         let hm1 = hash_message::<V>(V::MESSAGE, msg1);
         let hm2 = hash_message::<V>(V::MESSAGE, msg2);
         let hm_sum = hm1 + &hm2;
-        V::verify(&public, &hm_sum, &forged_agg)
+        V::verify(&public, &hm_sum, forged_agg.inner())
             .expect("vulnerable naive verification accepts forged aggregate");
 
         let forged_entries = vec![(None, msg1, forged_sig1), (None, msg2, forged_sig2)];
@@ -435,5 +531,16 @@ mod tests {
     fn test_aggregate_verify_fail_on_malleability() {
         aggregate_verify_fail_on_malleability::<MinPk>();
         aggregate_verify_fail_on_malleability::<MinSig>();
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<PublicKey<MinSig>>,
+            CodecConformance<Signature<MinSig>>,
+        }
     }
 }

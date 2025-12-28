@@ -21,11 +21,11 @@ fn benchmark_aggregate_verify_multiple_public_keys(c: &mut Criterion) {
                     }
                     (
                         public_keys,
-                        ops::aggregate_signatures::<MinSig, _>(&signatures),
+                        ops::aggregate::combine_signatures::<MinSig, _>(&signatures),
                     )
                 },
                 |(public_keys, signature)| {
-                    ops::aggregate_verify_multiple_public_keys::<MinSig, _>(
+                    ops::aggregate::verify_multiple_public_keys::<MinSig, _>(
                         &public_keys,
                         Some(namespace),
                         &msg,

@@ -9,10 +9,7 @@ pub mod mocks;
 use crate::{
     bls12381::primitives::{
         group::Private,
-        ops::{
-            aggregate_signatures, aggregate_verify_multiple_public_keys, compute_public,
-            sign_message, verify_message, verify_multiple_public_keys,
-        },
+        ops::{self, aggregate, batch},
         variant::Variant,
     },
     certificate::{Attestation, Scheme, Signers, Subject, Verification},
@@ -50,7 +47,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     /// Returns `None` if the provided private key does not match any signing key
     /// in the participant set.
     pub fn signer(participants: BiMap<P, V::Public>, private_key: Private) -> Option<Self> {
-        let public_key = compute_public::<V>(&private_key);
+        let public_key = ops::compute_public::<V>(&private_key);
         let signer = participants
             .values()
             .iter()
@@ -94,7 +91,8 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         let (index, private_key) = self.signer.as_ref()?;
 
         let (namespace, message) = subject.namespace_and_message(namespace);
-        let signature = sign_message::<V>(private_key, Some(namespace.as_ref()), message.as_ref());
+        let signature =
+            ops::sign_message::<V>(private_key, Some(namespace.as_ref()), message.as_ref());
 
         Some(Attestation {
             signer: *index,
@@ -118,7 +116,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         };
 
         let (namespace, message) = subject.namespace_and_message(namespace);
-        verify_message::<V>(
+        ops::verify_message::<V>(
             public_key,
             Some(namespace.as_ref()),
             message.as_ref(),
@@ -161,7 +159,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         // Verify attestations and return any invalid ones.
         let (namespace, message) = subject.namespace_and_message(namespace);
-        let invalid_indices = verify_multiple_public_keys::<_, V>(
+        let invalid_indices = batch::verify_multiple_public_keys::<_, V>(
             rng,
             Some(namespace.as_ref()),
             message.as_ref(),
@@ -204,7 +202,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         // Produce signers and aggregate signature.
         let (signers, signatures): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
         let signers = Signers::from(self.participants.len(), signers);
-        let signature = aggregate_signatures::<V, _>(signatures.iter());
+        let signature = aggregate::combine_signatures::<V, _>(signatures.iter());
 
         Some(Certificate { signers, signature })
     }
@@ -244,7 +242,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         // Verify the aggregate signature.
         let (namespace, message) = subject.namespace_and_message(namespace);
-        aggregate_verify_multiple_public_keys::<V, _>(
+        aggregate::verify_multiple_public_keys::<V, _>(
             publics.iter(),
             Some(namespace.as_ref()),
             message.as_ref(),
@@ -294,7 +292,7 @@ pub struct Certificate<V: Variant> {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
     /// Aggregated BLS signature covering all signatures in this certificate.
-    pub signature: V::Signature,
+    pub signature: aggregate::Signature<V>,
 }
 
 impl<V: Variant> Write for Certificate<V> {
@@ -322,7 +320,7 @@ impl<V: Variant> Read for Certificate<V> {
             ));
         }
 
-        let signature = V::Signature::read(reader)?;
+        let signature = aggregate::Signature::read(reader)?;
 
         Ok(Self { signers, signature })
     }
@@ -335,7 +333,7 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signers = Signers::arbitrary(u)?;
-        let signature = V::Signature::arbitrary(u)?;
+        let signature = aggregate::Signature::arbitrary(u)?;
         Ok(Self { signers, signature })
     }
 }
@@ -537,7 +535,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
-    use commonware_math::algebra::{Additive, Random};
+    use commonware_math::algebra::Random;
     use commonware_utils::{ordered::BiMap, quorum, TryCollect};
     use rand::{rngs::StdRng, thread_rng, SeedableRng};
 
@@ -787,7 +785,7 @@ mod tests {
 
         // Corrupted certificate fails
         let mut corrupted = certificate;
-        corrupted.signature = V::Signature::zero();
+        corrupted.signature = aggregate::Signature::zero();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
@@ -996,7 +994,7 @@ mod tests {
         }
 
         // Corrupt second certificate
-        certificates[1].signature = V::Signature::zero();
+        certificates[1].signature = aggregate::Signature::zero();
 
         let certs_iter = messages
             .iter()
@@ -1066,7 +1064,7 @@ mod tests {
         // Certificate with no signers is rejected
         let empty = Certificate::<V> {
             signers: Signers::from(participants_len, std::iter::empty::<u32>()),
-            signature: certificate.signature,
+            signature: certificate.signature.clone(),
         };
         assert!(Certificate::<V>::decode_cfg(empty.encode(), &participants_len).is_err());
 

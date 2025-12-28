@@ -32,7 +32,7 @@ fn benchmark_threshold_signature_recover(c: &mut Criterion) {
                             .values()
                             .iter()
                             .map(|s| {
-                                primitives::ops::partial_sign_message::<MinSig>(
+                                primitives::ops::threshold::sign_message::<MinSig>(
                                     s,
                                     Some(namespace),
                                     msg,
@@ -43,7 +43,7 @@ fn benchmark_threshold_signature_recover(c: &mut Criterion) {
                 },
                 |(public, partials)| {
                     black_box(
-                        primitives::ops::threshold_signature_recover::<MinSig, _>(
+                        primitives::ops::threshold::recover::<MinSig, _>(
                             public.public(),
                             &partials,
                         )
