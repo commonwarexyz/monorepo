@@ -9,7 +9,7 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "MCP_OBJECT",
+        "name": "CommonwareMCP",
         "class_name": "CommonwareMCP"
       }
     ]
@@ -18,7 +18,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_classes": ["CommonwareMCP"]
+      "new_sqlite_classes": ["CommonwareMCP"]
     }
   ],
 
