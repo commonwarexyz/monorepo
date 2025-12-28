@@ -14,7 +14,7 @@ pub mod mocks;
 use crate::{
     bls12381::primitives::{
         group::Share,
-        ops::{self as ops, batch, threshold},
+        ops::{self, batch, threshold},
         sharing::Sharing,
         variant::{PartialSignature, Variant},
     },

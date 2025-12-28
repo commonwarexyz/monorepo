@@ -1575,7 +1575,7 @@ mod test_plan {
     use super::*;
     use crate::{
         bls12381::primitives::{
-            ops::{self as ops, threshold},
+            ops::{self, threshold},
             variant::Variant,
         },
         ed25519, PublicKey,

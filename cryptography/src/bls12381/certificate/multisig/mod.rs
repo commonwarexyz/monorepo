@@ -9,7 +9,7 @@ pub mod mocks;
 use crate::{
     bls12381::primitives::{
         group::Private,
-        ops::{self as ops, aggregate, batch},
+        ops::{self, aggregate, batch},
         variant::Variant,
     },
     certificate::{Attestation, Scheme, Signers, Subject, Verification},

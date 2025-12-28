@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
     group::{Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE},
-    ops::{self as ops, batch, threshold},
+    ops::{self, batch, threshold},
     variant::{MinPk, MinSig, Variant},
 };
 use commonware_math::{
