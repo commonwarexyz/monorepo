@@ -55,6 +55,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
   private sitemapCache: SitemapCache | null = null;
   private cratesCache: CratesCache | null = null;
+  // File content cache - versioned files are immutable, so no TTL needed
+  private fileCache: Map<string, string> = new Map();
 
   async init() {
     // Initialize server with version from workspace Cargo.toml
@@ -89,22 +91,19 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         }
 
         const ver = version || (await this.getLatestVersion());
-        const url = `${this.env.BASE_URL}/code/${ver}/${path}`;
-
-        const response = await fetch(url);
-        if (!response.ok) {
+        const content = await this.fetchFile(ver, path);
+        if (content === null) {
           return {
             content: [
               {
                 type: "text",
-                text: `Error: File not found at ${path} (version ${ver}). Status: ${response.status}`,
+                text: `Error: File not found at ${path} (version ${ver})`,
               },
             ],
             isError: true,
           };
         }
 
-        const content = await response.text();
         return {
           content: [
             {
@@ -164,15 +163,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           const batch = filtered.slice(i, i + SEARCH_BATCH_SIZE);
           const responses = await Promise.all(
             batch.map(async (file) => {
-              const url = `${this.env.BASE_URL}/code/${ver}/${file}`;
-              try {
-                const resp = await fetch(url);
-                if (!resp.ok) return null;
-                const content = await resp.text();
-                return { file, content };
-              } catch {
-                return null;
-              }
+              const content = await this.fetchFile(ver, file);
+              if (content === null) return null;
+              return { file, content };
             })
           );
 
@@ -311,9 +304,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           };
         }
 
-        const url = `${this.env.BASE_URL}/code/${ver}/${crateInfo.path}/README.md`;
-        const response = await fetch(url);
-        if (!response.ok) {
+        const content = await this.fetchFile(ver, `${crateInfo.path}/README.md`);
+        if (content === null) {
           return {
             content: [
               {
@@ -325,7 +317,6 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           };
         }
 
-        const content = await response.text();
         return {
           content: [{ type: "text", text: content }],
         };
@@ -339,22 +330,38 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       {},
       async () => {
         const ver = await this.getLatestVersion();
-        const url = `${this.env.BASE_URL}/code/${ver}/README.md`;
-
-        const response = await fetch(url);
-        if (!response.ok) {
+        const content = await this.fetchFile(ver, "README.md");
+        if (content === null) {
           return {
             content: [{ type: "text", text: "Error fetching repository overview" }],
             isError: true,
           };
         }
 
-        const content = await response.text();
         return {
           content: [{ type: "text", text: content }],
         };
       }
     );
+  }
+
+  // Helper: Fetch file with caching (versioned files are immutable)
+  private async fetchFile(version: string, path: string): Promise<string | null> {
+    const cacheKey = `${version}/${path}`;
+    const cached = this.fileCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const url = `${this.env.BASE_URL}/code/${version}/${path}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      return null;
+    }
+
+    const content = await response.text();
+    this.fileCache.set(cacheKey, content);
+    return content;
   }
 
   // Helper: Get latest version
@@ -389,13 +396,11 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     const crates: CrateInfo[] = [];
 
     // Fetch workspace Cargo.toml to get members
-    const workspaceUrl = `${this.env.BASE_URL}/code/${version}/Cargo.toml`;
-    const workspaceResp = await fetch(workspaceUrl);
-    if (!workspaceResp.ok) {
+    const workspaceToml = await this.fetchFile(version, "Cargo.toml");
+    if (workspaceToml === null) {
       return [];
     }
 
-    const workspaceToml = await workspaceResp.text();
     const memberPaths = parseWorkspaceMembers(workspaceToml);
     if (memberPaths.length === 0) {
       return [];
@@ -403,18 +408,11 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
     // Fetch each crate's Cargo.toml to get description
     const cratePromises = memberPaths.map(async (path) => {
-      const cargoUrl = `${this.env.BASE_URL}/code/${version}/${path}/Cargo.toml`;
-      try {
-        const resp = await fetch(cargoUrl);
-        if (!resp.ok) return null;
+      const cargoToml = await this.fetchFile(version, `${path}/Cargo.toml`);
+      if (cargoToml === null) return null;
 
-        const cargoToml = await resp.text();
-        const { name, description } = parseCrateInfo(cargoToml, path);
-
-        return { name, path, description };
-      } catch {
-        return null;
-      }
+      const { name, description } = parseCrateInfo(cargoToml, path);
+      return { name, path, description };
     });
 
     const results = await Promise.all(cratePromises);
