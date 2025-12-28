@@ -94,7 +94,7 @@ commonware-storage = { version = "0.0.64", path = "storage", default-features = 
 commonware-stream = { version = "0.0.64", path = "stream" }
 commonware-utils = { version = "0.0.64", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
-crc-fast = "1.8.2"
+crc-fast = "1.9.0"
 criterion = "0.7.0"
 crossterm = "0.29.0"
 ecdsa = { version = "0.16.9", default-features = false }
