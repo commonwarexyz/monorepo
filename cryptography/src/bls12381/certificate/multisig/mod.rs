@@ -23,7 +23,7 @@ use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::ordered::{BiMap, Quorum, Set};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
@@ -137,7 +137,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     ) -> Verification<S>
     where
         S: Scheme<Signature = V::Signature>,
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
     {
@@ -219,7 +219,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     ) -> bool
     where
         S: Scheme,
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
     {
         // If the certificate signers length does not match the participant set, return false.
@@ -262,7 +262,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     ) -> bool
     where
         S: Scheme,
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate<V>)>,
     {
@@ -447,7 +447,7 @@ mod macros {
                     attestation: &$crate::certificate::Attestation<Self>,
                 ) -> bool
                 where
-                    R: rand::Rng + rand::CryptoRng,
+                    R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                 {
                     self.generic.verify_attestation::<_, D>(namespace, subject, attestation)
@@ -461,7 +461,7 @@ mod macros {
                     attestations: I,
                 ) -> $crate::certificate::Verification<Self>
                 where
-                    R: rand::Rng + rand::CryptoRng,
+                    R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
@@ -476,7 +476,7 @@ mod macros {
                 }
 
                 fn verify_certificate<
-                    R: rand::Rng + rand::CryptoRng,
+                    R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                 >(
                     &self,
@@ -495,7 +495,7 @@ mod macros {
                     certificates: I,
                 ) -> bool
                 where
-                    R: rand::Rng + rand::CryptoRng,
+                    R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                     I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 {
@@ -539,7 +539,7 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::{Additive, Random};
     use commonware_utils::{ordered::BiMap, quorum, TryCollect};
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{rngs::StdRng, thread_rng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test-bls12381-multisig";
     const MESSAGE: &[u8] = b"test message";
@@ -600,7 +600,7 @@ mod tests {
             .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
         assert!(scheme.verify_attestation::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &attestation
@@ -779,7 +779,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -789,7 +789,7 @@ mod tests {
         let mut corrupted = certificate;
         corrupted.signature = V::Signature::zero();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &corrupted
@@ -896,7 +896,7 @@ mod tests {
         certificate.signers = Signers::from(participants_len, signers);
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -929,7 +929,7 @@ mod tests {
         certificate.signers = Signers::from(participants_len + 1, signers);
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -1107,7 +1107,7 @@ mod tests {
         certificate.signers = Signers::from(participants_len + 1, signers);
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,

@@ -12,7 +12,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::{ordered::Set, union};
 use futures::channel::oneshot;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     hash::{Hash, Hasher},
     sync::Arc,
@@ -451,7 +451,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         provider: &impl Provider<Scope = Epoch, Scheme = S>,
     ) -> Result<Option<Chunk<P, D>>, Error>
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         S: scheme::Scheme<P, D>,
     {
         // Verify chunk
@@ -708,7 +708,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     /// Returns true if the attestation is valid, false otherwise.
     pub fn verify<R>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         S: scheme::Scheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
@@ -988,7 +988,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
     /// Returns true if the signature is valid, false otherwise.
     pub fn verify<R>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         S: scheme::Scheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
@@ -1061,7 +1061,7 @@ mod tests {
         Signer,
     };
     use commonware_utils::quorum;
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{rngs::StdRng, thread_rng, SeedableRng};
     use std::panic::catch_unwind;
 
     const NAMESPACE: &[u8] = b"test";
@@ -1612,11 +1612,10 @@ mod tests {
         let epoch = Epoch::new(5);
 
         let ack = Ack::sign(NAMESPACE, &fixture.schemes[0], chunk, epoch).expect("Should sign ack");
-        let mut rng = StdRng::seed_from_u64(0);
-        assert!(ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut thread_rng(), NAMESPACE, &fixture.verifier));
 
         // Test that verification fails with wrong namespace
-        assert!(!ack.verify(&mut rng, b"wrong", &fixture.verifier));
+        assert!(!ack.verify(&mut thread_rng(), b"wrong", &fixture.verifier));
     }
 
     #[test]
@@ -1902,8 +1901,7 @@ mod tests {
         .expect("Should sign ack");
 
         // Verification should succeed
-        let mut rng = StdRng::seed_from_u64(0);
-        assert!(ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut thread_rng(), NAMESPACE, &fixture.verifier));
 
         // Create an ack with tampered signature by signing with a different scheme
         let ctx = AckSubject {
@@ -1919,7 +1917,7 @@ mod tests {
         let invalid_ack = Ack::<PublicKey, S, Sha256Digest>::new(chunk, epoch, tampered_vote);
 
         // Verification should fail because the signer index doesn't match the signature
-        assert!(!invalid_ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
+        assert!(!invalid_ack.verify(&mut thread_rng(), NAMESPACE, &fixture.verifier));
     }
 
     #[test]
@@ -1949,10 +1947,10 @@ mod tests {
                 .expect("Should sign ack");
 
         // Verification should succeed with correct verifier
-        assert!(ack.verify(&mut rand::thread_rng(), NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut thread_rng(), NAMESPACE, &fixture.verifier));
 
         // Verification should fail with wrong verifier
-        assert!(!ack.verify(&mut rand::thread_rng(), NAMESPACE, &wrong_fixture.verifier));
+        assert!(!ack.verify(&mut thread_rng(), NAMESPACE, &wrong_fixture.verifier));
     }
 
     #[test]

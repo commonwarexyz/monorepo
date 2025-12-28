@@ -36,7 +36,7 @@ use commonware_cryptography::{
     Digest, PublicKey,
 };
 use commonware_utils::ordered::Set;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::{BTreeSet, HashMap},
     fmt::Debug,
@@ -174,7 +174,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The encrypted message can only be decrypted using the seed signature
     /// from a certificate of the target round (i.e. notarization, finalization,
     /// or nullification).
-    pub fn encrypt<R: Rng + CryptoRng>(
+    pub fn encrypt<R: CryptoRngCore>(
         &self,
         rng: &mut R,
         namespace: &[u8],
@@ -190,7 +190,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 /// The encrypted message can only be decrypted using the seed signature
 /// from a certificate of the target round (i.e. notarization, finalization,
 /// or nullification).
-pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
+pub fn encrypt<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
     identity: V::Public,
     namespace: &[u8],
@@ -445,7 +445,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         attestation: &Attestation<Self>,
     ) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
     {
         let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
@@ -483,7 +483,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         attestations: I,
     ) -> Verification<Self>
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
     {
@@ -587,7 +587,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         })
     }
 
-    fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
+    fn verify_certificate<R: CryptoRngCore, D: Digest>(
         &self,
         rng: &mut R,
         namespace: &[u8],
@@ -626,7 +626,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         certificates: I,
     ) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
     {

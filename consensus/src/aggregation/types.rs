@@ -11,7 +11,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::union;
 use futures::channel::oneshot;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::hash::Hash;
 
 /// Error that may be encountered when interacting with `aggregation`.
@@ -160,7 +160,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     /// Domain separation is automatically applied to prevent signature reuse.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
         scheme.verify_attestation::<_, D>(rng, namespace, &self.item, &self.attestation)
@@ -307,7 +307,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Verifies the recovered certificate for the item.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(rng, namespace, &self.item, &self.certificate)
@@ -440,7 +440,7 @@ mod tests {
         Hasher, Sha256,
     };
     use commonware_utils::ordered::Quorum;
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{rngs::StdRng, thread_rng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -487,8 +487,7 @@ mod tests {
         // Verify the restored ack
         assert_eq!(restored_ack.item, item);
         assert_eq!(restored_ack.epoch, Epoch::new(1));
-        let mut rng = StdRng::seed_from_u64(0);
-        assert!(restored_ack.verify(&mut rng, &schemes[0], NAMESPACE));
+        assert!(restored_ack.verify(&mut thread_rng(), &schemes[0], NAMESPACE));
 
         // Test TipAck codec
         let tip_ack = TipAck {

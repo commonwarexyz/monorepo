@@ -553,7 +553,7 @@ mod macros {
                     attestation: &$crate::certificate::Attestation<Self>,
                 ) -> bool
                 where
-                    R: rand::Rng + rand::CryptoRng,
+                    R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                 {
                     self.generic
@@ -568,7 +568,7 @@ mod macros {
                     attestations: I,
                 ) -> $crate::certificate::Verification<Self>
                 where
-                    R: rand::Rng + rand::CryptoRng,
+                    R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
@@ -587,7 +587,7 @@ mod macros {
                     self.generic.assemble(attestations)
                 }
 
-                fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: $crate::Digest>(
+                fn verify_certificate<R: rand_core::CryptoRngCore, D: $crate::Digest>(
                     &self,
                     rng: &mut R,
                     namespace: &[u8],
@@ -646,7 +646,7 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_utils::{ordered::Set, quorum, TryCollect};
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{rngs::StdRng, thread_rng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test-ed25519";
     const MESSAGE: &[u8] = b"test message";
@@ -694,7 +694,7 @@ mod tests {
             .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
         assert!(scheme.verify_attestation::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &attestation
@@ -849,7 +849,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -859,7 +859,7 @@ mod tests {
         let mut corrupted = certificate;
         corrupted.signatures[0] = corrupted.signatures[1].clone();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &corrupted
@@ -946,7 +946,7 @@ mod tests {
         certificate.signatures.pop();
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -972,7 +972,7 @@ mod tests {
         certificate.signatures.pop();
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -1160,7 +1160,7 @@ mod tests {
             .push(certificate.signatures[0].clone());
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,
@@ -1185,7 +1185,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,
@@ -1197,7 +1197,7 @@ mod tests {
 
         // Certificate verification should fail due to size mismatch
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut StdRng::seed_from_u64(0),
+            &mut thread_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,

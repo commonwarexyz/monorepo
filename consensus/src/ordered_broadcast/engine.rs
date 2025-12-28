@@ -44,7 +44,7 @@ use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
 };
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -62,7 +62,7 @@ struct Verify<C: PublicKey, D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
+    E: Clock + Spawner + CryptoRngCore + Storage + Metrics,
     C: Signer,
     S: SequencersProvider<PublicKey = C::PublicKey>,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
@@ -198,7 +198,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
+        E: Clock + Spawner + CryptoRngCore + Storage + Metrics,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
