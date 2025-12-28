@@ -18,7 +18,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Env } from "./env.d.ts";
 import {
-  LRUCache,
   getLanguage,
   isValidPath,
   parseSitemap,
@@ -26,7 +25,7 @@ import {
   parseCrateInfo,
 } from "./utils.ts";
 
-// Cached data structures
+// Cached data structures (in-memory, per Durable Object instance)
 interface SitemapCache {
   versions: string[];
   files: Map<string, string[]>; // version -> file paths
@@ -46,19 +45,17 @@ interface CratesCache {
 }
 
 // Constants
-const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour (for in-memory caches)
+const CACHE_TTL_SECONDS = 60 * 60 * 24 * 365; // 1 year (for Cache API - files are immutable)
 const MAX_SEARCH_RESULTS = 50;
 const SEARCH_BATCH_SIZE = 10;
-const FILE_CACHE_MAX_ENTRIES = 2500;
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
 
+  // In-memory caches for sitemap and crates (small, frequently accessed)
   private sitemapCache: SitemapCache | null = null;
   private cratesCache: CratesCache | null = null;
-  // File content cache - versioned files are immutable, so no TTL needed
-  // LRU cache evicts oldest entries when limit is reached
-  private fileCache = new LRUCache<string>(FILE_CACHE_MAX_ENTRIES);
 
   async init() {
     // Initialize server with version from workspace Cargo.toml
@@ -347,22 +344,34 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     );
   }
 
-  // Helper: Fetch file with caching (versioned files are immutable)
+  // Helper: Fetch file with Cache API caching (versioned files are immutable)
   private async fetchFile(version: string, path: string): Promise<string | null> {
-    const cacheKey = `${version}/${path}`;
-    const cached = this.fileCache.get(cacheKey);
-    if (cached !== undefined) {
-      return cached;
+    const url = `${this.env.BASE_URL}/code/${version}/${path}`;
+    const cacheKey = new Request(url);
+    const cache = caches.default;
+
+    // Check cache first
+    const cachedResponse = await cache.match(cacheKey);
+    if (cachedResponse) {
+      return cachedResponse.text();
     }
 
-    const url = `${this.env.BASE_URL}/code/${version}/${path}`;
+    // Fetch from origin
     const response = await fetch(url);
     if (!response.ok) {
       return null;
     }
 
+    // Cache the response (versioned files are immutable, cache for 1 year)
     const content = await response.text();
-    this.fileCache.set(cacheKey, content);
+    const cacheResponse = new Response(content, {
+      headers: {
+        "Content-Type": "text/plain",
+        "Cache-Control": `public, max-age=${CACHE_TTL_SECONDS}`,
+      },
+    });
+    await cache.put(cacheKey, cacheResponse);
+
     return content;
   }
 
@@ -390,7 +399,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     if (
       this.cratesCache &&
       this.cratesCache.version === version &&
-      Date.now() - this.cratesCache.timestamp < CACHE_TTL
+      Date.now() - this.cratesCache.timestamp < CACHE_TTL_MS
     ) {
       return this.cratesCache.crates;
     }
@@ -438,7 +447,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
   // Helper: Refresh sitemap cache
   private async refreshSitemapCache(): Promise<void> {
-    if (this.sitemapCache && Date.now() - this.sitemapCache.timestamp < CACHE_TTL) {
+    if (this.sitemapCache && Date.now() - this.sitemapCache.timestamp < CACHE_TTL_MS) {
       return;
     }
 
