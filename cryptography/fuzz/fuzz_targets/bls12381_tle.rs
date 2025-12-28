@@ -11,7 +11,7 @@ use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::{
     primitives::{
         group::Scalar,
-        ops::{compute_public, sign_message},
+        ops::core::{compute_public, sign_message},
         variant::{MinPk, MinSig, Variant},
     },
     tle::{decrypt, encrypt, Block, Ciphertext},

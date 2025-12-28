@@ -14,10 +14,7 @@ pub mod mocks;
 use crate::{
     bls12381::primitives::{
         group::Share,
-        ops::{
-            partial_sign_message, partial_verify_multiple_public_keys, threshold_signature_recover,
-            verify_message, verify_multiple_messages,
-        },
+        ops::{batch, core, threshold},
         sharing::Sharing,
         variant::{PartialSignature, Variant},
     },
@@ -27,7 +24,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use commonware_utils::ordered::Set;
-use core::fmt::Debug;
+use ::core::fmt::Debug;
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
@@ -183,7 +180,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         let (namespace, message) = subject.namespace_and_message(namespace);
         let signature =
-            partial_sign_message::<V>(share, Some(namespace.as_ref()), message.as_ref()).value;
+            threshold::sign_message::<V>(share, Some(namespace.as_ref()), message.as_ref()).value;
 
         Some(Attestation {
             signer: share.index,
@@ -207,7 +204,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         };
 
         let (namespace, message) = subject.namespace_and_message(namespace);
-        verify_message::<V>(
+        core::verify_message::<V>(
             &evaluated,
             Some(namespace.as_ref()),
             message.as_ref(),
@@ -241,7 +238,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         let polynomial = self.polynomial();
         let (namespace, message) = subject.namespace_and_message(namespace);
-        if let Err(errs) = partial_verify_multiple_public_keys::<_, V, _>(
+        if let Err(errs) = threshold::verify_multiple_public_keys::<_, V, _>(
             rng,
             polynomial,
             Some(namespace.as_ref()),
@@ -284,7 +281,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
             return None;
         }
 
-        threshold_signature_recover::<V, _>(quorum, partials.iter()).ok()
+        threshold::recover::<V, _>(quorum, partials.iter()).ok()
     }
 
     /// Verifies a certificate.
@@ -302,7 +299,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     {
         let identity = self.identity();
         let (namespace, message) = subject.namespace_and_message(namespace);
-        verify_message::<V>(
+        core::verify_message::<V>(
             identity,
             Some(namespace.as_ref()),
             message.as_ref(),
@@ -342,7 +339,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
             .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_ref(), *sig))
             .collect();
 
-        verify_multiple_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
+        batch::verify_multiple_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
     }
 
     pub const fn is_attributable(&self) -> bool {
@@ -565,7 +562,7 @@ mod tests {
         bls12381::{
             dkg,
             primitives::{
-                ops::partial_sign_message,
+                ops::threshold::sign_message,
                 variant::{MinPk, MinSig, Variant},
             },
         },
@@ -1192,7 +1189,7 @@ mod tests {
         // Verify the partial signature matches what we'd get from direct signing
         let share = scheme.share().expect("expected signer");
 
-        let expected = partial_sign_message::<V>(share, Some(NAMESPACE), MESSAGE);
+        let expected = sign_message::<V>(share, Some(NAMESPACE), MESSAGE);
 
         assert_eq!(signature.signer, share.index);
         assert_eq!(signature.signature, expected.value);

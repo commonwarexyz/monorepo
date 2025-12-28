@@ -142,7 +142,7 @@ impl crate::Signer for PrivateKey {
     type PublicKey = PublicKey;
 
     fn public_key(&self) -> Self::PublicKey {
-        PublicKey::from(ops::compute_public::<MinPk>(&self.key))
+        PublicKey::from(ops::core::compute_public::<MinPk>(&self.key))
     }
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
@@ -153,13 +153,13 @@ impl crate::Signer for PrivateKey {
 impl PrivateKey {
     #[inline(always)]
     fn sign_inner(&self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
-        ops::sign_message::<MinPk>(&self.key, namespace, message).into()
+        ops::core::sign_message::<MinPk>(&self.key, namespace, message).into()
     }
 }
 
 impl Random for PrivateKey {
     fn random(mut rng: impl CryptoRngCore) -> Self {
-        let (private, _) = ops::keypair::<_, MinPk>(&mut rng);
+        let (private, _) = ops::core::keypair::<_, MinPk>(&mut rng);
         let raw = private.encode_fixed();
         Self { raw, key: private }
     }
@@ -193,7 +193,7 @@ impl PublicKey {
         message: &[u8],
         signature: &Signature,
     ) -> bool {
-        ops::verify_message::<MinPk>(&self.key, namespace, message, &signature.signature).is_ok()
+        ops::core::verify_message::<MinPk>(&self.key, namespace, message, &signature.signature).is_ok()
     }
 }
 
@@ -431,7 +431,7 @@ impl Batch {
         let payload = namespace.map_or(Cow::Borrowed(message), |namespace| {
             Cow::Owned(union_unique(namespace, message))
         });
-        let hm = ops::hash_message::<MinPk>(MinPk::MESSAGE, &payload);
+        let hm = ops::core::hash_message::<MinPk>(MinPk::MESSAGE, &payload);
         self.hms.push(hm);
         self.signatures.push(signature.signature);
         true

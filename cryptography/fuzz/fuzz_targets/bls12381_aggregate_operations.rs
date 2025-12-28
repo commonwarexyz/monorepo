@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::bls12381::primitives::{
     group::{G1, G2},
-    ops::*,
+    ops::aggregate,
     variant::{MinPk, MinSig},
 };
 use libfuzzer_sys::fuzz_target;
@@ -106,25 +106,25 @@ fn fuzz(op: FuzzOperation) {
     match op {
         FuzzOperation::PublicKeysMinPk { public_keys } => {
             if !public_keys.is_empty() {
-                let _result = aggregate_public_keys::<MinPk, _>(&public_keys);
+                let _result = aggregate::public_keys::<MinPk, _>(&public_keys);
             }
         }
 
         FuzzOperation::PublicKeysMinSig { public_keys } => {
             if !public_keys.is_empty() {
-                let _result = aggregate_public_keys::<MinSig, _>(&public_keys);
+                let _result = aggregate::public_keys::<MinSig, _>(&public_keys);
             }
         }
 
         FuzzOperation::SignaturesMinPk { signatures } => {
             if !signatures.is_empty() {
-                let _result = aggregate_signatures::<MinPk, _>(&signatures);
+                let _result = aggregate::signatures::<MinPk, _>(&signatures);
             }
         }
 
         FuzzOperation::SignaturesMinSig { signatures } => {
             if !signatures.is_empty() {
-                let _result = aggregate_signatures::<MinSig, _>(&signatures);
+                let _result = aggregate::signatures::<MinSig, _>(&signatures);
             }
         }
 
@@ -135,7 +135,7 @@ fn fuzz(op: FuzzOperation) {
             signature,
         } => {
             if !public_keys.is_empty() {
-                let _ = aggregate_verify_multiple_public_keys::<MinPk, _>(
+                let _ = aggregate::verify_multiple_public_keys::<MinPk, _>(
                     &public_keys,
                     namespace.as_deref(),
                     &message,
@@ -151,7 +151,7 @@ fn fuzz(op: FuzzOperation) {
             signature,
         } => {
             if !public_keys.is_empty() {
-                let _ = aggregate_verify_multiple_public_keys::<MinSig, _>(
+                let _ = aggregate::verify_multiple_public_keys::<MinSig, _>(
                     &public_keys,
                     namespace.as_deref(),
                     &message,
@@ -172,7 +172,7 @@ fn fuzz(op: FuzzOperation) {
                     .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
                     .collect();
 
-                let _ = aggregate_verify_multiple_messages::<MinPk, _>(
+                let _ = aggregate::verify_multiple_messages::<MinPk, _>(
                     &public_key,
                     &messages_refs,
                     &signature,
@@ -193,7 +193,7 @@ fn fuzz(op: FuzzOperation) {
                     .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
                     .collect();
 
-                let _ = aggregate_verify_multiple_messages::<MinSig, _>(
+                let _ = aggregate::verify_multiple_messages::<MinSig, _>(
                     &public_key,
                     &messages_refs,
                     &signature,

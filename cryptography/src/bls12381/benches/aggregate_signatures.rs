@@ -15,16 +15,16 @@ fn benchmark_aggregate_signatures(c: &mut Criterion) {
         c.bench_function(&format!("{}/sigs={}", module_path!(), n), |b| {
             b.iter_batched(
                 || {
-                    let private = ops::keypair::<_, MinSig>(&mut thread_rng()).0;
+                    let private = ops::core::keypair::<_, MinSig>(&mut thread_rng()).0;
                     let mut signatures = Vec::with_capacity(n);
                     for msg in msgs.iter() {
-                        let signature = ops::sign_message::<MinSig>(&private, Some(namespace), msg);
+                        let signature = ops::core::sign_message::<MinSig>(&private, Some(namespace), msg);
                         signatures.push(signature);
                     }
                     signatures
                 },
                 |signatures| {
-                    black_box(ops::aggregate_signatures::<MinSig, _>(&signatures));
+                    black_box(ops::aggregate::signatures::<MinSig, _>(&signatures));
                 },
                 BatchSize::SmallInput,
             );

@@ -9,10 +9,7 @@ pub mod mocks;
 use crate::{
     bls12381::primitives::{
         group::Private,
-        ops::{
-            aggregate_signatures, aggregate_verify_multiple_public_keys, compute_public,
-            sign_message, verify_message, verify_multiple_public_keys,
-        },
+        ops::{aggregate, batch, core},
         variant::Variant,
     },
     certificate::{Attestation, Scheme, Signers, Subject, Verification},
@@ -50,7 +47,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     /// Returns `None` if the provided private key does not match any signing key
     /// in the participant set.
     pub fn signer(participants: BiMap<P, V::Public>, private_key: Private) -> Option<Self> {
-        let public_key = compute_public::<V>(&private_key);
+        let public_key = core::compute_public::<V>(&private_key);
         let signer = participants
             .values()
             .iter()
@@ -94,7 +91,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         let (index, private_key) = self.signer.as_ref()?;
 
         let (namespace, message) = subject.namespace_and_message(namespace);
-        let signature = sign_message::<V>(private_key, Some(namespace.as_ref()), message.as_ref());
+        let signature = core::sign_message::<V>(private_key, Some(namespace.as_ref()), message.as_ref());
 
         Some(Attestation {
             signer: *index,
@@ -118,7 +115,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         };
 
         let (namespace, message) = subject.namespace_and_message(namespace);
-        verify_message::<V>(
+        core::verify_message::<V>(
             public_key,
             Some(namespace.as_ref()),
             message.as_ref(),
@@ -161,7 +158,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         // Verify attestations and return any invalid ones.
         let (namespace, message) = subject.namespace_and_message(namespace);
-        let invalid_indices = verify_multiple_public_keys::<_, V>(
+        let invalid_indices = batch::verify_multiple_public_keys::<_, V>(
             rng,
             Some(namespace.as_ref()),
             message.as_ref(),
@@ -204,7 +201,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         // Produce signers and aggregate signature.
         let (signers, signatures): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
         let signers = Signers::from(self.participants.len(), signers);
-        let signature = aggregate_signatures::<V, _>(signatures.iter());
+        let signature = aggregate::signatures::<V, _>(signatures.iter());
 
         Some(Certificate { signers, signature })
     }
@@ -244,7 +241,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         // Verify the aggregate signature.
         let (namespace, message) = subject.namespace_and_message(namespace);
-        aggregate_verify_multiple_public_keys::<V, _>(
+        aggregate::verify_multiple_public_keys::<V, _>(
             publics.iter(),
             Some(namespace.as_ref()),
             message.as_ref(),
@@ -526,7 +523,7 @@ mod tests {
     use crate::{
         bls12381::primitives::{
             group::Private,
-            ops::compute_public,
+            ops::core::compute_public,
             variant::{MinPk, MinSig, Variant},
         },
         certificate::Scheme as _,

@@ -23,10 +23,7 @@ use commonware_cryptography::{
     bls12381::{
         primitives::{
             group::Share,
-            ops::{
-                partial_sign_message, partial_verify_multiple_public_keys,
-                threshold_signature_recover_pair, verify_message, verify_multiple_messages,
-            },
+            ops::{batch, core, threshold},
             sharing::Sharing,
             variant::{PartialSignature, Variant},
         },
@@ -293,7 +290,7 @@ impl<V: Variant> Seed<V> {
         let seed_namespace = seed_namespace(namespace);
         let seed_message = self.round.encode();
 
-        verify_message::<V>(
+        core::verify_message::<V>(
             scheme.identity(),
             Some(&seed_namespace),
             &seed_message,
@@ -418,12 +415,12 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
 
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
         let vote_signature =
-            partial_sign_message::<V>(share, Some(vote_namespace.as_ref()), vote_message.as_ref())
+            threshold::sign_message::<V>(share, Some(vote_namespace.as_ref()), vote_message.as_ref())
                 .value;
 
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
         let seed_signature =
-            partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), seed_message.as_ref())
+            threshold::sign_message::<V>(share, Some(seed_namespace.as_ref()), seed_message.as_ref())
                 .value;
 
         let signature = Signature {
@@ -455,7 +452,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
-        verify_multiple_messages::<_, V, _>(
+        batch::verify_multiple_messages::<_, V, _>(
             rng,
             &evaluated,
             &[
@@ -506,7 +503,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
 
         let polynomial = self.polynomial();
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
-        if let Err(errs) = partial_verify_multiple_public_keys::<_, V, _>(
+        if let Err(errs) = threshold::verify_multiple_public_keys::<_, V, _>(
             rng,
             polynomial,
             Some(vote_namespace.as_ref()),
@@ -519,7 +516,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         }
 
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
-        if let Err(errs) = partial_verify_multiple_public_keys::<_, V, _>(
+        if let Err(errs) = threshold::verify_multiple_public_keys::<_, V, _>(
             rng,
             polynomial,
             Some(seed_namespace.as_ref()),
@@ -574,7 +571,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             return None;
         }
 
-        let (vote_signature, seed_signature) = threshold_signature_recover_pair::<V, _>(
+        let (vote_signature, seed_signature) = threshold::recover_pair::<V, _>(
             quorum,
             vote_partials.iter(),
             seed_partials.iter(),
@@ -599,7 +596,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
-        verify_multiple_messages::<_, V, _>(
+        batch::verify_multiple_messages::<_, V, _>(
             rng,
             identity,
             &[
@@ -700,7 +697,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             .iter()
             .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_ref(), *sig))
             .collect();
-        verify_multiple_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
+        batch::verify_multiple_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
     }
 
     fn is_attributable(&self) -> bool {
@@ -727,7 +724,7 @@ mod tests {
         bls12381::{
             dkg::{self, deal_anonymous},
             primitives::{
-                ops::partial_sign_message,
+                ops::threshold,
                 variant::{MinPk, MinSig, Variant},
             },
         },
@@ -1444,7 +1441,7 @@ mod tests {
 
         let notarize_namespace = notarize_namespace(NAMESPACE);
         let notarize_message = proposal.encode();
-        let expected_message = partial_sign_message::<V>(
+        let expected_message = threshold::sign_message::<V>(
             share,
             Some(notarize_namespace.as_ref()),
             notarize_message.as_ref(),
@@ -1454,7 +1451,7 @@ mod tests {
         let seed_namespace = seed_namespace(NAMESPACE);
         let seed_message = proposal.round.encode();
         let expected_seed =
-            partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), seed_message.as_ref())
+            threshold::sign_message::<V>(share, Some(seed_namespace.as_ref()), seed_message.as_ref())
                 .value;
 
         assert_eq!(vote.signer, share.index);

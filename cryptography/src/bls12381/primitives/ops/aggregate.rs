@@ -27,7 +27,7 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 /// that each `public_key` is unique, and that the caller has a Proof-of-Possession (PoP)
 /// for each `public_key`. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn aggregate_public_keys<'a, V, I>(public_keys: I) -> V::Public
+pub fn public_keys<'a, V, I>(public_keys: I) -> V::Public
 where
     V: Variant,
     I: IntoIterator<Item = &'a V::Public>,
@@ -47,7 +47,7 @@ where
 /// This function assumes a group check was already performed on each `signature` and
 /// that each `signature` is unique. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn aggregate_signatures<'a, V, I>(signatures: I) -> V::Signature
+pub fn signatures<'a, V, I>(signatures: I) -> V::Signature
 where
     V: Variant,
     I: IntoIterator<Item = &'a V::Signature>,
@@ -67,7 +67,7 @@ where
 /// This function assumes the caller has performed a group check and collected a proof-of-possession
 /// for all provided `public`. This function assumes a group check was already performed on the
 /// `signature`. It is not safe to provide duplicate public keys.
-pub fn aggregate_verify_multiple_public_keys<'a, V, I>(
+pub fn verify_multiple_public_keys<'a, V, I>(
     public: I,
     namespace: Option<&[u8]>,
     message: &[u8],
@@ -82,7 +82,7 @@ where
     //
     // We can take advantage of the bilinearity property of pairings to aggregate public keys
     // that have all signed the same message (as long as all public keys are unique).
-    let agg_public = aggregate_public_keys::<V, _>(public);
+    let agg_public = public_keys::<V, _>(public);
 
     // Verify the signature
     verify_message::<V>(&agg_public, namespace, message, signature)
@@ -102,7 +102,7 @@ where
 ///
 /// This function assumes a group check was already performed on `public` and `signature`.
 /// It is not safe to provide an aggregate public key or to provide duplicate messages.
-pub fn aggregate_verify_multiple_messages<'a, V, I>(
+pub fn verify_multiple_messages<'a, V, I>(
     public: &V::Public,
     messages: I,
     signature: &V::Signature,
@@ -166,6 +166,7 @@ where
 mod tests {
     use super::{
         super::{
+            aggregate,
             batch::verify_multiple_messages,
             core::{hash_message, keypair, sign_message, verify_message},
         },
@@ -233,9 +234,9 @@ mod tests {
         let pks = vec![public1, public2, public3];
         let signatures = vec![sig1, sig2, sig3];
 
-        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
+        let aggregate_sig = aggregate::signatures::<V, _>(&signatures);
 
-        aggregate_verify_multiple_public_keys::<V, _>(
+        verify_multiple_public_keys::<V, _>(
             &pks,
             Some(namespace),
             message,
@@ -265,11 +266,11 @@ mod tests {
         let sig3 = sign_message::<V>(&private3, Some(namespace), message);
         let signatures = vec![sig1, sig2, sig3];
 
-        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
+        let aggregate_sig = aggregate::signatures::<V, _>(&signatures);
 
         let (_, public4) = keypair::<_, V>(&mut thread_rng());
         let wrong_pks = vec![public1, public2, public4];
-        let result = aggregate_verify_multiple_public_keys::<V, _>(
+        let result = verify_multiple_public_keys::<V, _>(
             &wrong_pks,
             Some(namespace),
             message,
@@ -295,10 +296,10 @@ mod tests {
         let sig3 = sign_message::<V>(&private3, Some(namespace), message);
         let signatures = vec![sig1, sig2, sig3];
 
-        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
+        let aggregate_sig = aggregate::signatures::<V, _>(&signatures);
 
         let wrong_pks = vec![public1, public2];
-        let result = aggregate_verify_multiple_public_keys::<V, _>(
+        let result = verify_multiple_public_keys::<V, _>(
             &wrong_pks,
             Some(namespace),
             message,
@@ -360,12 +361,12 @@ mod tests {
             .map(|(namespace, msg)| sign_message::<V>(&private, *namespace, msg))
             .collect();
 
-        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
+        let aggregate_sig = aggregate::signatures::<V, _>(&signatures);
 
-        aggregate_verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 1)
+        aggregate::verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 1)
             .expect("Aggregated signature should be valid");
 
-        aggregate_verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 4)
+        aggregate::verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 4)
             .expect("Aggregated signature should be valid with parallelism");
 
         let payload_msgs: Vec<_> = messages
@@ -408,8 +409,8 @@ mod tests {
             "forged sig2 should be invalid individually"
         );
 
-        let forged_agg = aggregate_signatures::<V, _>(&[forged_sig1, forged_sig2]);
-        let valid_agg = aggregate_signatures::<V, _>(&[sig1, sig2]);
+        let forged_agg = aggregate::signatures::<V, _>(&[forged_sig1, forged_sig2]);
+        let valid_agg = aggregate::signatures::<V, _>(&[sig1, sig2]);
         assert_eq!(forged_agg, valid_agg, "aggregates should be equal");
 
         let hm1 = hash_message::<V>(V::MESSAGE, msg1);

@@ -1,7 +1,7 @@
 //! Test fixtures for BLS12-381 multi-signature certificate schemes.
 
 use crate::{
-    bls12381::primitives::{group::Private, ops::compute_public, variant::Variant},
+    bls12381::primitives::{group::Private, ops::core::compute_public, variant::Variant},
     certificate::{mocks::Fixture, Scheme},
     ed25519,
 };
