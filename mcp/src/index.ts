@@ -379,11 +379,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     // Extract quoted strings from members array
     const pathMatches = membersBlock.matchAll(/"([^"]+)"/g);
     for (const match of pathMatches) {
-      const path = match[1];
-      // Filter out examples and fuzz targets - only include top-level crates
-      if (!path.includes("/")) {
-        memberPaths.push(path);
-      }
+      memberPaths.push(match[1]);
     }
 
     // Fetch each crate's Cargo.toml to get description
