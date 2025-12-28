@@ -23,7 +23,7 @@ use commonware_cryptography::{
     bls12381::{
         primitives::{
             group::Share,
-            ops::{batch, core, threshold},
+            ops::{self as ops, batch, threshold},
             sharing::Sharing,
             variant::{PartialSignature, Variant},
         },
@@ -290,7 +290,7 @@ impl<V: Variant> Seed<V> {
         let seed_namespace = seed_namespace(namespace);
         let seed_message = self.round.encode();
 
-        core::verify_message::<V>(
+        ops::verify_message::<V>(
             scheme.identity(),
             Some(&seed_namespace),
             &seed_message,
@@ -414,14 +414,20 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let share = self.share()?;
 
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
-        let vote_signature =
-            threshold::sign_message::<V>(share, Some(vote_namespace.as_ref()), vote_message.as_ref())
-                .value;
+        let vote_signature = threshold::sign_message::<V>(
+            share,
+            Some(vote_namespace.as_ref()),
+            vote_message.as_ref(),
+        )
+        .value;
 
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
-        let seed_signature =
-            threshold::sign_message::<V>(share, Some(seed_namespace.as_ref()), seed_message.as_ref())
-                .value;
+        let seed_signature = threshold::sign_message::<V>(
+            share,
+            Some(seed_namespace.as_ref()),
+            seed_message.as_ref(),
+        )
+        .value;
 
         let signature = Signature {
             vote_signature,
@@ -571,12 +577,9 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             return None;
         }
 
-        let (vote_signature, seed_signature) = threshold::recover_pair::<V, _>(
-            quorum,
-            vote_partials.iter(),
-            seed_partials.iter(),
-        )
-        .ok()?;
+        let (vote_signature, seed_signature) =
+            threshold::recover_pair::<V, _>(quorum, vote_partials.iter(), seed_partials.iter())
+                .ok()?;
 
         Some(Signature {
             vote_signature,
@@ -1450,9 +1453,12 @@ mod tests {
 
         let seed_namespace = seed_namespace(NAMESPACE);
         let seed_message = proposal.round.encode();
-        let expected_seed =
-            threshold::sign_message::<V>(share, Some(seed_namespace.as_ref()), seed_message.as_ref())
-                .value;
+        let expected_seed = threshold::sign_message::<V>(
+            share,
+            Some(seed_namespace.as_ref()),
+            seed_message.as_ref(),
+        )
+        .value;
 
         assert_eq!(vote.signer, share.index);
         assert_eq!(vote.signature.vote_signature, expected_message);

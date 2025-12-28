@@ -14,17 +14,17 @@ pub mod mocks;
 use crate::{
     bls12381::primitives::{
         group::Share,
-        ops::{batch, core, threshold},
+        ops::{self as ops, batch, threshold},
         sharing::Sharing,
         variant::{PartialSignature, Variant},
     },
     certificate::{Attestation, Scheme, Subject, Verification},
     Digest, PublicKey,
 };
+use ::core::fmt::Debug;
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use commonware_utils::ordered::Set;
-use ::core::fmt::Debug;
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
@@ -204,7 +204,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         };
 
         let (namespace, message) = subject.namespace_and_message(namespace);
-        core::verify_message::<V>(
+        ops::verify_message::<V>(
             &evaluated,
             Some(namespace.as_ref()),
             message.as_ref(),
@@ -299,7 +299,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     {
         let identity = self.identity();
         let (namespace, message) = subject.namespace_and_message(namespace);
-        core::verify_message::<V>(
+        ops::verify_message::<V>(
             identity,
             Some(namespace.as_ref()),
             message.as_ref(),

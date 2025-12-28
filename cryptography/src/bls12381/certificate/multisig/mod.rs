@@ -9,7 +9,7 @@ pub mod mocks;
 use crate::{
     bls12381::primitives::{
         group::Private,
-        ops::{aggregate, batch, core},
+        ops::{self as ops, aggregate, batch},
         variant::Variant,
     },
     certificate::{Attestation, Scheme, Signers, Subject, Verification},
@@ -47,7 +47,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     /// Returns `None` if the provided private key does not match any signing key
     /// in the participant set.
     pub fn signer(participants: BiMap<P, V::Public>, private_key: Private) -> Option<Self> {
-        let public_key = core::compute_public::<V>(&private_key);
+        let public_key = ops::compute_public::<V>(&private_key);
         let signer = participants
             .values()
             .iter()
@@ -91,7 +91,8 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         let (index, private_key) = self.signer.as_ref()?;
 
         let (namespace, message) = subject.namespace_and_message(namespace);
-        let signature = core::sign_message::<V>(private_key, Some(namespace.as_ref()), message.as_ref());
+        let signature =
+            ops::sign_message::<V>(private_key, Some(namespace.as_ref()), message.as_ref());
 
         Some(Attestation {
             signer: *index,
@@ -115,7 +116,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         };
 
         let (namespace, message) = subject.namespace_and_message(namespace);
-        core::verify_message::<V>(
+        ops::verify_message::<V>(
             public_key,
             Some(namespace.as_ref()),
             message.as_ref(),
@@ -523,7 +524,7 @@ mod tests {
     use crate::{
         bls12381::primitives::{
             group::Private,
-            ops::core::compute_public,
+            ops::compute_public,
             variant::{MinPk, MinSig, Variant},
         },
         certificate::Scheme as _,

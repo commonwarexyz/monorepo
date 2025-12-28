@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
     group::{Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE},
-    ops::{batch, core, threshold},
+    ops::{self as ops, batch, threshold},
     variant::{MinPk, MinSig, Variant},
 };
 use commonware_math::{
@@ -572,8 +572,8 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::ComputePublicKey { private } => {
-            let _pub_pk: G1 = core::compute_public::<MinPk>(&private);
-            let _pub_sig: G2 = core::compute_public::<MinSig>(&private);
+            let _pub_pk: G1 = ops::compute_public::<MinPk>(&private);
+            let _pub_sig: G2 = ops::compute_public::<MinSig>(&private);
         }
 
         FuzzOperation::SharePublicKey { share, use_minpk } => {
@@ -586,9 +586,9 @@ fn fuzz(op: FuzzOperation) {
 
         FuzzOperation::HashMessage { message, use_minpk } => {
             if use_minpk {
-                let _: G2 = core::hash_message::<MinPk>(MinPk::MESSAGE, &message);
+                let _: G2 = ops::hash_message::<MinPk>(MinPk::MESSAGE, &message);
             } else {
-                let _: G1 = core::hash_message::<MinSig>(MinSig::MESSAGE, &message);
+                let _: G1 = ops::hash_message::<MinSig>(MinSig::MESSAGE, &message);
             }
         }
 
@@ -598,16 +598,18 @@ fn fuzz(op: FuzzOperation) {
             use_minpk,
         } => {
             if use_minpk {
-                let _: G2 = core::hash_message_namespace::<MinPk>(MinPk::MESSAGE, &namespace, &message);
+                let _: G2 =
+                    ops::hash_message_namespace::<MinPk>(MinPk::MESSAGE, &namespace, &message);
             } else {
-                let _: G1 = core::hash_message_namespace::<MinSig>(MinSig::MESSAGE, &namespace, &message);
+                let _: G1 =
+                    ops::hash_message_namespace::<MinSig>(MinSig::MESSAGE, &namespace, &message);
             }
         }
 
         FuzzOperation::SignMinPk { private, message } => {
-            let sig = core::sign_message::<MinPk>(&private, None, &message);
-            let pub_key = core::compute_public::<MinPk>(&private);
-            let _ = core::verify_message::<MinPk>(&pub_key, None, &message, &sig);
+            let sig = ops::sign_message::<MinPk>(&private, None, &message);
+            let pub_key = ops::compute_public::<MinPk>(&private);
+            let _ = ops::verify_message::<MinPk>(&pub_key, None, &message, &sig);
         }
 
         FuzzOperation::SignMinPkWithNamespace {
@@ -615,16 +617,16 @@ fn fuzz(op: FuzzOperation) {
             namespace,
             message,
         } => {
-            let sig = core::sign_message::<MinPk>(&private, Some(&namespace), &message);
-            let pub_key = core::compute_public::<MinPk>(&private);
-            let _ = core::verify_message::<MinPk>(&pub_key, Some(&namespace), &message, &sig);
+            let sig = ops::sign_message::<MinPk>(&private, Some(&namespace), &message);
+            let pub_key = ops::compute_public::<MinPk>(&private);
+            let _ = ops::verify_message::<MinPk>(&pub_key, Some(&namespace), &message, &sig);
         }
 
         FuzzOperation::SignMinPkLowLevel { private, message } => {
             // Use built-in DST instead of arbitrary bytes
-            let sig = core::sign::<MinPk>(&private, MinPk::MESSAGE, &message);
-            let pub_key = core::compute_public::<MinPk>(&private);
-            let _ = core::verify::<MinPk>(&pub_key, MinPk::MESSAGE, &message, &sig);
+            let sig = ops::sign::<MinPk>(&private, MinPk::MESSAGE, &message);
+            let pub_key = ops::compute_public::<MinPk>(&private);
+            let _ = ops::verify::<MinPk>(&pub_key, MinPk::MESSAGE, &message, &sig);
         }
 
         FuzzOperation::VerifyMinPk {
@@ -632,7 +634,7 @@ fn fuzz(op: FuzzOperation) {
             message,
             signature,
         } => {
-            let _ = core::verify_message::<MinPk>(&public, None, &message, &signature);
+            let _ = ops::verify_message::<MinPk>(&public, None, &message, &signature);
         }
 
         FuzzOperation::VerifyMinPkWithNamespace {
@@ -641,7 +643,7 @@ fn fuzz(op: FuzzOperation) {
             message,
             signature,
         } => {
-            let _ = core::verify_message::<MinPk>(&public, Some(&namespace), &message, &signature);
+            let _ = ops::verify_message::<MinPk>(&public, Some(&namespace), &message, &signature);
         }
 
         FuzzOperation::VerifyMinPkLowLevel {
@@ -650,13 +652,13 @@ fn fuzz(op: FuzzOperation) {
             signature,
         } => {
             // Use built-in DST instead of arbitrary bytes
-            let _ = core::verify::<MinPk>(&public, MinPk::MESSAGE, &message, &signature);
+            let _ = ops::verify::<MinPk>(&public, MinPk::MESSAGE, &message, &signature);
         }
 
         FuzzOperation::SignMinSig { private, message } => {
-            let sig = core::sign_message::<MinSig>(&private, None, &message);
-            let pub_key = core::compute_public::<MinSig>(&private);
-            let _ = core::verify_message::<MinSig>(&pub_key, None, &message, &sig);
+            let sig = ops::sign_message::<MinSig>(&private, None, &message);
+            let pub_key = ops::compute_public::<MinSig>(&private);
+            let _ = ops::verify_message::<MinSig>(&pub_key, None, &message, &sig);
         }
 
         FuzzOperation::SignMinSigWithNamespace {
@@ -664,16 +666,16 @@ fn fuzz(op: FuzzOperation) {
             namespace,
             message,
         } => {
-            let sig = core::sign_message::<MinSig>(&private, Some(&namespace), &message);
-            let pub_key = core::compute_public::<MinSig>(&private);
-            let _ = core::verify_message::<MinSig>(&pub_key, Some(&namespace), &message, &sig);
+            let sig = ops::sign_message::<MinSig>(&private, Some(&namespace), &message);
+            let pub_key = ops::compute_public::<MinSig>(&private);
+            let _ = ops::verify_message::<MinSig>(&pub_key, Some(&namespace), &message, &sig);
         }
 
         FuzzOperation::SignMinSigLowLevel { private, message } => {
             // Use built-in DST instead of arbitrary bytes
-            let sig = core::sign::<MinSig>(&private, MinSig::MESSAGE, &message);
-            let pub_key = core::compute_public::<MinSig>(&private);
-            let _ = core::verify::<MinSig>(&pub_key, MinSig::MESSAGE, &message, &sig);
+            let sig = ops::sign::<MinSig>(&private, MinSig::MESSAGE, &message);
+            let pub_key = ops::compute_public::<MinSig>(&private);
+            let _ = ops::verify::<MinSig>(&pub_key, MinSig::MESSAGE, &message, &sig);
         }
 
         FuzzOperation::VerifyMinSig {
@@ -681,7 +683,7 @@ fn fuzz(op: FuzzOperation) {
             message,
             signature,
         } => {
-            let _ = core::verify_message::<MinSig>(&public, None, &message, &signature);
+            let _ = ops::verify_message::<MinSig>(&public, None, &message, &signature);
         }
 
         FuzzOperation::VerifyMinSigWithNamespace {
@@ -690,7 +692,7 @@ fn fuzz(op: FuzzOperation) {
             message,
             signature,
         } => {
-            let _ = core::verify_message::<MinSig>(&public, Some(&namespace), &message, &signature);
+            let _ = ops::verify_message::<MinSig>(&public, Some(&namespace), &message, &signature);
         }
 
         FuzzOperation::VerifyMinSigLowLevel {
@@ -699,27 +701,27 @@ fn fuzz(op: FuzzOperation) {
             signature,
         } => {
             // Use built-in DST instead of arbitrary bytes
-            let _ = core::verify::<MinSig>(&public, MinSig::MESSAGE, &message, &signature);
+            let _ = ops::verify::<MinSig>(&public, MinSig::MESSAGE, &message, &signature);
         }
 
         FuzzOperation::SignProofOfPossessionMinPk { private } => {
-            let sig = core::sign_proof_of_possession::<MinPk>(&private);
-            let pub_key = core::compute_public::<MinPk>(&private);
-            let _ = core::verify_proof_of_possession::<MinPk>(&pub_key, &sig);
+            let sig = ops::sign_proof_of_possession::<MinPk>(&private);
+            let pub_key = ops::compute_public::<MinPk>(&private);
+            let _ = ops::verify_proof_of_possession::<MinPk>(&pub_key, &sig);
         }
 
         FuzzOperation::VerifyProofOfPossessionMinPk { public, signature } => {
-            let _ = core::verify_proof_of_possession::<MinPk>(&public, &signature);
+            let _ = ops::verify_proof_of_possession::<MinPk>(&public, &signature);
         }
 
         FuzzOperation::SignProofOfPossessionMinSig { private } => {
-            let sig = core::sign_proof_of_possession::<MinSig>(&private);
-            let pub_key = core::compute_public::<MinSig>(&private);
-            let _ = core::verify_proof_of_possession::<MinSig>(&pub_key, &sig);
+            let sig = ops::sign_proof_of_possession::<MinSig>(&private);
+            let pub_key = ops::compute_public::<MinSig>(&private);
+            let _ = ops::verify_proof_of_possession::<MinSig>(&pub_key, &sig);
         }
 
         FuzzOperation::VerifyProofOfPossessionMinSig { public, signature } => {
-            let _ = core::verify_proof_of_possession::<MinSig>(&public, &signature);
+            let _ = ops::verify_proof_of_possession::<MinSig>(&public, &signature);
         }
 
         FuzzOperation::PartialSignMessage {

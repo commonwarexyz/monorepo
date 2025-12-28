@@ -1,5 +1,5 @@
 use commonware_cryptography::bls12381::{
-    primitives::{ops::core::keypair, variant::MinSig},
+    primitives::{ops::keypair, variant::MinSig},
     tle::{encrypt, Block},
 };
 use criterion::{criterion_group, Criterion};

@@ -413,21 +413,21 @@ mod tests {
     use rand::prelude::*;
 
     fn batch_verify_correct<V: Variant>() {
-        let (private1, public1) = ops::core::keypair::<_, V>(&mut thread_rng());
-        let (private2, public2) = ops::core::keypair::<_, V>(&mut thread_rng());
-        let (private3, public3) = ops::core::keypair::<_, V>(&mut thread_rng());
+        let (private1, public1) = ops::keypair::<_, V>(&mut thread_rng());
+        let (private2, public2) = ops::keypair::<_, V>(&mut thread_rng());
+        let (private3, public3) = ops::keypair::<_, V>(&mut thread_rng());
 
         let msg1: &[u8] = b"message 1";
         let msg2: &[u8] = b"message 2";
         let msg3: &[u8] = b"message 3";
 
-        let sig1 = ops::core::sign_message::<V>(&private1, None, msg1);
-        let sig2 = ops::core::sign_message::<V>(&private2, None, msg2);
-        let sig3 = ops::core::sign_message::<V>(&private3, None, msg3);
+        let sig1 = ops::sign_message::<V>(&private1, None, msg1);
+        let sig2 = ops::sign_message::<V>(&private2, None, msg2);
+        let sig3 = ops::sign_message::<V>(&private3, None, msg3);
 
-        let hm1 = ops::core::hash_message::<V>(V::MESSAGE, msg1);
-        let hm2 = ops::core::hash_message::<V>(V::MESSAGE, msg2);
-        let hm3 = ops::core::hash_message::<V>(V::MESSAGE, msg3);
+        let hm1 = ops::hash_message::<V>(V::MESSAGE, msg1);
+        let hm2 = ops::hash_message::<V>(V::MESSAGE, msg2);
+        let hm3 = ops::hash_message::<V>(V::MESSAGE, msg3);
 
         V::batch_verify(
             &mut thread_rng(),
@@ -445,17 +445,17 @@ mod tests {
     }
 
     fn batch_verify_rejects_malleability<V: Variant>() {
-        let (private1, public1) = ops::core::keypair::<_, V>(&mut thread_rng());
-        let (private2, public2) = ops::core::keypair::<_, V>(&mut thread_rng());
+        let (private1, public1) = ops::keypair::<_, V>(&mut thread_rng());
+        let (private2, public2) = ops::keypair::<_, V>(&mut thread_rng());
 
         let msg1: &[u8] = b"message 1";
         let msg2: &[u8] = b"message 2";
 
-        let sig1 = ops::core::sign_message::<V>(&private1, None, msg1);
-        let sig2 = ops::core::sign_message::<V>(&private2, None, msg2);
+        let sig1 = ops::sign_message::<V>(&private1, None, msg1);
+        let sig2 = ops::sign_message::<V>(&private2, None, msg2);
 
-        let hm1 = ops::core::hash_message::<V>(V::MESSAGE, msg1);
-        let hm2 = ops::core::hash_message::<V>(V::MESSAGE, msg2);
+        let hm1 = ops::hash_message::<V>(V::MESSAGE, msg1);
+        let hm2 = ops::hash_message::<V>(V::MESSAGE, msg2);
 
         // Forge signatures by redistributing: sig1' = sig1 - delta, sig2' = sig2 + delta
         let random_scalar = Scalar::random(&mut thread_rng());

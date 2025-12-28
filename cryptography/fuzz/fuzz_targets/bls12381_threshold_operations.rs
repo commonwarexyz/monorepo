@@ -336,11 +336,7 @@ fn fuzz(op: FuzzOperation) {
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();
-                let _ = threshold::recover_multiple::<MinPk, _>(
-                    &sharing,
-                    groups_refs,
-                    concurrency,
-                );
+                let _ = threshold::recover_multiple::<MinPk, _>(&sharing, groups_refs, concurrency);
             }
         }
 
@@ -354,11 +350,8 @@ fn fuzz(op: FuzzOperation) {
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();
-                let _ = threshold::recover_multiple::<MinSig, _>(
-                    &sharing,
-                    groups_refs,
-                    concurrency,
-                );
+                let _ =
+                    threshold::recover_multiple::<MinSig, _>(&sharing, groups_refs, concurrency);
             }
         }
 
@@ -367,8 +360,7 @@ fn fuzz(op: FuzzOperation) {
             partials_1,
             partials_2,
         } => {
-            let _ =
-                threshold::recover_pair::<MinPk, _>(&sharing, &partials_1, &partials_2);
+            let _ = threshold::recover_pair::<MinPk, _>(&sharing, &partials_1, &partials_2);
         }
 
         FuzzOperation::ThresholdSignatureRecoverPairMinSig {
@@ -376,8 +368,7 @@ fn fuzz(op: FuzzOperation) {
             partials_1,
             partials_2,
         } => {
-            let _ =
-                threshold::recover_pair::<MinSig, _>(&sharing, &partials_1, &partials_2);
+            let _ = threshold::recover_pair::<MinSig, _>(&sharing, &partials_1, &partials_2);
         }
     }
 }

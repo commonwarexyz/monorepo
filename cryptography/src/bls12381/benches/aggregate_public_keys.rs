@@ -10,7 +10,7 @@ fn benchmark_aggregate_public_keys(c: &mut Criterion) {
                 || {
                     let mut public_keys = Vec::with_capacity(n);
                     for _ in 0..n {
-                        let public_key = ops::core::keypair::<_, MinSig>(&mut thread_rng()).1;
+                        let public_key = ops::keypair::<_, MinSig>(&mut thread_rng()).1;
                         public_keys.push(public_key);
                     }
                     public_keys

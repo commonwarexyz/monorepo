@@ -11,7 +11,7 @@
 
 use super::{
     super::{variant::Variant, Error},
-    core::{hash_message, hash_message_namespace, verify_message},
+    hash_message, hash_message_namespace, verify_message,
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -166,9 +166,8 @@ where
 mod tests {
     use super::{
         super::{
-            aggregate,
-            batch::verify_multiple_messages,
-            core::{hash_message, keypair, sign_message, verify_message},
+            aggregate, batch::verify_multiple_messages, hash_message, keypair, sign_message,
+            verify_message,
         },
         *,
     };
@@ -236,13 +235,8 @@ mod tests {
 
         let aggregate_sig = aggregate::signatures::<V, _>(&signatures);
 
-        verify_multiple_public_keys::<V, _>(
-            &pks,
-            Some(namespace),
-            message,
-            &aggregate_sig,
-        )
-        .expect("Aggregated signature should be valid");
+        verify_multiple_public_keys::<V, _>(&pks, Some(namespace), message, &aggregate_sig)
+            .expect("Aggregated signature should be valid");
 
         let payload = union_unique(namespace, message);
         blst_aggregate_verify_multiple_public_keys::<V, _>(&pks, &payload, &aggregate_sig)

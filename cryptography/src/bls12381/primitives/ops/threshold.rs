@@ -15,7 +15,7 @@ use super::{
         variant::{PartialSignature, Variant},
         Error,
     },
-    batch, core,
+    batch,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
@@ -50,7 +50,7 @@ pub fn sign_message<V: Variant>(
     namespace: Option<&[u8]>,
     message: &[u8],
 ) -> PartialSignature<V> {
-    let sig = core::sign_message::<V>(&private.private, namespace, message);
+    let sig = super::sign_message::<V>(&private.private, namespace, message);
     PartialSignature {
         value: sig,
         index: private.index,
@@ -63,7 +63,7 @@ pub fn sign_proof_of_possession<V: Variant>(
     private: &Share,
 ) -> PartialSignature<V> {
     // Sign the public key
-    let sig = core::sign::<V>(
+    let sig = super::sign::<V>(
         &private.private,
         V::PROOF_OF_POSSESSION,
         &sharing.public().encode(),
@@ -85,7 +85,7 @@ pub fn verify_message<V: Variant>(
     message: &[u8],
     partial: &PartialSignature<V>,
 ) -> Result<(), Error> {
-    core::verify_message::<V>(
+    super::verify_message::<V>(
         &sharing.partial_public(partial.index)?,
         namespace,
         message,
@@ -102,7 +102,7 @@ pub fn verify_proof_of_possession<V: Variant>(
     sharing: &Sharing<V>,
     partial: &PartialSignature<V>,
 ) -> Result<(), Error> {
-    core::verify::<V>(
+    super::verify::<V>(
         &sharing.partial_public(partial.index)?,
         V::PROOF_OF_POSSESSION,
         &sharing.public().encode(),
@@ -202,7 +202,8 @@ where
         .collect();
 
     // Use the generic verification function
-    let invalid_indices = batch::verify_multiple_public_keys::<_, V>(rng, namespace, message, &entries);
+    let invalid_indices =
+        batch::verify_multiple_public_keys::<_, V>(rng, namespace, message, &entries);
 
     // Map indices back to PartialSignature references
     invalid_indices
@@ -244,12 +245,8 @@ where
     }
 
     // Find any invalid partial signatures
-    let bad = verify_multiple_public_keys_bisect::<_, V>(
-        rng,
-        pending.as_slice(),
-        namespace,
-        message,
-    );
+    let bad =
+        verify_multiple_public_keys_bisect::<_, V>(rng, pending.as_slice(), namespace, message);
     invalid.extend(bad);
 
     if invalid.is_empty() {
@@ -378,14 +375,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        super::core::{self as core, hash_message_namespace},
-        *,
-    };
+    use super::*;
     use crate::bls12381::{
         dkg,
         primitives::{
             group::{Private, Scalar, G1_MESSAGE, G2_MESSAGE},
+            ops::{self, hash_message_namespace},
             variant::{MinPk, MinSig},
         },
     };
@@ -430,13 +425,12 @@ mod tests {
             .map(|s| sign_proof_of_possession::<V>(&sharing, s))
             .collect();
         for p in &partials {
-            verify_proof_of_possession::<V>(&sharing, p)
-                .expect("signature should be valid");
+            verify_proof_of_possession::<V>(&sharing, p).expect("signature should be valid");
         }
         let threshold_sig = recover::<V, _>(&sharing, &partials).unwrap();
         let threshold_pub = sharing.public();
 
-        core::verify_proof_of_possession::<V>(threshold_pub, &threshold_sig)
+        ops::verify_proof_of_possession::<V>(threshold_pub, &threshold_sig)
             .expect("signature should be valid");
 
         blst_verify_proof_of_possession::<V>(threshold_pub, &threshold_sig)
@@ -492,7 +486,7 @@ mod tests {
         let threshold_sig = recover::<V, _>(&sharing, &partials).unwrap();
         let threshold_pub = sharing.public();
 
-        core::verify_message::<V>(threshold_pub, Some(namespace), msg, &threshold_sig)
+        ops::verify_message::<V>(threshold_pub, Some(namespace), msg, &threshold_sig)
             .expect("signature should be valid");
 
         let payload = union_unique(namespace, msg);
@@ -522,14 +516,8 @@ mod tests {
             .iter()
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, *ns, msg)))
             .collect();
-        verify_multiple_messages::<_, V, _>(
-            &mut thread_rng(),
-            &public,
-            signer.index,
-            &entries,
-            1,
-        )
-        .expect("Verification with namespaced messages should succeed");
+        verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, signer.index, &entries, 1)
+            .expect("Verification with namespaced messages should succeed");
 
         let messages_no_ns: &[(Option<&[u8]>, &[u8])] =
             &[(None, b"msg1"), (None, b"msg2"), (None, b"msg3")];
@@ -620,7 +608,7 @@ mod tests {
 
         let sig1 = recover::<V, _>(&sharing, &partials).unwrap();
 
-        core::verify_message::<V>(sharing.public(), None, b"payload", &sig1).unwrap();
+        ops::verify_message::<V>(sharing.public(), None, b"payload", &sig1).unwrap();
     }
 
     #[test]
@@ -645,11 +633,10 @@ mod tests {
             .map(|s| sign_message::<V>(s, None, b"payload2"))
             .collect();
 
-        let (sig_1, sig_2) =
-            recover_pair::<V, _>(&sharing, &partials_1, &partials_2).unwrap();
+        let (sig_1, sig_2) = recover_pair::<V, _>(&sharing, &partials_1, &partials_2).unwrap();
 
-        core::verify_message::<V>(sharing.public(), None, b"payload1", &sig_1).unwrap();
-        core::verify_message::<V>(sharing.public(), None, b"payload2", &sig_2).unwrap();
+        ops::verify_message::<V>(sharing.public(), None, b"payload1", &sig_1).unwrap();
+        ops::verify_message::<V>(sharing.public(), None, b"payload2", &sig_2).unwrap();
     }
 
     #[test]
@@ -676,7 +663,7 @@ mod tests {
         });
 
         let threshold_sig = recover::<V, _>(&sharing, &partials).unwrap();
-        core::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
+        ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 
     #[test]
@@ -708,7 +695,7 @@ mod tests {
 
         let threshold_sig = recover::<V, _>(&sharing, &partials).unwrap();
         assert!(matches!(
-            core::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap_err(),
+            ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap_err(),
             Error::InvalidSignature
         ));
     }
@@ -772,7 +759,7 @@ mod tests {
         });
 
         let threshold_sig = recover::<V, _>(&sharing, &partials).unwrap();
-        core::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
+        ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 
     #[test]
@@ -1106,10 +1093,8 @@ mod tests {
         let partial1 = sign_message::<V>(&shares[0], namespace, msg);
         let partial2 = sign_message::<V>(&shares[1], namespace, msg);
 
-        verify_message::<V>(&sharing, namespace, msg, &partial1)
-            .expect("partial1 should be valid");
-        verify_message::<V>(&sharing, namespace, msg, &partial2)
-            .expect("partial2 should be valid");
+        verify_message::<V>(&sharing, namespace, msg, &partial1).expect("partial1 should be valid");
+        verify_message::<V>(&sharing, namespace, msg, &partial2).expect("partial2 should be valid");
 
         let random_scalar = Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;

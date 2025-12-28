@@ -58,18 +58,15 @@ fn benchmark_partial_verify_multiple_public_keys(c: &mut Criterion) {
                             }
 
                             // Verify
-                            let result =
-                                black_box(primitives::ops::threshold::verify_multiple_public_keys::<
+                            let result = black_box(
+                                primitives::ops::threshold::verify_multiple_public_keys::<
                                     _,
                                     MinSig,
                                     _,
                                 >(
-                                    &mut rng,
-                                    &polynomial,
-                                    Some(namespace),
-                                    msg,
-                                    &signatures,
-                                ));
+                                    &mut rng, &polynomial, Some(namespace), msg, &signatures
+                                ),
+                            );
                             if invalid == 0 {
                                 assert!(result.is_ok());
                             } else {

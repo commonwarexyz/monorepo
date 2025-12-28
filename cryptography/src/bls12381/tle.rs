@@ -36,14 +36,14 @@
 //! use commonware_cryptography::bls12381::{
 //!     tle::{encrypt, decrypt, Block},
 //!     primitives::{
-//!         ops::core::{keypair, sign_message},
+//!         ops::{keypair, sign_message},
 //!         variant::MinPk,
 //!     },
 //! };
 //! use rand::rngs::OsRng;
 //!
-//! // Generate core::keypair
-//! let (master_secret, master_public) = core::keypair::<_, MinPk>(&mut OsRng);
+//! // Generate keypair
+//! let (master_secret, master_public) = keypair::<_, MinPk>(&mut OsRng);
 //!
 //! // Define a target (e.g., a timestamp or round number)
 //! let target = 12345u64.to_be_bytes();
@@ -82,7 +82,7 @@
 use crate::{
     bls12381::primitives::{
         group::{Scalar, DST, GT},
-        ops::core::{hash_message, hash_message_namespace},
+        ops::{hash_message, hash_message_namespace},
         variant::Variant,
     },
     sha256::Digest,
@@ -350,7 +350,7 @@ pub fn decrypt<V: Variant>(signature: &V::Signature, ciphertext: &Ciphertext<V>)
 mod tests {
     use super::*;
     use crate::bls12381::primitives::{
-        ops::core,
+        ops,
         variant::{MinPk, MinSig},
     };
     use commonware_math::algebra::Random as _;
@@ -360,15 +360,15 @@ mod tests {
     fn test_encrypt_decrypt_minpk() {
         let mut rng = thread_rng();
 
-        // Generate master core::keypair
-        let (master_secret, master_public) = core::keypair::<_, MinPk>(&mut rng);
+        // Generate master keypair
+        let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
 
         // Target and message
         let target = 10u64.to_be_bytes();
         let message = b"Hello, IBE! This is exactly 32b!"; // 32 bytes
 
         // Generate signature over the target
-        let signature = core::sign_message::<MinPk>(&master_secret, None, &target);
+        let signature = ops::sign_message::<MinPk>(&master_secret, None, &target);
 
         // Encrypt
         let ciphertext = encrypt::<_, MinPk>(
@@ -389,15 +389,15 @@ mod tests {
     fn test_encrypt_decrypt_minsig() {
         let mut rng = thread_rng();
 
-        // Generate master core::keypair
-        let (master_secret, master_public) = core::keypair::<_, MinSig>(&mut rng);
+        // Generate master ops::keypair
+        let (master_secret, master_public) = ops::keypair::<_, MinSig>(&mut rng);
 
         // Target and message
         let target = 20u64.to_be_bytes();
         let message = b"Testing MinSig variant - 32 byte";
 
         // Generate signature over the target
-        let signature = core::sign_message::<MinSig>(&master_secret, None, &target);
+        let signature = ops::sign_message::<MinSig>(&master_secret, None, &target);
 
         // Encrypt
         let ciphertext = encrypt::<_, MinSig>(
@@ -418,9 +418,9 @@ mod tests {
     fn test_wrong_private_key() {
         let mut rng = thread_rng();
 
-        // Generate two different master core::keypairs
-        let (_, master_public1) = core::keypair::<_, MinPk>(&mut rng);
-        let (master_secret2, _) = core::keypair::<_, MinPk>(&mut rng);
+        // Generate two different master ops::keypairs
+        let (_, master_public1) = ops::keypair::<_, MinPk>(&mut rng);
+        let (master_secret2, _) = ops::keypair::<_, MinPk>(&mut rng);
 
         let target = 30u64.to_be_bytes();
         let message = b"Secret message padded to 32bytes";
@@ -434,7 +434,7 @@ mod tests {
         );
 
         // Try to decrypt with signature from second master
-        let wrong_signature = core::sign_message::<MinPk>(&master_secret2, None, &target);
+        let wrong_signature = ops::sign_message::<MinPk>(&master_secret2, None, &target);
         let result = decrypt::<MinPk>(&wrong_signature, &ciphertext);
 
         assert!(result.is_none());
@@ -444,12 +444,12 @@ mod tests {
     fn test_tampered_ciphertext() {
         let mut rng = thread_rng();
 
-        let (master_secret, master_public) = core::keypair::<_, MinPk>(&mut rng);
+        let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
         let target = 40u64.to_be_bytes();
         let message = b"Tamper test padded to 32 bytes.."; // 32 bytes
 
         // Generate signature over the target
-        let signature = core::sign_message::<MinPk>(&master_secret, None, &target);
+        let signature = ops::sign_message::<MinPk>(&master_secret, None, &target);
 
         // Encrypt
         let ciphertext = encrypt::<_, MinPk>(
@@ -478,8 +478,8 @@ mod tests {
     fn test_encrypt_decrypt_with_namespace() {
         let mut rng = thread_rng();
 
-        // Generate master core::keypair
-        let (master_secret, master_public) = core::keypair::<_, MinPk>(&mut rng);
+        // Generate master ops::keypair
+        let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
 
         // Target and namespace
         let namespace = b"example.org";
@@ -487,7 +487,7 @@ mod tests {
         let message = b"Message with namespace - 32 byte"; // 32 bytes
 
         // Generate signature over the namespaced target
-        let signature = core::sign_message::<MinPk>(&master_secret, Some(namespace), &target);
+        let signature = ops::sign_message::<MinPk>(&master_secret, Some(namespace), &target);
 
         // Encrypt with namespace
         let ciphertext = encrypt::<_, MinPk>(
@@ -508,18 +508,18 @@ mod tests {
     fn test_namespace_variance() {
         let mut rng = thread_rng();
 
-        // Generate master core::keypair
-        let (master_secret, master_public) = core::keypair::<_, MinPk>(&mut rng);
+        // Generate master ops::keypair
+        let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
 
         let namespace = b"example.org";
         let target = 100u64.to_be_bytes();
         let message = b"Namespace vs no namespace - 32by"; // 32 bytes
 
         // Generate signature without namespace
-        let signature_no_ns = core::sign_message::<MinPk>(&master_secret, None, &target);
+        let signature_no_ns = ops::sign_message::<MinPk>(&master_secret, None, &target);
 
         // Generate signature with namespace
-        let signature_ns = core::sign_message::<MinPk>(&master_secret, Some(namespace), &target);
+        let signature_ns = ops::sign_message::<MinPk>(&master_secret, Some(namespace), &target);
 
         // Encrypt with namespace
         let ciphertext_ns = encrypt::<_, MinPk>(
@@ -559,12 +559,12 @@ mod tests {
     fn test_cca_modified_v() {
         let mut rng = thread_rng();
 
-        let (master_secret, master_public) = core::keypair::<_, MinPk>(&mut rng);
+        let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
         let target = 110u64.to_be_bytes();
         let message = b"Another CCA test message 32bytes"; // 32 bytes
 
         // Generate signature over the target
-        let signature = core::sign_message::<MinPk>(&master_secret, None, &target);
+        let signature = ops::sign_message::<MinPk>(&master_secret, None, &target);
 
         // Encrypt
         let ciphertext = encrypt::<_, MinPk>(
@@ -593,12 +593,12 @@ mod tests {
     fn test_cca_modified_u() {
         let mut rng = thread_rng();
 
-        let (master_secret, master_public) = core::keypair::<_, MinPk>(&mut rng);
+        let (master_secret, master_public) = ops::keypair::<_, MinPk>(&mut rng);
         let target = 70u64.to_be_bytes();
         let message = b"CCA security test message 32 byt"; // 32 bytes
 
         // Generate signature over the target
-        let signature = core::sign_message::<MinPk>(&master_secret, None, &target);
+        let signature = ops::sign_message::<MinPk>(&master_secret, None, &target);
 
         // Encrypt
         let mut ciphertext = encrypt::<_, MinPk>(

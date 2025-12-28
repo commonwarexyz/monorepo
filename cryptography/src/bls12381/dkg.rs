@@ -1575,15 +1575,15 @@ mod test_plan {
     use super::*;
     use crate::{
         bls12381::primitives::{
-            ops::{core as ops_core, threshold},
+            ops::{self as ops, threshold},
             variant::Variant,
         },
         ed25519, PublicKey,
     };
+    use ::core::num::NonZeroI32;
     use anyhow::anyhow;
     use bytes::BytesMut;
     use commonware_utils::{max_faults, quorum, TryCollect};
-    use ::core::num::NonZeroI32;
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;
 
@@ -2231,7 +2231,7 @@ mod test_plan {
                 .expect("Should recover threshold signature");
 
                 // Verify against the saved public key
-                ops_core::verify_message::<V>(
+                ops::verify_message::<V>(
                     threshold_public_key.as_ref().unwrap(),
                     namespace,
                     &test_message,

@@ -13,9 +13,9 @@ fn benchmark_aggregate_verify_multiple_public_keys(c: &mut Criterion) {
                     let mut public_keys = Vec::with_capacity(n);
                     let mut signatures = Vec::with_capacity(n);
                     for _ in 0..n {
-                        let (private, public) = ops::core::keypair::<_, MinSig>(&mut thread_rng());
+                        let (private, public) = ops::keypair::<_, MinSig>(&mut thread_rng());
                         let signature =
-                            ops::core::sign_message::<MinSig>(&private, Some(namespace), &msg);
+                            ops::sign_message::<MinSig>(&private, Some(namespace), &msg);
                         public_keys.push(public);
                         signatures.push(signature);
                     }

@@ -17,12 +17,13 @@ fn benchmark_verify_multiple_messages(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let (private, public) = ops::core::keypair::<_, MinSig>(&mut thread_rng());
+                            let (private, public) =
+                                ops::keypair::<_, MinSig>(&mut thread_rng());
                             let entries: Vec<_> = msgs
                                 .iter()
                                 .map(|msg| {
                                     let ns: Option<&[u8]> = Some(&namespace[..]);
-                                    let sig = ops::core::sign_message::<MinSig>(&private, ns, msg);
+                                    let sig = ops::sign_message::<MinSig>(&private, ns, msg);
                                     (ns, msg.as_ref(), sig)
                                 })
                                 .collect();

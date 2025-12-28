@@ -13,7 +13,7 @@
 
 use super::{
     super::{group::Scalar, variant::Variant, Error},
-    core::{hash_message, hash_message_namespace},
+    hash_message, hash_message_namespace,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
@@ -139,7 +139,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        super::core::{keypair, sign_message},
+        super::{keypair, sign_message},
         *,
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
