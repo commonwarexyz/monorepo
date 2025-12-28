@@ -18,7 +18,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Env } from "./env.d.ts";
 import {
-  sortVersionsDesc,
+  LRUCache,
   getLanguage,
   isValidPath,
   parseSitemap,
@@ -49,6 +49,7 @@ interface CratesCache {
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 const MAX_SEARCH_RESULTS = 50;
 const SEARCH_BATCH_SIZE = 10;
+const FILE_CACHE_MAX_ENTRIES = 1000; // ~1000 files cached max
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
@@ -56,7 +57,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   private sitemapCache: SitemapCache | null = null;
   private cratesCache: CratesCache | null = null;
   // File content cache - versioned files are immutable, so no TTL needed
-  private fileCache: Map<string, string> = new Map();
+  // LRU cache evicts oldest entries when limit is reached
+  private fileCache = new LRUCache<string>(FILE_CACHE_MAX_ENTRIES);
 
   async init() {
     // Initialize server with version from workspace Cargo.toml
