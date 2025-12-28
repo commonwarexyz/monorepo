@@ -5,54 +5,6 @@
  */
 
 /**
- * Simple LRU cache with a maximum entry count.
- * Uses Map's insertion order to track recency.
- */
-export class LRUCache<T> {
-  private cache: Map<string, T>;
-  private maxSize: number;
-
-  constructor(maxSize: number) {
-    this.cache = new Map();
-    this.maxSize = maxSize;
-  }
-
-  get(key: string): T | undefined {
-    const value = this.cache.get(key);
-    if (value !== undefined) {
-      // Move to end (most recently used)
-      this.cache.delete(key);
-      this.cache.set(key, value);
-    }
-    return value;
-  }
-
-  set(key: string, value: T): void {
-    // If key exists, delete it first to update position
-    if (this.cache.has(key)) {
-      this.cache.delete(key);
-    }
-    this.cache.set(key, value);
-
-    // Evict oldest entries if over limit
-    while (this.cache.size > this.maxSize) {
-      const oldest = this.cache.keys().next().value;
-      if (oldest !== undefined) {
-        this.cache.delete(oldest);
-      }
-    }
-  }
-
-  get size(): number {
-    return this.cache.size;
-  }
-
-  clear(): void {
-    this.cache.clear();
-  }
-}
-
-/**
  * Sort versions in descending order (newest first).
  * Handles semantic versioning like v0.0.64, v0.0.63, v0.0.62
  */

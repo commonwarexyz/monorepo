@@ -25,37 +25,27 @@ import {
   parseCrateInfo,
 } from "./utils.ts";
 
-// Cached data structures (in-memory, per Durable Object instance)
-interface SitemapCache {
-  versions: string[];
-  files: Map<string, string[]>; // version -> file paths
-  timestamp: number;
-}
-
+// Types
 interface CrateInfo {
   name: string;
   path: string;
   description: string;
 }
 
-interface CratesCache {
-  version: string;
-  crates: CrateInfo[];
-  timestamp: number;
+interface SitemapData {
+  versions: string[];
+  files: Record<string, string[]>; // version -> file paths (JSON-serializable)
 }
 
 // Constants
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour (for in-memory caches)
-const CACHE_TTL_SECONDS = 60 * 60 * 24 * 365; // 1 year (for Cache API - files are immutable)
+const FILE_CACHE_TTL = 60 * 60 * 24 * 365; // 1 year (versioned files are immutable)
+const SITEMAP_CACHE_TTL = 60 * 60; // 1 hour
+const CRATES_CACHE_TTL = 60 * 60; // 1 hour
 const MAX_SEARCH_RESULTS = 50;
 const SEARCH_BATCH_SIZE = 10;
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
-
-  // In-memory caches for sitemap and crates (small, frequently accessed)
-  private sitemapCache: SitemapCache | null = null;
-  private cratesCache: CratesCache | null = null;
 
   async init() {
     // Initialize server with version from workspace Cargo.toml
@@ -362,12 +352,12 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       return null;
     }
 
-    // Cache the response (versioned files are immutable, cache for 1 year)
+    // Cache the response (versioned files are immutable)
     const content = await response.text();
     const cacheResponse = new Response(content, {
       headers: {
         "Content-Type": "text/plain",
-        "Cache-Control": `public, max-age=${CACHE_TTL_SECONDS}`,
+        "Cache-Control": `public, max-age=${FILE_CACHE_TTL}`,
       },
     });
     await cache.put(cacheKey, cacheResponse);
@@ -377,34 +367,72 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
   // Helper: Get latest version
   private async getLatestVersion(): Promise<string> {
-    const versions = await this.getVersions();
-    return versions[0];
+    const sitemap = await this.getSitemap();
+    return sitemap.versions[0];
   }
 
   // Helper: Get all versions from sitemap
   private async getVersions(): Promise<string[]> {
-    await this.refreshSitemapCache();
-    return this.sitemapCache!.versions;
+    const sitemap = await this.getSitemap();
+    return sitemap.versions;
   }
 
   // Helper: Get file list for a version
   private async getFileList(version: string): Promise<string[]> {
-    await this.refreshSitemapCache();
-    return this.sitemapCache!.files.get(version) || [];
+    const sitemap = await this.getSitemap();
+    return sitemap.files[version] || [];
   }
 
-  // Helper: Get crates list with descriptions
-  private async getCrates(version: string): Promise<CrateInfo[]> {
-    // Check cache - must match version
-    if (
-      this.cratesCache &&
-      this.cratesCache.version === version &&
-      Date.now() - this.cratesCache.timestamp < CACHE_TTL_MS
-    ) {
-      return this.cratesCache.crates;
+  // Helper: Get sitemap with Cache API caching
+  private async getSitemap(): Promise<SitemapData> {
+    const cache = caches.default;
+    const cacheKey = new Request(`${this.env.BASE_URL}/_cache/sitemap`);
+
+    // Check cache first
+    const cachedResponse = await cache.match(cacheKey);
+    if (cachedResponse) {
+      return cachedResponse.json();
     }
 
-    const crates: CrateInfo[] = [];
+    // Fetch and parse sitemap
+    const response = await fetch(`${this.env.BASE_URL}/sitemap.xml`);
+    if (!response.ok) {
+      throw new Error("Failed to fetch sitemap");
+    }
+
+    const xml = await response.text();
+    const { versions, files } = parseSitemap(xml);
+
+    // Convert Map to plain object for JSON serialization
+    const filesObj: Record<string, string[]> = {};
+    for (const [version, paths] of files) {
+      filesObj[version] = paths;
+    }
+
+    const sitemapData: SitemapData = { versions, files: filesObj };
+
+    // Cache the parsed sitemap
+    const cacheResponse = new Response(JSON.stringify(sitemapData), {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": `public, max-age=${SITEMAP_CACHE_TTL}`,
+      },
+    });
+    await cache.put(cacheKey, cacheResponse);
+
+    return sitemapData;
+  }
+
+  // Helper: Get crates list with Cache API caching
+  private async getCrates(version: string): Promise<CrateInfo[]> {
+    const cache = caches.default;
+    const cacheKey = new Request(`${this.env.BASE_URL}/_cache/crates/${version}`);
+
+    // Check cache first
+    const cachedResponse = await cache.match(cacheKey);
+    if (cachedResponse) {
+      return cachedResponse.json();
+    }
 
     // Fetch workspace Cargo.toml to get members
     const workspaceToml = await this.fetchFile(version, "Cargo.toml");
@@ -427,6 +455,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     });
 
     const results = await Promise.all(cratePromises);
+    const crates: CrateInfo[] = [];
     for (const result of results) {
       if (result) {
         crates.push(result);
@@ -436,36 +465,17 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     // Sort alphabetically by name
     crates.sort((a, b) => a.name.localeCompare(b.name));
 
-    this.cratesCache = {
-      version,
-      crates,
-      timestamp: Date.now(),
-    };
+    // Cache the crates list
+    const cacheResponse = new Response(JSON.stringify(crates), {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": `public, max-age=${CRATES_CACHE_TTL}`,
+      },
+    });
+    await cache.put(cacheKey, cacheResponse);
 
     return crates;
   }
-
-  // Helper: Refresh sitemap cache
-  private async refreshSitemapCache(): Promise<void> {
-    if (this.sitemapCache && Date.now() - this.sitemapCache.timestamp < CACHE_TTL_MS) {
-      return;
-    }
-
-    const response = await fetch(`${this.env.BASE_URL}/sitemap.xml`);
-    if (!response.ok) {
-      throw new Error("Failed to fetch sitemap");
-    }
-
-    const xml = await response.text();
-    const { versions, files } = parseSitemap(xml);
-
-    this.sitemapCache = {
-      versions,
-      files,
-      timestamp: Date.now(),
-    };
-  }
-
 }
 
 // Helper: Fetch latest version from sitemap (for health check)

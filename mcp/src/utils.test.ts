@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  LRUCache,
   sortVersionsDesc,
   getLanguage,
   isValidPath,
@@ -8,103 +7,6 @@ import {
   parseWorkspaceMembers,
   parseCrateInfo,
 } from "./utils.ts";
-
-describe("LRUCache", () => {
-  it("should store and retrieve values", () => {
-    const cache = new LRUCache<string>(3);
-    cache.set("a", "value-a");
-    cache.set("b", "value-b");
-    expect(cache.get("a")).toBe("value-a");
-    expect(cache.get("b")).toBe("value-b");
-  });
-
-  it("should return undefined for missing keys", () => {
-    const cache = new LRUCache<string>(3);
-    expect(cache.get("missing")).toBeUndefined();
-  });
-
-  it("should evict oldest entry when over limit", () => {
-    const cache = new LRUCache<string>(3);
-    cache.set("a", "value-a");
-    cache.set("b", "value-b");
-    cache.set("c", "value-c");
-    cache.set("d", "value-d"); // Should evict "a"
-
-    expect(cache.get("a")).toBeUndefined();
-    expect(cache.get("b")).toBe("value-b");
-    expect(cache.get("c")).toBe("value-c");
-    expect(cache.get("d")).toBe("value-d");
-    expect(cache.size).toBe(3);
-  });
-
-  it("should update recency on get", () => {
-    const cache = new LRUCache<string>(3);
-    cache.set("a", "value-a");
-    cache.set("b", "value-b");
-    cache.set("c", "value-c");
-
-    // Access "a" to make it most recent
-    cache.get("a");
-
-    // Add new entry - should evict "b" (oldest after "a" was accessed)
-    cache.set("d", "value-d");
-
-    expect(cache.get("a")).toBe("value-a");
-    expect(cache.get("b")).toBeUndefined();
-    expect(cache.get("c")).toBe("value-c");
-    expect(cache.get("d")).toBe("value-d");
-  });
-
-  it("should update value and recency on set for existing key", () => {
-    const cache = new LRUCache<string>(3);
-    cache.set("a", "value-a");
-    cache.set("b", "value-b");
-    cache.set("c", "value-c");
-
-    // Update "a" to make it most recent
-    cache.set("a", "new-value-a");
-
-    // Add new entry - should evict "b" (oldest after "a" was updated)
-    cache.set("d", "value-d");
-
-    expect(cache.get("a")).toBe("new-value-a");
-    expect(cache.get("b")).toBeUndefined();
-    expect(cache.get("c")).toBe("value-c");
-    expect(cache.get("d")).toBe("value-d");
-  });
-
-  it("should track size correctly", () => {
-    const cache = new LRUCache<string>(5);
-    expect(cache.size).toBe(0);
-
-    cache.set("a", "value-a");
-    expect(cache.size).toBe(1);
-
-    cache.set("b", "value-b");
-    cache.set("c", "value-c");
-    expect(cache.size).toBe(3);
-  });
-
-  it("should clear all entries", () => {
-    const cache = new LRUCache<string>(3);
-    cache.set("a", "value-a");
-    cache.set("b", "value-b");
-    cache.clear();
-
-    expect(cache.size).toBe(0);
-    expect(cache.get("a")).toBeUndefined();
-  });
-
-  it("should handle maxSize of 1", () => {
-    const cache = new LRUCache<string>(1);
-    cache.set("a", "value-a");
-    cache.set("b", "value-b");
-
-    expect(cache.get("a")).toBeUndefined();
-    expect(cache.get("b")).toBe("value-b");
-    expect(cache.size).toBe(1);
-  });
-});
 
 describe("sortVersionsDesc", () => {
   it("should sort versions in descending order", () => {
