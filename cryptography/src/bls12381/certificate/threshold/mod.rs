@@ -579,7 +579,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::{Additive, Random};
     use commonware_utils::{ordered::Set, quorum, TryCollect, NZU32};
-    use rand::{rngs::StdRng, thread_rng, SeedableRng};
+    use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
     const MESSAGE: &[u8] = b"test message";
@@ -642,7 +642,7 @@ mod tests {
             .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
         assert!(scheme.verify_attestation::<_, Sha256Digest>(
-            &mut rand::thread_rng(),
+            &mut StdRng::seed_from_u64(0),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &attestation
@@ -739,7 +739,7 @@ mod tests {
 
         // Verify the assembled certificate
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut StdRng::seed_from_u64(0),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -799,7 +799,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut StdRng::seed_from_u64(0),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -808,7 +808,7 @@ mod tests {
         // Corrupted certificate fails
         let corrupted = V::Signature::zero();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut StdRng::seed_from_u64(0),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &corrupted
@@ -962,7 +962,7 @@ mod tests {
 
         // Should be able to verify certificates
         assert!(cert_verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut StdRng::seed_from_u64(0),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -1001,7 +1001,7 @@ mod tests {
             .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
         assert!(verifier.verify_attestation::<_, Sha256Digest>(
-            &mut rand::thread_rng(),
+            &mut StdRng::seed_from_u64(0),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &vote
@@ -1052,7 +1052,7 @@ mod tests {
 
         // CertificateVerifier should panic when trying to verify a vote
         certificate_verifier.verify_attestation::<_, Sha256Digest>(
-            &mut rand::thread_rng(),
+            &mut StdRng::seed_from_u64(0),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &vote,
