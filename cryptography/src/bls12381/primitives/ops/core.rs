@@ -123,3 +123,233 @@ pub fn verify_proof_of_possession<V: Variant>(
 ) -> Result<(), Error> {
     verify::<V>(public, V::PROOF_OF_POSSESSION, &public.encode(), signature)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bls12381::primitives::{
+        group::{G1_MESSAGE, G2_MESSAGE},
+        variant::{MinPk, MinSig},
+    };
+    use blst::BLST_ERROR;
+    use commonware_codec::{DecodeExt, Encode, ReadExt};
+    use commonware_math::algebra::CryptoGroup;
+    use commonware_utils::{from_hex_formatted, union_unique};
+    use rand::{prelude::*, rngs::OsRng};
+
+    fn codec<V: Variant>() {
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let (private_bytes, public_bytes) = (private.encode(), public.encode());
+
+        let (private_decoded, public_decoded) = (
+            group::Private::decode(private_bytes.clone()).unwrap(),
+            V::Public::decode(public_bytes.clone()).unwrap(),
+        );
+
+        assert_eq!(private, private_decoded);
+        assert_eq!(public, public_decoded);
+
+        match V::MESSAGE {
+            G1_MESSAGE => {
+                blst::min_sig::SecretKey::from_bytes(&private_bytes).unwrap();
+                let blst_public_decoded =
+                    blst::min_sig::PublicKey::from_bytes(&public_bytes).unwrap();
+                blst_public_decoded.validate().unwrap();
+                let blst_public_encoded = blst_public_decoded.compress().to_vec();
+                assert_eq!(public_bytes, blst_public_encoded.as_slice());
+            }
+            G2_MESSAGE => {
+                blst::min_pk::SecretKey::from_bytes(&private_bytes).unwrap();
+                let blst_public_decoded =
+                    blst::min_pk::PublicKey::from_bytes(&public_bytes).unwrap();
+                blst_public_decoded.validate().unwrap();
+                let blst_public_encoded = blst_public_decoded.compress().to_vec();
+                assert_eq!(public_bytes, blst_public_encoded.as_slice());
+            }
+            _ => panic!("Unsupported Variant"),
+        }
+    }
+
+    #[test]
+    fn test_codec() {
+        codec::<MinPk>();
+        codec::<MinSig>();
+    }
+
+    fn blst_verify_proof_of_possession<V: Variant>(
+        public: &V::Public,
+        signature: &V::Signature,
+    ) -> Result<(), BLST_ERROR> {
+        let msg = public.encode();
+        match V::MESSAGE {
+            G1_MESSAGE => {
+                let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
+                let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
+                match signature.verify(true, &msg, V::PROOF_OF_POSSESSION, &[], &public, true) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            G2_MESSAGE => {
+                let public = blst::min_pk::PublicKey::from_bytes(&public.encode()).unwrap();
+                let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
+                match signature.verify(true, &msg, V::PROOF_OF_POSSESSION, &[], &public, true) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            _ => panic!("Unsupported Variant"),
+        }
+    }
+
+    fn single_proof_of_possession<V: Variant>() {
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let pop = sign_proof_of_possession::<V>(&private);
+
+        verify_proof_of_possession::<V>(&public, &pop).expect("PoP should be valid");
+        blst_verify_proof_of_possession::<V>(&public, &pop).expect("PoP should be valid");
+    }
+
+    #[test]
+    fn test_single_proof_of_possession() {
+        single_proof_of_possession::<MinPk>();
+        single_proof_of_possession::<MinSig>();
+    }
+
+    fn blst_verify_message<V: Variant>(
+        public: &V::Public,
+        msg: &[u8],
+        signature: &V::Signature,
+    ) -> Result<(), BLST_ERROR> {
+        match V::MESSAGE {
+            G1_MESSAGE => {
+                let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
+                let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
+                match signature.verify(true, msg, V::MESSAGE, &[], &public, true) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            G2_MESSAGE => {
+                let public = blst::min_pk::PublicKey::from_bytes(&public.encode()).unwrap();
+                let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
+                match signature.verify(true, msg, V::MESSAGE, &[], &public, true) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            _ => panic!("Unsupported Variant"),
+        }
+    }
+
+    fn bad_namespace<V: Variant>() {
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let msg = &[1, 9, 6, 9];
+        let sig = sign_message::<V>(&private, Some(b"good"), msg);
+        assert!(matches!(
+            verify_message::<V>(&public, Some(b"bad"), msg, &sig).unwrap_err(),
+            Error::InvalidSignature
+        ));
+    }
+
+    #[test]
+    fn test_bad_namespace() {
+        bad_namespace::<MinPk>();
+        bad_namespace::<MinSig>();
+    }
+
+    fn single_message<V: Variant>() {
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let msg = &[1, 9, 6, 9];
+        let namespace = b"test";
+        let sig = sign_message::<V>(&private, Some(namespace), msg);
+        verify_message::<V>(&public, Some(namespace), msg, &sig)
+            .expect("signature should be valid");
+        let payload = union_unique(namespace, msg);
+        blst_verify_message::<V>(&public, &payload, &sig).expect("signature should be valid");
+    }
+
+    #[test]
+    fn test_single_message() {
+        single_message::<MinPk>();
+        single_message::<MinSig>();
+    }
+
+    // Source: https://github.com/paulmillr/noble-curves/blob/bee1ffe0000095f95b982a969d06baaa3dd8ce73/test/bls12-381/bls12-381-g1-test-vectors.txt
+    const MIN_SIG_TESTS: &str = include_str!("test_vectors/min_sig.txt");
+
+    #[test]
+    fn test_min_sig() {
+        const DST: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
+
+        let mut publics = Vec::new();
+        let mut hms = Vec::new();
+        let mut signatures = Vec::new();
+        for line in MIN_SIG_TESTS.lines() {
+            let parts: Vec<_> = line.split(':').collect();
+            let private = from_hex_formatted(parts[0]).unwrap();
+            let private = Scalar::read(&mut private.as_ref()).unwrap();
+            let message = from_hex_formatted(parts[1]).unwrap();
+            let signature = from_hex_formatted(parts[2]).unwrap();
+            let mut signature =
+                <MinSig as Variant>::Signature::read(&mut signature.as_ref()).unwrap();
+
+            let computed = sign::<MinSig>(&private, DST, &message);
+            assert_eq!(signature, computed);
+
+            let public = compute_public::<MinSig>(&private);
+            verify::<MinSig>(&public, DST, &message, &signature).unwrap();
+
+            publics.push(public);
+            hms.push(hash_message::<MinSig>(DST, &message));
+            signatures.push(signature);
+
+            signature += &<MinSig as Variant>::Signature::generator();
+            assert!(verify::<MinSig>(&public, DST, &message, &signature).is_err());
+        }
+
+        assert!(MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_ok());
+
+        signatures[0] += &<MinSig as Variant>::Signature::generator();
+        assert!(MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_err());
+    }
+
+    // Source: https://github.com/paulmillr/noble-curves/blob/bee1ffe0000095f95b982a969d06baaa3dd8ce73/test/bls12-381/bls12-381-g2-test-vectors.txt
+    const MIN_PK_TESTS: &str = include_str!("test_vectors/min_pk.txt");
+
+    #[test]
+    fn test_min_pk() {
+        const DST: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
+
+        let mut publics = Vec::new();
+        let mut hms = Vec::new();
+        let mut signatures = Vec::new();
+        for line in MIN_PK_TESTS.lines() {
+            let parts: Vec<_> = line.split(':').collect();
+            let private = from_hex_formatted(parts[0]).unwrap();
+            let private = Scalar::read(&mut private.as_ref()).unwrap();
+            let message = from_hex_formatted(parts[1]).unwrap();
+            let signature = from_hex_formatted(parts[2]).unwrap();
+            let mut signature =
+                <MinPk as Variant>::Signature::read(&mut signature.as_ref()).unwrap();
+
+            let computed = sign::<MinPk>(&private, DST, &message);
+            assert_eq!(signature, computed);
+
+            let public = compute_public::<MinPk>(&private);
+            verify::<MinPk>(&public, DST, &message, &signature).unwrap();
+
+            publics.push(public);
+            hms.push(hash_message::<MinPk>(DST, &message));
+            signatures.push(signature);
+
+            signature += &<MinPk as Variant>::Signature::generator();
+            assert!(verify::<MinPk>(&public, DST, &message, &signature).is_err());
+        }
+
+        assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_ok());
+
+        signatures[0] += &<MinPk as Variant>::Signature::generator();
+        assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_err());
+    }
+}

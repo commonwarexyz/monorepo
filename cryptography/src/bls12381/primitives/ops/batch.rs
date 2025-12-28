@@ -135,3 +135,66 @@ where
     // Verify: e(pk, weighted_hm) == e(weighted_sig, G)
     V::verify(public, &weighted_hm, &weighted_sig)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        super::core::{keypair, sign_message},
+        *,
+    };
+    use crate::bls12381::primitives::variant::{MinPk, MinSig};
+    use commonware_math::algebra::CryptoGroup;
+    use rand::prelude::*;
+
+    fn verify_multiple_messages_correct<V: Variant>() {
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let namespace = Some(&b"test"[..]);
+        let messages: &[(Option<&[u8]>, &[u8])] = &[
+            (namespace, b"Message 1"),
+            (namespace, b"Message 2"),
+            (namespace, b"Message 3"),
+        ];
+        let entries: Vec<_> = messages
+            .iter()
+            .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(&private, *ns, msg)))
+            .collect();
+
+        verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &entries, 1)
+            .expect("valid signatures should be accepted");
+
+        verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &entries, 4)
+            .expect("valid signatures should be accepted with parallelism");
+    }
+
+    #[test]
+    fn test_verify_multiple_messages_correct() {
+        verify_multiple_messages_correct::<MinPk>();
+        verify_multiple_messages_correct::<MinSig>();
+    }
+
+    fn verify_multiple_messages_wrong_signature<V: Variant>() {
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let namespace = Some(&b"test"[..]);
+        let messages: &[(Option<&[u8]>, &[u8])] = &[
+            (namespace, b"Message 1"),
+            (namespace, b"Message 2"),
+            (namespace, b"Message 3"),
+        ];
+        let mut entries: Vec<_> = messages
+            .iter()
+            .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(&private, *ns, msg)))
+            .collect();
+
+        let random_scalar = Scalar::random(&mut thread_rng());
+        entries[1].2 += &(V::Signature::generator() * &random_scalar);
+
+        let result = verify_multiple_messages::<_, V, _>(&mut thread_rng(), &public, &entries, 1);
+        assert!(result.is_err(), "corrupted signature should be rejected");
+    }
+
+    #[test]
+    fn test_verify_multiple_messages_wrong_signature() {
+        verify_multiple_messages_wrong_signature::<MinPk>();
+        verify_multiple_messages_wrong_signature::<MinSig>();
+    }
+}

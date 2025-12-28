@@ -39,6 +39,3 @@ pub use threshold::{
     partial_verify_proof_of_possession, threshold_signature_recover,
     threshold_signature_recover_multiple, threshold_signature_recover_pair,
 };
-
-#[cfg(test)]
-mod tests;
