@@ -80,6 +80,12 @@ pub trait Archive {
         identifier: Identifier<'_, Self::Key>,
     ) -> impl Future<Output = Result<bool, Error>>;
 
+    /// Retrieve the index associated with a key without fetching the value.
+    ///
+    /// This is more efficient than [Archive::get] when only the index is needed,
+    /// as it avoids deserializing the value.
+    fn index_for_key(&self, key: &Self::Key) -> impl Future<Output = Result<Option<u64>, Error>>;
+
     /// Retrieve the end of the current range including `index` (inclusive) and
     /// the start of the next range after `index` (if it exists).
     ///

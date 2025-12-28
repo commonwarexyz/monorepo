@@ -120,6 +120,23 @@ pub trait Blocks: Send + Sync + 'static {
         id: Identifier<'_, <Self::Block as Committable>::Commitment>,
     ) -> impl Future<Output = Result<Option<Self::Block>, Self::Error>> + Send;
 
+    /// Retrieve the height (index) for a given block commitment without fetching the full block.
+    ///
+    /// This is more efficient than [Blocks::get] when only the height is needed,
+    /// as it may avoid deserializing the block.
+    ///
+    /// # Arguments
+    ///
+    /// * `commitment`: The block commitment to look up.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(height))` if the block exists, `Ok(None)` if not found, or `Err` on read failure.
+    fn get_height(
+        &self,
+        commitment: &<Self::Block as Committable>::Commitment,
+    ) -> impl Future<Output = Result<Option<u64>, Self::Error>> + Send;
+
     /// Prune the store to the provided minimum height (inclusive).
     ///
     /// # Arguments
@@ -228,6 +245,18 @@ where
         <Self as Archive>::get(self, id).await
     }
 
+    async fn get_height(
+        &self,
+        commitment: &<Self::Block as Committable>::Commitment,
+    ) -> Result<Option<u64>, Self::Error> {
+        // Immutable archive does not support direct key -> index lookup.
+        // Fall back to fetching the full block.
+        match <Self as Archive>::get(self, Identifier::Key(commitment)).await? {
+            Some(block) => Ok(Some(block.height())),
+            None => Ok(None),
+        }
+    }
+
     async fn prune(&mut self, _: u64) -> Result<(), Self::Error> {
         // Pruning is a no-op for immutable archives.
         Ok(())
@@ -297,6 +326,13 @@ where
         id: Identifier<'_, <Self::Block as Committable>::Commitment>,
     ) -> Result<Option<Self::Block>, Self::Error> {
         <Self as Archive>::get(self, id).await
+    }
+
+    async fn get_height(
+        &self,
+        commitment: &<Self::Block as Committable>::Commitment,
+    ) -> Result<Option<u64>, Self::Error> {
+        <Self as Archive>::index_for_key(self, commitment).await
     }
 
     async fn prune(&mut self, min: u64) -> Result<(), Self::Error> {
