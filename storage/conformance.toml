@@ -48,11 +48,11 @@ hash = "13b3e99a8c74b50dc18150194a92306de670b94e6642758feb6d9b6e9881f827"
 
 ["commonware_storage::journal::conformance::ContiguousFixed"]
 n_cases = 512
-hash = "134bb8b838241c2dedf98d96130f014bea19f1bc7580307c9798540466eb81c6"
+hash = "d83fbae8bfbd2cecdae632bf09f6263ac2ab96fdd9842266d3c475fe2b0ac23d"
 
 ["commonware_storage::journal::conformance::ContiguousVariable"]
 n_cases = 512
-hash = "29d37f2309943dd27d4344710a900bb3b992c0a1089ff9734cddbfa78c039200"
+hash = "31d98b6488e800bc13f3d506fac7caee04f841611f51d9821dfc9bd2305a1442"
 
 ["commonware_storage::journal::conformance::SegmentedFixed"]
 n_cases = 512

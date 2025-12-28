@@ -120,7 +120,7 @@
 //!         prunable::{Archive, Config},
 //!     },
 //! };
-//! use commonware_utils::{NZUsize, NZU64};
+//! use commonware_utils::{NZUsize, NZU16, NZU64};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -128,7 +128,7 @@
 //!     let cfg = Config {
 //!         translator: FourCap,
 //!         key_partition: "demo_index".into(),
-//!         key_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!         key_buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "demo_value".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
@@ -203,15 +203,15 @@ mod tests {
     };
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, num::NonZeroU16};
 
     const DEFAULT_ITEMS_PER_SECTION: u64 = 65536;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     fn test_key(key: &str) -> FixedBytes<64> {
@@ -285,79 +285,6 @@ mod tests {
                     _
                 ))))
             ));
-        });
-    }
-
-    #[test_traced]
-    fn test_archive_record_corruption() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Initialize the archive
-            let cfg = Config {
-                translator: FourCap,
-                key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test_value".into(),
-                codec_config: (),
-                compression: None,
-                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-            };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
-
-            let index = 1u64;
-            let key = test_key("testkey");
-            let data = 1;
-
-            // Put the key-data pair
-            archive
-                .put(index, key.clone(), data)
-                .await
-                .expect("Failed to put data");
-
-            // Sync and drop the archive
-            archive.sync().await.expect("Failed to sync archive");
-            drop(archive);
-
-            // Corrupt the index journal
-            let section = (index / DEFAULT_ITEMS_PER_SECTION) * DEFAULT_ITEMS_PER_SECTION;
-            let (blob, _) = context
-                .open("test_index", &section.to_be_bytes())
-                .await
-                .unwrap();
-            blob.write_at(b"corrupt!".to_vec(), 8).await.unwrap();
-            blob.sync().await.unwrap();
-
-            // Initialize the archive again
-            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
-                context,
-                Config {
-                    translator: FourCap,
-                    key_partition: "test_index".into(),
-                    key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    value_partition: "test_value".into(),
-                    codec_config: (),
-                    compression: None,
-                    key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                    value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                    replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                    items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-                },
-            )
-            .await
-            .expect("Failed to initialize archive");
-
-            // Check that the archive is empty
-            let retrieved: Option<i32> = archive
-                .get(Identifier::Index(index))
-                .await
-                .expect("Failed to get data");
-            assert!(retrieved.is_none());
         });
     }
 

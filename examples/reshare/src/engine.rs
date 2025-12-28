@@ -27,10 +27,14 @@ use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{ordered::Set, union, NZUsize, NZU32, NZU64};
+use commonware_utils::{ordered::Set, union, NZUsize, NZU16, NZU32, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use rand_core::CryptoRngCore;
-use std::{marker::PhantomData, num::NonZero, time::Instant};
+use std::{
+    marker::PhantomData,
+    num::{NonZero, NonZeroU16},
+    time::Instant,
+};
 use tracing::{error, info, warn};
 
 const MAILBOX_SIZE: usize = 10;
@@ -45,7 +49,7 @@ const FREEZER_VALUE_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
 const FREEZER_VALUE_COMPRESSION: Option<u8> = Some(3);
 const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024); // 8MB
 const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
-const BUFFER_POOL_PAGE_SIZE: NonZero<usize> = NZUsize!(4_096); // 4KB
+const BUFFER_POOL_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
 const BUFFER_POOL_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 

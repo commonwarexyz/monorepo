@@ -29,8 +29,6 @@ pub enum Error {
     InvalidBlobName(String),
     #[error("invalid blob size: index={0} size={1}")]
     InvalidBlobSize(u64, u64),
-    #[error("checksum mismatch: expected={0} actual={1}")]
-    ChecksumMismatch(u32, u32),
     #[error("item too large: size={0}")]
     ItemTooLarge(usize),
     #[error("already pruned to section: {0}")]

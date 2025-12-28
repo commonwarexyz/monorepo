@@ -988,13 +988,16 @@ pub mod test {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        num::{NonZeroU16, NonZeroUsize},
+    };
     use tracing::warn;
 
-    const PAGE_SIZE: usize = 88;
-    const PAGE_CACHE_SIZE: usize = 8;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(88);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
 
     fn current_db_config(partition_prefix: &str) -> Config<OneCap> {
         Config {
@@ -1008,7 +1011,7 @@ pub mod test {
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: OneCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 

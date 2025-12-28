@@ -11,20 +11,12 @@
 //! Within a `section`, data is appended as an `item` with the following format:
 //!
 //! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! |       0 ~ 4       |    ...    | 8 | 9 |10 |11 |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! | Size (varint u32) |   Data    |    C(u32)     |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//!
-//! Size = u32 as varint (1 to 5 bytes)
-//! C = CRC32(Size | Data)
+//! +---+---+---+---+---+---+---+---+
+//! |       0 ~ 4       |    ...    |
+//! +---+---+---+---+---+---+---+---+
+//! | Size (varint u32) |   Data    |
+//! +---+---+---+---+---+---+---+---+
 //! ```
-//!
-//! _To ensure data returned by `Journal` is correct, a checksum (CRC32) is stored at the end of
-//! each item. If the checksum of the read data does not match the stored checksum, an error is
-//! returned. This checksum is only verified when data is accessed and not at startup (which would
-//! require reading all data in `Journal`)._
 //!
 //! # Open Blobs
 //!
@@ -64,7 +56,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
 //! use commonware_storage::journal::segmented::variable::{Journal, Config};
-//! use commonware_utils::NZUsize;
+//! use commonware_utils::{NZUsize, NZU16};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -73,7 +65,7 @@
 //!         partition: "partition".to_string(),
 //!         compression: None,
 //!         codec_config: (),
-//!         buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!         buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!     }).await.unwrap();
 //!
@@ -90,11 +82,11 @@ use crate::journal::Error;
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, FixedSize, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
-    buffer::{Append, PoolRef, Read},
+    buffer::pool::{Append, PoolRef, Read},
     Blob, Error as RError, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
-use std::{io::Cursor, num::NonZeroUsize};
+use std::{borrow::Cow, io::Cursor, num::NonZeroUsize};
 use tracing::{trace, warn};
 use zstd::{bulk::compress, decode_all};
 
@@ -118,10 +110,18 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
-/// Minimum size of any item: 1 byte varint (size=0) + 0 bytes data + 4 bytes checksum.
-/// This is also the max varint size for u32, so we can always read this many bytes
-/// at the start of an item to get the complete varint.
-const MIN_ITEM_SIZE: usize = 5;
+/// Maximum size of a varint for u32 (also the minimum useful read size for parsing item headers).
+const MAX_VARINT_SIZE: usize = 5;
+
+/// Parses a varint length prefix from a buffer.
+/// Returns (item_size, varint_len).
+#[inline]
+fn parse_length_prefix(buf: &[u8]) -> Result<(usize, usize), Error> {
+    let mut cursor = buf;
+    let size = UInt::<u32>::read(&mut cursor)?.0 as usize;
+    let varint_len = buf.len() - cursor.remaining();
+    Ok((size, varint_len))
+}
 
 /// Implementation of `Journal` storage.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
@@ -164,43 +164,38 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         blob: &Append<E::Blob>,
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
-        // Read varint size (max 5 bytes for u32)
-        let mut hasher = crc32fast::Hasher::new();
-        let varint_buf = blob.read_at(vec![0; MIN_ITEM_SIZE], offset).await?;
-        let mut varint = varint_buf.as_ref();
-        let size = UInt::<u32>::read(&mut varint).map_err(Error::Codec)?.0 as usize;
-        let varint_len = MIN_ITEM_SIZE - varint.remaining();
-        hasher.update(&varint_buf.as_ref()[..varint_len]);
-        let offset = offset
+        // Read varint header (max 5 bytes for u32)
+        let buf = vec![0u8; MAX_VARINT_SIZE];
+        let (buf, available) = blob.read_up_to(buf, offset).await?;
+        let (size, varint_len) = parse_length_prefix(&buf.as_ref()[..available])?;
+        let data_offset = offset
             .checked_add(varint_len as u64)
             .ok_or(Error::OffsetOverflow)?;
 
-        // Read remaining
-        let buf_size = size.checked_add(u32::SIZE).ok_or(Error::OffsetOverflow)?;
-        let buf = blob.read_at(vec![0u8; buf_size], offset).await?;
-        let buf = buf.as_ref();
-        let next_offset = offset
-            .checked_add(buf_size as u64)
+        // Compute next offset (no alignment)
+        let next_offset = data_offset
+            .checked_add(size as u64)
             .ok_or(Error::OffsetOverflow)?;
 
-        // Read item
-        let item = &buf[..size];
-        hasher.update(item);
+        // Get item bytes - either from buffer directly or by reading more
+        let extra_bytes = available - varint_len;
+        let item_data: Cow<'_, [u8]> = if extra_bytes >= size {
+            Cow::Borrowed(&buf.as_ref()[varint_len..varint_len + size])
+        } else {
+            let mut v = vec![0u8; size];
+            v[..extra_bytes].copy_from_slice(&buf.as_ref()[varint_len..varint_len + extra_bytes]);
+            blob.read_into(&mut v[extra_bytes..], data_offset + extra_bytes as u64)
+                .await?;
+            Cow::Owned(v)
+        };
 
-        // Verify integrity
-        let checksum = hasher.finalize();
-        let stored_checksum = u32::from_be_bytes(buf[size..].try_into().unwrap());
-        if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
-        }
-
-        // If compression is enabled, decompress the item
+        // Decode item (with optional decompression)
         let item = if compressed {
-            let decompressed =
-                decode_all(Cursor::new(&item)).map_err(|_| Error::DecompressionFailed)?;
+            let decompressed = decode_all(Cursor::new(item_data.as_ref()))
+                .map_err(|_| Error::DecompressionFailed)?;
             V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)?
         } else {
-            V::decode_cfg(item, cfg).map_err(Error::Codec)?
+            V::decode_cfg(item_data.as_ref(), cfg).map_err(Error::Codec)?
         };
 
         // Return item
@@ -209,7 +204,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Helper function to read an item from a [Read].
     async fn read_buffered(
-        reader: &mut Read<Append<E::Blob>>,
+        reader: &mut Read<E::Blob>,
         offset: u64,
         cfg: &V::Cfg,
         compressed: bool,
@@ -219,51 +214,35 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             reader.seek_to(offset).map_err(Error::Runtime)?;
         }
 
-        // Read varint size (max 5 bytes for u32, and min item size is 5 bytes)
-        let mut hasher = crc32fast::Hasher::new();
-        let mut varint_buf = [0u8; MIN_ITEM_SIZE];
-        reader
-            .read_exact(&mut varint_buf, MIN_ITEM_SIZE)
-            .await
-            .map_err(Error::Runtime)?;
-        let mut varint = varint_buf.as_ref();
-        let size = UInt::<u32>::read(&mut varint).map_err(Error::Codec)?.0 as usize;
-        let varint_len = MIN_ITEM_SIZE - varint.remaining();
-        hasher.update(&varint_buf[..varint_len]);
+        // Read varint header (max 5 bytes for u32)
+        let buf = vec![0u8; MAX_VARINT_SIZE];
+        let (buf, available) = reader.read_up_to(buf).await?;
+        let (size, varint_len) = parse_length_prefix(&buf.as_ref()[..available])?;
 
-        // Read remaining data+checksum (we already have some bytes from the varint read)
-        let buf_size = size.checked_add(u32::SIZE).ok_or(Error::OffsetOverflow)?;
-        let already_read = MIN_ITEM_SIZE - varint_len;
-        let mut buf = vec![0u8; buf_size];
-        buf[..already_read].copy_from_slice(&varint_buf[varint_len..]);
-        if buf_size > already_read {
+        // Get item bytes - either from buffer directly or by reading more
+        let extra_bytes = available - varint_len;
+        let item_data: Cow<'_, [u8]> = if extra_bytes >= size {
+            Cow::Borrowed(&buf.as_ref()[varint_len..varint_len + size])
+        } else {
+            let mut v = vec![0u8; size];
+            v[..extra_bytes].copy_from_slice(&buf.as_ref()[varint_len..varint_len + extra_bytes]);
             reader
-                .read_exact(&mut buf[already_read..], buf_size - already_read)
+                .read_exact(&mut v[extra_bytes..], size - extra_bytes)
                 .await
                 .map_err(Error::Runtime)?;
-        }
-
-        // Read item
-        let item = &buf[..size];
-        hasher.update(item);
-
-        // Verify integrity
-        let checksum = hasher.finalize();
-        let stored_checksum = u32::from_be_bytes(buf[size..].try_into().unwrap());
-        if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
-        }
-
-        // If compression is enabled, decompress the item
-        let item = if compressed {
-            let decompressed =
-                decode_all(Cursor::new(&item)).map_err(|_| Error::DecompressionFailed)?;
-            V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)?
-        } else {
-            V::decode_cfg(item, cfg).map_err(Error::Codec)?
+            Cow::Owned(v)
         };
 
-        // Calculate next offset
+        // Decode item (with optional decompression)
+        let item = if compressed {
+            let decompressed = decode_all(Cursor::new(item_data.as_ref()))
+                .map_err(|_| Error::DecompressionFailed)?;
+            V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)?
+        } else {
+            V::decode_cfg(item_data.as_ref(), cfg).map_err(Error::Codec)?
+        };
+
+        // Calculate next offset (no alignment)
         let next_offset = reader.position();
         Ok((next_offset, next_offset, size as u32, item))
     }
@@ -294,7 +273,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             let blob_size = blob.size().await;
             blobs.push((
                 section,
-                blob.clone(),
+                blob.as_blob_reader(buffer).await?,
                 blob_size,
                 codec_config.clone(),
                 compressed,
@@ -304,9 +283,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Replay all blobs in order and stream items as they are read (to avoid occupying too much
         // memory with buffered data)
         Ok(stream::iter(blobs).flat_map(
-            move |(section, blob, blob_size, codec_config, compressed)| {
-                // Created buffered reader
-                let mut reader = Read::new(blob, blob_size, buffer);
+            move |(section, mut reader, blob_size, codec_config, compressed)| {
                 if section == start_section && offset != 0 {
                     if let Err(err) = reader.seek_to(offset) {
                         warn!(section, offset, ?err, "failed to seek to offset");
@@ -361,21 +338,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     ),
                                 ))
                             }
-                            Err(Error::ChecksumMismatch(expected, found)) => {
-                                // If we encounter corruption, we prune to the last valid item. This
-                                // can happen during an unclean file close (where pending data is not
-                                // fully synced to disk).
-                                warn!(
-                                    blob = section,
-                                    bad_offset = offset,
-                                    new_size = valid_size,
-                                    expected,
-                                    found,
-                                    "corruption detected: truncating"
-                                );
-                                reader.resize(valid_size).await.ok()?;
-                                None
-                            }
                             Err(Error::Runtime(RError::BlobInsufficientLength)) => {
                                 // If we encounter trailing bytes, we prune to the last
                                 // valid item. This can happen during an unclean file close (where
@@ -417,16 +379,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Appends an item to `Journal` in a given `section`, returning the offset
     /// where the item was written and the size of the item (which may now be smaller
     /// than the encoded size from the codec, if compression is enabled).
-    ///
-    /// # Warning
-    ///
-    /// If there exist trailing bytes in the `Blob` of a particular `section` and
-    /// `replay` is not called before this, it is likely that subsequent data added
-    /// to the `Blob` will be considered corrupted (as the trailing bytes will fail
-    /// the checksum verification). It is recommended to call `replay` before calling
-    /// `append` to prevent this.
     pub async fn append(&mut self, section: u64, item: V) -> Result<(u64, u32), Error> {
-        // Create buffer with item data
+        // Create buffer with item data (no checksum, no alignment)
         let (buf, item_len) = if let Some(compression) = self.compression {
             // Compressed: encode first, then compress
             let encoded = item.encode();
@@ -440,14 +394,11 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             let size_len = UInt(item_len_u32).encode_size();
             let entry_len = size_len
                 .checked_add(item_len)
-                .and_then(|v| v.checked_add(4))
                 .ok_or(Error::OffsetOverflow)?;
 
             let mut buf = Vec::with_capacity(entry_len);
             UInt(item_len_u32).write(&mut buf);
             buf.put_slice(&compressed);
-            let checksum = crc32fast::hash(&buf);
-            buf.put_u32(checksum);
 
             (buf, item_len)
         } else {
@@ -460,14 +411,11 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             let size_len = UInt(item_len_u32).encode_size();
             let entry_len = size_len
                 .checked_add(item_len)
-                .and_then(|v| v.checked_add(4))
                 .ok_or(Error::OffsetOverflow)?;
 
             let mut buf = Vec::with_capacity(entry_len);
             UInt(item_len_u32).write(&mut buf);
             item.write(&mut buf);
-            let checksum = crc32fast::hash(&buf);
-            buf.put_u32(checksum);
 
             (buf, item_len)
         };
@@ -475,11 +423,11 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Get or create blob
         let blob = self.manager.get_or_create(section).await?;
 
-        // Get current position - this is where we'll write
+        // Get current position - this is where we'll write (no alignment)
         let offset = blob.size().await;
 
         // Append item to blob
-        blob.append(buf).await?;
+        blob.append(&buf).await?;
         trace!(blob = section, offset, "appended item");
         Ok((offset, item_len as u32))
     }
@@ -596,11 +544,12 @@ mod tests {
     use super::*;
     use bytes::BufMut;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
-    use commonware_utils::NZUsize;
+    use commonware_runtime::{deterministic, Blob, Runner, Storage};
+    use commonware_utils::{NZUsize, NZU16};
     use futures::{pin_mut, StreamExt};
+    use std::num::NonZeroU16;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     #[test_traced]
@@ -1110,7 +1059,7 @@ mod tests {
             let item_size: u32 = 10; // Size indicates 10 bytes of data
             let mut buf = Vec::new();
             UInt(item_size).write(&mut buf); // Varint encoding
-            let data = [2u8; 5]; // Only 5 bytes, not 10 + 4 (checksum)
+            let data = [2u8; 5];
             BufMut::put_slice(&mut buf, &data);
             blob.write_at(buf, 0)
                 .await
@@ -1343,23 +1292,17 @@ mod tests {
             }
             drop(journal);
 
-            // Verify that only non-corrupted items were replayed
-            assert_eq!(items.len(), 3);
+            // Verify that replay stopped after corruption detected (the second blob).
+            assert_eq!(items.len(), 1);
             assert_eq!(items[0].0, 1);
             assert_eq!(items[0].1, 1);
-            assert_eq!(items[1].0, data_items[0].0);
-            assert_eq!(items[1].1, data_items[0].1);
-            assert_eq!(items[2].0, data_items[1].0);
-            assert_eq!(items[2].1, data_items[1].1);
 
-            // Confirm blob is expected length
-            // entry = 1 (varint for 4) + 4 (data) + 4 (checksum) = 9 bytes
-            // Item 2 ends at position 9 + 9 = 18
+            // Confirm second blob was truncated.
             let (_, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_size, 18);
+            assert_eq!(blob_size, 0);
 
             // Attempt to replay journal after truncation
             let mut journal = Journal::init(context.clone(), cfg.clone())
@@ -1383,33 +1326,20 @@ mod tests {
             }
 
             // Verify that only non-corrupted items were replayed
-            assert_eq!(items.len(), 3);
+            assert_eq!(items.len(), 1);
             assert_eq!(items[0].0, 1);
             assert_eq!(items[0].1, 1);
-            assert_eq!(items[1].0, data_items[0].0);
-            assert_eq!(items[1].1, data_items[0].1);
-            assert_eq!(items[2].0, data_items[1].0);
-            assert_eq!(items[2].1, data_items[1].1);
 
             // Append a new item to truncated partition
             let (offset, _) = journal.append(2, 5).await.expect("Failed to append data");
             journal.sync(2).await.expect("Failed to sync blob");
 
-            // Get the new item
-            let item = journal.get(2, offset).await.expect("Failed to get item");
+            // Get the new item (offset is 0 since blob was truncated)
+            let item = journal.get(2, 0).await.expect("Failed to get item");
             assert_eq!(item, 5);
 
             // Drop the journal (data already synced)
             drop(journal);
-
-            // Confirm blob is expected length
-            // Items 1 and 2 at positions 0 and 9, item 3 (value 5) at position 18
-            // Item 3 = 1 (varint) + 4 (data) + 4 (checksum) = 9 bytes, ends at 27
-            let (_, blob_size) = context
-                .open(&cfg.partition, &2u64.to_be_bytes())
-                .await
-                .expect("Failed to open blob");
-            assert_eq!(blob_size, 27);
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context.clone(), cfg.clone())
@@ -1433,15 +1363,11 @@ mod tests {
             }
 
             // Verify that only non-corrupted items were replayed
-            assert_eq!(items.len(), 4);
+            assert_eq!(items.len(), 2);
             assert_eq!(items[0].0, 1);
             assert_eq!(items[0].1, 1);
-            assert_eq!(items[1].0, data_items[0].0);
-            assert_eq!(items[1].1, data_items[0].1);
-            assert_eq!(items[2].0, data_items[1].0);
-            assert_eq!(items[2].1, data_items[1].1);
-            assert_eq!(items[3].0, 2);
-            assert_eq!(items[3].1, 5);
+            assert_eq!(items[1].0, 2);
+            assert_eq!(items[1].1, 5);
         });
     }
 
@@ -1621,6 +1547,67 @@ mod tests {
             // Check size of section 2 - should be greater than 0
             let size = journal.size(2).await.unwrap();
             assert!(size > 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_small_items() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            // Append many small (1-byte) items to the same section
+            let num_items = 100;
+            let mut offsets = Vec::new();
+            for i in 0..num_items {
+                let (offset, size) = journal
+                    .append(1, i as u8)
+                    .await
+                    .expect("Failed to append data");
+                assert_eq!(size, 1, "u8 should encode to 1 byte");
+                offsets.push(offset);
+            }
+            journal.sync(1).await.expect("Failed to sync");
+
+            // Read each item back via random access
+            for (i, &offset) in offsets.iter().enumerate() {
+                let item: u8 = journal.get(1, offset).await.expect("Failed to get item");
+                assert_eq!(item, i as u8, "Item mismatch at offset {offset}");
+            }
+
+            // Drop and reopen to test replay
+            drop(journal);
+            let journal = Journal::<_, u8>::init(context, cfg)
+                .await
+                .expect("Failed to re-initialize journal");
+
+            // Replay and verify all items
+            let stream = journal
+                .replay(0, 0, NZUsize!(1024))
+                .await
+                .expect("Failed to setup replay");
+            pin_mut!(stream);
+
+            let mut count = 0;
+            while let Some(result) = stream.next().await {
+                let (section, offset, size, item) = result.expect("Failed to replay item");
+                assert_eq!(section, 1);
+                assert_eq!(offset, offsets[count]);
+                assert_eq!(size, 1);
+                assert_eq!(item, count as u8);
+                count += 1;
+            }
+            assert_eq!(count, num_items, "Should replay all items");
         });
     }
 

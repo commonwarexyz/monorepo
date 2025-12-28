@@ -598,10 +598,11 @@ pub(super) mod test {
         deterministic::{self},
         Runner as _,
     };
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use std::num::NonZeroU16;
 
-    const PAGE_SIZE: usize = 77;
-    const PAGE_CACHE_SIZE: usize = 9;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(77);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
     const ITEMS_PER_SECTION: u64 = 5;
 
     pub(crate) fn db_config(
@@ -619,7 +620,7 @@ pub(super) mod test {
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 

@@ -97,16 +97,16 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, NZU16};
     use futures::{channel::oneshot, future::join_all};
     use std::{
         collections::{BTreeMap, HashMap},
-        num::{NonZeroU32, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         time::Duration,
     };
     use tracing::debug;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     const TEST_NAMESPACE: &[u8] = b"ordered_broadcast_test";

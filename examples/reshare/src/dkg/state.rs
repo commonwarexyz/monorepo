@@ -30,15 +30,15 @@ use commonware_storage::journal::{
     contiguous::variable::{Config as CVConfig, Journal as CVJournal},
     segmented::variable::{Config as SVConfig, Journal as SVJournal},
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::StreamExt;
 use std::{
     collections::BTreeMap,
-    num::{NonZeroU32, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
 };
 use tracing::debug;
 
-const PAGE_SIZE: NonZeroUsize = NZUsize!(1 << 12);
+const PAGE_SIZE: NonZeroU16 = NZU16!(1 << 12);
 const POOL_CAPACITY: NonZeroUsize = NZUsize!(1 << 20);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1 << 12);
 const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20);

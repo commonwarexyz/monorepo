@@ -4,9 +4,10 @@ use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::journal::contiguous::fixed::{Config as JournalConfig, Journal};
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::{pin_mut, StreamExt};
 use libfuzzer_sys::fuzz_target;
+use std::num::NonZeroU16;
 
 const MAX_REPLAY_BUF: usize = 2048;
 const MAX_WRITE_BUF: usize = 2048;
@@ -51,7 +52,7 @@ struct FuzzInput {
     operations: Vec<JournalOperation>,
 }
 
-const PAGE_SIZE: usize = 128;
+const PAGE_SIZE: NonZeroU16 = NZU16!(57);
 const PAGE_CACHE_SIZE: usize = 1;
 
 fn fuzz(input: FuzzInput) {
@@ -62,7 +63,7 @@ fn fuzz(input: FuzzInput) {
             partition: "fixed_journal_operations_fuzz_test".to_string(),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(MAX_WRITE_BUF),
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 
         let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();

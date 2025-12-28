@@ -32,7 +32,7 @@
 //!         immutable::{Archive, Config},
 //!     },
 //! };
-//! use commonware_utils::{NZUsize, NZU64};
+//! use commonware_utils::{NZUsize, NZU16, NZU64};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -44,7 +44,7 @@
 //!         freezer_table_resize_frequency: 4,
 //!         freezer_table_resize_chunk_size: 16_384,
 //!         freezer_key_partition: "key".into(),
-//!         freezer_key_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!         freezer_key_buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
 //!         freezer_value_partition: "value".into(),
 //!         freezer_value_target_size: 1024,
 //!         freezer_value_compression: Some(3),
@@ -134,9 +134,10 @@ mod tests {
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use std::num::NonZeroU16;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     #[test]

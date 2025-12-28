@@ -835,14 +835,15 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
-    use commonware_utils::{hex, NZUsize, NZU64};
+    use commonware_utils::{hex, NZUsize, NZU16, NZU64};
+    use std::num::NonZeroU16;
 
     fn test_digest(v: usize) -> Digest {
         Sha256::hash(&v.to_be_bytes())
     }
 
-    const PAGE_SIZE: usize = 111;
-    const PAGE_CACHE_SIZE: usize = 5;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(111);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(5);
 
     fn test_config() -> Config {
         Config {
@@ -851,7 +852,7 @@ mod tests {
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -1134,16 +1135,17 @@ mod tests {
             drop(mmr);
 
             // The very last element we added (pos=495) resulted in new parents at positions 496 &
-            // 497. Simulate a partial write by corrupting the last parent's checksum by truncating
+            // 497. Simulate a partial write by corrupting the last page's checksum by truncating
             // the last blob by a single byte.
             let partition: String = "journal_partition".into();
             let (blob, len) = context
                 .open(&partition, &71u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(len, 36); // N+4 = 36 bytes per node, 1 node in the last blob
+            // A full page w/ CRC should have been written on sync.
+            assert_eq!(len, PAGE_SIZE.get() as u64 + 12);
 
-            // truncate the blob by one byte to corrupt the checksum of the last parent node.
+            // truncate the blob by one byte to corrupt the page CRC.
             blob.resize(len - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
@@ -1161,33 +1163,6 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(mmr.size(), 498);
-            drop(mmr);
-
-            // Repeat partial write test though this time truncate the leaf itself not just some
-            // parent. The leaf is in the *previous* blob so we'll have to delete the most recent
-            // blob, then appropriately truncate the previous one.
-            context
-                .remove(&partition, Some(&71u64.to_be_bytes()))
-                .await
-                .expect("Failed to remove blob");
-            let (blob, len) = context
-                .open(&partition, &70u64.to_be_bytes())
-                .await
-                .expect("Failed to open blob");
-            assert_eq!(len, 36 * 7); // this blob should be full.
-
-            // The last leaf should be in slot 5 of this blob, truncate last byte of its checksum.
-            blob.resize(36 * 5 + 35)
-                .await
-                .expect("Failed to corrupt blob");
-            blob.sync().await.expect("Failed to sync blob");
-
-            let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
-                .await
-                .unwrap();
-            // Since the leaf was corrupted, it should not have been recovered, and the journal's
-            // size will be the last-valid size.
-            assert_eq!(mmr.size(), 495);
 
             mmr.destroy().await.unwrap();
         });
@@ -1464,7 +1439,7 @@ mod tests {
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
             .await
@@ -1515,7 +1490,7 @@ mod tests {
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
             .await
@@ -1540,7 +1515,7 @@ mod tests {
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
             .await

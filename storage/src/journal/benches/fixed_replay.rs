@@ -59,7 +59,7 @@ fn bench_fixed_replay(c: &mut Criterion) {
 
         // Run the benchmarks
         let runner = tokio::Runner::new(cfg.clone());
-        for buffer in [128, 16_384, 65_536, 1_048_576] {
+        for buffer in [16_384, 65_536, 1_048_576] {
             c.bench_function(
                 &format!(
                     "{}/items={} buffer={} size={}",

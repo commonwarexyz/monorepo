@@ -3,9 +3,12 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::freezer::{Config, Freezer, Identifier};
-use commonware_utils::{sequence::FixedBytes, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
-use std::{collections::HashMap, num::NonZeroUsize};
+use std::{
+    collections::HashMap,
+    num::{NonZeroU16, NonZeroUsize},
+};
 
 #[derive(Arbitrary, Debug)]
 enum Op {
@@ -40,7 +43,7 @@ fn vec_to_key(v: &[u8]) -> FixedBytes<32> {
     FixedBytes::<32>::new(buf)
 }
 
-const PAGE_SIZE: NonZeroUsize = NZUsize!(555);
+const PAGE_SIZE: NonZeroU16 = NZU16!(393);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(100);
 
 fn fuzz(input: FuzzInput) {

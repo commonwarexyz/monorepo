@@ -164,7 +164,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
 //! use commonware_storage::freezer::{Freezer, Config, Identifier};
-//! use commonware_utils::{sequence::FixedBytes, NZUsize};
+//! use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -172,7 +172,7 @@
 //!     let cfg = Config {
 //!         key_partition: "freezer_key_index".into(),
 //!         key_write_buffer: NZUsize!(1024 * 1024), // 1MB
-//!         key_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!         key_buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "freezer_value_journal".into(),
 //!         value_compression: Some(3),
 //!         value_write_buffer: NZUsize!(1024 * 1024), // 1MB
@@ -276,8 +276,9 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{hex, sequence::FixedBytes, NZUsize};
+    use commonware_utils::{hex, sequence::FixedBytes, NZUsize, NZU16};
     use rand::{Rng, RngCore};
+    use std::num::NonZeroU16;
 
     const DEFAULT_WRITE_BUFFER: usize = 1024;
     const DEFAULT_VALUE_TARGET_SIZE: u64 = 10 * 1024 * 1024;
@@ -285,7 +286,7 @@ mod tests {
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
     const DEFAULT_TABLE_RESIZE_CHUNK_SIZE: u32 = 128; // force multiple chunks
     const DEFAULT_TABLE_REPLAY_BUFFER: usize = 64 * 1024; // 64KB
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     fn test_key(key: &str) -> FixedBytes<64> {

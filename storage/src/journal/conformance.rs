@@ -8,14 +8,14 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_conformance::{conformance_tests, Conformance};
 use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
-use commonware_utils::{NZUsize, NZU64};
-use core::num::{NonZeroU64, NonZeroUsize};
+use commonware_utils::{NZUsize, NZU16, NZU64};
+use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use oversized::Record;
 use rand::Rng;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(4096);
-const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
 struct ContiguousFixed;

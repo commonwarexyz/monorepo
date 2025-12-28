@@ -1,9 +1,9 @@
 use commonware_runtime::{buffer::PoolRef, tokio::Context};
 use commonware_storage::journal::contiguous::fixed::{Config as JConfig, Journal};
-use commonware_utils::{sequence::FixedBytes, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use criterion::criterion_main;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 mod fixed_append;
 mod fixed_read_random;
@@ -21,7 +21,7 @@ criterion_main!(
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1_024 * 1024); // 1MB
 
 /// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: NonZeroUsize = NZUsize!(16_384);
+const PAGE_SIZE: NonZeroU16 = NZU16!(16_384);
 
 /// The number of pages to cache in the buffer pool. Make it big enough to be
 /// fast, but not so big we avoid any page faults for the larger benchmarks.

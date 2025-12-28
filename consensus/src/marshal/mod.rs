@@ -130,7 +130,7 @@ mod tests {
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_storage::archive::immutable;
-    use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU64};
+    use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
     use futures::StreamExt;
     use rand::{
         seq::{IteratorRandom, SliceRandom},
@@ -138,7 +138,7 @@ mod tests {
     };
     use std::{
         collections::BTreeMap,
-        num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
         time::{Duration, Instant},
     };
     use tracing::info;
@@ -150,7 +150,7 @@ mod tests {
     type S = bls12381_threshold::Scheme<K, V>;
     type P = ConstantProvider<S, Epoch>;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const NAMESPACE: &[u8] = b"test";
     const NUM_VALIDATORS: u32 = 4;
