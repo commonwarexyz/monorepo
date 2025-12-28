@@ -16,7 +16,9 @@ fn benchmark_aggregate_public_keys(c: &mut Criterion) {
                     public_keys
                 },
                 |public_keys| {
-                    black_box(ops::aggregate::public_keys::<MinSig, _>(&public_keys));
+                    black_box(ops::aggregate::combine_public_keys::<MinSig, _>(
+                        &public_keys,
+                    ));
                 },
                 BatchSize::SmallInput,
             );

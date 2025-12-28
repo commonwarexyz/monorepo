@@ -16,16 +16,16 @@ use common::{
 
 #[derive(Debug)]
 enum FuzzOperation {
-    PublicKeysMinPk {
+    CombinePublicKeysMinPk {
         public_keys: Vec<G1>,
     },
-    PublicKeysMinSig {
+    CombinePublicKeysMinSig {
         public_keys: Vec<G2>,
     },
-    SignaturesMinPk {
+    CombineSignaturesMinPk {
         signatures: Vec<G2>,
     },
-    SignaturesMinSig {
+    CombineSignaturesMinSig {
         signatures: Vec<G1>,
     },
     AggregateVerifyMultiplePublicKeysMinPk {
@@ -59,16 +59,16 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
         let choice = u.int_in_range(0..=7)?;
 
         match choice {
-            0 => Ok(FuzzOperation::PublicKeysMinPk {
+            0 => Ok(FuzzOperation::CombinePublicKeysMinPk {
                 public_keys: arbitrary_vec_g1(u, 0, 20)?,
             }),
-            1 => Ok(FuzzOperation::PublicKeysMinSig {
+            1 => Ok(FuzzOperation::CombinePublicKeysMinSig {
                 public_keys: arbitrary_vec_g2(u, 0, 20)?,
             }),
-            2 => Ok(FuzzOperation::SignaturesMinPk {
+            2 => Ok(FuzzOperation::CombineSignaturesMinPk {
                 signatures: arbitrary_vec_g2(u, 0, 20)?,
             }),
-            3 => Ok(FuzzOperation::SignaturesMinSig {
+            3 => Ok(FuzzOperation::CombineSignaturesMinSig {
                 signatures: arbitrary_vec_g1(u, 0, 20)?,
             }),
             4 => Ok(FuzzOperation::AggregateVerifyMultiplePublicKeysMinPk {
@@ -95,7 +95,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 signature: arbitrary_g1(u)?,
                 concurrency: u.int_in_range(1..=8)?,
             }),
-            _ => Ok(FuzzOperation::PublicKeysMinPk {
+            _ => Ok(FuzzOperation::CombinePublicKeysMinPk {
                 public_keys: Vec::new(),
             }),
         }
@@ -104,27 +104,27 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 
 fn fuzz(op: FuzzOperation) {
     match op {
-        FuzzOperation::PublicKeysMinPk { public_keys } => {
+        FuzzOperation::CombinePublicKeysMinPk { public_keys } => {
             if !public_keys.is_empty() {
-                let _result = aggregate::public_keys::<MinPk, _>(&public_keys);
+                let _result = aggregate::combine_public_keys::<MinPk, _>(&public_keys);
             }
         }
 
-        FuzzOperation::PublicKeysMinSig { public_keys } => {
+        FuzzOperation::CombinePublicKeysMinSig { public_keys } => {
             if !public_keys.is_empty() {
-                let _result = aggregate::public_keys::<MinSig, _>(&public_keys);
+                let _result = aggregate::combine_public_keys::<MinSig, _>(&public_keys);
             }
         }
 
-        FuzzOperation::SignaturesMinPk { signatures } => {
+        FuzzOperation::CombineSignaturesMinPk { signatures } => {
             if !signatures.is_empty() {
-                let _result = aggregate::signatures::<MinPk, _>(&signatures);
+                let _result = aggregate::combine_signatures::<MinPk, _>(&signatures);
             }
         }
 
-        FuzzOperation::SignaturesMinSig { signatures } => {
+        FuzzOperation::CombineSignaturesMinSig { signatures } => {
             if !signatures.is_empty() {
-                let _result = aggregate::signatures::<MinSig, _>(&signatures);
+                let _result = aggregate::combine_signatures::<MinSig, _>(&signatures);
             }
         }
 
@@ -135,11 +135,12 @@ fn fuzz(op: FuzzOperation) {
             signature,
         } => {
             if !public_keys.is_empty() {
+                let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
                 let _ = aggregate::verify_multiple_public_keys::<MinPk, _>(
                     &public_keys,
                     namespace.as_deref(),
                     &message,
-                    &signature,
+                    &agg_sig,
                 );
             }
         }
@@ -151,11 +152,12 @@ fn fuzz(op: FuzzOperation) {
             signature,
         } => {
             if !public_keys.is_empty() {
+                let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
                 let _ = aggregate::verify_multiple_public_keys::<MinSig, _>(
                     &public_keys,
                     namespace.as_deref(),
                     &message,
-                    &signature,
+                    &agg_sig,
                 );
             }
         }
@@ -172,10 +174,11 @@ fn fuzz(op: FuzzOperation) {
                     .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
                     .collect();
 
+                let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
                 let _ = aggregate::verify_multiple_messages::<MinPk, _>(
                     &public_key,
                     &messages_refs,
-                    &signature,
+                    &agg_sig,
                     concurrency,
                 );
             }
@@ -193,10 +196,11 @@ fn fuzz(op: FuzzOperation) {
                     .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
                     .collect();
 
+                let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
                 let _ = aggregate::verify_multiple_messages::<MinSig, _>(
                     &public_key,
                     &messages_refs,
-                    &signature,
+                    &agg_sig,
                     concurrency,
                 );
             }

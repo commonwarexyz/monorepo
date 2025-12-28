@@ -202,7 +202,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         // Produce signers and aggregate signature.
         let (signers, signatures): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
         let signers = Signers::from(self.participants.len(), signers);
-        let signature = aggregate::signatures::<V, _>(signatures.iter());
+        let signature = aggregate::combine_signatures::<V, _>(signatures.iter());
 
         Some(Certificate { signers, signature })
     }
@@ -292,7 +292,7 @@ pub struct Certificate<V: Variant> {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
     /// Aggregated BLS signature covering all signatures in this certificate.
-    pub signature: V::Signature,
+    pub signature: aggregate::Signature<V>,
 }
 
 impl<V: Variant> Write for Certificate<V> {
@@ -320,7 +320,7 @@ impl<V: Variant> Read for Certificate<V> {
             ));
         }
 
-        let signature = V::Signature::read(reader)?;
+        let signature = aggregate::Signature::read(reader)?;
 
         Ok(Self { signers, signature })
     }
@@ -333,7 +333,7 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signers = Signers::arbitrary(u)?;
-        let signature = V::Signature::arbitrary(u)?;
+        let signature = aggregate::Signature::arbitrary(u)?;
         Ok(Self { signers, signature })
     }
 }
@@ -535,7 +535,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
-    use commonware_math::algebra::{Additive, Random};
+    use commonware_math::algebra::Random;
     use commonware_utils::{ordered::BiMap, quorum, TryCollect};
     use rand::{rngs::StdRng, thread_rng, SeedableRng};
 
@@ -785,7 +785,7 @@ mod tests {
 
         // Corrupted certificate fails
         let mut corrupted = certificate;
-        corrupted.signature = V::Signature::zero();
+        corrupted.signature = aggregate::Signature::zero();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),
             NAMESPACE,
@@ -994,7 +994,7 @@ mod tests {
         }
 
         // Corrupt second certificate
-        certificates[1].signature = V::Signature::zero();
+        certificates[1].signature = aggregate::Signature::zero();
 
         let certs_iter = messages
             .iter()
@@ -1064,7 +1064,7 @@ mod tests {
         // Certificate with no signers is rejected
         let empty = Certificate::<V> {
             signers: Signers::from(participants_len, std::iter::empty::<u32>()),
-            signature: certificate.signature,
+            signature: certificate.signature.clone(),
         };
         assert!(Certificate::<V>::decode_cfg(empty.encode(), &participants_len).is_err());
 
@@ -1073,7 +1073,7 @@ mod tests {
         signers.push(participants_len as u32);
         let extended = Certificate::<V> {
             signers: Signers::from(participants_len + 1, signers),
-            signature: certificate.signature,
+            signature: certificate.signature.clone(),
         };
         assert!(Certificate::<V>::decode_cfg(extended.encode(), &participants_len).is_err());
     }

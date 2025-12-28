@@ -17,8 +17,7 @@ fn benchmark_verify_multiple_messages(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let (private, public) =
-                                ops::keypair::<_, MinSig>(&mut thread_rng());
+                            let (private, public) = ops::keypair::<_, MinSig>(&mut thread_rng());
                             let entries: Vec<_> = msgs
                                 .iter()
                                 .map(|msg| {

@@ -18,14 +18,13 @@ fn benchmark_aggregate_signatures(c: &mut Criterion) {
                     let private = ops::keypair::<_, MinSig>(&mut thread_rng()).0;
                     let mut signatures = Vec::with_capacity(n);
                     for msg in msgs.iter() {
-                        let signature =
-                            ops::sign_message::<MinSig>(&private, Some(namespace), msg);
+                        let signature = ops::sign_message::<MinSig>(&private, Some(namespace), msg);
                         signatures.push(signature);
                     }
                     signatures
                 },
                 |signatures| {
-                    black_box(ops::aggregate::signatures::<MinSig, _>(&signatures));
+                    black_box(ops::aggregate::combine_signatures::<MinSig, _>(&signatures));
                 },
                 BatchSize::SmallInput,
             );
