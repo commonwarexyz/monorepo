@@ -17,6 +17,14 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Env } from "./env.d.ts";
+import {
+  sortVersionsDesc,
+  getLanguage,
+  isValidPath,
+  parseSitemap,
+  parseWorkspaceMembers,
+  parseCrateInfo,
+} from "./utils.ts";
 
 // Cached data structures
 interface SitemapCache {
@@ -42,18 +50,6 @@ const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 const MAX_SEARCH_RESULTS = 50;
 const SEARCH_BATCH_SIZE = 10;
 
-// Helper: Sort versions newest first (e.g., v0.0.64, v0.0.63, v0.0.62)
-function sortVersionsDesc(versions: string[]): void {
-  versions.sort((a, b) => {
-    const partsA = a.replace(/^v/, "").split(".").map(Number);
-    const partsB = b.replace(/^v/, "").split(".").map(Number);
-    for (let i = 0; i < 3; i++) {
-      if (partsA[i] !== partsB[i]) return partsB[i] - partsA[i];
-    }
-    return 0;
-  });
-}
-
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
 
@@ -62,16 +58,10 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
   async init() {
     // Initialize server with version from workspace Cargo.toml
-    let version = "0.0.0";
-    try {
-      const latestVersion = await this.getLatestVersion();
-      version = latestVersion.replace(/^v/, "");
-    } catch {
-      // Fall back to default version if sitemap unavailable
-    }
+    const latestVersion = await this.getLatestVersion();
     this.server = new McpServer({
       name: "commonware",
-      version,
+      version: latestVersion.replace(/^v/, ""),
     });
 
     // Tool: Get a specific file by path
@@ -91,7 +81,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       },
       async ({ path, version }) => {
         // Basic path validation - no path traversal
-        if (path.includes("..") || path.startsWith("/")) {
+        if (!isValidPath(path)) {
           return {
             content: [{ type: "text", text: `Error: Invalid path '${path}'` }],
             isError: true,
@@ -119,7 +109,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           content: [
             {
               type: "text",
-              text: `# ${path} (${ver})\n\n\`\`\`${this.getLanguage(path)}\n${content}\n\`\`\``,
+              text: `# ${path} (${ver})\n\n\`\`\`${getLanguage(path)}\n${content}\n\`\`\``,
             },
           ],
         };
@@ -228,7 +218,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         const output = results
           .map(
             (r) =>
-              `## ${r.file}\n\n\`\`\`${this.getLanguage(r.file)}\n${r.matches.join("\n---\n")}\n\`\`\``
+              `## ${r.file}\n\n\`\`\`${getLanguage(r.file)}\n${r.matches.join("\n---\n")}\n\`\`\``
           )
           .join("\n\n");
 
@@ -406,21 +396,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     }
 
     const workspaceToml = await workspaceResp.text();
-
-    // Parse members from workspace Cargo.toml
-    // Format: members = [\n    "crate1",\n    "crate2",\n    ...]
-    const membersMatch = workspaceToml.match(/members\s*=\s*\[([\s\S]*?)\]/);
-    if (!membersMatch) {
+    const memberPaths = parseWorkspaceMembers(workspaceToml);
+    if (memberPaths.length === 0) {
       return [];
-    }
-
-    const membersBlock = membersMatch[1];
-    const memberPaths: string[] = [];
-
-    // Extract quoted strings from members array
-    const pathMatches = membersBlock.matchAll(/"([^"]+)"/g);
-    for (const match of pathMatches) {
-      memberPaths.push(match[1]);
     }
 
     // Fetch each crate's Cargo.toml to get description
@@ -431,14 +409,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         if (!resp.ok) return null;
 
         const cargoToml = await resp.text();
-
-        // Extract package name
-        const nameMatch = cargoToml.match(/name\s*=\s*"([^"]+)"/);
-        const name = nameMatch ? nameMatch[1].replace("commonware-", "") : path;
-
-        // Extract description
-        const descMatch = cargoToml.match(/description\s*=\s*"([^"]+)"/);
-        const description = descMatch ? descMatch[1] : "No description available";
+        const { name, description } = parseCrateInfo(cargoToml, path);
 
         return { name, path, description };
       } catch {
@@ -477,29 +448,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     }
 
     const xml = await response.text();
-    const versions: string[] = [];
-    const files = new Map<string, string[]>();
-
-    // Parse sitemap XML (simple regex-based parsing)
-    const urlMatches = xml.matchAll(/<loc>([^<]+)<\/loc>/g);
-    for (const match of urlMatches) {
-      const url = match[1];
-
-      // Extract version from /code/vX.X.X/ paths
-      const codeMatch = url.match(/\/code\/(v[\d.]+)\/(.+)$/);
-      if (codeMatch) {
-        const [, version, path] = codeMatch;
-        if (!versions.includes(version)) {
-          versions.push(version);
-        }
-        if (!files.has(version)) {
-          files.set(version, []);
-        }
-        files.get(version)!.push(path);
-      }
-    }
-
-    sortVersionsDesc(versions);
+    const { versions, files } = parseSitemap(xml);
 
     this.sitemapCache = {
       versions,
@@ -508,34 +457,17 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     };
   }
 
-  // Helper: Get file language for syntax highlighting
-  private getLanguage(path: string): string {
-    if (path.endsWith(".rs")) return "rust";
-    if (path.endsWith(".toml")) return "toml";
-    if (path.endsWith(".md")) return "markdown";
-    return "";
-  }
 }
 
 // Helper: Fetch latest version from sitemap (for health check)
-async function getLatestVersion(baseUrl: string): Promise<string> {
+async function getLatestVersionFromSitemap(baseUrl: string): Promise<string> {
   const response = await fetch(`${baseUrl}/sitemap.xml`);
   if (!response.ok) {
     return "unknown";
   }
 
   const xml = await response.text();
-  const versions: string[] = [];
-
-  const urlMatches = xml.matchAll(/<loc>([^<]+)<\/loc>/g);
-  for (const match of urlMatches) {
-    const codeMatch = match[1].match(/\/code\/(v[\d.]+)\//);
-    if (codeMatch && !versions.includes(codeMatch[1])) {
-      versions.push(codeMatch[1]);
-    }
-  }
-
-  sortVersionsDesc(versions);
+  const { versions } = parseSitemap(xml);
   return versions[0]?.replace(/^v/, "") || "unknown";
 }
 
@@ -546,7 +478,7 @@ export default {
 
     // Health check endpoint
     if (url.pathname === "/health") {
-      const version = await getLatestVersion(env.BASE_URL);
+      const version = await getLatestVersionFromSitemap(env.BASE_URL);
       return new Response(
         JSON.stringify({
           name: "commonware-mcp",

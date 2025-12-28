@@ -7,6 +7,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "build": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
@@ -17,6 +19,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250620.0",
     "typescript": "^5.8.0",
+    "vitest": "^3.2.3",
     "wrangler": "^4.19.1"
   }
 }
