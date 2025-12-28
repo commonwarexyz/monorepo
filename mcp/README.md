@@ -18,7 +18,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server for the Comm
 ### Claude Code
 
 ```bash
-claude mcp add --transport http commonware https://mcp.commonware.xyz/mcp
+claude mcp add --transport http commonware https://mcp.commonware.xyz
 ```
 
 Or add to `.mcp.json` in your project:
@@ -28,7 +28,7 @@ Or add to `.mcp.json` in your project:
   "mcpServers": {
     "commonware": {
       "type": "http",
-      "url": "https://mcp.commonware.xyz/mcp"
+      "url": "https://mcp.commonware.xyz"
     }
   }
 }
@@ -40,7 +40,7 @@ Or add to `.mcp.json` in your project:
 {
   "mcpServers": {
     "commonware": {
-      "url": "https://mcp.commonware.xyz/mcp"
+      "url": "https://mcp.commonware.xyz"
     }
   }
 }
@@ -48,7 +48,7 @@ Or add to `.mcp.json` in your project:
 
 ### Cloudflare AI Playground
 
-Visit [ai.cloudflare.com](https://ai.cloudflare.com) and connect to `https://mcp.commonware.xyz/mcp`.
+Visit [ai.cloudflare.com](https://ai.cloudflare.com) and connect to `https://mcp.commonware.xyz`.
 
 ## Development
 
@@ -74,7 +74,7 @@ npm run dev
 The server will be available at `http://localhost:8787`. Use the MCP inspector to test:
 
 ```bash
-npx @modelcontextprotocol/inspector@latest http://localhost:8787/mcp
+npx @modelcontextprotocol/inspector@latest http://localhost:8787
 ```
 
 ### Deploy
@@ -97,8 +97,8 @@ The server uses Cloudflare's [Agents SDK](https://developers.cloudflare.com/agen
 
 ### Endpoints
 
-- `/` - Health check (JSON status)
-- `/mcp` - Streamable HTTP transport
+- `/` - MCP server (Streamable HTTP transport)
+- `/health` - Health check (JSON status)
 
 ## Example Usage
 

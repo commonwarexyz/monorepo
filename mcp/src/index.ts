@@ -524,14 +524,13 @@ export default {
     const url = new URL(request.url);
 
     // Health check endpoint
-    if (url.pathname === "/" || url.pathname === "/health") {
+    if (url.pathname === "/health") {
       const version = await getLatestVersion(env.BASE_URL);
       return new Response(
         JSON.stringify({
           name: "commonware-mcp",
           version,
           status: "ok",
-          endpoint: "/mcp",
         }),
         {
           headers: { "Content-Type": "application/json" },
@@ -539,14 +538,9 @@ export default {
       );
     }
 
-    // Route to MCP agent
-    if (url.pathname === "/mcp") {
-      // Get or create durable object instance
-      const id = env.MCP_OBJECT.idFromName("singleton");
-      const stub = env.MCP_OBJECT.get(id);
-      return stub.fetch(request);
-    }
-
-    return new Response("Not Found", { status: 404 });
+    // Route all other requests to MCP agent
+    const id = env.MCP_OBJECT.idFromName("singleton");
+    const stub = env.MCP_OBJECT.get(id);
+    return stub.fetch(request);
   },
 };
