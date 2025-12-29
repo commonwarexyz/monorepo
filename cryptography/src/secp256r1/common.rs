@@ -18,38 +18,35 @@ pub const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 
 /// Internal Secp256r1 Private Key storage.
 ///
-/// Only stores the raw key bytes in protected memory. The `SigningKey` is
-/// reconstructed on demand to avoid keeping unprotected copies in memory.
-#[derive(Clone, Eq, PartialEq)]
+/// Stores both the raw bytes and the `SigningKey` in protected memory.
+#[derive(Clone)]
 pub struct PrivateKeyInner {
     raw: Secret<[u8; PRIVATE_KEY_LENGTH]>,
+    pub(crate) key: Secret<SigningKey>,
 }
+
+impl PartialEq for PrivateKeyInner {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl Eq for PrivateKeyInner {}
 
 impl ZeroizeOnDrop for PrivateKeyInner {}
 
 impl PrivateKeyInner {
     pub fn new(key: SigningKey) -> Self {
-        let bytes = key.to_bytes();
-        let raw: [u8; PRIVATE_KEY_LENGTH] = bytes.into();
+        let raw: [u8; PRIVATE_KEY_LENGTH] = key.to_bytes().into();
         Self {
             raw: Secret::new(raw),
+            key: Secret::new(key),
         }
-    }
-
-    /// Reconstructs the `SigningKey` from the protected raw bytes.
-    ///
-    /// This is called on-demand to avoid keeping an unprotected `SigningKey`
-    /// in memory.
-    pub(crate) fn signing_key(&self) -> SigningKey {
-        self.raw.expose(|bytes| {
-            // This cannot fail since we only store valid keys
-            SigningKey::from_slice(bytes).expect("stored key bytes are always valid")
-        })
     }
 
     /// Returns the `VerifyingKey` corresponding to this private key.
     pub fn verifying_key(&self) -> VerifyingKey {
-        *self.signing_key().verifying_key()
+        self.key.expose(|k| *k.verifying_key())
     }
 }
 
@@ -61,7 +58,7 @@ impl Random for PrivateKeyInner {
 
 impl Write for PrivateKeyInner {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.expose(|bytes| bytes.write(buf));
+        self.raw.expose(|raw| raw.write(buf));
     }
 }
 
@@ -70,15 +67,13 @@ impl Read for PrivateKeyInner {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; PRIVATE_KEY_LENGTH]>::read(buf)?;
-        // Validate that the bytes form a valid key
-        let result = SigningKey::from_slice(&raw);
+        let key = SigningKey::from_slice(&raw);
         #[cfg(feature = "std")]
-        result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        let key = key.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         #[cfg(not(feature = "std"))]
-        result.map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-        Ok(Self {
-            raw: Secret::new(raw),
-        })
+        let key =
+            key.map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
+        Ok(Self::new(key))
     }
 }
 
@@ -90,7 +85,7 @@ impl Span for PrivateKeyInner {}
 
 impl Hash for PrivateKeyInner {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.expose(|bytes| bytes.hash(state));
+        self.raw.expose(|raw| raw.hash(state));
     }
 }
 

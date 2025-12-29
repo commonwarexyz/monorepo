@@ -44,6 +44,18 @@ fn ct_cmp_bytes(a: &[u8], b: &[u8]) -> Ordering {
     }
 }
 
+/// Zeroize memory at the given pointer using volatile writes.
+///
+/// # Safety
+///
+/// `ptr` must point to valid, writable memory of at least `size_of::<T>()` bytes.
+#[inline]
+unsafe fn zeroize_ptr<T>(ptr: *mut T) {
+    use zeroize::Zeroize;
+    let slice = core::slice::from_raw_parts_mut(ptr as *mut u8, core::mem::size_of::<T>());
+    slice.zeroize();
+}
+
 // Use protected implementation on Unix with the feature enabled
 #[cfg(unix)]
 mod implementation {
@@ -54,7 +66,7 @@ mod implementation {
         ptr::NonNull,
     };
     use subtle::ConstantTimeEq;
-    use zeroize::{Zeroize, ZeroizeOnDrop};
+    use zeroize::ZeroizeOnDrop;
 
     /// Returns the system page size.
     fn page_size() -> usize {
@@ -82,7 +94,7 @@ mod implementation {
     ///
     /// Access requires explicit `expose()` call which returns a guard.
     /// Memory is re-protected when the guard is dropped.
-    pub struct Secret<T: Zeroize> {
+    pub struct Secret<T> {
         ptr: NonNull<T>,
         size: usize,
     }
@@ -91,12 +103,12 @@ mod implementation {
     // through the guard pattern. Access to the protected memory region is
     // controlled by mprotect calls that make the memory accessible only
     // during the lifetime of guard objects.
-    unsafe impl<T: Zeroize + Send> Send for Secret<T> {}
+    unsafe impl<T: Send> Send for Secret<T> {}
     // SAFETY: Same reasoning as Send - the guard pattern ensures proper
     // synchronization of memory access.
-    unsafe impl<T: Zeroize + Sync> Sync for Secret<T> {}
+    unsafe impl<T: Sync> Sync for Secret<T> {}
 
-    impl<T: Zeroize> Secret<T> {
+    impl<T> Secret<T> {
         /// Creates a new `Secret` wrapping the given value.
         ///
         /// # Panics
@@ -143,7 +155,7 @@ mod implementation {
                 #[cfg(not(any(test, feature = "soft-mlock")))]
                 {
                     // SAFETY: ptr points to valid T, zeroize before freeing
-                    unsafe { (*ptr).zeroize() };
+                    unsafe { super::zeroize_ptr(ptr) };
                     // SAFETY: ptr and size match the mmap above
                     unsafe { libc::munmap(ptr as *mut libc::c_void, size) };
                     return Err("mlock failed");
@@ -154,7 +166,7 @@ mod implementation {
             if unsafe { libc::mprotect(ptr as *mut libc::c_void, size, libc::PROT_NONE) } != 0 {
                 // SAFETY: cleanup on failure - zeroize, unlock (if locked), and unmap
                 unsafe {
-                    (*ptr).zeroize();
+                    super::zeroize_ptr(ptr);
                     libc::munlock(ptr as *const libc::c_void, size);
                     libc::munmap(ptr as *mut libc::c_void, size);
                 }
@@ -199,19 +211,19 @@ mod implementation {
         }
     }
 
-    impl<T: Zeroize> Debug for Secret<T> {
+    impl<T> Debug for Secret<T> {
         fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
             f.write_str("[REDACTED]")
         }
     }
 
-    impl<T: Zeroize> Display for Secret<T> {
+    impl<T> Display for Secret<T> {
         fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
             f.write_str("[REDACTED]")
         }
     }
 
-    impl<T: Zeroize> Drop for Secret<T> {
+    impl<T> Drop for Secret<T> {
         fn drop(&mut self) {
             // SAFETY: self.ptr points to valid mmap'd memory of self.size bytes.
             // We unprotect, zeroize, unlock, and unmap in proper sequence.
@@ -222,22 +234,22 @@ mod implementation {
                     self.size,
                     libc::PROT_READ | libc::PROT_WRITE,
                 );
-                (*self.ptr.as_ptr()).zeroize();
+                super::zeroize_ptr(self.ptr.as_ptr());
                 libc::munlock(self.ptr.as_ptr() as *const libc::c_void, self.size);
                 libc::munmap(self.ptr.as_ptr() as *mut libc::c_void, self.size);
             }
         }
     }
 
-    impl<T: Zeroize> ZeroizeOnDrop for Secret<T> {}
+    impl<T> ZeroizeOnDrop for Secret<T> {}
 
-    impl<T: Zeroize + Clone> Clone for Secret<T> {
+    impl<T: Clone> Clone for Secret<T> {
         fn clone(&self) -> Self {
             self.expose(|v| Self::new(v.clone()))
         }
     }
 
-    impl<T: Zeroize> PartialEq for Secret<T> {
+    impl<T> PartialEq for Secret<T> {
         fn eq(&self, other: &Self) -> bool {
             self.expose(|a| {
                 other.expose(|b| {
@@ -260,21 +272,21 @@ mod implementation {
         }
     }
 
-    impl<T: Zeroize> Eq for Secret<T> {}
+    impl<T> Eq for Secret<T> {}
 
-    impl<T: Zeroize + Hash> Hash for Secret<T> {
+    impl<T: Hash> Hash for Secret<T> {
         fn hash<H: Hasher>(&self, state: &mut H) {
             self.expose(|v| v.hash(state));
         }
     }
 
-    impl<T: Zeroize> PartialOrd for Secret<T> {
+    impl<T> PartialOrd for Secret<T> {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
             Some(self.cmp(other))
         }
     }
 
-    impl<T: Zeroize> Ord for Secret<T> {
+    impl<T> Ord for Secret<T> {
         fn cmp(&self, other: &Self) -> Ordering {
             self.expose(|a| {
                 other.expose(|b| {
@@ -305,9 +317,10 @@ mod implementation {
         cmp::Ordering,
         fmt::{Debug, Display, Formatter},
         hash::{Hash, Hasher},
+        mem::MaybeUninit,
     };
     use subtle::ConstantTimeEq;
-    use zeroize::{Zeroize, ZeroizeOnDrop};
+    use zeroize::ZeroizeOnDrop;
 
     /// A wrapper for secret values that prevents accidental leakage.
     ///
@@ -315,56 +328,51 @@ mod implementation {
     /// - Debug and Display show `[REDACTED]`
     /// - Zeroized on drop
     /// - Access requires explicit `expose()` call
-    pub struct Secret<T: Zeroize>(T);
+    pub struct Secret<T>(MaybeUninit<T>);
 
-    impl<T: Zeroize> Secret<T> {
+    impl<T> Secret<T> {
         /// Creates a new `Secret` wrapping the given value.
         #[inline]
-        #[allow(clippy::missing_const_for_fn)]
         pub fn new(value: T) -> Self {
-            Self(value)
+            Self(MaybeUninit::new(value))
         }
 
         /// Exposes the secret value for read-only access within a closure.
         #[inline]
         pub fn expose<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-            f(&self.0)
+            // SAFETY: self.0 is always initialized (set in new, only zeroed in drop)
+            f(unsafe { self.0.assume_init_ref() })
         }
     }
 
-    impl<T: Zeroize> Debug for Secret<T> {
+    impl<T> Debug for Secret<T> {
         fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
             f.write_str("[REDACTED]")
         }
     }
 
-    impl<T: Zeroize> Display for Secret<T> {
+    impl<T> Display for Secret<T> {
         fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
             f.write_str("[REDACTED]")
         }
     }
 
-    impl<T: Zeroize> Zeroize for Secret<T> {
-        fn zeroize(&mut self) {
-            self.0.zeroize();
-        }
-    }
-
-    impl<T: Zeroize> Drop for Secret<T> {
+    impl<T> Drop for Secret<T> {
         fn drop(&mut self) {
-            self.0.zeroize();
+            // SAFETY: self.0 is initialized and we have exclusive access
+            unsafe { super::zeroize_ptr(self.0.as_mut_ptr()) };
         }
     }
 
-    impl<T: Zeroize> ZeroizeOnDrop for Secret<T> {}
+    impl<T> ZeroizeOnDrop for Secret<T> {}
 
-    impl<T: Zeroize + Clone> Clone for Secret<T> {
+    impl<T: Clone> Clone for Secret<T> {
         fn clone(&self) -> Self {
             self.expose(|v| Self::new(v.clone()))
         }
     }
 
-    impl<T: Zeroize> PartialEq for Secret<T> {
+    impl<T> PartialEq for Secret<T> {
         fn eq(&self, other: &Self) -> bool {
             self.expose(|a| {
                 other.expose(|b| {
@@ -387,21 +395,21 @@ mod implementation {
         }
     }
 
-    impl<T: Zeroize> Eq for Secret<T> {}
+    impl<T> Eq for Secret<T> {}
 
-    impl<T: Zeroize + Hash> Hash for Secret<T> {
+    impl<T: Hash> Hash for Secret<T> {
         fn hash<H: Hasher>(&self, state: &mut H) {
             self.expose(|v| v.hash(state));
         }
     }
 
-    impl<T: Zeroize> PartialOrd for Secret<T> {
+    impl<T> PartialOrd for Secret<T> {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
             Some(self.cmp(other))
         }
     }
 
-    impl<T: Zeroize> Ord for Secret<T> {
+    impl<T> Ord for Secret<T> {
         fn cmp(&self, other: &Self) -> Ordering {
             self.expose(|a| {
                 other.expose(|b| {
