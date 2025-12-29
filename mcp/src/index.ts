@@ -188,7 +188,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           content: [
             {
               type: "text",
-              text: `# Search results for "${query}" (${ver})\n\nFound ${results.length} file(s):\n\n${output}`,
+              text: `# Search results for "${query}" (${ver})\n\nFound ${results.length} file(s):\n\n${output}\n\n---\nFiles are listed by path. Use \`list_crates\` to see crate name to path mappings.`,
             },
           ],
         };
@@ -233,13 +233,13 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           };
         }
 
-        const output = crates.map((c) => `- **${c.name}**: ${c.description}`).join("\n");
+        const output = crates.map((c) => `- **${c.name}** (${c.path}): ${c.description}`).join("\n");
 
         return {
           content: [
             {
               type: "text",
-              text: `# Commonware Crates (${ver})\n\n${output}\n\nUse \`get_crate_readme\` to get detailed documentation for any crate.`,
+              text: `# Commonware Crates (${ver})\n\n${output}\n\nUse \`get_crate_readme\` to get detailed documentation for any crate. Use the path in parentheses with \`list_files\` or \`get_file\` to browse crate contents.`,
             },
           ],
         };
@@ -557,7 +557,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           matches.push(snippet);
 
           // Limit matches per file
-          if (matches.length >= 10) {
+          if (matches.length >= 5) {
             break;
           }
         }
