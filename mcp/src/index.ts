@@ -592,11 +592,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 // Create MCP handler using McpAgent.serve() for proper session management
 const mcpHandler = McpAgent.serve("/", { binding: "MCP" });
 
-// Helper: Index all versions that aren't already indexed
-async function reindexVersions(
-  env: Env,
-  keepVersions: number = 10
-): Promise<{ indexed: string[]; pruned: string[] }> {
+// Helper: Sync indexed versions with sitemap (index new, prune removed)
+async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: string[] }> {
   // Fetch sitemap to get available versions
   const sitemapUrl = `${env.BASE_URL}/sitemap.xml`;
   const response = await fetch(sitemapUrl);
@@ -604,7 +601,8 @@ async function reindexVersions(
     throw new Error("Failed to fetch sitemap");
   }
   const xml = await response.text();
-  const { versions, files } = parseSitemap(xml);
+  const { versions: sitemapVersions, files } = parseSitemap(xml);
+  const sitemapSet = new Set(sitemapVersions);
 
   // Get already indexed versions
   const indexedResult = await env.SEARCH_DB.prepare("SELECT version FROM indexed_versions").all<{
@@ -612,11 +610,9 @@ async function reindexVersions(
   }>();
   const indexedSet = new Set(indexedResult.results.map((r) => r.version));
 
-  // Index new versions (keep only the latest N)
-  const versionsToKeep = versions.slice(0, keepVersions);
+  // Index versions in sitemap that aren't indexed yet
   const indexed: string[] = [];
-
-  for (const version of versionsToKeep) {
+  for (const version of sitemapVersions) {
     if (indexedSet.has(version)) {
       continue;
     }
@@ -664,10 +660,10 @@ async function reindexVersions(
     indexed.push(version);
   }
 
-  // Prune old versions not in keepVersions list
+  // Prune versions not in sitemap
   const pruned: string[] = [];
   for (const oldVersion of indexedSet) {
-    if (!versionsToKeep.includes(oldVersion)) {
+    if (!sitemapSet.has(oldVersion)) {
       await env.SEARCH_DB.prepare("DELETE FROM files WHERE version = ?").bind(oldVersion).run();
       await env.SEARCH_DB.prepare("DELETE FROM indexed_versions WHERE version = ?")
         .bind(oldVersion)
