@@ -17,8 +17,6 @@ pub const PRIVATE_KEY_LENGTH: usize = 32;
 pub const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 
 /// Internal Secp256r1 Private Key storage.
-///
-/// Stores both the raw bytes and the `SigningKey` in protected memory.
 #[derive(Clone, Debug)]
 pub struct PrivateKeyInner {
     raw: Secret<[u8; PRIVATE_KEY_LENGTH]>,
@@ -32,8 +30,6 @@ impl PartialEq for PrivateKeyInner {
 }
 
 impl Eq for PrivateKeyInner {}
-
-impl ZeroizeOnDrop for PrivateKeyInner {}
 
 impl PrivateKeyInner {
     pub fn new(key: SigningKey) -> Self {
@@ -91,7 +87,6 @@ impl Hash for PrivateKeyInner {
 
 impl Ord for PrivateKeyInner {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        // Use Secret's constant-time comparison
         self.raw.cmp(&other.raw)
     }
 }

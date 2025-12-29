@@ -113,7 +113,6 @@ impl PartialEq for PrivateKey {
 
 impl Ord for PrivateKey {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        // Use Secret's constant-time comparison
         self.raw.cmp(&other.raw)
     }
 }
