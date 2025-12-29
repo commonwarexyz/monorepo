@@ -109,15 +109,21 @@ export function parseWorkspaceMembers(cargoToml: string): string[] {
 
 /**
  * Parse package name and description from a crate's Cargo.toml.
+ * Only matches fields within the [package] section to avoid matching
+ * fields in [dependencies] or other sections.
  */
 export function parseCrateInfo(
   cargoToml: string,
   fallbackPath: string
 ): { name: string; description: string } {
-  const nameMatch = cargoToml.match(/name\s*=\s*"([^"]+)"/);
+  // Extract the [package] section (ends at next [...] section or EOF)
+  const packageMatch = cargoToml.match(/\[package\]([\s\S]*?)(?=\n\[|$)/);
+  const packageSection = packageMatch ? packageMatch[1] : "";
+
+  const nameMatch = packageSection.match(/name\s*=\s*"([^"]+)"/);
   const name = nameMatch ? nameMatch[1] : fallbackPath;
 
-  const descMatch = cargoToml.match(/description\s*=\s*"([^"]+)"/);
+  const descMatch = packageSection.match(/description\s*=\s*"([^"]+)"/);
   const description = descMatch ? descMatch[1] : "No description available";
 
   return { name, description };

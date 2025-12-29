@@ -284,4 +284,24 @@ description = "Send encrypted messages to a group of friends."`;
     expect(info.name).toBe("chat");
     expect(info.description).toBe("Send encrypted messages to a group of friends.");
   });
+
+  it("should only match name in [package] section, not dependencies", () => {
+    const cargoToml = `[dependencies]
+some-crate = { version = "1.0", package = "actual-name" }
+
+[dependencies.renamed]
+name = "wrong-name"
+version = "1.0"
+
+[package]
+name = "correct-name"
+description = "The correct description"
+
+[dev-dependencies]
+test-crate = { name = "also-wrong" }`;
+
+    const info = parseCrateInfo(cargoToml, "fallback");
+    expect(info.name).toBe("correct-name");
+    expect(info.description).toBe("The correct description");
+  });
 });
