@@ -25,8 +25,13 @@
 //! will only have their metadata protected, not heap data.
 
 use crate::bls12381::primitives::group::Scalar;
-use core::cmp::Ordering;
+use core::{
+    cmp::Ordering,
+    fmt::{Debug, Display, Formatter},
+    hash::{Hash, Hasher},
+};
 use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeLess};
+use zeroize::ZeroizeOnDrop;
 
 /// Constant-time lexicographic comparison for byte slices.
 #[inline]
@@ -60,14 +65,7 @@ unsafe fn zeroize_ptr<T>(ptr: *mut T) {
 // Use protected implementation on Unix with the feature enabled
 #[cfg(unix)]
 mod implementation {
-    use core::{
-        cmp::Ordering,
-        fmt::{Debug, Display, Formatter},
-        hash::{Hash, Hasher},
-        ptr::NonNull,
-    };
-    use subtle::ConstantTimeEq;
-    use zeroize::ZeroizeOnDrop;
+    use core::ptr::NonNull;
 
     /// Returns the system page size.
     fn page_size() -> usize {
@@ -227,18 +225,6 @@ mod implementation {
         }
     }
 
-    impl<T> Debug for Secret<T> {
-        fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-            f.write_str("[REDACTED]")
-        }
-    }
-
-    impl<T> Display for Secret<T> {
-        fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-            f.write_str("[REDACTED]")
-        }
-    }
-
     impl<T> Drop for Secret<T> {
         fn drop(&mut self) {
             // SAFETY: self.ptr points to valid mmap'd memory of self.size bytes.
@@ -257,53 +243,12 @@ mod implementation {
             }
         }
     }
-
-    impl<T> ZeroizeOnDrop for Secret<T> {}
-
-    impl<T: Clone> Clone for Secret<T> {
-        fn clone(&self) -> Self {
-            self.expose(|v| Self::new(v.clone()))
-        }
-    }
-
-    impl<const N: usize> PartialEq for Secret<[u8; N]> {
-        fn eq(&self, other: &Self) -> bool {
-            self.expose(|a| other.expose(|b| a.ct_eq(b).into()))
-        }
-    }
-
-    impl<const N: usize> Eq for Secret<[u8; N]> {}
-
-    impl<const N: usize> PartialOrd for Secret<[u8; N]> {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-
-    impl<const N: usize> Ord for Secret<[u8; N]> {
-        fn cmp(&self, other: &Self) -> Ordering {
-            self.expose(|a| other.expose(|b| super::ct_cmp_bytes(a, b)))
-        }
-    }
-
-    impl<T: Hash> Hash for Secret<T> {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.expose(|v| v.hash(state));
-        }
-    }
 }
 
 // Simple implementation for non-Unix platforms
 #[cfg(not(unix))]
 mod implementation {
-    use core::{
-        cmp::Ordering,
-        fmt::{Debug, Display, Formatter},
-        hash::{Hash, Hasher},
-        mem::MaybeUninit,
-    };
-    use subtle::ConstantTimeEq;
-    use zeroize::ZeroizeOnDrop;
+    use core::mem::MaybeUninit;
 
     /// A wrapper for secret values that prevents accidental leakage.
     ///
@@ -329,18 +274,6 @@ mod implementation {
         }
     }
 
-    impl<T> Debug for Secret<T> {
-        fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-            f.write_str("[REDACTED]")
-        }
-    }
-
-    impl<T> Display for Secret<T> {
-        fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-            f.write_str("[REDACTED]")
-        }
-    }
-
     impl<T> Drop for Secret<T> {
         fn drop(&mut self) {
             // SAFETY: self.0 is initialized and we have exclusive access.
@@ -351,45 +284,55 @@ mod implementation {
             }
         }
     }
+}
 
-    impl<T> ZeroizeOnDrop for Secret<T> {}
+pub use implementation::*;
 
-    impl<T: Clone> Clone for Secret<T> {
-        fn clone(&self) -> Self {
-            self.expose(|v| Self::new(v.clone()))
-        }
-    }
-
-    // Only implement comparison traits for byte arrays (no padding bytes)
-    impl<const N: usize> PartialEq for Secret<[u8; N]> {
-        fn eq(&self, other: &Self) -> bool {
-            self.expose(|a| other.expose(|b| a.ct_eq(b).into()))
-        }
-    }
-
-    impl<const N: usize> Eq for Secret<[u8; N]> {}
-
-    impl<const N: usize> PartialOrd for Secret<[u8; N]> {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-
-    impl<const N: usize> Ord for Secret<[u8; N]> {
-        fn cmp(&self, other: &Self) -> Ordering {
-            self.expose(|a| other.expose(|b| super::ct_cmp_bytes(a, b)))
-        }
-    }
-
-    impl<T: Hash> Hash for Secret<T> {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.expose(|v| v.hash(state));
-        }
+impl<T> Debug for Secret<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Secret([REDACTED])")
     }
 }
 
-// Specialized comparison impls for Secret<Scalar>
-pub use implementation::*;
+impl<T> Display for Secret<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+impl<T> ZeroizeOnDrop for Secret<T> {}
+
+impl<T: Clone> Clone for Secret<T> {
+    fn clone(&self) -> Self {
+        self.expose(|v| Self::new(v.clone()))
+    }
+}
+
+impl<const N: usize> PartialEq for Secret<[u8; N]> {
+    fn eq(&self, other: &Self) -> bool {
+        self.expose(|a| other.expose(|b| a.ct_eq(b).into()))
+    }
+}
+
+impl<const N: usize> Eq for Secret<[u8; N]> {}
+
+impl<const N: usize> PartialOrd for Secret<[u8; N]> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<const N: usize> Ord for Secret<[u8; N]> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.expose(|a| other.expose(|b| ct_cmp_bytes(a, b)))
+    }
+}
+
+impl<T: Hash> Hash for Secret<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.expose(|v| v.hash(state));
+    }
+}
 
 impl PartialEq for Secret<Scalar> {
     fn eq(&self, other: &Self) -> bool {
