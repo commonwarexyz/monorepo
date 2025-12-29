@@ -566,7 +566,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         };
         let expected = pub_msg.commitment.eval_msm(&scalar);
         priv_msg
-            .share()
+            .share
             .expose(|share| expected == V::Public::generator() * share)
     }
 }
@@ -695,11 +695,6 @@ impl DealerPrivMsg {
         Self {
             share: Secret::new(share),
         }
-    }
-
-    /// Returns a reference to the share wrapped in `Secret`.
-    pub const fn share(&self) -> &Secret<Scalar> {
-        &self.share
     }
 }
 
@@ -1498,7 +1493,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
                 let share = self
                     .view
                     .get(dealer)
-                    .map(|(_, priv_msg)| priv_msg.share().expose(|s| s.clone()))
+                    .map(|(_, priv_msg)| priv_msg.share.expose(|s| s.clone()))
                     .unwrap_or_else(|| {
                         log.get_reveal(&self.me_pub).map_or_else(
                             || {
@@ -1506,7 +1501,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
                                     "select didn't check dealer reveal, or we're not a player?"
                                 )
                             },
-                            |priv_msg| priv_msg.share().expose(|s| s.clone()),
+                            |priv_msg| priv_msg.share.expose(|s| s.clone()),
                         )
                     });
                 (dealer.clone(), share)
