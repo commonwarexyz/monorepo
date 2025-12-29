@@ -54,8 +54,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "get_file",
       "Retrieve a file from the Commonware repository by its path. " +
-      "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
-      "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
+        "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
+        "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
       {
         path: z
           .string()
@@ -108,8 +108,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "search_code",
       "Search for a pattern across source code files in the Commonware repository. " +
-      "Returns matching files with relevant snippets. Useful for finding function definitions, " +
-      "usage patterns, or understanding how features are implemented.",
+        "Returns matching files with relevant snippets. Useful for finding function definitions, " +
+        "usage patterns, or understanding how features are implemented.",
       {
         query: z.string().describe("Search query"),
         mode: z
@@ -118,7 +118,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           .default("substring")
           .describe(
             "Search mode: 'substring' for literal substring match (min 3 chars), " +
-            "'word' for word-based search with prefix matching"
+              "'word' for word-based search with prefix matching"
           ),
         crate: z
           .string()
@@ -333,14 +333,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "list_files",
       "List all files in a crate or directory. Useful for discovering the structure " +
-      "of a crate before fetching specific files.",
+        "of a crate before fetching specific files.",
       {
         crate: z
           .string()
           .optional()
           .describe(
             "Crate name (e.g., 'commonware-cryptography') or directory path. " +
-            "If omitted, lists top-level directories."
+              "If omitted, lists top-level directories."
           ),
         version: z.string().optional().describe("Version tag. Defaults to latest."),
       },
