@@ -697,13 +697,13 @@ impl DealerPrivMsg {
 
 impl EncodeSize for DealerPrivMsg {
     fn encode_size(&self) -> usize {
-        self.share.expose(|s| s.encode_size())
+        self.share.expose(|share| share.encode_size())
     }
 }
 
 impl Write for DealerPrivMsg {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.share.expose(|s| s.write(buf));
+        self.share.expose(|share| share.write(buf));
     }
 }
 
@@ -1174,8 +1174,12 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     ) -> Result<(Self, DealerPubMsg<V>, Vec<(S::PublicKey, DealerPrivMsg)>), Error> {
         // Check that this dealer is defined in the round.
         info.dealer_index(&me.public_key())?;
-        let share =
-            info.unwrap_or_random_share(&mut rng, share.map(|x| x.private.expose(|s| s.clone())))?;
+        let share = info.unwrap_or_random_share(
+            &mut rng,
+            // We are leaking the private scalar since `Poly::new_with_constant`
+            // needs an owned scalar for polynomial arithmetic
+            share.map(|x| x.private.expose(|private| private.clone())),
+        )?;
         let my_poly = Poly::new_with_constant(&mut rng, info.degree(), share);
         let priv_msgs = info
             .players
@@ -1479,7 +1483,9 @@ impl<V: Variant, S: Signer> Player<V, S> {
                 let share = self
                     .view
                     .get(dealer)
-                    .map(|(_, priv_msg)| priv_msg.share.expose(|s| s.clone()))
+                    // We are leaking private scalars since interpolation/summation needs
+                    // owned scalars for polynomial arithmetic
+                    .map(|(_, priv_msg)| priv_msg.share.expose(|share| share.clone()))
                     .unwrap_or_else(|| {
                         log.get_reveal(&self.me_pub).map_or_else(
                             || {
@@ -1487,7 +1493,9 @@ impl<V: Variant, S: Signer> Player<V, S> {
                                     "select didn't check dealer reveal, or we're not a player?"
                                 )
                             },
-                            |priv_msg| priv_msg.share.expose(|s| s.clone()),
+                            // We are leaking private scalars since interpolation/summation
+                            // needs owned scalars for polynomial arithmetic
+                            |priv_msg| priv_msg.share.expose(|share| share.clone()),
                         )
                     });
                 (dealer.clone(), share)
@@ -1936,7 +1944,7 @@ mod test_plan {
                             let share = info
                                 .unwrap_or_random_share(
                                     &mut rng,
-                                    share.map(|s| s.private.expose(|k| k.clone())),
+                                    share.map(|s| s.private.expose(|private| private.clone())),
                                 )
                                 .expect("Failed to generate dealer share");
 

@@ -41,7 +41,7 @@ impl PrivateKeyInner {
 
     /// Returns the `VerifyingKey` corresponding to this private key.
     pub fn verifying_key(&self) -> VerifyingKey {
-        self.key.expose(|k| *k.verifying_key())
+        self.key.expose(|key| *key.verifying_key())
     }
 }
 

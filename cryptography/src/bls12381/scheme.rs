@@ -69,7 +69,7 @@ impl Eq for PrivateKey {}
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.expose(|bytes| bytes.write(buf));
+        self.raw.expose(|raw| raw.write(buf));
     }
 }
 
@@ -95,7 +95,7 @@ impl Span for PrivateKey {}
 
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.expose(|bytes| bytes.hash(state));
+        self.raw.expose(|raw| raw.hash(state));
     }
 }
 

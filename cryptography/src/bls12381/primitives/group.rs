@@ -514,14 +514,15 @@ impl Share {
     ///
     /// This can be verified against the public polynomial.
     pub fn public<V: Variant>(&self) -> V::Public {
-        self.private.expose(|key| V::Public::generator() * key)
+        self.private
+            .expose(|private| V::Public::generator() * private)
     }
 }
 
 impl Write for Share {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.index).write(buf);
-        self.private.expose(|key| key.write(buf));
+        self.private.expose(|private| private.write(buf));
     }
 }
 
@@ -540,7 +541,7 @@ impl Read for Share {
 
 impl EncodeSize for Share {
     fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + self.private.expose(|key| key.encode_size())
+        UInt(self.index).encode_size() + self.private.expose(|private| private.encode_size())
     }
 }
 
