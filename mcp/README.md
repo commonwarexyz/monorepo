@@ -110,8 +110,7 @@ The server uses Cloudflare's [Agents SDK](https://developers.cloudflare.com/agen
 
 - **Durable Objects**: Maintains persistent connections for MCP clients
 - **Sitemap-based discovery**: Parses `commonware.xyz/sitemap.xml` to discover available versions
-- **D1 + FTS5**: Full-text search index and file storage powered by SQLite FTS5
-- **Cron sync**: Scheduled task syncs versions with sitemap every 10 minutes
+- **D1 + FTS5**: Full-text search index powered by SQLite FTS5
 
 ### Endpoints
 

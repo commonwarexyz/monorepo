@@ -54,8 +54,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "get_file",
       "Retrieve a file from the Commonware repository by its path. " +
-        "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
-        "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
+      "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
+      "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
       {
         path: z
           .string()
@@ -108,8 +108,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "search_code",
       "Search for a pattern across source code files in the Commonware repository. " +
-        "Returns matching files with relevant snippets. Useful for finding function definitions, " +
-        "usage patterns, or understanding how features are implemented.",
+      "Returns matching files with relevant snippets. Useful for finding function definitions, " +
+      "usage patterns, or understanding how features are implemented.",
       {
         query: z.string().describe("Search query (matches words with prefix matching)"),
         crate: z
@@ -310,14 +310,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "list_files",
       "List all files in a crate or directory. Useful for discovering the structure " +
-        "of a crate before fetching specific files.",
+      "of a crate before fetching specific files.",
       {
         crate: z
           .string()
           .optional()
           .describe(
             "Crate name (e.g., 'commonware-cryptography') or directory path. " +
-              "If omitted, lists top-level directories."
+            "If omitted, lists top-level directories."
           ),
         version: z.string().optional().describe("Version tag. Defaults to latest."),
       },
@@ -483,12 +483,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   ): Promise<Array<{ file: string; matches: string[] }>> {
     // Build FTS query and get words for snippet matching
     const parsed = this.buildFTSQuery(query);
-
-    // Handle queries with no valid search terms
     if (parsed === null) {
       return [];
     }
-
     const { ftsQuery, words: queryWords } = parsed;
 
     // Build the SQL query with filters
@@ -518,6 +515,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     sql += " ORDER BY bm25(files_fts) LIMIT ?";
     params.push(limit);
 
+    // Execute the SQL query
     const results = await this.env.SEARCH_DB.withSession()
       .prepare(sql)
       .bind(...params)
