@@ -39,7 +39,7 @@ interface CrateInfo {
 
 // Constants
 const MAX_SEARCH_RESULTS = 50;
-const INDEX_BUILD_BATCH_SIZE = 50;
+const INDEX_BUILD_BATCH_SIZE = 20; // D1 has 100 bind param limit, 20 rows × 3 cols = 60
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
@@ -593,8 +593,10 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 // Create MCP handler using McpAgent.serve() for proper session management
 const mcpHandler = McpAgent.serve("/", { binding: "MCP" });
 
-// Helper: Sync indexed versions with sitemap (index new, prune removed)
-async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: string[] }> {
+// Helper: Sync indexed versions with sitemap (index one version per run to avoid timeout)
+async function reindexVersions(
+  env: Env
+): Promise<{ indexed: string | null; pruned: string | null }> {
   // Fetch sitemap to get available versions
   const sitemapUrl = `${env.BASE_URL}/sitemap.xml`;
   const response = await fetch(sitemapUrl);
@@ -612,8 +614,22 @@ async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: s
   }>();
   const indexedSet = new Set(indexedResult.results.map((r) => r.version));
 
-  // Index versions in sitemap that aren't indexed yet
-  const indexed: string[] = [];
+  // Prune ONE version not in sitemap (delete version record first to prevent
+  // queries from finding a version with no files)
+  let pruned: string | null = null;
+  for (const oldVersion of indexedSet) {
+    if (!sitemapSet.has(oldVersion)) {
+      await session.batch([
+        session.prepare("DELETE FROM versions WHERE version = ?").bind(oldVersion),
+        session.prepare("DELETE FROM files WHERE version = ?").bind(oldVersion),
+      ]);
+      pruned = oldVersion;
+      break;
+    }
+  }
+
+  // Index ONE version not yet indexed (newest first since sitemapVersions is sorted desc)
+  let indexed: string | null = null;
   for (const version of sitemapVersions) {
     if (indexedSet.has(version)) {
       continue;
@@ -637,13 +653,13 @@ async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: s
         })
       );
 
-      const statements = results.map((r) =>
-        session
-          .prepare("INSERT OR REPLACE INTO files (version, path, content) VALUES (?, ?, ?)")
-          .bind(version, r.file, r.content)
-      );
-
-      await session.batch(statements);
+      // Use multi-row INSERT for better performance
+      const placeholders = results.map(() => "(?, ?, ?)").join(", ");
+      const params = results.flatMap((r) => [version, r.file, r.content]);
+      await session
+        .prepare(`INSERT OR REPLACE INTO files (version, path, content) VALUES ${placeholders}`)
+        .bind(...params)
+        .run();
     }
 
     // Mark version as indexed
@@ -651,18 +667,8 @@ async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: s
       .prepare("INSERT OR REPLACE INTO versions (version) VALUES (?)")
       .bind(version)
       .run();
-    indexed.push(version);
-  }
-
-  // Prune versions not in sitemap (delete version record first to prevent
-  // queries from finding a version with no files)
-  const pruned: string[] = [];
-  for (const oldVersion of indexedSet) {
-    if (!sitemapSet.has(oldVersion)) {
-      await session.prepare("DELETE FROM versions WHERE version = ?").bind(oldVersion).run();
-      await session.prepare("DELETE FROM files WHERE version = ?").bind(oldVersion).run();
-      pruned.push(oldVersion);
-    }
+    indexed = version;
+    break;
   }
 
   return { indexed, pruned };
