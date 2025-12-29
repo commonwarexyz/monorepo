@@ -136,10 +136,12 @@ jobs:
           for i in {1..30}; do
             if curl -s http://localhost:8787/health > /dev/null 2>&1; then
               echo "Server is ready"
-              break
+              exit 0
             fi
             sleep 1
           done
+          echo "ERROR: Server failed to start within 30 seconds"
+          exit 1
 
       - name: Run integration tests
         run: node integration-test.mjs
