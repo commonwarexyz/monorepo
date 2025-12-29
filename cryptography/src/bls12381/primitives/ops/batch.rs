@@ -139,11 +139,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        super::{keypair, sign_message},
+        super::{aggregate, hash_message, keypair, sign_message, verify_message},
         *,
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
-    use commonware_math::algebra::CryptoGroup;
+    use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_utils::test_rng;
 
     fn verify_multiple_messages_correct<V: Variant>() {
@@ -198,5 +198,62 @@ mod tests {
     fn test_verify_multiple_messages_wrong_signature() {
         verify_multiple_messages_wrong_signature::<MinPk>();
         verify_multiple_messages_wrong_signature::<MinSig>();
+    }
+
+    fn resists_signature_redistribution<V: Variant>() {
+        let mut rng = test_rng();
+        let (private, public) = keypair::<_, V>(&mut rng);
+        let msg1: &[u8] = b"message 1";
+        let msg2: &[u8] = b"message 2";
+
+        let sig1 = sign_message::<V>(&private, None, msg1);
+        let sig2 = sign_message::<V>(&private, None, msg2);
+
+        verify_message::<V>(&public, None, msg1, &sig1).expect("sig1 should be valid");
+        verify_message::<V>(&public, None, msg2, &sig2).expect("sig2 should be valid");
+
+        // Create forged signatures by redistributing components
+        let random_scalar = Scalar::random(&mut rng);
+        let delta = V::Signature::generator() * &random_scalar;
+        let forged_sig1 = sig1 - &delta;
+        let forged_sig2 = sig2 + &delta;
+
+        // Forged signatures are invalid individually
+        assert!(
+            verify_message::<V>(&public, None, msg1, &forged_sig1).is_err(),
+            "forged sig1 should be invalid individually"
+        );
+        assert!(
+            verify_message::<V>(&public, None, msg2, &forged_sig2).is_err(),
+            "forged sig2 should be invalid individually"
+        );
+
+        // But aggregates are identical (the attack)
+        let forged_agg = aggregate::combine_signatures::<V, _>(&[forged_sig1, forged_sig2]);
+        let valid_agg = aggregate::combine_signatures::<V, _>(&[sig1, sig2]);
+        assert_eq!(forged_agg, valid_agg, "aggregates should be equal");
+
+        // Naive aggregate verification accepts forged signatures
+        let hm1 = hash_message::<V>(V::MESSAGE, msg1);
+        let hm2 = hash_message::<V>(V::MESSAGE, msg2);
+        let hm_sum = hm1 + &hm2;
+        V::verify(&public, &hm_sum, forged_agg.inner())
+            .expect("naive aggregate verification accepts forged aggregate");
+
+        // Batch verification (with random weights) rejects forged signatures
+        let forged_entries = vec![(None, msg1, forged_sig1), (None, msg2, forged_sig2)];
+        let result = verify_multiple_messages::<_, V, _>(&mut rng, &public, &forged_entries, 1);
+        assert!(result.is_err(), "batch verification should reject forged signatures");
+
+        // Batch verification accepts valid signatures
+        let valid_entries = vec![(None, msg1, sig1), (None, msg2, sig2)];
+        verify_multiple_messages::<_, V, _>(&mut rng, &public, &valid_entries, 1)
+            .expect("batch verification should accept valid signatures");
+    }
+
+    #[test]
+    fn test_resists_signature_redistribution() {
+        resists_signature_redistribution::<MinPk>();
+        resists_signature_redistribution::<MinSig>();
     }
 }
