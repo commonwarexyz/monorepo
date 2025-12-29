@@ -9,7 +9,7 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "CommonwareMCP",
+        "name": "MCP",
         "class_name": "CommonwareMCP"
       }
     ]

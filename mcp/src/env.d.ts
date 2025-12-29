@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 export interface Env {
-  CommonwareMCP: DurableObjectNamespace;
+  MCP: DurableObjectNamespace;
   BASE_URL: string;
 }
 

@@ -38,6 +38,14 @@ export function getLanguage(path: string): string {
 }
 
 /**
+ * Strip the commonware- prefix from a crate name or path.
+ * Crate names use commonware-* but folder paths don't have the prefix.
+ */
+export function stripCratePrefix(name: string): string {
+  return name.replace(/^commonware-/, "");
+}
+
+/**
  * Validate a file path - no path traversal or absolute paths allowed.
  */
 export function isValidPath(path: string): boolean {
@@ -107,7 +115,7 @@ export function parseCrateInfo(
   fallbackPath: string
 ): { name: string; description: string } {
   const nameMatch = cargoToml.match(/name\s*=\s*"([^"]+)"/);
-  const name = nameMatch ? nameMatch[1].replace("commonware-", "") : fallbackPath;
+  const name = nameMatch ? nameMatch[1] : fallbackPath;
 
   const descMatch = cargoToml.match(/description\s*=\s*"([^"]+)"/);
   const description = descMatch ? descMatch[1] : "No description available";

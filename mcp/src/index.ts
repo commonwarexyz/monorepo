@@ -14,7 +14,6 @@
  */
 
 import { McpAgent } from "agents/mcp";
-import { routeAgentRequest } from "agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Env } from "./env.d.ts";
@@ -24,6 +23,7 @@ import {
   parseSitemap,
   parseWorkspaceMembers,
   parseCrateInfo,
+  stripCratePrefix,
 } from "./utils.ts";
 import pkg from "../package.json";
 
@@ -59,12 +59,12 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "get_file",
       "Retrieve a file from the Commonware repository by its path. " +
-        "Paths should be relative to the repository root (e.g., 'cryptography/src/lib.rs'). " +
+        "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
         "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
       {
         path: z
           .string()
-          .describe("File path relative to repository root, e.g., 'cryptography/src/lib.rs'"),
+          .describe("File path relative to repository root, e.g., 'commonware-cryptography/src/lib.rs'"),
         version: z
           .string()
           .optional()
@@ -79,8 +79,11 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           };
         }
 
+        // Strip commonware- prefix from path if present (folders don't have it)
+        const normalizedPath = stripCratePrefix(path);
+
         const ver = version || (await this.getLatestVersion());
-        const content = await this.fetchFile(ver, path);
+        const content = await this.fetchFile(ver, normalizedPath);
         if (content === null) {
           return {
             content: [
@@ -115,7 +118,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         crate: z
           .string()
           .optional()
-          .describe("Limit search to a specific crate (e.g., 'cryptography')"),
+          .describe("Limit search to a specific crate (e.g., 'commonware-cryptography')"),
         file_type: z
           .enum(["rs", "md", "toml", "all"])
           .optional()
@@ -138,9 +141,11 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         const files = await this.getFileList(ver);
 
         // Filter files by crate and type
+        // Strip commonware- prefix since folder paths don't include it
         let filtered = files;
         if (crate) {
-          filtered = filtered.filter((f) => f.startsWith(`${crate}/`));
+          const folderName = stripCratePrefix(crate);
+          filtered = filtered.filter((f) => f.startsWith(`${folderName}/`));
         }
         if (file_type && file_type !== "all") {
           filtered = filtered.filter((f) => f.endsWith(`.${file_type}`));
@@ -279,15 +284,17 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       "get_crate_readme",
       "Get the README documentation for a specific Commonware crate.",
       {
-        crate: z.string().describe("Crate name (e.g., 'cryptography', 'consensus', 'p2p')"),
+        crate: z.string().describe("Crate name (e.g., 'commonware-cryptography', 'commonware-consensus', 'commonware-p2p')"),
         version: z.string().optional().describe("Version tag. Defaults to latest."),
       },
       async ({ crate, version }) => {
         const ver = version || (await this.getLatestVersion());
 
         // Validate crate exists
+        // Match by full name (commonware-*) or folder path
         const crates = await this.getCrates(ver);
-        const crateInfo = crates.find((c) => c.name === crate || c.path === crate);
+        const folderName = stripCratePrefix(crate);
+        const crateInfo = crates.find((c) => c.name === crate || c.path === folderName);
         if (!crateInfo) {
           const names = crates.map((c) => c.name).join(", ");
           return {
@@ -488,9 +495,12 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   }
 }
 
+// Create MCP handler using McpAgent.serve() for proper session management
+const mcpHandler = McpAgent.serve("/", { binding: "MCP" });
+
 // Worker fetch handler
 export default {
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     // Health check endpoint
@@ -507,8 +517,7 @@ export default {
       );
     }
 
-    // Route to MCP agent using the agents SDK helper
-    // Maps requests to /agents/:agent/:name pattern for proper session handling
-    return (await routeAgentRequest(request, env)) || new Response("Not found", { status: 404 });
+    // Route to MCP agent
+    return mcpHandler.fetch(request, env, ctx);
   },
 };
