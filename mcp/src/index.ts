@@ -504,23 +504,15 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
   // Helper: Resolve crate name or path to actual directory path
   private async resolveCratePath(version: string, crate: string): Promise<string> {
+    // Try matching by crate name first (e.g., "commonware-consensus-fuzz" -> "consensus/fuzz")
     const crates = await this.getCrates(version);
-
-    // Try matching by crate name first (e.g., "commonware-consensus-fuzz")
     const byName = crates.find((c) => c.name === crate);
     if (byName) {
       return byName.path;
     }
 
-    // Strip prefix and match by path (handles both "commonware-cryptography" and "consensus/fuzz")
-    const stripped = stripCratePrefix(crate);
-    const byPath = crates.find((c) => c.path === stripped);
-    if (byPath) {
-      return byPath.path;
-    }
-
-    // Not a known crate, but could be a valid directory - return stripped version
-    return stripped;
+    // Otherwise strip prefix and use as path (e.g., "commonware-cryptography" -> "cryptography")
+    return stripCratePrefix(crate);
   }
 
   // Helper: Search using D1 FTS5
