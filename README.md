@@ -62,6 +62,26 @@ We encourage external contributors to submit issues and pull requests to the Com
 
 All work is coordinated via the [tracker](https://github.com/orgs/commonwarexyz/projects/2). If something in [the backlog](https://github.com/orgs/commonwarexyz/projects/2/views/3) looks particularly useful, leave a comment so we can prioritize it!
 
+## LLM Integration
+
+Connect your LLM to the Commonware Library via [MCP](https://modelcontextprotocol.io) at https://mcp.commonware.xyz:
+
+```bash
+# Claude Code
+claude mcp add --transport http commonware https://mcp.commonware.xyz
+```
+
+```json
+// Cursor, Windsurf, etc.
+{
+  "mcpServers": {
+    "commonware": {
+      "url": "https://mcp.commonware.xyz"
+    }
+  }
+}
+```
+
 ## Support
 
 If you have any questions about using the Commonware Library, we encourage you to post in [GitHub Discussions](https://github.com/commonwarexyz/monorepo/discussions). We're happy to help!
