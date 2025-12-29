@@ -554,26 +554,30 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
     for (const row of results.results) {
       const lines = row.content.split("\n");
-      const matches: string[] = [];
 
+      // Score each line by number of matching terms
+      const scoredLines: Array<{ lineNum: number; score: number }> = [];
       for (let lineNum = 0; lineNum < lines.length; lineNum++) {
         const lineLower = lines[lineNum].toLowerCase();
-        // Check if any search term appears in this line
-        if (snippetMatcher(lineLower)) {
-          // Include context (2 lines before and after)
-          const start = Math.max(0, lineNum - 2);
-          const end = Math.min(lines.length, lineNum + 3);
-          const snippet = lines
-            .slice(start, end)
-            .map((l, idx) => `${start + idx + 1}: ${l}`)
-            .join("\n");
-          matches.push(snippet);
-
-          // Limit matches per file
-          if (matches.length >= 5) {
-            break;
-          }
+        const score = snippetMatcher(lineLower);
+        if (score > 0) {
+          scoredLines.push({ lineNum, score });
         }
+      }
+
+      // Sort by score descending (lines with more matching terms first)
+      scoredLines.sort((a, b) => b.score - a.score);
+
+      // Take top 5 and build snippets
+      const matches: string[] = [];
+      for (const { lineNum } of scoredLines.slice(0, 5)) {
+        const start = Math.max(0, lineNum - 2);
+        const end = Math.min(lines.length, lineNum + 3);
+        const snippet = lines
+          .slice(start, end)
+          .map((l, idx) => `${start + idx + 1}: ${l}`)
+          .join("\n");
+        matches.push(snippet);
       }
 
       // Always include file if FTS5 matched it
@@ -584,36 +588,39 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   }
 
   // Helper: Build FTS5 query based on mode
+  // Returns a snippetMatcher that scores lines (0 = no match, higher = more matches)
   private buildFTSQuery(
     query: string,
     mode: "substring" | "word"
-  ): { ftsQuery: string | null; snippetMatcher: (line: string) => boolean } {
+  ): { ftsQuery: string | null; snippetMatcher: (line: string) => number } {
     const trimmed = query.trim();
 
     if (mode === "substring") {
       // Trigram requires at least 3 characters
       if (trimmed.length < 3) {
-        return { ftsQuery: null, snippetMatcher: () => false };
+        return { ftsQuery: null, snippetMatcher: () => 0 };
       }
       // Escape double quotes for FTS5
       const escaped = trimmed.replace(/"/g, '""');
       const queryLower = trimmed.toLowerCase();
       return {
         ftsQuery: `"${escaped}"`,
-        snippetMatcher: (line) => line.includes(queryLower),
+        // Substring mode: 1 if matches, 0 otherwise
+        snippetMatcher: (line) => (line.includes(queryLower) ? 1 : 0),
       };
     } else {
       // Word mode: escape special chars and add prefix matching
       const escaped = trimmed.replace(/["()*:^]/g, " ").trim();
       const words = escaped.split(/\s+/).filter((w) => w.length > 0);
       if (words.length === 0) {
-        return { ftsQuery: null, snippetMatcher: () => false };
+        return { ftsQuery: null, snippetMatcher: () => 0 };
       }
       const ftsQuery = words.map((w) => `"${w}"*`).join(" ");
       const wordsLower = words.map((w) => w.toLowerCase());
       return {
         ftsQuery,
-        snippetMatcher: (line) => wordsLower.some((w) => line.includes(w)),
+        // Word mode: count how many query words appear in the line
+        snippetMatcher: (line) => wordsLower.filter((w) => line.includes(w)).length,
       };
     }
   }
