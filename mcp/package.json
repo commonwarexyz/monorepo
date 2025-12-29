@@ -1,6 +1,6 @@
 {
   "name": "commonware-mcp",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Interact with the Commonware Library via MCP at https://mcp.commonware.xyz.",
   "type": "module",
   "scripts": {
