@@ -130,8 +130,12 @@ mod implementation {
                     {
                         // We won the race - unprotect memory
                         // SAFETY: ptr points to valid mmap'd memory of the given size
-                        let result = unsafe { libc::mprotect(ptr, size, libc::PROT_READ) };
-                        assert_eq!(result, 0, "mprotect failed to unprotect memory");
+                        if unsafe { libc::mprotect(ptr, size, libc::PROT_READ) } != 0 {
+                            // Restore to PROTECTED before panicking. If the panic is caught,
+                            // future expose() calls can retry instead of spinning on TRANSITIONING.
+                            readers.store(PROTECTED, Ordering::Release);
+                            panic!("mprotect failed to unprotect memory");
+                        }
 
                         // Transition to readable state with 1 reader (state = 2)
                         readers.store(2, Ordering::Release);
@@ -172,8 +176,12 @@ mod implementation {
                     {
                         // Re-protect memory
                         // SAFETY: ptr and size are valid from the Secret that created us
-                        unsafe {
-                            libc::mprotect(self.ptr, self.size, libc::PROT_NONE);
+                        if unsafe { libc::mprotect(self.ptr, self.size, libc::PROT_NONE) } != 0 {
+                            // Restore to PROTECTED so future expose calls can retry.
+                            // Memory remains readable but next expose()'s mprotect(PROT_READ)
+                            // will succeed, allowing recovery.
+                            self.readers.store(PROTECTED, Ordering::Release);
+                            panic!("mprotect failed to re-protect memory");
                         }
 
                         // Transition to protected state
@@ -297,7 +305,7 @@ mod implementation {
                     unsafe { super::zeroize_ptr(ptr) };
                     // SAFETY: ptr and size match the mmap above
                     unsafe { libc::munmap(ptr as *mut libc::c_void, size) };
-                    return Err("mlock failed");
+                    return Err("mlock failed: memory limit exceeded. Try increasing with `ulimit -l` or check /etc/security/limits.conf");
                 }
             }
 
