@@ -143,8 +143,19 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
         const ver = version || (await this.getLatestVersion());
 
-        // Ensure the search index is built for this version
-        await this.ensureSearchIndex(ver);
+        // Check if version is indexed (indexing only happens via scheduled trigger)
+        const isIndexed = await this.isVersionIndexed(ver);
+        if (!isIndexed) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Version ${ver} has not been indexed yet. Indexing happens automatically via scheduled trigger.`,
+              },
+            ],
+            isError: true,
+          };
+        }
 
         // Search using D1 FTS5
         const results = await this.searchWithFTS(ver, query, crate, file_type, limit);
@@ -509,60 +520,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     return crates;
   }
 
-  // Helper: Check if search index is built for a version
-  private async ensureSearchIndex(version: string): Promise<void> {
+  // Helper: Check if a version has been indexed
+  private async isVersionIndexed(version: string): Promise<boolean> {
     const result = await this.env.SEARCH_DB.prepare(
       "SELECT 1 FROM indexed_versions WHERE version = ?"
     )
       .bind(version)
       .first();
-
-    if (result !== null) {
-      return;
-    }
-
-    // Build the search index
-    await this.buildSearchIndex(version);
-  }
-
-  // Helper: Build search index for a version by inserting files into D1
-  private async buildSearchIndex(version: string): Promise<void> {
-    const allFiles = await this.getFileList(version);
-
-    // Filter to indexable file types
-    const indexableFiles = allFiles.filter((file) => {
-      const ext = file.split(".").pop() || "";
-      return SEARCH_INDEX_EXTENSIONS.has(ext);
-    });
-
-    // Fetch files in batches and insert into D1
-    for (let i = 0; i < indexableFiles.length; i += INDEX_BUILD_BATCH_SIZE) {
-      const batch = indexableFiles.slice(i, i + INDEX_BUILD_BATCH_SIZE);
-      const results = await Promise.all(
-        batch.map(async (file) => {
-          const content = await this.fetchFile(version, file);
-          return content !== null ? { file, content } : null;
-        })
-      );
-
-      // Batch insert into D1
-      const statements = results
-        .filter((r) => r !== null)
-        .map((r) =>
-          this.env.SEARCH_DB.prepare(
-            "INSERT OR REPLACE INTO files (version, path, content) VALUES (?, ?, ?)"
-          ).bind(version, r.file, r.content)
-        );
-
-      if (statements.length > 0) {
-        await this.env.SEARCH_DB.batch(statements);
-      }
-    }
-
-    // Mark version as indexed
-    await this.env.SEARCH_DB.prepare("INSERT OR REPLACE INTO indexed_versions (version) VALUES (?)")
-      .bind(version)
-      .run();
+    return result !== null;
   }
 
   // Helper: Search using D1 FTS5
