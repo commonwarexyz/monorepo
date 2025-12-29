@@ -13,10 +13,8 @@ CREATE TABLE IF NOT EXISTS files (
 -- Index for quick version lookups
 CREATE INDEX IF NOT EXISTS idx_files_version ON files(version);
 
--- FTS5 virtual table for full-text search
--- Uses external content to avoid duplicating the content column
--- Trigram tokenizer enables substring matching (minimum 3 characters)
-CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
+-- FTS5 table for substring search (trigram tokenizer, min 3 chars)
+CREATE VIRTUAL TABLE IF NOT EXISTS files_fts_substring USING fts5(
   path,
   content,
   content='files',
@@ -24,18 +22,31 @@ CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
   tokenize='trigram'
 );
 
--- Triggers to keep FTS index in sync with files table
+-- FTS5 table for word search (unicode61 tokenizer)
+CREATE VIRTUAL TABLE IF NOT EXISTS files_fts_word USING fts5(
+  path,
+  content,
+  content='files',
+  content_rowid='id',
+  tokenize='unicode61'
+);
+
+-- Triggers to keep both FTS indexes in sync with files table
 CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
-  INSERT INTO files_fts(rowid, path, content) VALUES (new.id, new.path, new.content);
+  INSERT INTO files_fts_substring(rowid, path, content) VALUES (new.id, new.path, new.content);
+  INSERT INTO files_fts_word(rowid, path, content) VALUES (new.id, new.path, new.content);
 END;
 
 CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
-  INSERT INTO files_fts(files_fts, rowid, path, content) VALUES ('delete', old.id, old.path, old.content);
+  INSERT INTO files_fts_substring(files_fts_substring, rowid, path, content) VALUES ('delete', old.id, old.path, old.content);
+  INSERT INTO files_fts_word(files_fts_word, rowid, path, content) VALUES ('delete', old.id, old.path, old.content);
 END;
 
 CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN
-  INSERT INTO files_fts(files_fts, rowid, path, content) VALUES ('delete', old.id, old.path, old.content);
-  INSERT INTO files_fts(rowid, path, content) VALUES (new.id, new.path, new.content);
+  INSERT INTO files_fts_substring(files_fts_substring, rowid, path, content) VALUES ('delete', old.id, old.path, old.content);
+  INSERT INTO files_fts_substring(rowid, path, content) VALUES (new.id, new.path, new.content);
+  INSERT INTO files_fts_word(files_fts_word, rowid, path, content) VALUES ('delete', old.id, old.path, old.content);
+  INSERT INTO files_fts_word(rowid, path, content) VALUES (new.id, new.path, new.content);
 END;
 
 -- Track which versions are available
