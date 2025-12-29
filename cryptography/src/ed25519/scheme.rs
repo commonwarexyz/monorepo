@@ -24,7 +24,7 @@ const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
 
 /// Ed25519 Private Key.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PrivateKey {
     raw: Secret<[u8; PRIVATE_KEY_LENGTH]>,
     key: Secret<ed25519_consensus::SigningKey>,
@@ -134,15 +134,9 @@ impl From<ed25519_consensus::SigningKey> for PrivateKey {
     }
 }
 
-impl Debug for PrivateKey {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("[REDACTED]")
-    }
-}
-
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("[REDACTED]")
+        write!(f, "{:?}", self)
     }
 }
 

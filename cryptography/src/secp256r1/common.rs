@@ -19,7 +19,7 @@ pub const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 /// Internal Secp256r1 Private Key storage.
 ///
 /// Stores both the raw bytes and the `SigningKey` in protected memory.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PrivateKeyInner {
     raw: Secret<[u8; PRIVATE_KEY_LENGTH]>,
     pub(crate) key: Secret<SigningKey>,
@@ -108,15 +108,9 @@ impl From<SigningKey> for PrivateKeyInner {
     }
 }
 
-impl Debug for PrivateKeyInner {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("[REDACTED]")
-    }
-}
-
 impl Display for PrivateKeyInner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("[REDACTED]")
+        write!(f, "{:?}", self)
     }
 }
 

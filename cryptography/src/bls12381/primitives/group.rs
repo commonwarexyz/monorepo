@@ -493,7 +493,7 @@ impl Random for Scalar {
 }
 
 /// A share of a threshold signing key.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
@@ -502,9 +502,7 @@ pub struct Share {
 }
 
 impl Share {
-    /// Creates a new Share with the given index and private key.
-    ///
-    /// The private key is wrapped in a `Secret` for secure handling.
+    /// Creates a new `Share` with the given index and private key.
     pub fn new(index: u32, private: Private) -> Self {
         Self {
             index,
@@ -548,13 +546,7 @@ impl EncodeSize for Share {
 
 impl Display for Share {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Share(index={}, private=[REDACTED])", self.index)
-    }
-}
-
-impl Debug for Share {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Share(index={}, private=[REDACTED])", self.index)
+        write!(f, "{:?}", self)
     }
 }
 

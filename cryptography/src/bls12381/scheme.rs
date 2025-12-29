@@ -53,7 +53,7 @@ use std::borrow::Cow;
 const CURVE_NAME: &str = "bls12381";
 
 /// BLS12-381 private key.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PrivateKey {
     raw: Secret<[u8; group::PRIVATE_KEY_LENGTH]>,
     key: Secret<Scalar>,
@@ -122,15 +122,9 @@ impl From<Scalar> for PrivateKey {
     }
 }
 
-impl Debug for PrivateKey {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        f.write_str("[REDACTED]")
-    }
-}
-
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        f.write_str("[REDACTED]")
+        write!(f, "{:?}", self)
     }
 }
 
