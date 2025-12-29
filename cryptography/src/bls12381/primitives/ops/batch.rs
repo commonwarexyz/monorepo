@@ -243,7 +243,10 @@ mod tests {
         // Batch verification (with random weights) rejects forged signatures
         let forged_entries = vec![(None, msg1, forged_sig1), (None, msg2, forged_sig2)];
         let result = verify_multiple_messages::<_, V, _>(&mut rng, &public, &forged_entries, 1);
-        assert!(result.is_err(), "batch verification should reject forged signatures");
+        assert!(
+            result.is_err(),
+            "batch verification should reject forged signatures"
+        );
 
         // Batch verification accepts valid signatures
         let valid_entries = vec![(None, msg1, sig1), (None, msg2, sig2)];
