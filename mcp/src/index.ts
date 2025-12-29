@@ -111,7 +111,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         "Returns matching files with relevant snippets. Useful for finding function definitions, " +
         "usage patterns, or understanding how features are implemented.",
       {
-        query: z.string().describe("Search query (matches words with prefix matching)"),
+        query: z.string().describe("Search query (substring match, minimum 3 characters)"),
         crate: z
           .string()
           .optional()
@@ -481,12 +481,12 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     fileType: string,
     limit: number
   ): Promise<Array<{ file: string; matches: string[] }>> {
-    // Build FTS query and get words for snippet matching
+    // Build FTS trigram query
     const parsed = this.buildFTSQuery(query);
     if (parsed === null) {
       return [];
     }
-    const { ftsQuery, words: queryWords } = parsed;
+    const { ftsQuery, queryLower } = parsed;
 
     // Build the SQL query with filters
     let sql = `
@@ -530,8 +530,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
       for (let lineNum = 0; lineNum < lines.length; lineNum++) {
         const lineLower = lines[lineNum].toLowerCase();
-        // Check if any query word appears in this line
-        if (queryWords.some((word) => lineLower.includes(word))) {
+        // Check if query substring appears in this line
+        if (lineLower.includes(queryLower)) {
           // Include context (2 lines before and after)
           const start = Math.max(0, lineNum - 2);
           const end = Math.min(lines.length, lineNum + 3);
@@ -555,25 +555,21 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     return output;
   }
 
-  // Helper: Build FTS5 query with prefix matching
-  // Returns null if query has no valid search terms, otherwise returns
-  // the FTS query string and lowercase words for snippet matching
-  private buildFTSQuery(query: string): { ftsQuery: string; words: string[] } | null {
-    // Escape special FTS5 characters: " ( ) * : ^
-    const escaped = query.replace(/["()*:^]/g, " ").trim();
+  // Helper: Build FTS5 trigram query
+  // Returns null if query is too short (trigram requires 3+ characters)
+  private buildFTSQuery(query: string): { ftsQuery: string; queryLower: string } | null {
+    const trimmed = query.trim();
 
-    // Split into words
-    const words = escaped.split(/\s+/).filter((w) => w.length > 0);
-
-    if (words.length === 0) {
+    // Trigram requires at least 3 characters
+    if (trimmed.length < 3) {
       return null;
     }
 
-    // FTS query uses prefix matching for each word
-    const ftsQuery = words.map((w) => `"${w}"*`).join(" ");
+    // Escape double quotes for FTS5
+    const escaped = trimmed.replace(/"/g, '""');
 
-    // Return lowercase words for snippet matching
-    return { ftsQuery, words: words.map((w) => w.toLowerCase()) };
+    // Return quoted literal query for trigram matching
+    return { ftsQuery: `"${escaped}"`, queryLower: trimmed.toLowerCase() };
   }
 }
 

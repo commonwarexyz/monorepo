@@ -63,17 +63,20 @@ async function testMcpTools() {
   const latestVersion = versionMatch[1];
   console.log("Latest version:", latestVersion);
 
-  // Test search_code
+  // Test search_code (trigram requires 3+ characters)
   console.log("\nTesting search_code...");
   const searchResult = await client.callTool({
     name: "search_code",
     arguments: {
-      query: "fn",
+      query: "impl",
       max_results: 3,
     },
   });
   if (searchResult.isError) {
     throw new Error(`search_code failed: ${searchResult.content[0].text}`);
+  }
+  if (searchResult.content[0].text.includes("No matches found")) {
+    throw new Error("search_code returned no matches for 'impl'");
   }
   console.log("search_code result:", searchResult.content[0].text.slice(0, 200) + "...");
 

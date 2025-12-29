@@ -15,12 +15,13 @@ CREATE INDEX IF NOT EXISTS idx_files_version ON files(version);
 
 -- FTS5 virtual table for full-text search
 -- Uses external content to avoid duplicating the content column
+-- Trigram tokenizer enables substring matching (minimum 3 characters)
 CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
   path,
   content,
   content='files',
   content_rowid='id',
-  tokenize='unicode61'
+  tokenize='trigram'
 );
 
 -- Triggers to keep FTS index in sync with files table
