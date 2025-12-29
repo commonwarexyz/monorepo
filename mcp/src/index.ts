@@ -276,31 +276,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       },
       async ({ crate, version }) => {
         const ver = version || (await this.getLatestVersion());
-
-        // Validate crate exists
-        const crates = await this.getCrates(ver);
-        const cratePath = await this.resolveCratePath(ver, crate, crates);
-        const crateInfo = crates.find((c) => c.path === cratePath);
-        if (!crateInfo) {
-          const names = crates.map((c) => c.name).join(", ");
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Error: Unknown crate '${crate}'. Available crates: ${names}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
+        const cratePath = await this.resolveCratePath(ver, crate);
         const content = await this.fetchFile(ver, `${cratePath}/README.md`);
         if (content === null) {
           return {
             content: [
               {
                 type: "text",
-                text: `Error: README not found for crate '${crate}' (version ${ver})`,
+                text: `Error: README not found for crate '${crate}' (version ${ver}). Use \`list_crates\` to see available crates.`,
               },
             ],
             isError: true,
@@ -502,14 +485,10 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   }
 
   // Helper: Resolve crate name or path to actual directory path
-  private async resolveCratePath(
-    version: string,
-    crate: string,
-    crates?: CrateInfo[]
-  ): Promise<string> {
+  private async resolveCratePath(version: string, crate: string): Promise<string> {
     // Try matching by crate name first (e.g., "commonware-consensus-fuzz" -> "consensus/fuzz")
-    const crateList = crates ?? (await this.getCrates(version));
-    const byName = crateList.find((c) => c.name === crate);
+    const crates = await this.getCrates(version);
+    const byName = crates.find((c) => c.name === crate);
     if (byName) {
       return byName.path;
     }
