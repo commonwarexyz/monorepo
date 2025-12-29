@@ -100,7 +100,7 @@ npx wrangler d1 migrations apply commonware-mcp-search
 # Deploy
 npm run deploy
 
-# Trigger initial indexing (or wait for hourly cron)
+# Trigger initial sync (or wait for cron)
 npx wrangler workflows trigger commonware-mcp
 ```
 
@@ -111,7 +111,7 @@ The server uses Cloudflare's [Agents SDK](https://developers.cloudflare.com/agen
 - **Durable Objects**: Maintains persistent connections for MCP clients
 - **Sitemap-based discovery**: Parses `commonware.xyz/sitemap.xml` to discover available versions
 - **D1 + FTS5**: Full-text search index and file storage powered by SQLite FTS5
-- **Cron indexing**: Hourly scheduled task syncs indexed versions with sitemap
+- **Cron sync**: Scheduled task syncs versions with sitemap every 10 minutes
 
 ### Endpoints
 
