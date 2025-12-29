@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn test_debug_redacted() {
         let secret = Secret::new([1u8, 2, 3, 4]);
-        assert_eq!(format!("{:?}", secret), "[REDACTED]");
+        assert_eq!(format!("{:?}", secret), "Secret([REDACTED])");
     }
 
     #[test]
@@ -472,5 +472,80 @@ mod tests {
         secret.expose(|v| {
             assert_eq!(v[0], 42);
         });
+    }
+
+    #[test]
+    fn test_hash() {
+        use std::collections::hash_map::DefaultHasher;
+
+        let s1 = Secret::new([1u8, 2, 3, 4]);
+        let s2 = Secret::new([1u8, 2, 3, 4]);
+        let s3 = Secret::new([5u8, 6, 7, 8]);
+
+        let hash = |s: &Secret<[u8; 4]>| {
+            let mut hasher = DefaultHasher::new();
+            s.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        // Equal secrets should hash equal
+        assert_eq!(hash(&s1), hash(&s2));
+        // Different secrets should (very likely) hash differently
+        assert_ne!(hash(&s1), hash(&s3));
+    }
+
+    #[test]
+    fn test_partial_ord() {
+        let s1 = Secret::new([1u8, 2]);
+        let s2 = Secret::new([1u8, 3]);
+        let s3 = Secret::new([1u8, 2]);
+
+        assert!(s1 < s2);
+        assert!(s2 > s1);
+        assert!(s1 <= s3);
+        assert!(s1 >= s3);
+
+        assert_eq!(s1.partial_cmp(&s2), Some(core::cmp::Ordering::Less));
+        assert_eq!(s2.partial_cmp(&s1), Some(core::cmp::Ordering::Greater));
+        assert_eq!(s1.partial_cmp(&s3), Some(core::cmp::Ordering::Equal));
+    }
+
+    #[test]
+    fn test_scalar_equality() {
+        use crate::bls12381::primitives::group::Scalar;
+        use commonware_math::algebra::Random;
+        use rand::rngs::OsRng;
+
+        let scalar1 = Scalar::random(&mut OsRng);
+        let scalar2 = scalar1.clone();
+        let scalar3 = Scalar::random(&mut OsRng);
+
+        let s1 = Secret::new(scalar1);
+        let s2 = Secret::new(scalar2);
+        let s3 = Secret::new(scalar3);
+
+        // Same scalar should be equal
+        assert_eq!(s1, s2);
+        // Different scalars should (very likely) be different
+        assert_ne!(s1, s3);
+    }
+
+    #[test]
+    fn test_scalar_ordering() {
+        use crate::bls12381::primitives::group::Scalar;
+        use commonware_math::algebra::{Additive, Ring};
+
+        let zero = Scalar::zero();
+        let one = Scalar::one();
+
+        let s_zero = Secret::new(zero);
+        let s_one = Secret::new(one);
+
+        // Zero and one should compare consistently
+        assert_ne!(s_zero, s_one);
+        // Ordering should be deterministic
+        let cmp1 = s_zero.cmp(&s_one);
+        let cmp2 = s_zero.cmp(&s_one);
+        assert_eq!(cmp1, cmp2);
     }
 }
