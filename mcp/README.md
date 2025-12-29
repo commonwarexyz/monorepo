@@ -53,7 +53,7 @@ Or add to `.mcp.json` in your project:
 
 ### Cloudflare AI Playground
 
-Visit [ai.cloudflare.com](https://ai.cloudflare.com) and connect to `https://mcp.commonware.xyz`.
+Visit [playground.ai.cloudflare.com](https://playground.ai.cloudflare.com) and connect to `https://mcp.commonware.xyz`.
 
 ## Development
 
