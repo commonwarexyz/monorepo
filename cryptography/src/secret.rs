@@ -154,7 +154,8 @@ mod implementation {
             if unsafe { libc::mlock(ptr as *const libc::c_void, size) } != 0 {
                 #[cfg(not(any(test, feature = "soft-mlock")))]
                 {
-                    // SAFETY: ptr points to valid T, zeroize before freeing
+                    // SAFETY: ptr points to valid T, drop then zeroize before freeing
+                    unsafe { core::ptr::drop_in_place(ptr) };
                     unsafe { super::zeroize_ptr(ptr) };
                     // SAFETY: ptr and size match the mmap above
                     unsafe { libc::munmap(ptr as *mut libc::c_void, size) };
@@ -164,8 +165,9 @@ mod implementation {
 
             // SAFETY: ptr points to valid memory of size `size`
             if unsafe { libc::mprotect(ptr as *mut libc::c_void, size, libc::PROT_NONE) } != 0 {
-                // SAFETY: cleanup on failure - zeroize, unlock (if locked), and unmap
+                // SAFETY: cleanup on failure - drop, zeroize, unlock (if locked), and unmap
                 unsafe {
+                    core::ptr::drop_in_place(ptr);
                     super::zeroize_ptr(ptr);
                     libc::munlock(ptr as *const libc::c_void, size);
                     libc::munmap(ptr as *mut libc::c_void, size);
@@ -238,7 +240,7 @@ mod implementation {
     impl<T> Drop for Secret<T> {
         fn drop(&mut self) {
             // SAFETY: self.ptr points to valid mmap'd memory of self.size bytes.
-            // We unprotect, zeroize, unlock, and unmap in proper sequence.
+            // We unprotect, drop inner value, zeroize, unlock, and unmap in proper sequence.
             // This is safe because we have exclusive access (&mut self).
             unsafe {
                 libc::mprotect(
@@ -246,6 +248,7 @@ mod implementation {
                     self.size,
                     libc::PROT_READ | libc::PROT_WRITE,
                 );
+                core::ptr::drop_in_place(self.ptr.as_ptr());
                 super::zeroize_ptr(self.ptr.as_ptr());
                 libc::munlock(self.ptr.as_ptr() as *const libc::c_void, self.size);
                 libc::munmap(self.ptr.as_ptr() as *mut libc::c_void, self.size);
@@ -371,8 +374,12 @@ mod implementation {
 
     impl<T> Drop for Secret<T> {
         fn drop(&mut self) {
-            // SAFETY: self.0 is initialized and we have exclusive access
-            unsafe { super::zeroize_ptr(self.0.as_mut_ptr()) };
+            // SAFETY: self.0 is initialized and we have exclusive access.
+            // We drop the inner value first to run its destructor, then zeroize.
+            unsafe {
+                core::ptr::drop_in_place(self.0.as_mut_ptr());
+                super::zeroize_ptr(self.0.as_mut_ptr());
+            }
         }
     }
 
