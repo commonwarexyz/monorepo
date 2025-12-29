@@ -358,8 +358,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         let prefix: string;
 
         if (crate) {
-          // Strip commonware- prefix for folder matching
-          const folderName = stripCratePrefix(crate);
+          // Resolve crate name or path to actual directory
+          const folderName = await this.resolveCratePath(ver, crate);
           prefix = `${folderName}/`;
           filtered = allFiles.filter((f) => f.startsWith(prefix));
 
@@ -502,6 +502,27 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     return result !== null;
   }
 
+  // Helper: Resolve crate name or path to actual directory path
+  private async resolveCratePath(version: string, crate: string): Promise<string> {
+    const crates = await this.getCrates(version);
+
+    // Try matching by crate name first (e.g., "commonware-consensus-fuzz")
+    const byName = crates.find((c) => c.name === crate);
+    if (byName) {
+      return byName.path;
+    }
+
+    // Strip prefix and match by path (handles both "commonware-cryptography" and "consensus/fuzz")
+    const stripped = stripCratePrefix(crate);
+    const byPath = crates.find((c) => c.path === stripped);
+    if (byPath) {
+      return byPath.path;
+    }
+
+    // Not a known crate, but could be a valid directory - return stripped version
+    return stripped;
+  }
+
   // Helper: Search using D1 FTS5
   private async searchWithFTS(
     version: string,
@@ -532,7 +553,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
     // Add crate filter (escape LIKE wildcards)
     if (crate) {
-      const folderName = stripCratePrefix(crate);
+      const folderName = await this.resolveCratePath(version, crate);
       const escaped = folderName.replace(/[%_\\]/g, "\\$&");
       sql += " AND f.path LIKE ? ESCAPE '\\'";
       params.push(`${escaped}/%`);
