@@ -312,7 +312,8 @@ mod implementation {
     impl<T: Zeroize> Secret<T> {
         /// Creates a new `Secret` wrapping the given value.
         #[inline]
-        pub const fn new(value: T) -> Self {
+        #[allow(clippy::missing_const_for_fn)]
+        pub fn new(value: T) -> Self {
             Self(value)
         }
 
