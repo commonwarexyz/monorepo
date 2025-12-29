@@ -278,10 +278,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         const ver = version || (await this.getLatestVersion());
 
         // Validate crate exists
-        // Match by full name (commonware-*) or folder path
         const crates = await this.getCrates(ver);
-        const folderName = stripCratePrefix(crate);
-        const crateInfo = crates.find((c) => c.name === crate || c.path === folderName);
+        const cratePath = await this.resolveCratePath(ver, crate, crates);
+        const crateInfo = crates.find((c) => c.path === cratePath);
         if (!crateInfo) {
           const names = crates.map((c) => c.name).join(", ");
           return {
@@ -295,7 +294,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           };
         }
 
-        const content = await this.fetchFile(ver, `${crateInfo.path}/README.md`);
+        const content = await this.fetchFile(ver, `${cratePath}/README.md`);
         if (content === null) {
           return {
             content: [
@@ -503,10 +502,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   }
 
   // Helper: Resolve crate name or path to actual directory path
-  private async resolveCratePath(version: string, crate: string): Promise<string> {
+  private async resolveCratePath(
+    version: string,
+    crate: string,
+    crates?: CrateInfo[]
+  ): Promise<string> {
     // Try matching by crate name first (e.g., "commonware-consensus-fuzz" -> "consensus/fuzz")
-    const crates = await this.getCrates(version);
-    const byName = crates.find((c) => c.name === crate);
+    const crateList = crates ?? (await this.getCrates(version));
+    const byName = crateList.find((c) => c.name === crate);
     if (byName) {
       return byName.path;
     }
