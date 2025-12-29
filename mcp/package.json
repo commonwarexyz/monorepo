@@ -1,7 +1,7 @@
 {
   "name": "commonware-mcp",
   "version": "0.0.1",
-  "description": "MCP server for the Commonware Library",
+  "description": "Interact with the Commonware Library via MCP at https://mcp.commonware.xyz.",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",

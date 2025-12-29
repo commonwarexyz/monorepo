@@ -1,7 +1,5 @@
 /**
- * Utility functions for the Commonware MCP Server
- *
- * Extracted for testability and reuse.
+ * Utility functions for Commonware MCP
  */
 
 /**

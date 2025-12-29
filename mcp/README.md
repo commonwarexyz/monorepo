@@ -1,6 +1,10 @@
-# Commonware MCP Server
+# Commonware MCP
 
-A [Model Context Protocol](https://modelcontextprotocol.io/) server for the Commonware Library, deployed on Cloudflare Workers. This server exposes Commonware source code to AI assistants like Claude, Cursor, and other MCP-compatible clients.
+Interact with the Commonware Library via [MCP](https://modelcontextprotocol.io/) at https://mcp.commonware.xyz.
+
+## Status
+
+`commonware-mcp` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
 ## Tools
 
@@ -95,7 +99,7 @@ The server uses Cloudflare's [Agents SDK](https://developers.cloudflare.com/agen
 
 - **Durable Objects**: Maintains persistent connections for MCP clients
 - **Sitemap-based discovery**: Parses `commonware.xyz/sitemap.xml` to discover available files
-- **Caching**: Files cached for 1 year (immutable); sitemap cached for 1 hour
+- **Caching**: Files cached indefinitely (immutable); sitemap cached for 1 hour
 
 ### Endpoints
 
@@ -113,7 +117,3 @@ Once connected, you can ask your AI assistant questions like:
 - "Explain how the deterministic runtime works"
 
 The assistant will use the MCP tools to fetch actual source code rather than relying on training data.
-
-## License
-
-Apache-2.0 OR MIT (same as Commonware Library)

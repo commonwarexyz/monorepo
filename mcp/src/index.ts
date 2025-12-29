@@ -1,5 +1,5 @@
 /**
- * Commonware MCP Server
+ * Commonware MCP
  *
  * A Model Context Protocol server for the Commonware Library that exposes
  * source code to AI assistants like Claude, Cursor, etc.
@@ -59,8 +59,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "get_file",
       "Retrieve a file from the Commonware repository by its path. " +
-        "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
-        "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
+      "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
+      "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
       {
         path: z
           .string()
@@ -113,8 +113,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "search_code",
       "Search for a pattern across source code files in the Commonware repository. " +
-        "Returns matching files with relevant snippets. Useful for finding function definitions, " +
-        "usage patterns, or understanding how features are implemented.",
+      "Returns matching files with relevant snippets. Useful for finding function definitions, " +
+      "usage patterns, or understanding how features are implemented.",
       {
         query: z.string().describe("Search pattern (case-insensitive substring match)"),
         crate: z
