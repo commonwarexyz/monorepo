@@ -18,6 +18,8 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
 
+pub mod sync;
+
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
 pub type Operation<K, V> = unordered::Operation<K, FixedEncoding<V>>;
 
@@ -598,5 +600,38 @@ pub(super) mod test {
     #[test_traced("DEBUG")]
     fn test_batch() {
         batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await });
+    }
+
+    // FromSyncTestable implementation for from_sync_result tests
+    mod from_sync_testable {
+        use super::*;
+        use crate::{
+            mmr::{iterator::nodes_to_pin, journaled::Mmr, mem::Clean},
+            qmdb::any::unordered::sync_tests::FromSyncTestable,
+        };
+        use futures::future::join_all;
+
+        type TestMmr = Mmr<deterministic::Context, Digest, Clean<Digest>>;
+
+        impl FromSyncTestable for AnyTest {
+            type Mmr = TestMmr;
+
+            fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
+                (self.log.mmr, self.log.journal)
+            }
+
+            async fn pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
+                join_all(nodes_to_pin(pos).map(|p| self.log.mmr.get_node(p)))
+                    .await
+                    .into_iter()
+                    .map(|n| n.unwrap().unwrap())
+                    .collect()
+            }
+
+            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
+                let map = self.log.mmr.get_pinned_nodes();
+                nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
+            }
+        }
     }
 }

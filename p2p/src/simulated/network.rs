@@ -29,7 +29,7 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::{Duration, SystemTime},
@@ -145,7 +145,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     tracked_peer_sets: Option<usize>,
 
     // A map of peers blocking each other
-    blocks: HashSet<(P, P)>,
+    blocks: BTreeSet<(P, P)>,
 
     // State of the transmitter
     transmitter: transmitter::State<P>,
@@ -197,7 +197,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 peers: BTreeMap::new(),
                 peer_sets: BTreeMap::new(),
                 peer_refs: BTreeMap::new(),
-                blocks: HashSet::new(),
+                blocks: BTreeSet::new(),
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
                 peer_subscribers: Vec::new(),
