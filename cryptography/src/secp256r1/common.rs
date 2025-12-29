@@ -1,10 +1,3 @@
-cfg_if::cfg_if! {
-    if #[cfg(feature = "std")] {
-        use std::borrow::ToOwned;
-    } else {
-        use alloc::borrow::ToOwned;
-    }
-}
 use crate::Secret;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
@@ -25,16 +18,13 @@ pub const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 
 /// Internal Secp256r1 Private Key storage.
 ///
-/// Note: `SigningKey` implements `ZeroizeOnDrop` (not `Zeroize`), so it cannot be wrapped
-/// in `Secret<T>`. The `raw` bytes are wrapped in `Secret` for zeroization, while `key`
-/// relies on its own `ZeroizeOnDrop` implementation.
+/// Only stores the raw key bytes in protected memory. The `SigningKey` is
+/// reconstructed on demand to avoid keeping unprotected copies in memory.
 #[derive(Clone, Eq, PartialEq)]
 pub struct PrivateKeyInner {
     raw: Secret<[u8; PRIVATE_KEY_LENGTH]>,
-    pub key: SigningKey,
 }
 
-// SAFETY: Both `raw` (via Secret) and `key` (via its own ZeroizeOnDrop) are zeroized on drop.
 impl ZeroizeOnDrop for PrivateKeyInner {}
 
 impl PrivateKeyInner {
@@ -43,8 +33,22 @@ impl PrivateKeyInner {
         let raw: [u8; PRIVATE_KEY_LENGTH] = bytes.into();
         Self {
             raw: Secret::new(raw),
-            key,
         }
+    }
+
+    /// Reconstructs the `SigningKey` from the protected raw bytes.
+    ///
+    /// This is called on-demand to avoid keeping an unprotected `SigningKey`
+    /// in memory.
+    pub(crate) fn signing_key(&self) -> SigningKey {
+        let guard = self.raw.expose();
+        // This cannot fail since we only store valid keys
+        SigningKey::from_slice(&*guard).expect("stored key bytes are always valid")
+    }
+
+    /// Returns the `VerifyingKey` corresponding to this private key.
+    pub fn verifying_key(&self) -> VerifyingKey {
+        *self.signing_key().verifying_key()
     }
 }
 
@@ -65,15 +69,14 @@ impl Read for PrivateKeyInner {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; PRIVATE_KEY_LENGTH]>::read(buf)?;
+        // Validate that the bytes form a valid key
         let result = SigningKey::from_slice(&raw);
         #[cfg(feature = "std")]
-        let key = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         #[cfg(not(feature = "std"))]
-        let key = result
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
+        result.map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
         Ok(Self {
             raw: Secret::new(raw),
-            key,
         })
     }
 }
@@ -84,17 +87,23 @@ impl FixedSize for PrivateKeyInner {
 
 impl Span for PrivateKeyInner {}
 
+// Array is only available on non-protected platforms because it requires
+// AsRef<[u8]> and Deref<Target = [u8]>, which need the memory to stay accessible
+// without a guard.
+#[cfg(not(unix))]
 impl Array for PrivateKeyInner {}
 
 impl Hash for PrivateKeyInner {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.expose().hash(state);
+        let guard = self.raw.expose();
+        (*guard).hash(state);
     }
 }
 
 impl Ord for PrivateKeyInner {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.expose().cmp(other.raw.expose())
+        // Use Secret's constant-time comparison
+        self.raw.cmp(&other.raw)
     }
 }
 
@@ -104,16 +113,20 @@ impl PartialOrd for PrivateKeyInner {
     }
 }
 
+// AsRef and Deref are only available on non-protected platforms because
+// protected memory requires holding a guard to keep the memory accessible.
+#[cfg(not(unix))]
 impl AsRef<[u8]> for PrivateKeyInner {
     fn as_ref(&self) -> &[u8] {
-        self.raw.expose()
+        &*self.raw.expose()
     }
 }
 
+#[cfg(not(unix))]
 impl Deref for PrivateKeyInner {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        self.raw.expose()
+        &*self.raw.expose()
     }
 }
 
@@ -161,7 +174,7 @@ impl PublicKeyInner {
     }
 
     pub fn from_private_key(private_key: &PrivateKeyInner) -> Self {
-        Self::new(private_key.key.verifying_key().to_owned())
+        Self::new(private_key.verifying_key())
     }
 }
 
@@ -273,6 +286,10 @@ macro_rules! impl_private_key_wrapper {
 
         impl commonware_utils::Span for $name {}
 
+        // Array is only available on non-protected platforms because it requires
+        // AsRef<[u8]> and Deref<Target = [u8]>, which need the memory to stay accessible
+        // without a guard.
+        #[cfg(not(unix))]
         impl commonware_utils::Array for $name {}
 
         impl core::hash::Hash for $name {
@@ -293,12 +310,16 @@ macro_rules! impl_private_key_wrapper {
             }
         }
 
+        // AsRef and Deref are only available on non-protected platforms because
+        // protected memory requires holding a guard to keep the memory accessible.
+        #[cfg(not(unix))]
         impl AsRef<[u8]> for $name {
             fn as_ref(&self) -> &[u8] {
                 self.0.as_ref()
             }
         }
 
+        #[cfg(not(unix))]
         impl core::ops::Deref for $name {
             type Target = [u8];
             fn deref(&self) -> &[u8] {

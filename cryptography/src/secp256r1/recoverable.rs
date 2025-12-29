@@ -50,7 +50,7 @@ impl PrivateKey {
         });
         let (mut signature, mut recovery_id) = self
             .0
-            .key
+            .signing_key()
             .sign_recoverable(&payload)
             .expect("signing must succeed");
 

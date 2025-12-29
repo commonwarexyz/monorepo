@@ -96,13 +96,18 @@ impl FixedSize for PrivateKey {
 
 impl Span for PrivateKey {}
 
+// Array is only available on non-protected platforms because it requires
+// AsRef<[u8]> and Deref<Target = [u8]>, which need the memory to stay accessible
+// without a guard.
+#[cfg(not(unix))]
 impl Array for PrivateKey {}
 
 impl Eq for PrivateKey {}
 
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.expose().hash(state);
+        let guard = self.raw.expose();
+        (*guard).hash(state);
     }
 }
 
@@ -114,7 +119,8 @@ impl PartialEq for PrivateKey {
 
 impl Ord for PrivateKey {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.expose().cmp(other.raw.expose())
+        // Use Secret's constant-time comparison
+        self.raw.cmp(&other.raw)
     }
 }
 
@@ -124,16 +130,20 @@ impl PartialOrd for PrivateKey {
     }
 }
 
+// AsRef and Deref are only available on non-protected platforms because
+// protected memory requires holding a guard to keep the memory accessible.
+#[cfg(not(unix))]
 impl AsRef<[u8]> for PrivateKey {
     fn as_ref(&self) -> &[u8] {
-        self.raw.expose()
+        &*self.raw.expose()
     }
 }
 
+#[cfg(not(unix))]
 impl Deref for PrivateKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        self.raw.expose()
+        &*self.raw.expose()
     }
 }
 

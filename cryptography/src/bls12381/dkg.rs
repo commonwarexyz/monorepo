@@ -290,7 +290,7 @@ use crate::{
         variant::Variant,
     },
     transcript::{Summary, Transcript},
-    PublicKey, Secret, Signer,
+    PublicKey, Secret, SecretGuard, SecretGuardMut, Signer,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
@@ -565,7 +565,8 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             return false;
         };
         let expected = pub_msg.commitment.eval_msm(&scalar);
-        expected == V::Public::generator() * priv_msg.share.expose()
+        let guard = priv_msg.expose_share();
+        expected == V::Public::generator() * &*guard
     }
 }
 
@@ -679,7 +680,7 @@ where
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct DealerPrivMsg {
     share: Secret<Scalar>,
 }
@@ -688,20 +689,48 @@ impl DealerPrivMsg {
     /// Creates a new DealerPrivMsg with the given share.
     ///
     /// The share is wrapped in a `Secret` for secure handling.
+    /// On Unix, this includes OS-level memory protection (mlock + mprotect).
+    ///
+    /// Note: This function is const on non-Unix platforms only.
+    #[cfg(not(unix))]
     pub const fn new(share: Scalar) -> Self {
         Self {
             share: Secret::new(share),
         }
     }
 
-    /// Returns a reference to the wrapped share.
-    pub const fn share(&self) -> &Secret<Scalar> {
-        &self.share
+    /// Creates a new DealerPrivMsg with the given share.
+    ///
+    /// The share is wrapped in a `Secret` for secure handling.
+    /// On Unix, this includes OS-level memory protection (mlock + mprotect).
+    #[cfg(unix)]
+    pub fn new(share: Scalar) -> Self {
+        Self {
+            share: Secret::new(share),
+        }
     }
 
-    /// Returns a mutable reference to the wrapped share.
-    pub const fn share_mut(&mut self) -> &mut Secret<Scalar> {
-        &mut self.share
+    /// Temporarily exposes the share for reading.
+    ///
+    /// The returned guard re-protects the memory when dropped (on supported platforms).
+    #[cfg(not(unix))]
+    pub const fn expose_share(&self) -> SecretGuard<'_, Scalar> {
+        self.share.expose()
+    }
+
+    /// Temporarily exposes the share for reading.
+    ///
+    /// The returned guard re-protects the memory when dropped (on supported platforms).
+    #[cfg(unix)]
+    pub fn expose_share(&self) -> SecretGuard<'_, Scalar> {
+        self.share.expose()
+    }
+
+    /// Temporarily exposes the share for mutation.
+    ///
+    /// The returned guard re-protects the memory when dropped (on supported platforms).
+    pub fn expose_share_mut(&mut self) -> SecretGuardMut<'_, Scalar> {
+        self.share.expose_mut()
     }
 }
 
@@ -725,9 +754,7 @@ impl Read for DealerPrivMsg {
         _cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let share: Scalar = ReadExt::read(buf)?;
-        Ok(Self {
-            share: Secret::new(share),
-        })
+        Ok(Self::new(share))
     }
 }
 
@@ -735,11 +762,18 @@ impl Read for DealerPrivMsg {
 impl arbitrary::Arbitrary<'_> for DealerPrivMsg {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let share: Scalar = u.arbitrary()?;
-        Ok(Self {
-            share: Secret::new(share),
-        })
+        Ok(Self::new(share))
     }
 }
+
+impl PartialEq for DealerPrivMsg {
+    fn eq(&self, other: &Self) -> bool {
+        // Use Secret's constant-time comparison
+        self.share == other.share
+    }
+}
+
+impl Eq for DealerPrivMsg {}
 
 #[derive(Clone, Debug)]
 pub struct PlayerAck<P: PublicKey> {
@@ -1495,7 +1529,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
                 let share = self
                     .view
                     .get(dealer)
-                    .map(|(_, priv_msg)| priv_msg.share().expose().clone())
+                    .map(|(_, priv_msg)| (*priv_msg.expose_share()).clone())
                     .unwrap_or_else(|| {
                         log.get_reveal(&self.me_pub).map_or_else(
                             || {
@@ -1503,7 +1537,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
                                     "select didn't check dealer reveal, or we're not a player?"
                                 )
                             },
-                            |priv_msg| priv_msg.share().expose().clone(),
+                            |priv_msg| (*priv_msg.expose_share()).clone(),
                         )
                     });
                 (dealer.clone(), share)
@@ -1996,7 +2030,7 @@ mod test_plan {
                     for (player, priv_msg) in &mut priv_msgs {
                         let player_key_idx = pk_to_key_idx[player];
                         if round.bad_shares.contains(&(i_dealer, player_key_idx)) {
-                            *priv_msg.share_mut().expose_mut() = Scalar::random(&mut rng);
+                            *priv_msg.expose_share_mut() = Scalar::random(&mut rng);
                         }
                     }
                     assert_eq!(priv_msgs.len(), players.len());

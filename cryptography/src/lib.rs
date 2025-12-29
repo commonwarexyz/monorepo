@@ -36,7 +36,7 @@ pub mod lthash;
 pub use lthash::LtHash;
 pub mod secp256r1;
 pub mod secret;
-pub use secret::Secret;
+pub use secret::{Secret, SecretGuard, SecretGuardMut};
 pub mod transcript;
 
 /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
@@ -74,7 +74,18 @@ pub trait Signer: Random + Send + Sync + Clone + 'static {
 }
 
 /// A [Signer] that can be serialized/deserialized.
+///
+/// Note: On Unix, `Array` is not a bound because protected secrets cannot
+/// implement `AsRef`/`Deref` without holding a guard.
+#[cfg(not(unix))]
 pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {}
+
+/// A [Signer] that can be serialized/deserialized.
+///
+/// Note: On Unix, `Array` is not a bound because protected secrets cannot
+/// implement `AsRef`/`Deref` without holding a guard.
+#[cfg(unix)]
+pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq {}
 
 /// Verifies [Signature]s over messages.
 pub trait Verifier {

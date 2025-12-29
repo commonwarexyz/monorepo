@@ -137,16 +137,14 @@ pub fn verify_message<V: Variant>(
 }
 
 /// Generates a proof of possession for the private key share.
+#[allow(clippy::needless_borrow)] // Guard is &T on non-protected, SecretGuard on protected
 pub fn partial_sign_proof_of_possession<V: Variant>(
     sharing: &Sharing<V>,
     private: &Share,
 ) -> PartialSignature<V> {
     // Sign the public key
-    let sig = sign::<V>(
-        private.as_ref(),
-        V::PROOF_OF_POSSESSION,
-        &sharing.public().encode(),
-    );
+    let guard = private.private().expose();
+    let sig = sign::<V>(&guard, V::PROOF_OF_POSSESSION, &sharing.public().encode());
     PartialSignature {
         value: sig,
         index: private.index,
@@ -171,12 +169,14 @@ pub fn partial_verify_proof_of_possession<V: Variant>(
 }
 
 /// Signs the provided message with the key share.
+#[allow(clippy::needless_borrow)] // Guard is &T on non-protected, SecretGuard on protected
 pub fn partial_sign_message<V: Variant>(
     private: &Share,
     namespace: Option<&[u8]>,
     message: &[u8],
 ) -> PartialSignature<V> {
-    let sig = sign_message::<V>(private.as_ref(), namespace, message);
+    let guard = private.private().expose();
+    let sig = sign_message::<V>(&guard, namespace, message);
     PartialSignature {
         value: sig,
         index: private.index,

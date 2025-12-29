@@ -501,9 +501,12 @@ pub struct Share {
     private: Secret<Private>,
 }
 
+// AsRef is only available on non-protected platforms because protected memory
+// requires holding a guard to keep the memory accessible.
+#[cfg(not(unix))]
 impl AsRef<Private> for Share {
     fn as_ref(&self) -> &Private {
-        self.private.expose()
+        &*self.private.expose()
     }
 }
 
@@ -511,7 +514,19 @@ impl Share {
     /// Creates a new Share with the given index and private key.
     ///
     /// The private key is wrapped in a `Secret` for secure handling.
+    #[cfg(not(unix))]
     pub const fn new(index: u32, private: Private) -> Self {
+        Self {
+            index,
+            private: Secret::new(private),
+        }
+    }
+
+    /// Creates a new Share with the given index and private key.
+    ///
+    /// The private key is wrapped in a `Secret` for secure handling.
+    #[cfg(unix)]
+    pub fn new(index: u32, private: Private) -> Self {
         Self {
             index,
             private: Secret::new(private),
@@ -522,7 +537,8 @@ impl Share {
     ///
     /// This can be verified against the public polynomial.
     pub fn public<V: Variant>(&self) -> V::Public {
-        V::Public::generator() * self.private.expose()
+        let guard = self.private.expose();
+        V::Public::generator() * &*guard
     }
 
     /// Returns a reference to the wrapped private key.

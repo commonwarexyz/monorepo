@@ -41,6 +41,9 @@ zeroize = { workspace = true, features = ["zeroize_derive"] }
 version = "0.2.15"
 features = ["js"]
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 anyhow.workspace = true
 commonware-conformance.workspace = true

@@ -85,17 +85,23 @@ impl FixedSize for PrivateKey {
 
 impl Span for PrivateKey {}
 
+// Array is only available on non-protected platforms because it requires
+// AsRef<[u8]> and Deref<Target = [u8]>, which need the memory to stay accessible
+// without a guard.
+#[cfg(not(unix))]
 impl Array for PrivateKey {}
 
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.expose().hash(state);
+        let guard = self.raw.expose();
+        (*guard).hash(state);
     }
 }
 
 impl Ord for PrivateKey {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.expose().cmp(other.raw.expose())
+        // Use Secret's constant-time comparison
+        self.raw.cmp(&other.raw)
     }
 }
 
@@ -105,16 +111,20 @@ impl PartialOrd for PrivateKey {
     }
 }
 
+// AsRef and Deref are only available on non-protected platforms because
+// protected memory requires holding a guard to keep the memory accessible.
+#[cfg(not(unix))]
 impl AsRef<[u8]> for PrivateKey {
     fn as_ref(&self) -> &[u8] {
-        self.raw.expose()
+        &*self.raw.expose()
     }
 }
 
+#[cfg(not(unix))]
 impl Deref for PrivateKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        self.raw.expose()
+        &*self.raw.expose()
     }
 }
 
@@ -146,8 +156,10 @@ impl crate::Signer for PrivateKey {
     type Signature = Signature;
     type PublicKey = PublicKey;
 
+    #[allow(clippy::needless_borrow)] // Guard is &T on non-protected, SecretGuard on protected
     fn public_key(&self) -> Self::PublicKey {
-        PublicKey::from(ops::compute_public::<MinPk>(self.key.expose()))
+        let guard = self.key.expose();
+        PublicKey::from(ops::compute_public::<MinPk>(&guard))
     }
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
@@ -157,8 +169,10 @@ impl crate::Signer for PrivateKey {
 
 impl PrivateKey {
     #[inline(always)]
+    #[allow(clippy::needless_borrow)] // Guard is &T on non-protected, SecretGuard on protected
     fn sign_inner(&self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
-        ops::sign_message::<MinPk>(self.key.expose(), namespace, message).into()
+        let guard = self.key.expose();
+        ops::sign_message::<MinPk>(&guard, namespace, message).into()
     }
 }
 
