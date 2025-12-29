@@ -131,8 +131,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           ),
       },
       async ({ query, crate, file_type, version, max_results }) => {
-        // Clamp max_results to prevent excessive fetching
-        const limit = Math.min(max_results, MAX_SEARCH_RESULTS);
+        // Clamp max_results to valid range (negative LIMIT in SQLite means no limit)
+        const limit = Math.max(1, Math.min(max_results, MAX_SEARCH_RESULTS));
 
         const ver = version || (await this.getLatestVersion());
 
