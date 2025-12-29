@@ -61,7 +61,7 @@ pub struct PrivateKey {
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.expose().write(buf);
+        self.raw.expose(|bytes| bytes.write(buf));
     }
 }
 
@@ -87,8 +87,7 @@ impl Span for PrivateKey {}
 
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let guard = self.raw.expose();
-        (*guard).hash(state);
+        self.raw.expose(|bytes| bytes.hash(state));
     }
 }
 
@@ -133,10 +132,9 @@ impl crate::Signer for PrivateKey {
     type Signature = Signature;
     type PublicKey = PublicKey;
 
-    #[allow(clippy::needless_borrow)] // Guard is &T on non-protected, SecretGuard on protected
     fn public_key(&self) -> Self::PublicKey {
-        let guard = self.key.expose();
-        PublicKey::from(ops::compute_public::<MinPk>(&guard))
+        self.key
+            .expose(|key| PublicKey::from(ops::compute_public::<MinPk>(key)))
     }
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
@@ -146,10 +144,9 @@ impl crate::Signer for PrivateKey {
 
 impl PrivateKey {
     #[inline(always)]
-    #[allow(clippy::needless_borrow)] // Guard is &T on non-protected, SecretGuard on protected
     fn sign_inner(&self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
-        let guard = self.key.expose();
-        ops::sign_message::<MinPk>(&guard, namespace, message).into()
+        self.key
+            .expose(|key| ops::sign_message::<MinPk>(key, namespace, message).into())
     }
 }
 

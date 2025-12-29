@@ -41,11 +41,13 @@ impl crate::Signer for PrivateKey {
     }
 
     fn public_key(&self) -> Self::PublicKey {
-        let raw = self.key.expose().verification_key().to_bytes();
-        Self::PublicKey {
-            raw,
-            key: self.key.expose().verification_key().to_owned(),
-        }
+        self.key.expose(|key| {
+            let raw = key.verification_key().to_bytes();
+            Self::PublicKey {
+                raw,
+                key: key.verification_key().to_owned(),
+            }
+        })
     }
 }
 
@@ -55,8 +57,7 @@ impl PrivateKey {
         let payload = namespace
             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
             .unwrap_or_else(|| Cow::Borrowed(msg));
-        let sig = self.key.expose().sign(&payload);
-        Signature::from(sig)
+        self.key.expose(|key| Signature::from(key.sign(&payload)))
     }
 }
 
@@ -73,7 +74,7 @@ impl Random for PrivateKey {
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.expose().write(buf);
+        self.raw.expose(|bytes| bytes.write(buf));
     }
 }
 
@@ -100,8 +101,7 @@ impl Eq for PrivateKey {}
 
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let guard = self.raw.expose();
-        (*guard).hash(state);
+        self.raw.expose(|bytes| bytes.hash(state));
     }
 }
 
@@ -165,11 +165,13 @@ pub struct PublicKey {
 
 impl From<PrivateKey> for PublicKey {
     fn from(value: PrivateKey) -> Self {
-        let raw = value.key.expose().verification_key().to_bytes();
-        Self {
-            raw,
-            key: value.key.expose().verification_key(),
-        }
+        value.key.expose(|key| {
+            let raw = key.verification_key().to_bytes();
+            Self {
+                raw,
+                key: key.verification_key(),
+            }
+        })
     }
 }
 

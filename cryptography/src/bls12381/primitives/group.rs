@@ -516,25 +516,19 @@ impl Share {
     ///
     /// This can be verified against the public polynomial.
     pub fn public<V: Variant>(&self) -> V::Public {
-        let guard = self.private.expose();
-        V::Public::generator() * &*guard
+        self.private.expose(|key| V::Public::generator() * key)
     }
 
     /// Returns a reference to the wrapped private key.
     pub const fn private(&self) -> &Secret<Private> {
         &self.private
     }
-
-    /// Returns a mutable reference to the wrapped private key.
-    pub const fn private_mut(&mut self) -> &mut Secret<Private> {
-        &mut self.private
-    }
 }
 
 impl Write for Share {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.index).write(buf);
-        self.private.expose().write(buf);
+        self.private.expose(|key| key.write(buf));
     }
 }
 
@@ -553,7 +547,7 @@ impl Read for Share {
 
 impl EncodeSize for Share {
     fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + self.private.expose().encode_size()
+        UInt(self.index).encode_size() + self.private.expose(|key| key.encode_size())
     }
 }
 

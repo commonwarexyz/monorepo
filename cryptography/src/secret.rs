@@ -51,7 +51,6 @@ mod implementation {
         cmp::Ordering,
         fmt::{Debug, Display, Formatter},
         hash::{Hash, Hasher},
-        ops::{Deref, DerefMut},
         ptr::NonNull,
     };
     use subtle::ConstantTimeEq;
@@ -161,11 +160,11 @@ mod implementation {
             })
         }
 
-        /// Exposes the secret value for use.
+        /// Exposes the secret value for read-only access within a closure.
         ///
-        /// Returns a guard that re-protects memory when dropped.
+        /// Memory is re-protected immediately after the closure returns.
         #[inline]
-        pub fn expose(&self) -> SecretGuard<'_, T> {
+        pub fn expose<R>(&self, f: impl FnOnce(&T) -> R) -> R {
             // SAFETY: self.ptr points to valid protected memory of self.size bytes
             let result = unsafe {
                 libc::mprotect(
@@ -175,24 +174,20 @@ mod implementation {
                 )
             };
             assert_eq!(result, 0, "mprotect failed to unprotect memory");
-            SecretGuard { secret: self }
-        }
 
-        /// Exposes the secret value mutably.
-        ///
-        /// Returns a guard that re-protects memory when dropped.
-        #[inline]
-        pub fn expose_mut(&mut self) -> SecretGuardMut<'_, T> {
-            // SAFETY: self.ptr points to valid protected memory of self.size bytes
-            let result = unsafe {
+            // SAFETY: Memory is now readable and ptr is valid
+            let value = unsafe { self.ptr.as_ref() };
+            let result = f(value);
+
+            // SAFETY: Re-protect after use
+            unsafe {
                 libc::mprotect(
                     self.ptr.as_ptr() as *mut libc::c_void,
                     self.size,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                )
-            };
-            assert_eq!(result, 0, "mprotect failed to unprotect memory");
-            SecretGuardMut { secret: self }
+                    libc::PROT_NONE,
+                );
+            }
+            result
         }
     }
 
@@ -230,29 +225,30 @@ mod implementation {
 
     impl<T: Zeroize + Clone> Clone for Secret<T> {
         fn clone(&self) -> Self {
-            let guard = self.expose();
-            Self::new((*guard).clone())
+            self.expose(|v| Self::new(v.clone()))
         }
     }
 
     impl<T: Zeroize> PartialEq for Secret<T> {
         fn eq(&self, other: &Self) -> bool {
-            let guard_self = self.expose();
-            let guard_other = other.expose();
-            // SAFETY: Reading raw bytes of T for constant-time comparison.
-            let (a, b) = unsafe {
-                (
-                    core::slice::from_raw_parts(
-                        &*guard_self as *const T as *const u8,
-                        core::mem::size_of::<T>(),
-                    ),
-                    core::slice::from_raw_parts(
-                        &*guard_other as *const T as *const u8,
-                        core::mem::size_of::<T>(),
-                    ),
-                )
-            };
-            a.ct_eq(b).into()
+            self.expose(|a| {
+                other.expose(|b| {
+                    // SAFETY: Reading raw bytes of T for constant-time comparison.
+                    let (a, b) = unsafe {
+                        (
+                            core::slice::from_raw_parts(
+                                a as *const T as *const u8,
+                                core::mem::size_of::<T>(),
+                            ),
+                            core::slice::from_raw_parts(
+                                b as *const T as *const u8,
+                                core::mem::size_of::<T>(),
+                            ),
+                        )
+                    };
+                    a.ct_eq(b).into()
+                })
+            })
         }
     }
 
@@ -260,8 +256,7 @@ mod implementation {
 
     impl<T: Zeroize + Hash> Hash for Secret<T> {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            let guard = self.expose();
-            (*guard).hash(state);
+            self.expose(|v| v.hash(state));
         }
     }
 
@@ -273,92 +268,24 @@ mod implementation {
 
     impl<T: Zeroize> Ord for Secret<T> {
         fn cmp(&self, other: &Self) -> Ordering {
-            let guard_self = self.expose();
-            let guard_other = other.expose();
-            // SAFETY: Reading raw bytes of T for constant-time comparison.
-            let (a, b) = unsafe {
-                (
-                    core::slice::from_raw_parts(
-                        &*guard_self as *const T as *const u8,
-                        core::mem::size_of::<T>(),
-                    ),
-                    core::slice::from_raw_parts(
-                        &*guard_other as *const T as *const u8,
-                        core::mem::size_of::<T>(),
-                    ),
-                )
-            };
-
-            super::ct_cmp_bytes(a, b)
-        }
-    }
-
-    /// RAII guard for read access to a secret.
-    pub struct SecretGuard<'a, T: Zeroize> {
-        secret: &'a Secret<T>,
-    }
-
-    impl<T: Zeroize> Deref for SecretGuard<'_, T> {
-        type Target = T;
-
-        #[inline]
-        fn deref(&self) -> &T {
-            // SAFETY: The memory is currently unprotected (PROT_READ) because
-            // this guard exists, and the pointer is valid for the lifetime of Secret.
-            unsafe { self.secret.ptr.as_ref() }
-        }
-    }
-
-    impl<T: Zeroize> Drop for SecretGuard<'_, T> {
-        fn drop(&mut self) {
-            // SAFETY: Re-protect the memory when the guard is dropped.
-            // The pointer and size are valid from the Secret.
-            unsafe {
-                libc::mprotect(
-                    self.secret.ptr.as_ptr() as *mut libc::c_void,
-                    self.secret.size,
-                    libc::PROT_NONE,
-                );
-            }
-        }
-    }
-
-    /// RAII guard for mutable access to a secret.
-    pub struct SecretGuardMut<'a, T: Zeroize> {
-        secret: &'a mut Secret<T>,
-    }
-
-    impl<T: Zeroize> Deref for SecretGuardMut<'_, T> {
-        type Target = T;
-
-        #[inline]
-        fn deref(&self) -> &T {
-            // SAFETY: The memory is currently unprotected (PROT_READ|PROT_WRITE) because
-            // this guard exists, and the pointer is valid for the lifetime of Secret.
-            unsafe { self.secret.ptr.as_ref() }
-        }
-    }
-
-    impl<T: Zeroize> DerefMut for SecretGuardMut<'_, T> {
-        #[inline]
-        fn deref_mut(&mut self) -> &mut T {
-            // SAFETY: The memory is currently unprotected (PROT_READ|PROT_WRITE) because
-            // this guard exists, and we have exclusive mutable access.
-            unsafe { self.secret.ptr.as_mut() }
-        }
-    }
-
-    impl<T: Zeroize> Drop for SecretGuardMut<'_, T> {
-        fn drop(&mut self) {
-            // SAFETY: Re-protect the memory when the guard is dropped.
-            // The pointer and size are valid from the Secret.
-            unsafe {
-                libc::mprotect(
-                    self.secret.ptr.as_ptr() as *mut libc::c_void,
-                    self.secret.size,
-                    libc::PROT_NONE,
-                );
-            }
+            self.expose(|a| {
+                other.expose(|b| {
+                    // SAFETY: Reading raw bytes of T for constant-time comparison.
+                    let (a, b) = unsafe {
+                        (
+                            core::slice::from_raw_parts(
+                                a as *const T as *const u8,
+                                core::mem::size_of::<T>(),
+                            ),
+                            core::slice::from_raw_parts(
+                                b as *const T as *const u8,
+                                core::mem::size_of::<T>(),
+                            ),
+                        )
+                    };
+                    super::ct_cmp_bytes(a, b)
+                })
+            })
         }
     }
 }
@@ -389,26 +316,10 @@ mod implementation {
             Self(value)
         }
 
-        /// Exposes the secret value for use.
-        ///
-        /// # Warning
-        ///
-        /// This method should be used sparingly and only when the secret
-        /// value is actually needed for cryptographic operations.
+        /// Exposes the secret value for read-only access within a closure.
         #[inline]
-        pub fn expose(&self) -> SecretGuard<'_, T> {
-            SecretGuard(&self.0)
-        }
-
-        /// Exposes the secret value mutably.
-        ///
-        /// # Warning
-        ///
-        /// This method should be used sparingly and only when mutable access
-        /// to the secret value is actually needed.
-        #[inline]
-        pub fn expose_mut(&mut self) -> SecretGuardMut<'_, T> {
-            SecretGuardMut(&mut self.0)
+        pub fn expose<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+            f(&self.0)
         }
     }
 
@@ -440,26 +351,30 @@ mod implementation {
 
     impl<T: Zeroize + Clone> Clone for Secret<T> {
         fn clone(&self) -> Self {
-            Self(self.0.clone())
+            self.expose(|v| Self::new(v.clone()))
         }
     }
 
     impl<T: Zeroize> PartialEq for Secret<T> {
         fn eq(&self, other: &Self) -> bool {
-            // SAFETY: Reading raw bytes of T for constant-time comparison.
-            let (a, b) = unsafe {
-                (
-                    core::slice::from_raw_parts(
-                        &self.0 as *const T as *const u8,
-                        core::mem::size_of::<T>(),
-                    ),
-                    core::slice::from_raw_parts(
-                        &other.0 as *const T as *const u8,
-                        core::mem::size_of::<T>(),
-                    ),
-                )
-            };
-            a.ct_eq(b).into()
+            self.expose(|a| {
+                other.expose(|b| {
+                    // SAFETY: Reading raw bytes of T for constant-time comparison.
+                    let (a, b) = unsafe {
+                        (
+                            core::slice::from_raw_parts(
+                                a as *const T as *const u8,
+                                core::mem::size_of::<T>(),
+                            ),
+                            core::slice::from_raw_parts(
+                                b as *const T as *const u8,
+                                core::mem::size_of::<T>(),
+                            ),
+                        )
+                    };
+                    a.ct_eq(b).into()
+                })
+            })
         }
     }
 
@@ -467,7 +382,7 @@ mod implementation {
 
     impl<T: Zeroize + Hash> Hash for Secret<T> {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            self.0.hash(state);
+            self.expose(|v| v.hash(state));
         }
     }
 
@@ -479,58 +394,24 @@ mod implementation {
 
     impl<T: Zeroize> Ord for Secret<T> {
         fn cmp(&self, other: &Self) -> Ordering {
-            // SAFETY: Reading raw bytes of T for constant-time comparison.
-            let (a, b) = unsafe {
-                (
-                    core::slice::from_raw_parts(
-                        &self.0 as *const T as *const u8,
-                        core::mem::size_of::<T>(),
-                    ),
-                    core::slice::from_raw_parts(
-                        &other.0 as *const T as *const u8,
-                        core::mem::size_of::<T>(),
-                    ),
-                )
-            };
-
-            super::ct_cmp_bytes(a, b)
-        }
-    }
-
-    use core::ops::{Deref, DerefMut};
-
-    /// RAII guard for read access to a secret.
-    ///
-    /// On non-Unix platforms, this is a simple wrapper around a reference.
-    pub struct SecretGuard<'a, T: Zeroize>(&'a T);
-
-    impl<T: Zeroize> Deref for SecretGuard<'_, T> {
-        type Target = T;
-
-        #[inline]
-        fn deref(&self) -> &T {
-            self.0
-        }
-    }
-
-    /// RAII guard for mutable access to a secret.
-    ///
-    /// On non-Unix platforms, this is a simple wrapper around a mutable reference.
-    pub struct SecretGuardMut<'a, T: Zeroize>(&'a mut T);
-
-    impl<T: Zeroize> Deref for SecretGuardMut<'_, T> {
-        type Target = T;
-
-        #[inline]
-        fn deref(&self) -> &T {
-            self.0
-        }
-    }
-
-    impl<T: Zeroize> DerefMut for SecretGuardMut<'_, T> {
-        #[inline]
-        fn deref_mut(&mut self) -> &mut T {
-            self.0
+            self.expose(|a| {
+                other.expose(|b| {
+                    // SAFETY: Reading raw bytes of T for constant-time comparison.
+                    let (a, b) = unsafe {
+                        (
+                            core::slice::from_raw_parts(
+                                a as *const T as *const u8,
+                                core::mem::size_of::<T>(),
+                            ),
+                            core::slice::from_raw_parts(
+                                b as *const T as *const u8,
+                                core::mem::size_of::<T>(),
+                            ),
+                        )
+                    };
+                    super::ct_cmp_bytes(a, b)
+                })
+            })
         }
     }
 }
@@ -556,26 +437,20 @@ mod tests {
     #[test]
     fn test_expose() {
         let secret = Secret::new([1u8, 2, 3, 4]);
-        let guard = secret.expose();
-        assert_eq!(&*guard, &[1u8, 2, 3, 4]);
-    }
-
-    #[test]
-    fn test_expose_mut() {
-        let mut secret = Secret::new([1u8, 2, 3, 4]);
-        {
-            let mut guard = secret.expose_mut();
-            guard[0] = 5;
-        }
-        let guard = secret.expose();
-        assert_eq!(&*guard, &[5u8, 2, 3, 4]);
+        secret.expose(|v| {
+            assert_eq!(v, &[1u8, 2, 3, 4]);
+        });
     }
 
     #[test]
     fn test_clone() {
         let secret = Secret::new([1u8, 2, 3, 4]);
         let cloned = secret.clone();
-        assert_eq!(&*secret.expose(), &*cloned.expose());
+        secret.expose(|a| {
+            cloned.expose(|b| {
+                assert_eq!(a, b);
+            });
+        });
     }
 
     #[test]
@@ -617,16 +492,14 @@ mod tests {
         let secret = Secret::new([42u8; 32]);
 
         // First expose
-        {
-            let guard = secret.expose();
-            assert_eq!(guard[0], 42);
-        }
+        secret.expose(|v| {
+            assert_eq!(v[0], 42);
+        });
 
-        // Second expose after first guard dropped
-        {
-            let guard = secret.expose();
-            assert_eq!(guard[31], 42);
-        }
+        // Second expose
+        secret.expose(|v| {
+            assert_eq!(v[31], 42);
+        });
     }
 
     #[cfg(unix)]
@@ -639,9 +512,8 @@ mod tests {
         let scalar = Scalar::random(&mut OsRng);
         let secret = Secret::new(scalar);
 
-        {
-            let guard = secret.expose();
-            let _ = format!("{:?}", *guard);
-        }
+        secret.expose(|v| {
+            let _ = format!("{:?}", *v);
+        });
     }
 }

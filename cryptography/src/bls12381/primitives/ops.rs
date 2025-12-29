@@ -137,14 +137,14 @@ pub fn verify_message<V: Variant>(
 }
 
 /// Generates a proof of possession for the private key share.
-#[allow(clippy::needless_borrow)] // Guard is &T on non-protected, SecretGuard on protected
 pub fn partial_sign_proof_of_possession<V: Variant>(
     sharing: &Sharing<V>,
     private: &Share,
 ) -> PartialSignature<V> {
     // Sign the public key
-    let guard = private.private().expose();
-    let sig = sign::<V>(&guard, V::PROOF_OF_POSSESSION, &sharing.public().encode());
+    let sig = private
+        .private()
+        .expose(|key| sign::<V>(key, V::PROOF_OF_POSSESSION, &sharing.public().encode()));
     PartialSignature {
         value: sig,
         index: private.index,
@@ -169,14 +169,14 @@ pub fn partial_verify_proof_of_possession<V: Variant>(
 }
 
 /// Signs the provided message with the key share.
-#[allow(clippy::needless_borrow)] // Guard is &T on non-protected, SecretGuard on protected
 pub fn partial_sign_message<V: Variant>(
     private: &Share,
     namespace: Option<&[u8]>,
     message: &[u8],
 ) -> PartialSignature<V> {
-    let guard = private.private().expose();
-    let sig = sign_message::<V>(&guard, namespace, message);
+    let sig = private
+        .private()
+        .expose(|key| sign_message::<V>(key, namespace, message));
     PartialSignature {
         value: sig,
         index: private.index,
@@ -1444,8 +1444,8 @@ mod tests {
             dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
 
         // Corrupt a share
-        let share = shares.get_mut(3).unwrap();
-        *share.private_mut().expose_mut() = Private::random(&mut rand::thread_rng());
+        let corrupt_index = 3;
+        shares[corrupt_index] = Share::new(shares[corrupt_index].index, Private::random(&mut rng));
 
         // Generate the partial signatures
         let namespace = Some(&b"test"[..]);
@@ -1504,7 +1504,8 @@ mod tests {
 
         // Corrupt the second share's private key
         let corrupted_index = 1;
-        *shares[corrupted_index].private_mut().expose_mut() = Private::random(&mut rng);
+        shares[corrupted_index] =
+            Share::new(shares[corrupted_index].index, Private::random(&mut rng));
 
         // Generate partial signatures
         let partials: Vec<_> = shares
@@ -1544,7 +1545,7 @@ mod tests {
         // Corrupt shares at indices 1 and 3
         let corrupted_indices = vec![1, 3];
         for &idx in &corrupted_indices {
-            *shares[idx].private_mut().expose_mut() = Private::random(&mut rng);
+            shares[idx] = Share::new(shares[idx].index, Private::random(&mut rng));
         }
 
         // Generate partial signatures
@@ -1639,7 +1640,7 @@ mod tests {
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
 
-        *shares[0].private_mut().expose_mut() = Private::random(&mut rng);
+        shares[0] = Share::new(shares[0].index, Private::random(&mut rng));
 
         let partials: Vec<_> = shares
             .iter()
@@ -1667,7 +1668,8 @@ mod tests {
         let msg = b"hello";
 
         let corrupted_index = n - 1;
-        *shares[corrupted_index as usize].private_mut().expose_mut() = Private::random(&mut rng);
+        let idx = corrupted_index as usize;
+        shares[idx] = Share::new(shares[idx].index, Private::random(&mut rng));
 
         let partials: Vec<_> = shares
             .iter()

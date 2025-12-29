@@ -290,7 +290,7 @@ use crate::{
         variant::Variant,
     },
     transcript::{Summary, Transcript},
-    PublicKey, Secret, SecretGuard, SecretGuardMut, Signer,
+    PublicKey, Secret, Signer,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
@@ -565,8 +565,9 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             return false;
         };
         let expected = pub_msg.commitment.eval_msm(&scalar);
-        let guard = priv_msg.expose_share();
-        expected == V::Public::generator() * &*guard
+        priv_msg
+            .share()
+            .expose(|share| expected == V::Public::generator() * share)
     }
 }
 
@@ -696,30 +697,21 @@ impl DealerPrivMsg {
         }
     }
 
-    /// Temporarily exposes the share for reading.
-    ///
-    /// The returned guard re-protects the memory when dropped (on supported platforms).
-    pub fn expose_share(&self) -> SecretGuard<'_, Scalar> {
-        self.share.expose()
-    }
-
-    /// Temporarily exposes the share for mutation.
-    ///
-    /// The returned guard re-protects the memory when dropped (on supported platforms).
-    pub fn expose_share_mut(&mut self) -> SecretGuardMut<'_, Scalar> {
-        self.share.expose_mut()
+    /// Returns a reference to the share wrapped in `Secret`.
+    pub const fn share(&self) -> &Secret<Scalar> {
+        &self.share
     }
 }
 
 impl EncodeSize for DealerPrivMsg {
     fn encode_size(&self) -> usize {
-        self.share.expose().encode_size()
+        self.share.expose(|s| s.encode_size())
     }
 }
 
 impl Write for DealerPrivMsg {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.share.expose().write(buf);
+        self.share.expose(|s| s.write(buf));
     }
 }
 
@@ -1201,8 +1193,8 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     ) -> Result<(Self, DealerPubMsg<V>, Vec<(S::PublicKey, DealerPrivMsg)>), Error> {
         // Check that this dealer is defined in the round.
         info.dealer_index(&me.public_key())?;
-        let share =
-            info.unwrap_or_random_share(&mut rng, share.map(|x| x.private().expose().clone()))?;
+        let share = info
+            .unwrap_or_random_share(&mut rng, share.map(|x| x.private().expose(|s| s.clone())))?;
         let my_poly = Poly::new_with_constant(&mut rng, info.degree(), share);
         let priv_msgs = info
             .players
@@ -1506,7 +1498,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
                 let share = self
                     .view
                     .get(dealer)
-                    .map(|(_, priv_msg)| (*priv_msg.expose_share()).clone())
+                    .map(|(_, priv_msg)| priv_msg.share().expose(|s| s.clone()))
                     .unwrap_or_else(|| {
                         log.get_reveal(&self.me_pub).map_or_else(
                             || {
@@ -1514,7 +1506,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
                                     "select didn't check dealer reveal, or we're not a player?"
                                 )
                             },
-                            |priv_msg| (*priv_msg.expose_share()).clone(),
+                            |priv_msg| priv_msg.share().expose(|s| s.clone()),
                         )
                     });
                 (dealer.clone(), share)
@@ -1963,7 +1955,7 @@ mod test_plan {
                             let share = info
                                 .unwrap_or_random_share(
                                     &mut rng,
-                                    share.map(|s| s.private().expose().clone()),
+                                    share.map(|s| s.private().expose(|k| k.clone())),
                                 )
                                 .expect("Failed to generate dealer share");
 
@@ -2007,7 +1999,7 @@ mod test_plan {
                     for (player, priv_msg) in &mut priv_msgs {
                         let player_key_idx = pk_to_key_idx[player];
                         if round.bad_shares.contains(&(i_dealer, player_key_idx)) {
-                            *priv_msg.expose_share_mut() = Scalar::random(&mut rng);
+                            *priv_msg = DealerPrivMsg::new(Scalar::random(&mut rng));
                         }
                     }
                     assert_eq!(priv_msgs.len(), players.len());

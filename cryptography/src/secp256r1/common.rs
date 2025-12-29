@@ -41,9 +41,10 @@ impl PrivateKeyInner {
     /// This is called on-demand to avoid keeping an unprotected `SigningKey`
     /// in memory.
     pub(crate) fn signing_key(&self) -> SigningKey {
-        let guard = self.raw.expose();
-        // This cannot fail since we only store valid keys
-        SigningKey::from_slice(&*guard).expect("stored key bytes are always valid")
+        self.raw.expose(|bytes| {
+            // This cannot fail since we only store valid keys
+            SigningKey::from_slice(bytes).expect("stored key bytes are always valid")
+        })
     }
 
     /// Returns the `VerifyingKey` corresponding to this private key.
@@ -60,7 +61,7 @@ impl Random for PrivateKeyInner {
 
 impl Write for PrivateKeyInner {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.expose().write(buf);
+        self.raw.expose(|bytes| bytes.write(buf));
     }
 }
 
@@ -89,8 +90,7 @@ impl Span for PrivateKeyInner {}
 
 impl Hash for PrivateKeyInner {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let guard = self.raw.expose();
-        (*guard).hash(state);
+        self.raw.expose(|bytes| bytes.hash(state));
     }
 }
 
