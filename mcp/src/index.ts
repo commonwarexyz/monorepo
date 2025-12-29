@@ -276,32 +276,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       },
       async ({ crate, version }) => {
         const ver = version || (await this.getLatestVersion());
-
-        // Validate crate exists
-        // Match by full name (commonware-*) or folder path
-        const crates = await this.getCrates(ver);
-        const folderName = stripCratePrefix(crate);
-        const crateInfo = crates.find((c) => c.name === crate || c.path === folderName);
-        if (!crateInfo) {
-          const names = crates.map((c) => c.name).join(", ");
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Error: Unknown crate '${crate}'. Available crates: ${names}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        const content = await this.fetchFile(ver, `${crateInfo.path}/README.md`);
+        const cratePath = await this.resolveCratePath(ver, crate);
+        const content = await this.fetchFile(ver, `${cratePath}/README.md`);
         if (content === null) {
           return {
             content: [
               {
                 type: "text",
-                text: `Error: README not found for crate '${crate}' (version ${ver})`,
+                text: `Error: README not found for crate '${crate}' (version ${ver}). Use \`list_crates\` to see available crates.`,
               },
             ],
             isError: true,
@@ -358,8 +340,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         let prefix: string;
 
         if (crate) {
-          // Strip commonware- prefix for folder matching
-          const folderName = stripCratePrefix(crate);
+          // Resolve crate name or path to actual directory
+          const folderName = await this.resolveCratePath(ver, crate);
           prefix = `${folderName}/`;
           filtered = allFiles.filter((f) => f.startsWith(prefix));
 
@@ -502,6 +484,19 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     return result !== null;
   }
 
+  // Helper: Resolve crate name or path to actual directory path
+  private async resolveCratePath(version: string, crate: string): Promise<string> {
+    // Try matching by crate name first (e.g., "commonware-consensus-fuzz" -> "consensus/fuzz")
+    const crates = await this.getCrates(version);
+    const byName = crates.find((c) => c.name === crate);
+    if (byName) {
+      return byName.path;
+    }
+
+    // Otherwise strip prefix and use as path (e.g., "commonware-cryptography" -> "cryptography")
+    return stripCratePrefix(crate);
+  }
+
   // Helper: Search using D1 FTS5
   private async searchWithFTS(
     version: string,
@@ -532,7 +527,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
     // Add crate filter (escape LIKE wildcards)
     if (crate) {
-      const folderName = stripCratePrefix(crate);
+      const folderName = await this.resolveCratePath(version, crate);
       const escaped = folderName.replace(/[%_\\]/g, "\\$&");
       sql += " AND f.path LIKE ? ESCAPE '\\'";
       params.push(`${escaped}/%`);
