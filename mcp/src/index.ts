@@ -137,14 +137,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
         const ver = version || (await this.getLatestVersion());
 
-        // Check if version is indexed (indexing only happens via scheduled trigger)
+        // Check if version exists
         const isIndexed = await this.isVersionIndexed(ver);
         if (!isIndexed) {
           return {
             content: [
               {
                 type: "text",
-                text: `Version ${ver} has not been indexed yet. Indexing happens automatically via scheduled trigger.`,
+                text: `Error: Version '${ver}' not found`,
               },
             ],
             isError: true,
@@ -403,16 +403,16 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     return versions;
   }
 
-  // Helper: Get latest version (from indexed versions in D1)
+  // Helper: Get latest version
   private async getLatestVersion(): Promise<string> {
     const versions = await this.getIndexedVersions();
     if (versions.length === 0) {
-      throw new Error("No indexed versions available");
+      throw new Error("No versions available");
     }
     return versions[0];
   }
 
-  // Helper: Get all indexed versions
+  // Helper: Get all versions
   private async getVersions(): Promise<string[]> {
     return this.getIndexedVersions();
   }
