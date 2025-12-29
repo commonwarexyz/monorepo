@@ -53,11 +53,19 @@ use std::borrow::Cow;
 const CURVE_NAME: &str = "bls12381";
 
 /// BLS12-381 private key.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct PrivateKey {
     raw: Secret<[u8; group::PRIVATE_KEY_LENGTH]>,
     key: Secret<Scalar>,
 }
+
+impl PartialEq for PrivateKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl Eq for PrivateKey {}
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {

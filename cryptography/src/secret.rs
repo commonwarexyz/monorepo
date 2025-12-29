@@ -24,6 +24,7 @@
 //! self-contained types (no heap pointers). Types like `Vec<T>` or `String`
 //! will only have their metadata protected, not heap data.
 
+use crate::bls12381::primitives::group::Scalar;
 use core::cmp::Ordering;
 use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeLess};
 
@@ -263,63 +264,29 @@ mod implementation {
         }
     }
 
-    impl<T> PartialEq for Secret<T> {
+    impl<const N: usize> PartialEq for Secret<[u8; N]> {
         fn eq(&self, other: &Self) -> bool {
-            self.expose(|a| {
-                other.expose(|b| {
-                    // SAFETY: Reading raw bytes of T for constant-time comparison.
-                    let (a, b) = unsafe {
-                        (
-                            core::slice::from_raw_parts(
-                                a as *const T as *const u8,
-                                core::mem::size_of::<T>(),
-                            ),
-                            core::slice::from_raw_parts(
-                                b as *const T as *const u8,
-                                core::mem::size_of::<T>(),
-                            ),
-                        )
-                    };
-                    a.ct_eq(b).into()
-                })
-            })
+            self.expose(|a| other.expose(|b| a.ct_eq(b).into()))
         }
     }
 
-    impl<T> Eq for Secret<T> {}
+    impl<const N: usize> Eq for Secret<[u8; N]> {}
 
-    impl<T: Hash> Hash for Secret<T> {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.expose(|v| v.hash(state));
-        }
-    }
-
-    impl<T> PartialOrd for Secret<T> {
+    impl<const N: usize> PartialOrd for Secret<[u8; N]> {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
             Some(self.cmp(other))
         }
     }
 
-    impl<T> Ord for Secret<T> {
+    impl<const N: usize> Ord for Secret<[u8; N]> {
         fn cmp(&self, other: &Self) -> Ordering {
-            self.expose(|a| {
-                other.expose(|b| {
-                    // SAFETY: Reading raw bytes of T for constant-time comparison.
-                    let (a, b) = unsafe {
-                        (
-                            core::slice::from_raw_parts(
-                                a as *const T as *const u8,
-                                core::mem::size_of::<T>(),
-                            ),
-                            core::slice::from_raw_parts(
-                                b as *const T as *const u8,
-                                core::mem::size_of::<T>(),
-                            ),
-                        )
-                    };
-                    super::ct_cmp_bytes(a, b)
-                })
-            })
+            self.expose(|a| other.expose(|b| super::ct_cmp_bytes(a, b)))
+        }
+    }
+
+    impl<T: Hash> Hash for Secret<T> {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.expose(|v| v.hash(state));
         }
     }
 }
@@ -391,68 +358,56 @@ mod implementation {
         }
     }
 
-    impl<T> PartialEq for Secret<T> {
+    // Only implement comparison traits for byte arrays (no padding bytes)
+    impl<const N: usize> PartialEq for Secret<[u8; N]> {
         fn eq(&self, other: &Self) -> bool {
-            self.expose(|a| {
-                other.expose(|b| {
-                    // SAFETY: Reading raw bytes of T for constant-time comparison.
-                    let (a, b) = unsafe {
-                        (
-                            core::slice::from_raw_parts(
-                                a as *const T as *const u8,
-                                core::mem::size_of::<T>(),
-                            ),
-                            core::slice::from_raw_parts(
-                                b as *const T as *const u8,
-                                core::mem::size_of::<T>(),
-                            ),
-                        )
-                    };
-                    a.ct_eq(b).into()
-                })
-            })
+            self.expose(|a| other.expose(|b| a.ct_eq(b).into()))
         }
     }
 
-    impl<T> Eq for Secret<T> {}
+    impl<const N: usize> Eq for Secret<[u8; N]> {}
+
+    impl<const N: usize> PartialOrd for Secret<[u8; N]> {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl<const N: usize> Ord for Secret<[u8; N]> {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.expose(|a| other.expose(|b| super::ct_cmp_bytes(a, b)))
+        }
+    }
 
     impl<T: Hash> Hash for Secret<T> {
         fn hash<H: Hasher>(&self, state: &mut H) {
             self.expose(|v| v.hash(state));
         }
     }
+}
 
-    impl<T> PartialOrd for Secret<T> {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.cmp(other))
-        }
-    }
+// Specialized comparison impls for Secret<Scalar>
+pub use implementation::*;
 
-    impl<T> Ord for Secret<T> {
-        fn cmp(&self, other: &Self) -> Ordering {
-            self.expose(|a| {
-                other.expose(|b| {
-                    // SAFETY: Reading raw bytes of T for constant-time comparison.
-                    let (a, b) = unsafe {
-                        (
-                            core::slice::from_raw_parts(
-                                a as *const T as *const u8,
-                                core::mem::size_of::<T>(),
-                            ),
-                            core::slice::from_raw_parts(
-                                b as *const T as *const u8,
-                                core::mem::size_of::<T>(),
-                            ),
-                        )
-                    };
-                    super::ct_cmp_bytes(a, b)
-                })
-            })
-        }
+impl PartialEq for Secret<Scalar> {
+    fn eq(&self, other: &Self) -> bool {
+        self.expose(|a| other.expose(|b| a.as_slice().ct_eq(&b.as_slice()).into()))
     }
 }
 
-pub use implementation::*;
+impl Eq for Secret<Scalar> {}
+
+impl PartialOrd for Secret<Scalar> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Secret<Scalar> {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.expose(|a| other.expose(|b| ct_cmp_bytes(&a.as_slice(), &b.as_slice())))
+    }
+}
 
 #[cfg(test)]
 mod tests {

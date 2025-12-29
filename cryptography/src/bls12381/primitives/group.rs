@@ -285,8 +285,8 @@ impl Scalar {
         Self(ret)
     }
 
-    /// Encodes the scalar into a slice.
-    fn as_slice(&self) -> [u8; Self::SIZE] {
+    /// Encodes the scalar into a byte array.
+    pub(crate) fn as_slice(&self) -> [u8; Self::SIZE] {
         let mut slice = [0u8; Self::SIZE];
         // SAFETY: All pointers valid; blst_bendian_from_scalar writes exactly 32 bytes.
         unsafe {
