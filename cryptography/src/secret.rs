@@ -142,6 +142,8 @@ mod implementation {
             if unsafe { libc::mlock(ptr as *const libc::c_void, size) } != 0 {
                 #[cfg(not(any(test, feature = "soft-mlock")))]
                 {
+                    // SAFETY: ptr points to valid T, zeroize before freeing
+                    unsafe { (*ptr).zeroize() };
                     // SAFETY: ptr and size match the mmap above
                     unsafe { libc::munmap(ptr as *mut libc::c_void, size) };
                     return Err("mlock failed");
@@ -150,8 +152,9 @@ mod implementation {
 
             // SAFETY: ptr points to valid memory of size `size`
             if unsafe { libc::mprotect(ptr as *mut libc::c_void, size, libc::PROT_NONE) } != 0 {
-                // SAFETY: cleanup on failure - unlock (if locked) and unmap
+                // SAFETY: cleanup on failure - zeroize, unlock (if locked), and unmap
                 unsafe {
+                    (*ptr).zeroize();
                     libc::munlock(ptr as *const libc::c_void, size);
                     libc::munmap(ptr as *mut libc::c_void, size);
                 }
