@@ -621,8 +621,16 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       const queryLower = trimmed.toLowerCase();
       return {
         ftsQuery: `"${escaped}"`,
-        // Substring mode: 1 if matches, 0 otherwise
-        snippetMatcher: (line) => (line.includes(queryLower) ? 1 : 0),
+        // Substring mode: count occurrences
+        snippetMatcher: (line) => {
+          let count = 0;
+          let idx = 0;
+          while ((idx = line.indexOf(queryLower, idx)) !== -1) {
+            count++;
+            idx += queryLower.length;
+          }
+          return count;
+        },
       };
     } else {
       // Word mode: escape special chars and add prefix matching
@@ -635,8 +643,18 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       const wordsLower = words.map((w) => w.toLowerCase());
       return {
         ftsQuery,
-        // Word mode: count how many query words appear in the line
-        snippetMatcher: (line) => wordsLower.filter((w) => line.includes(w)).length,
+        // Word mode: count total occurrences of all query words
+        snippetMatcher: (line) => {
+          let count = 0;
+          for (const word of wordsLower) {
+            let idx = 0;
+            while ((idx = line.indexOf(word, idx)) !== -1) {
+              count++;
+              idx += word.length;
+            }
+          }
+          return count;
+        },
       };
     }
   }
