@@ -73,7 +73,17 @@ npm install
 ### Local Development
 
 ```bash
+# Create local D1 database and run migrations
+npx wrangler d1 migrations apply commonware-mcp-search --local
+
+# Start dev server
 npm run dev
+```
+
+In a separate terminal, trigger indexing to populate the search index:
+
+```bash
+curl "http://localhost:8787/__scheduled?cron=*"
 ```
 
 The server will be available at `http://localhost:8787`. Use the MCP inspector to test:
@@ -90,8 +100,18 @@ In the inspector UI, select **Streamable HTTP** transport, enter `http://localho
 # Login to Cloudflare (first time only)
 npx wrangler login
 
+# Create D1 database (first time only)
+npx wrangler d1 create commonware-mcp-search
+# Update database_id in wrangler.jsonc with the returned ID
+
+# Run migrations (first time and after schema changes)
+npx wrangler d1 migrations apply commonware-mcp-search
+
 # Deploy
 npm run deploy
+
+# Trigger initial sync (or wait for cron)
+npx wrangler workflows trigger commonware-mcp
 ```
 
 ## Architecture
@@ -99,8 +119,8 @@ npm run deploy
 The server uses Cloudflare's [Agents SDK](https://developers.cloudflare.com/agents/) with the `McpAgent` class:
 
 - **Durable Objects**: Maintains persistent connections for MCP clients
-- **Sitemap-based discovery**: Parses `commonware.xyz/sitemap.xml` to discover available files
-- **Caching**: Files cached indefinitely (immutable); sitemap cached for 1 hour
+- **Sitemap-based discovery**: Parses `commonware.xyz/sitemap.xml` to discover available versions
+- **D1 + FTS5**: Full-text search index powered by SQLite FTS5
 
 ### Endpoints
 

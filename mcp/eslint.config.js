@@ -22,6 +22,8 @@ export default [
         console: "readonly",
         DurableObjectNamespace: "readonly",
         ExecutionContext: "readonly",
+        D1Database: "readonly",
+        ScheduledEvent: "readonly",
       },
     },
     plugins: {

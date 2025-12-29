@@ -25,6 +25,7 @@ import {
   parseSitemap,
   parseWorkspaceMembers,
   parseCrateInfo,
+  sortVersionsDesc,
   stripCratePrefix,
 } from "./utils.ts";
 import pkg from "../package.json";
@@ -36,16 +37,9 @@ interface CrateInfo {
   description: string;
 }
 
-interface SitemapData {
-  versions: string[];
-  files: Record<string, string[]>; // version -> file paths (JSON-serializable)
-}
-
 // Constants
-const FILE_CACHE_TTL = 60 * 60 * 24 * 365; // 1 year (versioned files are immutable)
-const SITEMAP_CACHE_TTL = 60 * 60; // 1 hour
 const MAX_SEARCH_RESULTS = 50;
-const SEARCH_BATCH_SIZE = 10;
+const INDEX_BUILD_BATCH_SIZE = 50;
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
@@ -117,7 +111,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         "Returns matching files with relevant snippets. Useful for finding function definitions, " +
         "usage patterns, or understanding how features are implemented.",
       {
-        query: z.string().describe("Search pattern (case-insensitive substring match)"),
+        query: z.string().describe("Search query (substring match, minimum 3 characters)"),
         crate: z
           .string()
           .optional()
@@ -137,70 +131,40 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           ),
       },
       async ({ query, crate, file_type, version, max_results }) => {
-        // Clamp max_results to prevent excessive fetching
-        const limit = Math.min(max_results, MAX_SEARCH_RESULTS);
+        // Trigram requires at least 3 characters
+        if (query.trim().length < 3) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error: Query must be at least 3 characters`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        // Clamp max_results to valid range (negative LIMIT in SQLite means no limit)
+        const limit = Math.max(1, Math.min(max_results, MAX_SEARCH_RESULTS));
 
         const ver = version || (await this.getLatestVersion());
-        const files = await this.getFileList(ver);
 
-        // Filter files by crate and type
-        // Strip commonware- prefix since folder paths don't include it
-        let filtered = files;
-        if (crate) {
-          const folderName = stripCratePrefix(crate);
-          filtered = filtered.filter((f) => f.startsWith(`${folderName}/`));
+        // Check if version exists
+        const isIndexed = await this.isVersionIndexed(ver);
+        if (!isIndexed) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error: Version '${ver}' not found`,
+              },
+            ],
+            isError: true,
+          };
         }
-        if (file_type && file_type !== "all") {
-          filtered = filtered.filter((f) => f.endsWith(`.${file_type}`));
-        }
 
-        const results: Array<{ file: string; matches: string[] }> = [];
-        const queryLower = query.toLowerCase();
-
-        // Search through files (limit concurrent requests)
-        for (let i = 0; i < filtered.length && results.length < limit; i += SEARCH_BATCH_SIZE) {
-          const batch = filtered.slice(i, i + SEARCH_BATCH_SIZE);
-          const responses = await Promise.all(
-            batch.map(async (file) => {
-              const content = await this.fetchFile(ver, file);
-              if (content === null) {
-                return null;
-              }
-              return { file, content };
-            })
-          );
-
-          for (const resp of responses) {
-            if (!resp || results.length >= limit) {
-              continue;
-            }
-
-            const lines = resp.content.split("\n");
-            const matches: string[] = [];
-
-            for (let lineNum = 0; lineNum < lines.length; lineNum++) {
-              if (lines[lineNum].toLowerCase().includes(queryLower)) {
-                // Include context (2 lines before and after)
-                const start = Math.max(0, lineNum - 2);
-                const end = Math.min(lines.length, lineNum + 3);
-                const snippet = lines
-                  .slice(start, end)
-                  .map((l, idx) => `${start + idx + 1}: ${l}`)
-                  .join("\n");
-                matches.push(snippet);
-
-                // Limit matches per file
-                if (matches.length >= 3) {
-                  break;
-                }
-              }
-            }
-
-            if (matches.length > 0) {
-              results.push({ file: resp.file, matches });
-            }
-          }
-        }
+        // Search using D1 FTS5
+        const results = await this.searchWithFTS(ver, query, crate, file_type, limit);
 
         if (results.length === 0) {
           return {
@@ -224,7 +188,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           content: [
             {
               type: "text",
-              text: `# Search results for "${query}" (${ver})\n\nFound ${results.length} file(s):\n\n${output}`,
+              text: `# Search results for "${query}" (${ver})\n\nFound ${results.length} file(s):\n\n${output}\n\n---\nFiles are listed by path. Use \`list_crates\` to see crate name to path mappings.`,
             },
           ],
         };
@@ -269,13 +233,15 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           };
         }
 
-        const output = crates.map((c) => `- **${c.name}**: ${c.description}`).join("\n");
+        const output = crates
+          .map((c) => `- **${c.name}** (${c.path}): ${c.description}`)
+          .join("\n");
 
         return {
           content: [
             {
               type: "text",
-              text: `# Commonware Crates (${ver})\n\n${output}\n\nUse \`get_crate_readme\` to get detailed documentation for any crate.`,
+              text: `# Commonware Crates (${ver})\n\n${output}\n\nUse \`get_crate_readme\` to get detailed documentation for any crate. Use the path in parentheses with \`list_files\` or \`get_file\` to browse crate contents.`,
             },
           ],
         };
@@ -430,98 +396,49 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     );
   }
 
-  // Helper: Fetch file with Cache API caching (versioned files are immutable)
+  // Helper: Fetch file from commonware.xyz
   private async fetchFile(version: string, path: string): Promise<string | null> {
     const url = `${this.env.BASE_URL}/code/${version}/${path}`;
-    const cacheKey = new Request(url);
-    const cache = caches.default;
-
-    // Check cache first
-    const cachedResponse = await cache.match(cacheKey);
-    if (cachedResponse) {
-      return cachedResponse.text();
-    }
-
-    // Fetch from origin
     const response = await fetch(url);
     if (!response.ok) {
       return null;
     }
+    return response.text();
+  }
 
-    // Cache the response (versioned files are immutable)
-    const content = await response.text();
-    const cacheResponse = new Response(content, {
-      headers: {
-        "Content-Type": "text/plain",
-        "Cache-Control": `public, max-age=${FILE_CACHE_TTL}`,
-      },
-    });
-    await cache.put(cacheKey, cacheResponse);
+  // Helper: Get indexed versions from D1 (sorted descending)
+  private async getIndexedVersions(): Promise<string[]> {
+    const result = await this.env.SEARCH_DB.withSession()
+      .prepare("SELECT version FROM versions")
+      .all<{ version: string }>();
 
-    return content;
+    const versions = result.results.map((r) => r.version);
+    sortVersionsDesc(versions);
+    return versions;
   }
 
   // Helper: Get latest version
   private async getLatestVersion(): Promise<string> {
-    const sitemap = await this.getSitemap();
-    return sitemap.versions[0];
+    const versions = await this.getIndexedVersions();
+    if (versions.length === 0) {
+      throw new Error("No versions available");
+    }
+    return versions[0];
   }
 
-  // Helper: Get all versions from sitemap
+  // Helper: Get all versions
   private async getVersions(): Promise<string[]> {
-    const sitemap = await this.getSitemap();
-    return sitemap.versions;
+    return this.getIndexedVersions();
   }
 
-  // Helper: Get file list for a version
+  // Helper: Get file list for a version (from D1)
   private async getFileList(version: string): Promise<string[]> {
-    const sitemap = await this.getSitemap();
-    return sitemap.files[version] || [];
-  }
+    const result = await this.env.SEARCH_DB.withSession()
+      .prepare("SELECT path FROM files WHERE version = ?")
+      .bind(version)
+      .all<{ path: string }>();
 
-  // Helper: Fetch sitemap.xml with Cache API caching
-  private async fetchSitemap(): Promise<string> {
-    const url = `${this.env.BASE_URL}/sitemap.xml`;
-    const cacheKey = new Request(url);
-    const cache = caches.default;
-
-    // Check cache first
-    const cachedResponse = await cache.match(cacheKey);
-    if (cachedResponse) {
-      return cachedResponse.text();
-    }
-
-    // Fetch from origin
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error("Failed to fetch sitemap");
-    }
-
-    // Cache the raw response
-    const xml = await response.text();
-    const cacheResponse = new Response(xml, {
-      headers: {
-        "Content-Type": "application/xml",
-        "Cache-Control": `public, max-age=${SITEMAP_CACHE_TTL}`,
-      },
-    });
-    await cache.put(cacheKey, cacheResponse);
-
-    return xml;
-  }
-
-  // Helper: Get parsed sitemap data
-  private async getSitemap(): Promise<SitemapData> {
-    const xml = await this.fetchSitemap();
-    const { versions, files } = parseSitemap(xml);
-
-    // Convert Map to plain object
-    const filesObj: Record<string, string[]> = {};
-    for (const [version, paths] of files) {
-      filesObj[version] = paths;
-    }
-
-    return { versions, files: filesObj };
+    return result.results.map((r) => r.path);
   }
 
   // Helper: Get crates list (individual Cargo.toml files are cached via fetchFile)
@@ -561,10 +478,195 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
     return crates;
   }
+
+  // Helper: Check if a version has been indexed
+  private async isVersionIndexed(version: string): Promise<boolean> {
+    const result = await this.env.SEARCH_DB.withSession()
+      .prepare("SELECT 1 FROM versions WHERE version = ?")
+      .bind(version)
+      .first();
+    return result !== null;
+  }
+
+  // Helper: Search using D1 FTS5
+  private async searchWithFTS(
+    version: string,
+    query: string,
+    crate: string | undefined,
+    fileType: string,
+    limit: number
+  ): Promise<Array<{ file: string; matches: string[] }>> {
+    // Build FTS trigram query
+    const parsed = this.buildFTSQuery(query);
+    if (parsed === null) {
+      return [];
+    }
+    const { ftsQuery, queryLower } = parsed;
+
+    // Build the SQL query with filters
+    let sql = `
+      SELECT f.path, f.content
+      FROM files_fts
+      JOIN files f ON files_fts.rowid = f.id
+      WHERE files_fts MATCH ?
+        AND f.version = ?
+    `;
+    const params: (string | number)[] = [ftsQuery, version];
+
+    // Add crate filter (escape LIKE wildcards)
+    if (crate) {
+      const folderName = stripCratePrefix(crate);
+      const escaped = folderName.replace(/[%_\\]/g, "\\$&");
+      sql += " AND f.path LIKE ? ESCAPE '\\'";
+      params.push(`${escaped}/%`);
+    }
+
+    // Add file type filter (escape LIKE wildcards)
+    if (fileType !== "all") {
+      const escaped = fileType.replace(/[%_\\]/g, "\\$&");
+      sql += " AND f.path LIKE ? ESCAPE '\\'";
+      params.push(`%.${escaped}`);
+    }
+
+    // Order by relevance and limit
+    sql += " ORDER BY bm25(files_fts) LIMIT ?";
+    params.push(limit);
+
+    // Execute the SQL query
+    const results = await this.env.SEARCH_DB.withSession()
+      .prepare(sql)
+      .bind(...params)
+      .all<{ path: string; content: string }>();
+
+    // Extract snippets with context
+    const output: Array<{ file: string; matches: string[] }> = [];
+
+    for (const row of results.results) {
+      const lines = row.content.split("\n");
+      const matches: string[] = [];
+
+      for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+        const lineLower = lines[lineNum].toLowerCase();
+        // Check if query substring appears in this line
+        if (lineLower.includes(queryLower)) {
+          // Include context (2 lines before and after)
+          const start = Math.max(0, lineNum - 2);
+          const end = Math.min(lines.length, lineNum + 3);
+          const snippet = lines
+            .slice(start, end)
+            .map((l, idx) => `${start + idx + 1}: ${l}`)
+            .join("\n");
+          matches.push(snippet);
+
+          // Limit matches per file
+          if (matches.length >= 5) {
+            break;
+          }
+        }
+      }
+
+      // Always include file if FTS5 matched it
+      output.push({ file: row.path, matches });
+    }
+
+    return output;
+  }
+
+  // Helper: Build FTS5 trigram query
+  // Returns null if query is too short (trigram requires 3+ characters)
+  private buildFTSQuery(query: string): { ftsQuery: string; queryLower: string } | null {
+    const trimmed = query.trim();
+
+    // Trigram requires at least 3 characters
+    if (trimmed.length < 3) {
+      return null;
+    }
+
+    // Escape double quotes for FTS5
+    const escaped = trimmed.replace(/"/g, '""');
+
+    // Return quoted literal query for trigram matching
+    return { ftsQuery: `"${escaped}"`, queryLower: trimmed.toLowerCase() };
+  }
 }
 
 // Create MCP handler using McpAgent.serve() for proper session management
 const mcpHandler = McpAgent.serve("/", { binding: "MCP" });
+
+// Helper: Sync indexed versions with sitemap (index new, prune removed)
+async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: string[] }> {
+  // Fetch sitemap to get available versions
+  const sitemapUrl = `${env.BASE_URL}/sitemap.xml`;
+  const response = await fetch(sitemapUrl);
+  if (!response.ok) {
+    throw new Error("Failed to fetch sitemap");
+  }
+  const xml = await response.text();
+  const { versions: sitemapVersions, files } = parseSitemap(xml);
+  const sitemapSet = new Set(sitemapVersions);
+
+  // Get already indexed versions (use primary for writes)
+  const session = env.SEARCH_DB.withSession("first-primary");
+  const indexedResult = await session.prepare("SELECT version FROM versions").all<{
+    version: string;
+  }>();
+  const indexedSet = new Set(indexedResult.results.map((r) => r.version));
+
+  // Index versions in sitemap that aren't indexed yet
+  const indexed: string[] = [];
+  for (const version of sitemapVersions) {
+    if (indexedSet.has(version)) {
+      continue;
+    }
+
+    // Get all files for this version
+    const versionFiles = files.get(version) || [];
+
+    // Fetch and index all files in batches
+    for (let i = 0; i < versionFiles.length; i += INDEX_BUILD_BATCH_SIZE) {
+      const batch = versionFiles.slice(i, i + INDEX_BUILD_BATCH_SIZE);
+      const results = await Promise.all(
+        batch.map(async (file) => {
+          const fileUrl = `${env.BASE_URL}/code/${version}/${file}`;
+          const res = await fetch(fileUrl);
+          if (!res.ok) {
+            throw new Error(`Failed to fetch ${file} for ${version}: ${res.status}`);
+          }
+          const content = await res.text();
+          return { file, content };
+        })
+      );
+
+      const statements = results.map((r) =>
+        session
+          .prepare("INSERT OR REPLACE INTO files (version, path, content) VALUES (?, ?, ?)")
+          .bind(version, r.file, r.content)
+      );
+
+      await session.batch(statements);
+    }
+
+    // Mark version as indexed
+    await session
+      .prepare("INSERT OR REPLACE INTO versions (version) VALUES (?)")
+      .bind(version)
+      .run();
+    indexed.push(version);
+  }
+
+  // Prune versions not in sitemap (delete version record first to prevent
+  // queries from finding a version with no files)
+  const pruned: string[] = [];
+  for (const oldVersion of indexedSet) {
+    if (!sitemapSet.has(oldVersion)) {
+      await session.prepare("DELETE FROM versions WHERE version = ?").bind(oldVersion).run();
+      await session.prepare("DELETE FROM files WHERE version = ?").bind(oldVersion).run();
+      pruned.push(oldVersion);
+    }
+  }
+
+  return { indexed, pruned };
+}
 
 // Worker fetch handler
 export default {
@@ -587,5 +689,10 @@ export default {
 
     // Route to MCP agent
     return mcpHandler.fetch(request, env, ctx);
+  },
+
+  // Scheduled handler for automatic indexing
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(reindexVersions(env));
   },
 };
