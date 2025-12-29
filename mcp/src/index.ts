@@ -52,7 +52,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
   async init() {
     this.server = new McpServer({
-      name: "commonware",
+      name: "commonware-library",
       version: pkg.version,
     });
 
