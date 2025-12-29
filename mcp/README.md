@@ -23,7 +23,7 @@ Interact with the Commonware Library via [MCP](https://modelcontextprotocol.io/)
 ### Claude Code
 
 ```bash
-claude mcp add --transport http commonware https://mcp.commonware.xyz
+claude mcp add --transport http commonware-library https://mcp.commonware.xyz
 ```
 
 Or add to `.mcp.json` in your project:
@@ -31,7 +31,7 @@ Or add to `.mcp.json` in your project:
 ```json
 {
   "mcpServers": {
-    "commonware": {
+    "commonware-library": {
       "type": "http",
       "url": "https://mcp.commonware.xyz"
     }
@@ -44,7 +44,7 @@ Or add to `.mcp.json` in your project:
 ```json
 {
   "mcpServers": {
-    "commonware": {
+    "commonware-library": {
       "url": "https://mcp.commonware.xyz"
     }
   }
