@@ -34,5 +34,11 @@
   // Environment variables for the base URL
   "vars": {
     "BASE_URL": "https://commonware.xyz"
+  },
+
+  // Scheduled trigger for indexing new versions (runs hourly)
+  // Trigger manually after deploy: npx wrangler workflows trigger commonware-mcp
+  "triggers": {
+    "crons": ["0 * * * *"]
   }
 }

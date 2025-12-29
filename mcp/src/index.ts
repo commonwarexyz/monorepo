@@ -661,6 +661,93 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 // Create MCP handler using McpAgent.serve() for proper session management
 const mcpHandler = McpAgent.serve("/", { binding: "MCP" });
 
+// Helper: Index all versions that aren't already indexed
+async function reindexVersions(
+  env: Env,
+  keepVersions: number = 10
+): Promise<{ indexed: string[]; pruned: string[] }> {
+  // Fetch sitemap to get available versions
+  const sitemapUrl = `${env.BASE_URL}/sitemap.xml`;
+  const response = await fetch(sitemapUrl);
+  if (!response.ok) {
+    throw new Error("Failed to fetch sitemap");
+  }
+  const xml = await response.text();
+  const { versions, files } = parseSitemap(xml);
+
+  // Get already indexed versions
+  const indexedResult = await env.SEARCH_DB.prepare("SELECT version FROM indexed_versions").all<{
+    version: string;
+  }>();
+  const indexedSet = new Set(indexedResult.results.map((r) => r.version));
+
+  // Index new versions (keep only the latest N)
+  const versionsToKeep = versions.slice(0, keepVersions);
+  const indexed: string[] = [];
+
+  for (const version of versionsToKeep) {
+    if (indexedSet.has(version)) {
+      continue;
+    }
+
+    // Get files for this version
+    const versionFiles = files.get(version) || [];
+    const indexableFiles = versionFiles.filter((file) => {
+      const ext = file.split(".").pop() || "";
+      return SEARCH_INDEX_EXTENSIONS.has(ext);
+    });
+
+    // Fetch and index files in batches
+    for (let i = 0; i < indexableFiles.length; i += INDEX_BUILD_BATCH_SIZE) {
+      const batch = indexableFiles.slice(i, i + INDEX_BUILD_BATCH_SIZE);
+      const results = await Promise.all(
+        batch.map(async (file) => {
+          const fileUrl = `${env.BASE_URL}/code/${version}/${file}`;
+          const res = await fetch(fileUrl);
+          if (!res.ok) {
+            return null;
+          }
+          const content = await res.text();
+          return { file, content };
+        })
+      );
+
+      const statements = results
+        .filter((r) => r !== null)
+        .map((r) =>
+          env.SEARCH_DB.prepare(
+            "INSERT OR REPLACE INTO files (version, path, content) VALUES (?, ?, ?)"
+          ).bind(version, r.file, r.content)
+        );
+
+      if (statements.length > 0) {
+        await env.SEARCH_DB.batch(statements);
+      }
+    }
+
+    // Mark as indexed
+    await env.SEARCH_DB.prepare("INSERT OR REPLACE INTO indexed_versions (version) VALUES (?)")
+      .bind(version)
+      .run();
+
+    indexed.push(version);
+  }
+
+  // Prune old versions not in keepVersions list
+  const pruned: string[] = [];
+  for (const oldVersion of indexedSet) {
+    if (!versionsToKeep.includes(oldVersion)) {
+      await env.SEARCH_DB.prepare("DELETE FROM files WHERE version = ?").bind(oldVersion).run();
+      await env.SEARCH_DB.prepare("DELETE FROM indexed_versions WHERE version = ?")
+        .bind(oldVersion)
+        .run();
+      pruned.push(oldVersion);
+    }
+  }
+
+  return { indexed, pruned };
+}
+
 // Worker fetch handler
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -682,5 +769,10 @@ export default {
 
     // Route to MCP agent
     return mcpHandler.fetch(request, env, ctx);
+  },
+
+  // Scheduled handler for automatic indexing
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(reindexVersions(env));
   },
 };
