@@ -233,7 +233,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           };
         }
 
-        const output = crates.map((c) => `- **${c.name}** (${c.path}): ${c.description}`).join("\n");
+        const output = crates
+          .map((c) => `- **${c.name}** (${c.path}): ${c.description}`)
+          .join("\n");
 
         return {
           content: [
