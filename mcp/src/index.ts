@@ -210,6 +210,12 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       {},
       async () => {
         const versions = await this.getVersions();
+        if (versions.length === 0) {
+          return {
+            content: [{ type: "text", text: "No versions available" }],
+            isError: true,
+          };
+        }
         return {
           content: [
             {
