@@ -74,17 +74,6 @@ pub trait Signer: Random + Send + Sync + Clone + 'static {
 }
 
 /// A [Signer] that can be serialized/deserialized.
-///
-/// Note: On Unix, `Array` is not a bound because protected secrets cannot
-/// implement `AsRef`/`Deref` without holding a guard.
-#[cfg(not(unix))]
-pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {}
-
-/// A [Signer] that can be serialized/deserialized.
-///
-/// Note: On Unix, `Array` is not a bound because protected secrets cannot
-/// implement `AsRef`/`Deref` without holding a guard.
-#[cfg(unix)]
 pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq {}
 
 /// Verifies [Signature]s over messages.

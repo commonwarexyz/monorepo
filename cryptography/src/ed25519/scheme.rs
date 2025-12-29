@@ -1,4 +1,4 @@
-use crate::{Array, BatchVerifier, Secret};
+use crate::{BatchVerifier, Secret};
 #[cfg(not(feature = "std"))]
 use alloc::{
     borrow::{Cow, ToOwned},
@@ -7,7 +7,7 @@ use alloc::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
-use commonware_utils::{hex, union_unique, Span};
+use commonware_utils::{hex, union_unique, Array, Span};
 use core::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
@@ -96,12 +96,6 @@ impl FixedSize for PrivateKey {
 
 impl Span for PrivateKey {}
 
-// Array is only available on non-protected platforms because it requires
-// AsRef<[u8]> and Deref<Target = [u8]>, which need the memory to stay accessible
-// without a guard.
-#[cfg(not(unix))]
-impl Array for PrivateKey {}
-
 impl Eq for PrivateKey {}
 
 impl Hash for PrivateKey {
@@ -127,23 +121,6 @@ impl Ord for PrivateKey {
 impl PartialOrd for PrivateKey {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
-    }
-}
-
-// AsRef and Deref are only available on non-protected platforms because
-// protected memory requires holding a guard to keep the memory accessible.
-#[cfg(not(unix))]
-impl AsRef<[u8]> for PrivateKey {
-    fn as_ref(&self) -> &[u8] {
-        &*self.raw.expose()
-    }
-}
-
-#[cfg(not(unix))]
-impl Deref for PrivateKey {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        &*self.raw.expose()
     }
 }
 

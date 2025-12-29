@@ -87,12 +87,6 @@ impl FixedSize for PrivateKeyInner {
 
 impl Span for PrivateKeyInner {}
 
-// Array is only available on non-protected platforms because it requires
-// AsRef<[u8]> and Deref<Target = [u8]>, which need the memory to stay accessible
-// without a guard.
-#[cfg(not(unix))]
-impl Array for PrivateKeyInner {}
-
 impl Hash for PrivateKeyInner {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let guard = self.raw.expose();
@@ -110,23 +104,6 @@ impl Ord for PrivateKeyInner {
 impl PartialOrd for PrivateKeyInner {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
-    }
-}
-
-// AsRef and Deref are only available on non-protected platforms because
-// protected memory requires holding a guard to keep the memory accessible.
-#[cfg(not(unix))]
-impl AsRef<[u8]> for PrivateKeyInner {
-    fn as_ref(&self) -> &[u8] {
-        &*self.raw.expose()
-    }
-}
-
-#[cfg(not(unix))]
-impl Deref for PrivateKeyInner {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        &*self.raw.expose()
     }
 }
 
@@ -286,12 +263,6 @@ macro_rules! impl_private_key_wrapper {
 
         impl commonware_utils::Span for $name {}
 
-        // Array is only available on non-protected platforms because it requires
-        // AsRef<[u8]> and Deref<Target = [u8]>, which need the memory to stay accessible
-        // without a guard.
-        #[cfg(not(unix))]
-        impl commonware_utils::Array for $name {}
-
         impl core::hash::Hash for $name {
             fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
                 self.0.hash(state);
@@ -307,23 +278,6 @@ macro_rules! impl_private_key_wrapper {
         impl PartialOrd for $name {
             fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
                 Some(self.cmp(other))
-            }
-        }
-
-        // AsRef and Deref are only available on non-protected platforms because
-        // protected memory requires holding a guard to keep the memory accessible.
-        #[cfg(not(unix))]
-        impl AsRef<[u8]> for $name {
-            fn as_ref(&self) -> &[u8] {
-                self.0.as_ref()
-            }
-        }
-
-        #[cfg(not(unix))]
-        impl core::ops::Deref for $name {
-            type Target = [u8];
-            fn deref(&self) -> &[u8] {
-                &self.0
             }
         }
 

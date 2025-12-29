@@ -690,20 +690,6 @@ impl DealerPrivMsg {
     ///
     /// The share is wrapped in a `Secret` for secure handling.
     /// On Unix, this includes OS-level memory protection (mlock + mprotect).
-    ///
-    /// Note: This function is const on non-Unix platforms only.
-    #[cfg(not(unix))]
-    pub const fn new(share: Scalar) -> Self {
-        Self {
-            share: Secret::new(share),
-        }
-    }
-
-    /// Creates a new DealerPrivMsg with the given share.
-    ///
-    /// The share is wrapped in a `Secret` for secure handling.
-    /// On Unix, this includes OS-level memory protection (mlock + mprotect).
-    #[cfg(unix)]
     pub fn new(share: Scalar) -> Self {
         Self {
             share: Secret::new(share),
@@ -713,15 +699,6 @@ impl DealerPrivMsg {
     /// Temporarily exposes the share for reading.
     ///
     /// The returned guard re-protects the memory when dropped (on supported platforms).
-    #[cfg(not(unix))]
-    pub const fn expose_share(&self) -> SecretGuard<'_, Scalar> {
-        self.share.expose()
-    }
-
-    /// Temporarily exposes the share for reading.
-    ///
-    /// The returned guard re-protects the memory when dropped (on supported platforms).
-    #[cfg(unix)]
     pub fn expose_share(&self) -> SecretGuard<'_, Scalar> {
         self.share.expose()
     }
