@@ -147,6 +147,34 @@ jobs:
             echo "✓ MCP endpoint is accessible (HTTP $status)"
           fi
 
+      - name: Test D1 FTS search works
+        run: |
+          # Insert test data directly into D1
+          npx wrangler d1 execute commonware-mcp-search --local --command "INSERT INTO files (version, path, content) VALUES ('v0.0.1', 'test/example.rs', 'fn main() { println!(\"Hello world\"); }');"
+          npx wrangler d1 execute commonware-mcp-search --local --command "INSERT INTO indexed_versions (version) VALUES ('v0.0.1');"
+
+          # Verify FTS index was populated (via trigger)
+          result=$(npx wrangler d1 execute commonware-mcp-search --local --command "SELECT * FROM files_fts WHERE files_fts MATCH 'hello';" --json)
+          echo "FTS query result: $result"
+
+          if echo "$result" | grep -q "Hello"; then
+            echo "✓ FTS search found test data"
+          else
+            echo "ERROR: FTS search did not find test data"
+            exit 1
+          fi
+
+          # Test prefix matching
+          result=$(npx wrangler d1 execute commonware-mcp-search --local --command "SELECT * FROM files_fts WHERE files_fts MATCH '\"print\"*';" --json)
+          echo "FTS prefix query result: $result"
+
+          if echo "$result" | grep -q "println"; then
+            echo "✓ FTS prefix search works"
+          else
+            echo "ERROR: FTS prefix search failed"
+            exit 1
+          fi
+
       - name: Cleanup
         if: always()
         run: |
