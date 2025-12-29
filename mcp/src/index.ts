@@ -25,6 +25,7 @@ import {
   parseSitemap,
   parseWorkspaceMembers,
   parseCrateInfo,
+  sortVersionsDesc,
   stripCratePrefix,
 } from "./utils.ts";
 import pkg from "../package.json";
@@ -36,16 +37,10 @@ interface CrateInfo {
   description: string;
 }
 
-interface SitemapData {
-  versions: string[];
-  files: Record<string, string[]>; // version -> file paths (JSON-serializable)
-}
-
 // Constants
 const FILE_CACHE_TTL = 60 * 60 * 24 * 365; // 1 year (versioned files are immutable)
-const SITEMAP_CACHE_TTL = 60 * 60; // 1 hour
 const MAX_SEARCH_RESULTS = 50;
-const INDEX_BUILD_BATCH_SIZE = 50; // Larger batches for index building (one-time cost)
+const INDEX_BUILD_BATCH_SIZE = 50;
 const SEARCH_INDEX_EXTENSIONS = new Set(["rs", "md", "toml"]); // File types to index
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
@@ -61,8 +56,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "get_file",
       "Retrieve a file from the Commonware repository by its path. " +
-        "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
-        "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
+      "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
+      "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
       {
         path: z
           .string()
@@ -115,8 +110,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "search_code",
       "Search for a pattern across source code files in the Commonware repository. " +
-        "Returns matching files with relevant snippets. Useful for finding function definitions, " +
-        "usage patterns, or understanding how features are implemented.",
+      "Returns matching files with relevant snippets. Useful for finding function definitions, " +
+      "usage patterns, or understanding how features are implemented.",
       {
         query: z.string().describe("Search pattern (case-insensitive substring match)"),
         crate: z
@@ -317,14 +312,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "list_files",
       "List all files in a crate or directory. Useful for discovering the structure " +
-        "of a crate before fetching specific files.",
+      "of a crate before fetching specific files.",
       {
         crate: z
           .string()
           .optional()
           .describe(
             "Crate name (e.g., 'commonware-cryptography') or directory path. " +
-              "If omitted, lists top-level directories."
+            "If omitted, lists top-level directories."
           ),
         version: z.string().optional().describe("Version tag. Defaults to latest."),
       },
@@ -419,67 +414,38 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     return content;
   }
 
-  // Helper: Get latest version
+  // Helper: Get indexed versions from D1 (sorted descending)
+  private async getIndexedVersions(): Promise<string[]> {
+    const result = await this.env.SEARCH_DB.prepare("SELECT version FROM indexed_versions").all<{
+      version: string;
+    }>();
+
+    const versions = result.results.map((r) => r.version);
+    sortVersionsDesc(versions);
+    return versions;
+  }
+
+  // Helper: Get latest version (from indexed versions in D1)
   private async getLatestVersion(): Promise<string> {
-    const sitemap = await this.getSitemap();
-    return sitemap.versions[0];
+    const versions = await this.getIndexedVersions();
+    if (versions.length === 0) {
+      throw new Error("No indexed versions available");
+    }
+    return versions[0];
   }
 
-  // Helper: Get all versions from sitemap
+  // Helper: Get all indexed versions
   private async getVersions(): Promise<string[]> {
-    const sitemap = await this.getSitemap();
-    return sitemap.versions;
+    return this.getIndexedVersions();
   }
 
-  // Helper: Get file list for a version
+  // Helper: Get file list for a version (from D1)
   private async getFileList(version: string): Promise<string[]> {
-    const sitemap = await this.getSitemap();
-    return sitemap.files[version] || [];
-  }
+    const result = await this.env.SEARCH_DB.prepare("SELECT path FROM files WHERE version = ?")
+      .bind(version)
+      .all<{ path: string }>();
 
-  // Helper: Fetch sitemap.xml with Cache API caching
-  private async fetchSitemap(): Promise<string> {
-    const url = `${this.env.BASE_URL}/sitemap.xml`;
-    const cacheKey = new Request(url);
-    const cache = caches.default;
-
-    // Check cache first
-    const cachedResponse = await cache.match(cacheKey);
-    if (cachedResponse) {
-      return cachedResponse.text();
-    }
-
-    // Fetch from origin
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error("Failed to fetch sitemap");
-    }
-
-    // Cache the raw response
-    const xml = await response.text();
-    const cacheResponse = new Response(xml, {
-      headers: {
-        "Content-Type": "application/xml",
-        "Cache-Control": `public, max-age=${SITEMAP_CACHE_TTL}`,
-      },
-    });
-    await cache.put(cacheKey, cacheResponse);
-
-    return xml;
-  }
-
-  // Helper: Get parsed sitemap data
-  private async getSitemap(): Promise<SitemapData> {
-    const xml = await this.fetchSitemap();
-    const { versions, files } = parseSitemap(xml);
-
-    // Convert Map to plain object
-    const filesObj: Record<string, string[]> = {};
-    for (const [version, paths] of files) {
-      filesObj[version] = paths;
-    }
-
-    return { versions, files: filesObj };
+    return result.results.map((r) => r.path);
   }
 
   // Helper: Get crates list (individual Cargo.toml files are cached via fetchFile)
