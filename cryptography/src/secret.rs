@@ -120,7 +120,6 @@ mod implementation {
         }
 
         /// Creates a new `Secret`, returning an error on failure.
-        #[allow(clippy::undocumented_unsafe_blocks)]
         pub fn try_new(value: T) -> Result<Self, &'static str> {
             let page_size = page_size();
             let type_size = core::mem::size_of::<T>();
@@ -348,6 +347,7 @@ mod implementation {
     impl<T> Secret<T> {
         /// Creates a new `Secret` wrapping the given value.
         #[inline]
+        #[allow(clippy::missing_const_for_fn)]
         pub fn new(value: T) -> Self {
             Self(MaybeUninit::new(value))
         }
