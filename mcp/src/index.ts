@@ -25,6 +25,7 @@ import {
   parseWorkspaceMembers,
   parseCrateInfo,
 } from "./utils.ts";
+import pkg from "../package.json";
 
 // Types
 interface CrateInfo {
@@ -49,11 +50,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
 
   async init() {
-    // Initialize server with version from workspace Cargo.toml
-    const latestVersion = await this.getLatestVersion();
     this.server = new McpServer({
       name: "commonware",
-      version: latestVersion.replace(/^v/, ""),
+      version: pkg.version,
     });
 
     // Tool: Get a specific file by path
@@ -489,18 +488,6 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   }
 }
 
-// Helper: Fetch latest version from sitemap (for health check)
-async function getLatestVersionFromSitemap(baseUrl: string): Promise<string> {
-  const response = await fetch(`${baseUrl}/sitemap.xml`);
-  if (!response.ok) {
-    return "unknown";
-  }
-
-  const xml = await response.text();
-  const { versions } = parseSitemap(xml);
-  return versions[0]?.replace(/^v/, "") || "unknown";
-}
-
 // Worker fetch handler
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
@@ -508,11 +495,10 @@ export default {
 
     // Health check endpoint
     if (url.pathname === "/health") {
-      const version = await getLatestVersionFromSitemap(env.BASE_URL);
       return new Response(
         JSON.stringify({
           name: "commonware-mcp",
-          version,
+          version: pkg.version,
           status: "ok",
         }),
         {

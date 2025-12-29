@@ -48,6 +48,7 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 * [docs](./docs): Access information about Commonware at https://commonware.xyz.
 * [docker](./docker): Dockerfiles used for cross-compilation and CI.
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
+* [mcp](./mcp/README.md): Expose Commonware source code to AI assistants via the Model Context Protocol.
 * [pipeline](./pipeline): Mechanisms under development.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 
