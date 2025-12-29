@@ -38,8 +38,8 @@ CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN
   INSERT INTO files_fts(rowid, path, content) VALUES (new.id, new.path, new.content);
 END;
 
--- Track which versions have been indexed
-CREATE TABLE IF NOT EXISTS indexed_versions (
+-- Track which versions are available
+CREATE TABLE IF NOT EXISTS versions (
   version TEXT PRIMARY KEY,
   indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
