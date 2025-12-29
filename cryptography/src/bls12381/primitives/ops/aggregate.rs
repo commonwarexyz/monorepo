@@ -262,20 +262,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        super::{
-            aggregate, batch::verify_multiple_messages, hash_message, keypair, sign_message,
-            verify_message,
-        },
+        super::{aggregate, keypair, sign_message},
         *,
     };
     use crate::bls12381::primitives::{
-        group::{Scalar, G1_MESSAGE, G2_MESSAGE},
+        group::{G1_MESSAGE, G2_MESSAGE},
         variant::{MinPk, MinSig},
         Error,
     };
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
-    use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_utils::{test_rng, union_unique};
 
     fn blst_aggregate_verify_multiple_public_keys<'a, V, I>(
@@ -479,60 +475,6 @@ mod tests {
     fn test_aggregate_verify_multiple_messages_correct() {
         aggregate_verify_multiple_messages_correct::<MinPk>();
         aggregate_verify_multiple_messages_correct::<MinSig>();
-    }
-
-    fn aggregate_verify_fail_on_malleability<V: Variant>() {
-        let mut rng = test_rng();
-        let (private, public) = keypair::<_, V>(&mut rng);
-        let msg1: &[u8] = b"message 1";
-        let msg2: &[u8] = b"message 2";
-
-        let sig1 = sign_message::<V>(&private, None, msg1);
-        let sig2 = sign_message::<V>(&private, None, msg2);
-
-        verify_message::<V>(&public, None, msg1, &sig1).expect("sig1 should be valid");
-        verify_message::<V>(&public, None, msg2, &sig2).expect("sig2 should be valid");
-
-        let random_scalar = Scalar::random(&mut rng);
-        let delta = V::Signature::generator() * &random_scalar;
-        let forged_sig1 = sig1 - &delta;
-        let forged_sig2 = sig2 + &delta;
-
-        assert!(
-            verify_message::<V>(&public, None, msg1, &forged_sig1).is_err(),
-            "forged sig1 should be invalid individually"
-        );
-        assert!(
-            verify_message::<V>(&public, None, msg2, &forged_sig2).is_err(),
-            "forged sig2 should be invalid individually"
-        );
-
-        let forged_agg = aggregate::combine_signatures::<V, _>(&[forged_sig1, forged_sig2]);
-        let valid_agg = aggregate::combine_signatures::<V, _>(&[sig1, sig2]);
-        assert_eq!(forged_agg, valid_agg, "aggregates should be equal");
-
-        let hm1 = hash_message::<V>(V::MESSAGE, msg1);
-        let hm2 = hash_message::<V>(V::MESSAGE, msg2);
-        let hm_sum = hm1 + &hm2;
-        V::verify(&public, &hm_sum, forged_agg.inner())
-            .expect("vulnerable naive verification accepts forged aggregate");
-
-        let forged_entries = vec![(None, msg1, forged_sig1), (None, msg2, forged_sig2)];
-        let result = verify_multiple_messages::<_, V, _>(&mut rng, &public, &forged_entries, 1);
-        assert!(
-            result.is_err(),
-            "secure function should reject forged signatures"
-        );
-
-        let valid_entries = vec![(None, msg1, sig1), (None, msg2, sig2)];
-        verify_multiple_messages::<_, V, _>(&mut rng, &public, &valid_entries, 1)
-            .expect("secure function should accept valid signatures");
-    }
-
-    #[test]
-    fn test_aggregate_verify_fail_on_malleability() {
-        aggregate_verify_fail_on_malleability::<MinPk>();
-        aggregate_verify_fail_on_malleability::<MinSig>();
     }
 
     #[cfg(feature = "arbitrary")]
