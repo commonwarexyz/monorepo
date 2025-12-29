@@ -481,13 +481,15 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     fileType: string,
     limit: number
   ): Promise<Array<{ file: string; matches: string[] }>> {
-    // Escape special FTS5 characters and add prefix matching
-    const ftsQuery = this.buildFTSQuery(query);
+    // Build FTS query and get words for snippet matching
+    const parsed = this.buildFTSQuery(query);
 
     // Handle queries with no valid search terms
-    if (ftsQuery === null) {
+    if (parsed === null) {
       return [];
     }
+
+    const { ftsQuery, words: queryWords } = parsed;
 
     // Build the SQL query with filters
     let sql = `
@@ -522,12 +524,6 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       .all<{ path: string; content: string }>();
 
     // Extract snippets with context
-    // Use same word extraction as FTS5 query for consistent matching
-    const queryWords = query
-      .replace(/["()*:^]/g, " ")
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((w) => w.length > 0);
     const output: Array<{ file: string; matches: string[] }> = [];
 
     for (const row of results.results) {
@@ -562,20 +558,24 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   }
 
   // Helper: Build FTS5 query with prefix matching
-  // Returns null if query has no valid search terms
-  private buildFTSQuery(query: string): string | null {
+  // Returns null if query has no valid search terms, otherwise returns
+  // the FTS query string and lowercase words for snippet matching
+  private buildFTSQuery(query: string): { ftsQuery: string; words: string[] } | null {
     // Escape special FTS5 characters: " ( ) * : ^
     const escaped = query.replace(/["()*:^]/g, " ").trim();
 
-    // Split into words and add prefix matching to each
+    // Split into words
     const words = escaped.split(/\s+/).filter((w) => w.length > 0);
 
     if (words.length === 0) {
       return null;
     }
 
-    // Use prefix matching for each word
-    return words.map((w) => `"${w}"*`).join(" ");
+    // FTS query uses prefix matching for each word
+    const ftsQuery = words.map((w) => `"${w}"*`).join(" ");
+
+    // Return lowercase words for snippet matching
+    return { ftsQuery, words: words.map((w) => w.toLowerCase()) };
   }
 }
 
@@ -643,15 +643,16 @@ async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: s
     indexed.push(version);
   }
 
-  // Prune versions not in sitemap
+  // Prune versions not in sitemap (delete version record first to prevent
+  // queries from finding a version with no files)
   const pruned: string[] = [];
   for (const oldVersion of indexedSet) {
     if (!sitemapSet.has(oldVersion)) {
-      await session.prepare("DELETE FROM files WHERE version = ?").bind(oldVersion).run();
       await session
         .prepare("DELETE FROM indexed_versions WHERE version = ?")
         .bind(oldVersion)
         .run();
+      await session.prepare("DELETE FROM files WHERE version = ?").bind(oldVersion).run();
       pruned.push(oldVersion);
     }
   }
