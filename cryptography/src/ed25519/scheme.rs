@@ -1,4 +1,4 @@
-use crate::{Array, BatchVerifier};
+use crate::{Array, BatchVerifier, Secret};
 #[cfg(not(feature = "std"))]
 use alloc::{
     borrow::{Cow, ToOwned},
@@ -17,7 +17,6 @@ use ed25519_consensus::{self, VerificationKey};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::borrow::{Cow, ToOwned};
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -25,10 +24,10 @@ const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
 
 /// Ed25519 Private Key.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone)]
 pub struct PrivateKey {
-    raw: [u8; PRIVATE_KEY_LENGTH],
-    key: ed25519_consensus::SigningKey,
+    raw: Secret<[u8; PRIVATE_KEY_LENGTH]>,
+    key: Secret<ed25519_consensus::SigningKey>,
 }
 
 impl crate::PrivateKey for PrivateKey {}
@@ -42,10 +41,10 @@ impl crate::Signer for PrivateKey {
     }
 
     fn public_key(&self) -> Self::PublicKey {
-        let raw = self.key.verification_key().to_bytes();
+        let raw = self.key.expose().verification_key().to_bytes();
         Self::PublicKey {
             raw,
-            key: self.key.verification_key().to_owned(),
+            key: self.key.expose().verification_key().to_owned(),
         }
     }
 }
@@ -56,7 +55,7 @@ impl PrivateKey {
         let payload = namespace
             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
             .unwrap_or_else(|| Cow::Borrowed(msg));
-        let sig = self.key.sign(&payload);
+        let sig = self.key.expose().sign(&payload);
         Signature::from(sig)
     }
 }
@@ -65,13 +64,16 @@ impl Random for PrivateKey {
     fn random(rng: impl CryptoRngCore) -> Self {
         let key = ed25519_consensus::SigningKey::new(rng);
         let raw = key.to_bytes();
-        Self { raw, key }
+        Self {
+            raw: Secret::new(raw),
+            key: Secret::new(key),
+        }
     }
 }
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
+        self.raw.expose().write(buf);
     }
 }
 
@@ -81,7 +83,10 @@ impl Read for PrivateKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let key = ed25519_consensus::SigningKey::from(raw);
-        Ok(Self { raw, key })
+        Ok(Self {
+            raw: Secret::new(raw),
+            key: Secret::new(key),
+        })
     }
 }
 
@@ -97,7 +102,7 @@ impl Eq for PrivateKey {}
 
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.hash(state);
+        self.raw.expose().hash(state);
     }
 }
 
@@ -109,7 +114,7 @@ impl PartialEq for PrivateKey {
 
 impl Ord for PrivateKey {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.cmp(&other.raw)
+        self.raw.expose().cmp(other.raw.expose())
     }
 }
 
@@ -121,33 +126,36 @@ impl PartialOrd for PrivateKey {
 
 impl AsRef<[u8]> for PrivateKey {
     fn as_ref(&self) -> &[u8] {
-        &self.raw
+        self.raw.expose()
     }
 }
 
 impl Deref for PrivateKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.raw
+        self.raw.expose()
     }
 }
 
 impl From<ed25519_consensus::SigningKey> for PrivateKey {
     fn from(key: ed25519_consensus::SigningKey) -> Self {
         let raw = key.to_bytes();
-        Self { raw, key }
+        Self {
+            raw: Secret::new(raw),
+            key: Secret::new(key),
+        }
     }
 }
 
 impl Debug for PrivateKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        f.write_str("[REDACTED]")
     }
 }
 
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        f.write_str("[REDACTED]")
     }
 }
 
@@ -170,10 +178,10 @@ pub struct PublicKey {
 
 impl From<PrivateKey> for PublicKey {
     fn from(value: PrivateKey) -> Self {
-        let raw = value.key.verification_key().to_bytes();
+        let raw = value.key.expose().verification_key().to_bytes();
         Self {
             raw,
-            key: value.key.verification_key(),
+            key: value.key.expose().verification_key(),
         }
     }
 }

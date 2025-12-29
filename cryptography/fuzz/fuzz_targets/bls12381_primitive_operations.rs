@@ -417,10 +417,7 @@ fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
 }
 
 fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> {
-    Ok(Share {
-        index: u.int_in_range(1..=100)?,
-        private: arbitrary_scalar(u)?,
-    })
+    Ok(Share::new(u.int_in_range(1..=100)?, arbitrary_scalar(u)?))
 }
 
 fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbitrary::Error> {

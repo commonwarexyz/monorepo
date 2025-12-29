@@ -143,7 +143,7 @@ pub fn partial_sign_proof_of_possession<V: Variant>(
 ) -> PartialSignature<V> {
     // Sign the public key
     let sig = sign::<V>(
-        &private.private,
+        private.as_ref(),
         V::PROOF_OF_POSSESSION,
         &sharing.public().encode(),
     );
@@ -176,7 +176,7 @@ pub fn partial_sign_message<V: Variant>(
     namespace: Option<&[u8]>,
     message: &[u8],
 ) -> PartialSignature<V> {
-    let sig = sign_message::<V>(&private.private, namespace, message);
+    let sig = sign_message::<V>(private.as_ref(), namespace, message);
     PartialSignature {
         value: sig,
         index: private.index,
@@ -1445,7 +1445,7 @@ mod tests {
 
         // Corrupt a share
         let share = shares.get_mut(3).unwrap();
-        share.private = Private::random(&mut rand::thread_rng());
+        *share.private_mut().expose_mut() = Private::random(&mut rand::thread_rng());
 
         // Generate the partial signatures
         let namespace = Some(&b"test"[..]);
@@ -1504,7 +1504,7 @@ mod tests {
 
         // Corrupt the second share's private key
         let corrupted_index = 1;
-        shares[corrupted_index].private = Private::random(&mut rng);
+        *shares[corrupted_index].private_mut().expose_mut() = Private::random(&mut rng);
 
         // Generate partial signatures
         let partials: Vec<_> = shares
@@ -1544,7 +1544,7 @@ mod tests {
         // Corrupt shares at indices 1 and 3
         let corrupted_indices = vec![1, 3];
         for &idx in &corrupted_indices {
-            shares[idx].private = Private::random(&mut rng);
+            *shares[idx].private_mut().expose_mut() = Private::random(&mut rng);
         }
 
         // Generate partial signatures
@@ -1639,7 +1639,7 @@ mod tests {
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
 
-        shares[0].private = Private::random(&mut rng);
+        *shares[0].private_mut().expose_mut() = Private::random(&mut rng);
 
         let partials: Vec<_> = shares
             .iter()
@@ -1667,7 +1667,7 @@ mod tests {
         let msg = b"hello";
 
         let corrupted_index = n - 1;
-        shares[corrupted_index as usize].private = Private::random(&mut rng);
+        *shares[corrupted_index as usize].private_mut().expose_mut() = Private::random(&mut rng);
 
         let partials: Vec<_> = shares
             .iter()

@@ -5,6 +5,7 @@ cfg_if::cfg_if! {
         use alloc::borrow::ToOwned;
     }
 }
+use crate::Secret;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
@@ -16,34 +17,34 @@ use core::{
 };
 use p256::ecdsa::{SigningKey, VerifyingKey};
 use rand_core::CryptoRngCore;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::ZeroizeOnDrop;
 
 pub const CURVE_NAME: &str = "secp256r1";
 pub const PRIVATE_KEY_LENGTH: usize = 32;
 pub const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 
 /// Internal Secp256r1 Private Key storage.
-#[derive(Clone, Eq, PartialEq, ZeroizeOnDrop)]
+///
+/// Note: `SigningKey` implements `ZeroizeOnDrop` (not `Zeroize`), so it cannot be wrapped
+/// in `Secret<T>`. The `raw` bytes are wrapped in `Secret` for zeroization, while `key`
+/// relies on its own `ZeroizeOnDrop` implementation.
+#[derive(Clone, Eq, PartialEq)]
 pub struct PrivateKeyInner {
-    raw: [u8; PRIVATE_KEY_LENGTH],
+    raw: Secret<[u8; PRIVATE_KEY_LENGTH]>,
     pub key: SigningKey,
 }
 
-impl Zeroize for PrivateKeyInner {
-    fn zeroize(&mut self) {
-        self.raw.zeroize();
-
-        // skip zeroizing `key` here, `ZeroizeOnDrop` is implemented for `SigningKey` and
-        // can't be called directly.
-        //
-        // Reference: <https://github.com/RustCrypto/signatures/blob/a83c494216b6f3dacba5d4e4376785e2ea142044/ecdsa/src/signing.rs#L487-L493>
-    }
-}
+// SAFETY: Both `raw` (via Secret) and `key` (via its own ZeroizeOnDrop) are zeroized on drop.
+impl ZeroizeOnDrop for PrivateKeyInner {}
 
 impl PrivateKeyInner {
     pub fn new(key: SigningKey) -> Self {
-        let raw = key.to_bytes().into();
-        Self { raw, key }
+        let bytes = key.to_bytes();
+        let raw: [u8; PRIVATE_KEY_LENGTH] = bytes.into();
+        Self {
+            raw: Secret::new(raw),
+            key,
+        }
     }
 }
 
@@ -55,7 +56,7 @@ impl Random for PrivateKeyInner {
 
 impl Write for PrivateKeyInner {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
+        self.raw.expose().write(buf);
     }
 }
 
@@ -70,7 +71,10 @@ impl Read for PrivateKeyInner {
         #[cfg(not(feature = "std"))]
         let key = result
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-        Ok(Self { raw, key })
+        Ok(Self {
+            raw: Secret::new(raw),
+            key,
+        })
     }
 }
 
@@ -84,13 +88,13 @@ impl Array for PrivateKeyInner {}
 
 impl Hash for PrivateKeyInner {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.hash(state);
+        self.raw.expose().hash(state);
     }
 }
 
 impl Ord for PrivateKeyInner {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.cmp(&other.raw)
+        self.raw.expose().cmp(other.raw.expose())
     }
 }
 
@@ -102,14 +106,14 @@ impl PartialOrd for PrivateKeyInner {
 
 impl AsRef<[u8]> for PrivateKeyInner {
     fn as_ref(&self) -> &[u8] {
-        &self.raw
+        self.raw.expose()
     }
 }
 
 impl Deref for PrivateKeyInner {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.raw
+        self.raw.expose()
     }
 }
 
@@ -121,13 +125,13 @@ impl From<SigningKey> for PrivateKeyInner {
 
 impl Debug for PrivateKeyInner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        f.write_str("[REDACTED]")
     }
 }
 
 impl Display for PrivateKeyInner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        f.write_str("[REDACTED]")
     }
 }
 

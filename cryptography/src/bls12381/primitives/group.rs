@@ -11,6 +11,7 @@
 //! is already taken care of for you if you use the provided `deserialize` function.
 
 use super::variant::Variant;
+use crate::Secret;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
@@ -493,33 +494,52 @@ impl Random for Scalar {
 
 /// A share of a threshold signing key.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
     /// The scalar corresponding to the share's secret.
-    pub private: Private,
+    private: Secret<Private>,
 }
 
 impl AsRef<Private> for Share {
     fn as_ref(&self) -> &Private {
-        &self.private
+        self.private.expose()
     }
 }
 
 impl Share {
+    /// Creates a new Share with the given index and private key.
+    ///
+    /// The private key is wrapped in a `Secret` for secure handling.
+    pub const fn new(index: u32, private: Private) -> Self {
+        Self {
+            index,
+            private: Secret::new(private),
+        }
+    }
+
     /// Returns the public key corresponding to the share.
     ///
     /// This can be verified against the public polynomial.
     pub fn public<V: Variant>(&self) -> V::Public {
-        V::Public::generator() * &self.private
+        V::Public::generator() * self.private.expose()
+    }
+
+    /// Returns a reference to the wrapped private key.
+    pub const fn private(&self) -> &Secret<Private> {
+        &self.private
+    }
+
+    /// Returns a mutable reference to the wrapped private key.
+    pub const fn private_mut(&mut self) -> &mut Secret<Private> {
+        &mut self.private
     }
 }
 
 impl Write for Share {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.index).write(buf);
-        self.private.write(buf);
+        self.private.expose().write(buf);
     }
 }
 
@@ -529,25 +549,40 @@ impl Read for Share {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let index = UInt::read(buf)?.into();
         let private = Private::read(buf)?;
-        Ok(Self { index, private })
+        Ok(Self {
+            index,
+            private: Secret::new(private),
+        })
     }
 }
 
 impl EncodeSize for Share {
     fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + self.private.encode_size()
+        UInt(self.index).encode_size() + self.private.expose().encode_size()
     }
 }
 
 impl Display for Share {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Share(index={}, private={})", self.index, self.private)
+        write!(f, "Share(index={}, private=[REDACTED])", self.index)
     }
 }
 
 impl Debug for Share {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Share(index={}, private={})", self.index, self.private)
+        write!(f, "Share(index={}, private=[REDACTED])", self.index)
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Share {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let index = u.arbitrary()?;
+        let private = Private::arbitrary(u)?;
+        Ok(Self {
+            index,
+            private: Secret::new(private),
+        })
     }
 }
 
@@ -1448,10 +1483,7 @@ mod tests {
             let scalar = Scalar::random(&mut rng);
             let g1 = G1::generator() * &scalar;
             let g2 = G2::generator() * &scalar;
-            let share = Share {
-                index: scalar_set.len() as u32,
-                private: scalar.clone(),
-            };
+            let share = Share::new(scalar_set.len() as u32, scalar.clone());
 
             scalar_set.insert(scalar);
             g1_set.insert(g1);

@@ -30,7 +30,7 @@ use super::primitives::{
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{Array, BatchVerifier, Signer as _};
+use crate::{Array, BatchVerifier, Secret, Signer as _};
 #[cfg(not(feature = "std"))]
 use alloc::borrow::Cow;
 #[cfg(not(feature = "std"))]
@@ -49,20 +49,19 @@ use core::{
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::borrow::Cow;
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "bls12381";
 
 /// BLS12-381 private key.
-#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct PrivateKey {
-    raw: [u8; group::PRIVATE_KEY_LENGTH],
-    key: group::Private,
+    raw: Secret<[u8; group::PRIVATE_KEY_LENGTH]>,
+    key: Secret<Scalar>,
 }
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
+        self.raw.expose().write(buf);
     }
 }
 
@@ -73,7 +72,10 @@ impl Read for PrivateKey {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let key = group::Private::decode(raw.as_ref())
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
-        Ok(Self { raw, key })
+        Ok(Self {
+            raw: Secret::new(raw),
+            key: Secret::new(key),
+        })
     }
 }
 
@@ -87,13 +89,13 @@ impl Array for PrivateKey {}
 
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.hash(state);
+        self.raw.expose().hash(state);
     }
 }
 
 impl Ord for PrivateKey {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.cmp(&other.raw)
+        self.raw.expose().cmp(other.raw.expose())
     }
 }
 
@@ -105,33 +107,36 @@ impl PartialOrd for PrivateKey {
 
 impl AsRef<[u8]> for PrivateKey {
     fn as_ref(&self) -> &[u8] {
-        &self.raw
+        self.raw.expose()
     }
 }
 
 impl Deref for PrivateKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.raw
+        self.raw.expose()
     }
 }
 
 impl From<Scalar> for PrivateKey {
     fn from(key: Scalar) -> Self {
         let raw = key.encode_fixed();
-        Self { raw, key }
+        Self {
+            raw: Secret::new(raw),
+            key: Secret::new(key),
+        }
     }
 }
 
 impl Debug for PrivateKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        f.write_str("[REDACTED]")
     }
 }
 
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        f.write_str("[REDACTED]")
     }
 }
 
@@ -142,7 +147,7 @@ impl crate::Signer for PrivateKey {
     type PublicKey = PublicKey;
 
     fn public_key(&self) -> Self::PublicKey {
-        PublicKey::from(ops::compute_public::<MinPk>(&self.key))
+        PublicKey::from(ops::compute_public::<MinPk>(self.key.expose()))
     }
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
@@ -153,7 +158,7 @@ impl crate::Signer for PrivateKey {
 impl PrivateKey {
     #[inline(always)]
     fn sign_inner(&self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
-        ops::sign_message::<MinPk>(&self.key, namespace, message).into()
+        ops::sign_message::<MinPk>(self.key.expose(), namespace, message).into()
     }
 }
 
@@ -161,7 +166,10 @@ impl Random for PrivateKey {
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let (private, _) = ops::keypair::<_, MinPk>(&mut rng);
         let raw = private.encode_fixed();
-        Self { raw, key: private }
+        Self {
+            raw: Secret::new(raw),
+            key: Secret::new(private),
+        }
     }
 }
 
