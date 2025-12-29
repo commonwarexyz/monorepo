@@ -131,6 +131,19 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           ),
       },
       async ({ query, crate, file_type, version, max_results }) => {
+        // Trigram requires at least 3 characters
+        if (query.trim().length < 3) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error: Query must be at least 3 characters`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
         // Clamp max_results to valid range (negative LIMIT in SQLite means no limit)
         const limit = Math.max(1, Math.min(max_results, MAX_SEARCH_RESULTS));
 
@@ -498,17 +511,19 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     `;
     const params: (string | number)[] = [ftsQuery, version];
 
-    // Add crate filter
+    // Add crate filter (escape LIKE wildcards)
     if (crate) {
       const folderName = stripCratePrefix(crate);
-      sql += " AND f.path LIKE ?";
-      params.push(`${folderName}/%`);
+      const escaped = folderName.replace(/[%_\\]/g, "\\$&");
+      sql += " AND f.path LIKE ? ESCAPE '\\'";
+      params.push(`${escaped}/%`);
     }
 
-    // Add file type filter
+    // Add file type filter (escape LIKE wildcards)
     if (fileType !== "all") {
-      sql += " AND f.path LIKE ?";
-      params.push(`%.${fileType}`);
+      const escaped = fileType.replace(/[%_\\]/g, "\\$&");
+      sql += " AND f.path LIKE ? ESCAPE '\\'";
+      params.push(`%.${escaped}`);
     }
 
     // Order by relevance and limit
