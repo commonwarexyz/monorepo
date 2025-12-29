@@ -66,13 +66,15 @@ All work is coordinated via the [tracker](https://github.com/orgs/commonwarexyz/
 
 Connect your LLM to the Commonware Library via [MCP](https://modelcontextprotocol.io) at https://mcp.commonware.xyz:
 
+### Claude Code
+
 ```bash
-# Claude Code
 claude mcp add --transport http commonware https://mcp.commonware.xyz
 ```
 
+### Cursor, Windsurf, etc.
+
 ```json
-// Cursor, Windsurf, etc.
 {
   "mcpServers": {
     "commonware": {
