@@ -88,7 +88,9 @@ export function parseSitemap(xml: string): { versions: string[]; files: Map<stri
 }
 
 /**
- * Parse workspace members from a Cargo.toml content string.
+ * Parse workspace member paths from a Cargo.toml content string.
+ * Returns folder paths (e.g., "cryptography", "examples/chat"), not crate names.
+ * Use parseCrateInfo to get the actual crate name from each member's Cargo.toml.
  */
 export function parseWorkspaceMembers(cargoToml: string): string[] {
   const membersMatch = cargoToml.match(/members\s*=\s*\[([\s\S]*?)\]/);

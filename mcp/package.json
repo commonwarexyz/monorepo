@@ -1,7 +1,7 @@
 {
-  "name": "commonware-mcp-server",
+  "name": "commonware-mcp",
   "version": "0.0.1",
-  "description": "MCP server for the Commonware Library - exposes source code and documentation to AI assistants",
+  "description": "MCP server for the Commonware Library",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",

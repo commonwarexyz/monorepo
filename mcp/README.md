@@ -95,7 +95,7 @@ The server uses Cloudflare's [Agents SDK](https://developers.cloudflare.com/agen
 
 - **Durable Objects**: Maintains persistent connections for MCP clients
 - **Sitemap-based discovery**: Parses `commonware.xyz/sitemap.xml` to discover available files
-- **Caching**: All file content cached for 1 year (versioned files are immutable); sitemap and crate data cached for 1 hour
+- **Caching**: Files cached for 1 year (immutable); sitemap cached for 1 hour
 
 ### Endpoints
 
