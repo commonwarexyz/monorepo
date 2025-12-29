@@ -1,4 +1,4 @@
-name: MCP Server
+name: MCP
 
 on:
   push:
