@@ -109,10 +109,9 @@ npx wrangler workflows trigger commonware-mcp
 The server uses Cloudflare's [Agents SDK](https://developers.cloudflare.com/agents/) with the `McpAgent` class:
 
 - **Durable Objects**: Maintains persistent connections for MCP clients
-- **Sitemap-based discovery**: Parses `commonware.xyz/sitemap.xml` to discover available files
-- **D1 + FTS5**: Full-text search powered by SQLite FTS5 for fast code search
-- **Cron indexing**: Hourly scheduled task indexes new versions and prunes old ones
-- **Caching**: Files cached indefinitely (immutable); sitemap cached for 1 hour
+- **Sitemap-based discovery**: Parses `commonware.xyz/sitemap.xml` to discover available versions
+- **D1 + FTS5**: Full-text search index and file storage powered by SQLite FTS5
+- **Cron indexing**: Hourly scheduled task syncs indexed versions with sitemap
 
 ### Endpoints
 

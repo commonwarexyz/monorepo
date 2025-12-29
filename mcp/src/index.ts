@@ -38,7 +38,6 @@ interface CrateInfo {
 }
 
 // Constants
-const FILE_CACHE_TTL = 60 * 60 * 24 * 365; // 1 year (versioned files are immutable)
 const MAX_SEARCH_RESULTS = 50;
 const INDEX_BUILD_BATCH_SIZE = 50;
 const SEARCH_INDEX_EXTENSIONS = new Set(["rs", "md", "toml"]); // File types to index
@@ -383,35 +382,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     );
   }
 
-  // Helper: Fetch file with Cache API caching (versioned files are immutable)
+  // Helper: Fetch file from commonware.xyz
   private async fetchFile(version: string, path: string): Promise<string | null> {
     const url = `${this.env.BASE_URL}/code/${version}/${path}`;
-    const cacheKey = new Request(url);
-    const cache = caches.default;
-
-    // Check cache first
-    const cachedResponse = await cache.match(cacheKey);
-    if (cachedResponse) {
-      return cachedResponse.text();
-    }
-
-    // Fetch from origin
     const response = await fetch(url);
     if (!response.ok) {
       return null;
     }
-
-    // Cache the response (versioned files are immutable)
-    const content = await response.text();
-    const cacheResponse = new Response(content, {
-      headers: {
-        "Content-Type": "text/plain",
-        "Cache-Control": `public, max-age=${FILE_CACHE_TTL}`,
-      },
-    });
-    await cache.put(cacheKey, cacheResponse);
-
-    return content;
+    return response.text();
   }
 
   // Helper: Get indexed versions from D1 (sorted descending)
