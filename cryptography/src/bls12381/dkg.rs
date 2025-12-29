@@ -687,10 +687,7 @@ pub struct DealerPrivMsg {
 }
 
 impl DealerPrivMsg {
-    /// Creates a new DealerPrivMsg with the given share.
-    ///
-    /// The share is wrapped in a `Secret` for secure handling.
-    /// On Unix, this includes OS-level memory protection (mlock + mprotect).
+    /// Creates a new `DealerPrivMsg` with the given share.
     pub fn new(share: Scalar) -> Self {
         Self {
             share: Secret::new(share),
@@ -717,16 +714,14 @@ impl Read for DealerPrivMsg {
         buf: &mut impl bytes::Buf,
         _cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let share: Scalar = ReadExt::read(buf)?;
-        Ok(Self::new(share))
+        Ok(Self::new(ReadExt::read(buf)?))
     }
 }
 
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for DealerPrivMsg {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let share: Scalar = u.arbitrary()?;
-        Ok(Self::new(share))
+        Ok(Self::new(u.arbitrary()?))
     }
 }
 
@@ -1179,8 +1174,8 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     ) -> Result<(Self, DealerPubMsg<V>, Vec<(S::PublicKey, DealerPrivMsg)>), Error> {
         // Check that this dealer is defined in the round.
         info.dealer_index(&me.public_key())?;
-        let share = info
-            .unwrap_or_random_share(&mut rng, share.map(|x| x.private().expose(|s| s.clone())))?;
+        let share =
+            info.unwrap_or_random_share(&mut rng, share.map(|x| x.private.expose(|s| s.clone())))?;
         let my_poly = Poly::new_with_constant(&mut rng, info.degree(), share);
         let priv_msgs = info
             .players
@@ -1941,7 +1936,7 @@ mod test_plan {
                             let share = info
                                 .unwrap_or_random_share(
                                     &mut rng,
-                                    share.map(|s| s.private().expose(|k| k.clone())),
+                                    share.map(|s| s.private.expose(|k| k.clone())),
                                 )
                                 .expect("Failed to generate dealer share");
 

@@ -343,7 +343,10 @@ mod implementation {
         ///
         /// The closure uses a higher-ranked trait bound (`for<'a>`) to prevent
         /// the returned value from containing references to the secret data.
-        /// This ensures the reference cannot escape the closure scope.
+        /// This ensures the reference cannot escape the closure scope. However,
+        /// this does not prevent copying or cloning the secret value within
+        /// the closure (e.g., `secret.expose(|s| s.clone())`). Callers should
+        /// avoid leaking secrets through such patterns.
         #[inline]
         pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a T) -> R) -> R {
             let _guard = AccessGuard::acquire(
@@ -406,7 +409,10 @@ mod implementation {
         ///
         /// The closure uses a higher-ranked trait bound (`for<'a>`) to prevent
         /// the returned value from containing references to the secret data.
-        /// This ensures the reference cannot escape the closure scope.
+        /// This ensures the reference cannot escape the closure scope. However,
+        /// this does not prevent copying or cloning the secret value within
+        /// the closure (e.g., `secret.expose(|s| s.clone())`). Callers should
+        /// avoid leaking secrets through such patterns.
         #[inline]
         pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a T) -> R) -> R {
             // SAFETY: self.0 is always initialized (set in new, only zeroed in drop)

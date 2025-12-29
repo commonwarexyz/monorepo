@@ -498,7 +498,7 @@ pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
     /// The scalar corresponding to the share's secret.
-    private: Secret<Private>,
+    pub private: Secret<Private>,
 }
 
 impl Share {
@@ -517,11 +517,6 @@ impl Share {
     /// This can be verified against the public polynomial.
     pub fn public<V: Variant>(&self) -> V::Public {
         self.private.expose(|key| V::Public::generator() * key)
-    }
-
-    /// Returns a reference to the wrapped private key.
-    pub const fn private(&self) -> &Secret<Private> {
-        &self.private
     }
 }
 

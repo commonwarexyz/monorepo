@@ -143,7 +143,7 @@ pub fn partial_sign_proof_of_possession<V: Variant>(
 ) -> PartialSignature<V> {
     // Sign the public key
     let sig = private
-        .private()
+        .private
         .expose(|key| sign::<V>(key, V::PROOF_OF_POSSESSION, &sharing.public().encode()));
     PartialSignature {
         value: sig,
@@ -175,7 +175,7 @@ pub fn partial_sign_message<V: Variant>(
     message: &[u8],
 ) -> PartialSignature<V> {
     let sig = private
-        .private()
+        .private
         .expose(|key| sign_message::<V>(key, namespace, message));
     PartialSignature {
         value: sig,
