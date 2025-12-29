@@ -40,7 +40,6 @@ interface CrateInfo {
 // Constants
 const MAX_SEARCH_RESULTS = 50;
 const INDEX_BUILD_BATCH_SIZE = 50;
-const SEARCH_INDEX_EXTENSIONS = new Set(["rs", "md", "toml"]); // File types to index
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
@@ -112,7 +111,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         "Returns matching files with relevant snippets. Useful for finding function definitions, " +
         "usage patterns, or understanding how features are implemented.",
       {
-        query: z.string().describe("Search pattern (case-insensitive substring match)"),
+        query: z.string().describe("Search query (matches words with prefix matching)"),
         crate: z
           .string()
           .optional()
@@ -485,6 +484,11 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     // Escape special FTS5 characters and add prefix matching
     const ftsQuery = this.buildFTSQuery(query);
 
+    // Handle queries with no valid search terms
+    if (ftsQuery === null) {
+      return [];
+    }
+
     // Build the SQL query with filters
     let sql = `
       SELECT f.path, f.content
@@ -517,7 +521,11 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       .all<{ path: string; content: string }>();
 
     // Extract snippets with context
-    const queryLower = query.toLowerCase();
+    // Match any word from the query (matching FTS5 behavior)
+    const queryWords = query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((w) => w.length > 0);
     const output: Array<{ file: string; matches: string[] }> = [];
 
     for (const row of results.results) {
@@ -525,7 +533,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       const matches: string[] = [];
 
       for (let lineNum = 0; lineNum < lines.length; lineNum++) {
-        if (lines[lineNum].toLowerCase().includes(queryLower)) {
+        const lineLower = lines[lineNum].toLowerCase();
+        // Check if any query word appears in this line
+        if (queryWords.some((word) => lineLower.includes(word))) {
           // Include context (2 lines before and after)
           const start = Math.max(0, lineNum - 2);
           const end = Math.min(lines.length, lineNum + 3);
@@ -542,16 +552,16 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         }
       }
 
-      if (matches.length > 0) {
-        output.push({ file: row.path, matches });
-      }
+      // Always include file if FTS5 matched it
+      output.push({ file: row.path, matches });
     }
 
     return output;
   }
 
   // Helper: Build FTS5 query with prefix matching
-  private buildFTSQuery(query: string): string {
+  // Returns null if query has no valid search terms
+  private buildFTSQuery(query: string): string | null {
     // Escape special FTS5 characters: " ( ) * : ^
     const escaped = query.replace(/["()*:^]/g, " ").trim();
 
@@ -559,7 +569,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     const words = escaped.split(/\s+/).filter((w) => w.length > 0);
 
     if (words.length === 0) {
-      return '""'; // Empty query
+      return null;
     }
 
     // Use prefix matching for each word
@@ -595,16 +605,13 @@ async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: s
       continue;
     }
 
-    // Get files for this version
+    // Get all files for this version
     const versionFiles = files.get(version) || [];
-    const indexableFiles = versionFiles.filter((file) => {
-      const ext = file.split(".").pop() || "";
-      return SEARCH_INDEX_EXTENSIONS.has(ext);
-    });
 
-    // Fetch and index files in batches
-    for (let i = 0; i < indexableFiles.length; i += INDEX_BUILD_BATCH_SIZE) {
-      const batch = indexableFiles.slice(i, i + INDEX_BUILD_BATCH_SIZE);
+    // Fetch and index all files in batches
+    let filesIndexed = 0;
+    for (let i = 0; i < versionFiles.length; i += INDEX_BUILD_BATCH_SIZE) {
+      const batch = versionFiles.slice(i, i + INDEX_BUILD_BATCH_SIZE);
       const results = await Promise.all(
         batch.map(async (file) => {
           const fileUrl = `${env.BASE_URL}/code/${version}/${file}`;
@@ -617,25 +624,26 @@ async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: s
         })
       );
 
-      const statements = results
-        .filter((r) => r !== null)
-        .map((r) =>
-          env.SEARCH_DB.prepare(
-            "INSERT OR REPLACE INTO files (version, path, content) VALUES (?, ?, ?)"
-          ).bind(version, r.file, r.content)
-        );
+      const successfulResults = results.filter((r) => r !== null);
+      const statements = successfulResults.map((r) =>
+        env.SEARCH_DB.prepare(
+          "INSERT OR REPLACE INTO files (version, path, content) VALUES (?, ?, ?)"
+        ).bind(version, r.file, r.content)
+      );
 
       if (statements.length > 0) {
         await env.SEARCH_DB.batch(statements);
+        filesIndexed += statements.length;
       }
     }
 
-    // Mark as indexed
-    await env.SEARCH_DB.prepare("INSERT OR REPLACE INTO indexed_versions (version) VALUES (?)")
-      .bind(version)
-      .run();
-
-    indexed.push(version);
+    // Only mark as indexed if at least one file was successfully indexed
+    if (filesIndexed > 0) {
+      await env.SEARCH_DB.prepare("INSERT OR REPLACE INTO indexed_versions (version) VALUES (?)")
+        .bind(version)
+        .run();
+      indexed.push(version);
+    }
   }
 
   // Prune versions not in sitemap
