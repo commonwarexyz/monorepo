@@ -80,6 +80,37 @@ mod implementation {
         }
     }
 
+    /// Guard that unprotects memory on creation and re-protects on drop.
+    ///
+    /// This ensures memory is always re-protected, even during panic unwinding.
+    struct AccessGuard {
+        ptr: *mut libc::c_void,
+        size: usize,
+    }
+
+    impl AccessGuard {
+        /// Unprotects memory for read access, returning a guard that re-protects on drop.
+        ///
+        /// # Panics
+        ///
+        /// Panics if mprotect fails to unprotect the memory.
+        fn new(ptr: *mut libc::c_void, size: usize) -> Self {
+            // SAFETY: ptr points to valid mmap'd memory of the given size
+            let result = unsafe { libc::mprotect(ptr, size, libc::PROT_READ) };
+            assert_eq!(result, 0, "mprotect failed to unprotect memory");
+            Self { ptr, size }
+        }
+    }
+
+    impl Drop for AccessGuard {
+        fn drop(&mut self) {
+            // SAFETY: ptr and size are valid from the Secret that created us
+            unsafe {
+                libc::mprotect(self.ptr, self.size, libc::PROT_NONE);
+            }
+        }
+    }
+
     /// A wrapper for secret values with OS-level memory protection.
     ///
     /// Uses `mmap` for allocation instead of the global allocator because:
@@ -188,36 +219,7 @@ mod implementation {
         /// the closure panics.
         #[inline]
         pub fn expose<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-            // Scope guard that re-protects memory on drop (including panic unwinding)
-            struct ReprotectGuard {
-                ptr: *mut libc::c_void,
-                size: usize,
-            }
-
-            impl Drop for ReprotectGuard {
-                fn drop(&mut self) {
-                    // SAFETY: ptr and size are valid from the Secret that created us
-                    unsafe {
-                        libc::mprotect(self.ptr, self.size, libc::PROT_NONE);
-                    }
-                }
-            }
-
-            // SAFETY: self.ptr points to valid protected memory of self.size bytes
-            let result = unsafe {
-                libc::mprotect(
-                    self.ptr.as_ptr() as *mut libc::c_void,
-                    self.size,
-                    libc::PROT_READ,
-                )
-            };
-            assert_eq!(result, 0, "mprotect failed to unprotect memory");
-
-            // Create guard AFTER unprotecting - it will re-protect on drop
-            let _guard = ReprotectGuard {
-                ptr: self.ptr.as_ptr() as *mut libc::c_void,
-                size: self.size,
-            };
+            let _guard = AccessGuard::new(self.ptr.as_ptr() as *mut libc::c_void, self.size);
 
             // SAFETY: Memory is now readable and ptr is valid
             let value = unsafe { self.ptr.as_ref() };
