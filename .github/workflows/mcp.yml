@@ -3,13 +3,7 @@ name: MCP
 on:
   push:
     branches: ["main"]
-    paths:
-      - "mcp/**"
-      - ".github/workflows/mcp.yml"
   pull_request:
-    paths:
-      - "mcp/**"
-      - ".github/workflows/mcp.yml"
   merge_group:
 
 permissions:
@@ -18,10 +12,6 @@ permissions:
 concurrency:
   group: mcp-${{ github.head_ref || github.ref_name || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
-defaults:
-  run:
-    working-directory: mcp
 
 jobs:
   Lint:
