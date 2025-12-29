@@ -542,7 +542,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           matches.push(snippet);
 
           // Limit matches per file
-          if (matches.length >= 3) {
+          if (matches.length >= 10) {
             break;
           }
         }
