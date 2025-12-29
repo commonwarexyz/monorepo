@@ -10,7 +10,6 @@ use core::{
 };
 use p256::ecdsa::{SigningKey, VerifyingKey};
 use rand_core::CryptoRngCore;
-use zeroize::ZeroizeOnDrop;
 
 pub const CURVE_NAME: &str = "secp256r1";
 pub const PRIVATE_KEY_LENGTH: usize = 32;
