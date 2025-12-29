@@ -1,7 +1,5 @@
 //! A wrapper type for secret values that prevents accidental leakage.
 //!
-//! # Status
-//!
 //! `Secret<T>` provides the following guarantees:
 //! - Debug and Display always show `[REDACTED]` instead of the actual value
 //! - The inner value is zeroized on drop
@@ -10,8 +8,8 @@
 //!
 //! # Platform-Specific Behavior
 //!
-//! On Unix platforms, `Secret<T>`
-//! provides additional OS-level memory protection:
+//! On Unix platforms, `Secret<T>` provides additional OS-level memory
+//! protection:
 //! - Memory is locked to prevent swapping (mlock)
 //! - Memory is marked no-access except during expose() (mprotect)
 //!
@@ -128,7 +126,7 @@ mod implementation {
                         )
                         .is_ok()
                     {
-                        // We won the race - unprotect memory
+                        // We won the race, unprotect memory
                         // SAFETY: ptr points to valid mmap'd memory of the given size
                         if unsafe { libc::mprotect(ptr, size, libc::PROT_READ) } != 0 {
                             // Restore to PROTECTED before panicking. If the panic is caught,
@@ -137,13 +135,13 @@ mod implementation {
                             panic!("mprotect failed to unprotect memory");
                         }
 
-                        // Transition to readable state with 1 reader (state = 2)
+                        // Transition to readable state with 1 reader
                         readers.store(2, Ordering::Release);
                         break;
                     }
-                    // CAS failed, another thread is transitioning - retry
+                    // CAS failed, another thread is transitioning, retry
                 } else if state == TRANSITIONING {
-                    // Another thread is calling mprotect - spin wait
+                    // Another thread is calling mprotect, spin wait
                     core::hint::spin_loop();
                 } else {
                     // state >= 2: memory is readable, try to increment
@@ -153,7 +151,7 @@ mod implementation {
                     {
                         break;
                     }
-                    // CAS failed, state changed - retry
+                    // CAS failed, state changed, retry
                 }
             }
 
@@ -165,10 +163,10 @@ mod implementation {
         fn drop(&mut self) {
             loop {
                 let state = self.readers.load(Ordering::Acquire);
-                debug_assert!(state >= 2, "invalid reader state on drop");
+                assert!(state >= 2, "invalid reader state on drop");
 
                 if state == 2 {
-                    // We're the last reader - try to transition to protecting
+                    // We're the last reader, try to transition to protecting
                     if self
                         .readers
                         .compare_exchange(2, TRANSITIONING, Ordering::AcqRel, Ordering::Acquire)
@@ -188,7 +186,7 @@ mod implementation {
                         self.readers.store(PROTECTED, Ordering::Release);
                         break;
                     }
-                    // CAS failed - another reader appeared, retry
+                    // CAS failed, another reader appeared, retry
                 } else {
                     // state > 2: other readers exist, just decrement
                     if self
@@ -198,7 +196,7 @@ mod implementation {
                     {
                         break;
                     }
-                    // CAS failed, state changed - retry
+                    // CAS failed, state changed, retry
                 }
             }
         }
@@ -218,7 +216,7 @@ mod implementation {
     /// - Zeroized on drop
     ///
     /// Access requires explicit `expose()` call. Multiple concurrent readers are
-    /// supported via atomic reference counting - memory remains readable as long
+    /// supported via atomic reference counting, memory remains readable as long
     /// as at least one reader holds access.
     pub struct Secret<T> {
         ptr: NonNull<T>,
@@ -332,7 +330,7 @@ mod implementation {
         /// Exposes the secret value for read-only access within a closure.
         ///
         /// Memory is re-protected when all concurrent readers have finished,
-        /// even if a closure panics.
+        /// even if the closure panics.
         ///
         /// # Thread Safety
         ///
