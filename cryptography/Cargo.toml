@@ -43,7 +43,7 @@ version = "0.2.15"
 features = ["js"]
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
