@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   sortVersionsDesc,
   getLanguage,
+  stripCratePrefix,
   isValidPath,
   parseSitemap,
   parseWorkspaceMembers,
@@ -72,6 +73,28 @@ describe("getLanguage", () => {
     expect(getLanguage("file.txt")).toBe("");
     expect(getLanguage("file.json")).toBe("");
     expect(getLanguage("file")).toBe("");
+  });
+});
+
+describe("stripCratePrefix", () => {
+  it("should strip commonware- prefix from crate names", () => {
+    expect(stripCratePrefix("commonware-cryptography")).toBe("cryptography");
+    expect(stripCratePrefix("commonware-broadcast")).toBe("broadcast");
+    expect(stripCratePrefix("commonware-p2p")).toBe("p2p");
+  });
+
+  it("should strip prefix from paths", () => {
+    expect(stripCratePrefix("commonware-cryptography/src/lib.rs")).toBe("cryptography/src/lib.rs");
+  });
+
+  it("should not modify names without prefix", () => {
+    expect(stripCratePrefix("chat")).toBe("chat");
+    expect(stripCratePrefix("bridge")).toBe("bridge");
+    expect(stripCratePrefix("cryptography")).toBe("cryptography");
+  });
+
+  it("should only strip prefix at start", () => {
+    expect(stripCratePrefix("foo-commonware-bar")).toBe("foo-commonware-bar");
   });
 });
 
@@ -220,19 +243,19 @@ edition.workspace = true
 description = "Generate keys, sign arbitrary messages, and deterministically verify signatures."`;
 
     const info = parseCrateInfo(cargoToml, "cryptography");
-    expect(info.name).toBe("cryptography");
+    expect(info.name).toBe("commonware-cryptography");
     expect(info.description).toBe(
       "Generate keys, sign arbitrary messages, and deterministically verify signatures."
     );
   });
 
-  it("should strip commonware- prefix from name", () => {
+  it("should preserve commonware- prefix in name", () => {
     const cargoToml = `[package]
 name = "commonware-broadcast"
 description = "Disseminate data over a wide-area network."`;
 
     const info = parseCrateInfo(cargoToml, "broadcast");
-    expect(info.name).toBe("broadcast");
+    expect(info.name).toBe("commonware-broadcast");
   });
 
   it("should use fallback path when name is missing", () => {

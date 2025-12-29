@@ -6,7 +6,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server for the Comm
 
 | Tool | Description |
 |------|-------------|
-| `get_file` | Retrieve a specific file by path (e.g., `cryptography/src/lib.rs`) |
+| `get_file` | Retrieve a specific file by path (e.g., `commonware-cryptography/src/lib.rs`) |
 | `search_code` | Search across source files for patterns or keywords |
 | `list_versions` | List all available code versions |
 | `list_crates` | List all crates with descriptions |

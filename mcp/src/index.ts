@@ -64,7 +64,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       {
         path: z
           .string()
-          .describe("File path relative to repository root, e.g., 'commonware-cryptography/src/lib.rs'"),
+          .describe(
+            "File path relative to repository root, e.g., 'commonware-cryptography/src/lib.rs'"
+          ),
         version: z
           .string()
           .optional()
@@ -284,7 +286,11 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       "get_crate_readme",
       "Get the README documentation for a specific Commonware crate.",
       {
-        crate: z.string().describe("Crate name (e.g., 'commonware-cryptography', 'commonware-consensus', 'commonware-p2p')"),
+        crate: z
+          .string()
+          .describe(
+            "Crate name (e.g., 'commonware-cryptography', 'commonware-consensus', 'commonware-p2p')"
+          ),
         version: z.string().optional().describe("Version tag. Defaults to latest."),
       },
       async ({ crate, version }) => {
