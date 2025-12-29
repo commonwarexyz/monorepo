@@ -63,22 +63,44 @@ async function testMcpTools() {
   const latestVersion = versionMatch[1];
   console.log("Latest version:", latestVersion);
 
-  // Test search_code (trigram requires 3+ characters)
-  console.log("\nTesting search_code...");
-  const searchResult = await client.callTool({
+  // Test search_code with substring mode (default, trigram requires 3+ characters)
+  console.log("\nTesting search_code (substring mode)...");
+  const substringResult = await client.callTool({
     name: "search_code",
     arguments: {
       query: "impl",
+      mode: "substring",
       max_results: 3,
     },
   });
-  if (searchResult.isError) {
-    throw new Error(`search_code failed: ${searchResult.content[0].text}`);
+  if (substringResult.isError) {
+    throw new Error(`search_code (substring) failed: ${substringResult.content[0].text}`);
   }
-  if (searchResult.content[0].text.includes("No matches found")) {
-    throw new Error("search_code returned no matches for 'impl'");
+  if (substringResult.content[0].text.includes("No matches found")) {
+    throw new Error("search_code (substring) returned no matches for 'impl'");
   }
-  console.log("search_code result:", searchResult.content[0].text.slice(0, 200) + "...");
+  console.log(
+    "search_code (substring) result:",
+    substringResult.content[0].text.slice(0, 200) + "..."
+  );
+
+  // Test search_code with word mode
+  console.log("\nTesting search_code (word mode)...");
+  const wordResult = await client.callTool({
+    name: "search_code",
+    arguments: {
+      query: "pub fn",
+      mode: "word",
+      max_results: 3,
+    },
+  });
+  if (wordResult.isError) {
+    throw new Error(`search_code (word) failed: ${wordResult.content[0].text}`);
+  }
+  if (wordResult.content[0].text.includes("No matches found")) {
+    throw new Error("search_code (word) returned no matches for 'pub fn'");
+  }
+  console.log("search_code (word) result:", wordResult.content[0].text.slice(0, 200) + "...");
 
   // Test get_overview
   console.log("\nTesting get_overview...");
