@@ -74,8 +74,10 @@ npm run dev
 The server will be available at `http://localhost:8787`. Use the MCP inspector to test:
 
 ```bash
-npx @modelcontextprotocol/inspector@latest http://localhost:8787
+npx @modelcontextprotocol/inspector@latest
 ```
+
+In the inspector UI, select **Streamable HTTP** transport, enter `http://localhost:8787` as the URL, and choose **Direct** connection mode.
 
 ### Deploy
 
