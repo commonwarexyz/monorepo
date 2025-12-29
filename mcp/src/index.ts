@@ -54,8 +54,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "get_file",
       "Retrieve a file from the Commonware repository by its path. " +
-      "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
-      "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
+        "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
+        "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
       {
         path: z
           .string()
@@ -108,8 +108,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "search_code",
       "Search for a pattern across source code files in the Commonware repository. " +
-      "Returns matching files with relevant snippets. Useful for finding function definitions, " +
-      "usage patterns, or understanding how features are implemented.",
+        "Returns matching files with relevant snippets. Useful for finding function definitions, " +
+        "usage patterns, or understanding how features are implemented.",
       {
         query: z.string().describe("Search query (matches words with prefix matching)"),
         crate: z
@@ -310,14 +310,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "list_files",
       "List all files in a crate or directory. Useful for discovering the structure " +
-      "of a crate before fetching specific files.",
+        "of a crate before fetching specific files.",
       {
         crate: z
           .string()
           .optional()
           .describe(
             "Crate name (e.g., 'commonware-cryptography') or directory path. " +
-            "If omitted, lists top-level directories."
+              "If omitted, lists top-level directories."
           ),
         version: z.string().optional().describe("Version tag. Defaults to latest."),
       },
@@ -612,7 +612,6 @@ async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: s
     const versionFiles = files.get(version) || [];
 
     // Fetch and index all files in batches
-    let filesIndexed = 0;
     for (let i = 0; i < versionFiles.length; i += INDEX_BUILD_BATCH_SIZE) {
       const batch = versionFiles.slice(i, i + INDEX_BUILD_BATCH_SIZE);
       const results = await Promise.all(
@@ -620,34 +619,28 @@ async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: s
           const fileUrl = `${env.BASE_URL}/code/${version}/${file}`;
           const res = await fetch(fileUrl);
           if (!res.ok) {
-            return null;
+            throw new Error(`Failed to fetch ${file} for ${version}: ${res.status}`);
           }
           const content = await res.text();
           return { file, content };
         })
       );
 
-      const successfulResults = results.filter((r) => r !== null);
-      const statements = successfulResults.map((r) =>
+      const statements = results.map((r) =>
         session
           .prepare("INSERT OR REPLACE INTO files (version, path, content) VALUES (?, ?, ?)")
           .bind(version, r.file, r.content)
       );
 
-      if (statements.length > 0) {
-        await session.batch(statements);
-        filesIndexed += statements.length;
-      }
+      await session.batch(statements);
     }
 
-    // Only mark as indexed if at least one file was successfully indexed
-    if (filesIndexed > 0) {
-      await session
-        .prepare("INSERT OR REPLACE INTO indexed_versions (version) VALUES (?)")
-        .bind(version)
-        .run();
-      indexed.push(version);
-    }
+    // Mark version as indexed
+    await session
+      .prepare("INSERT OR REPLACE INTO indexed_versions (version) VALUES (?)")
+      .bind(version)
+      .run();
+    indexed.push(version);
   }
 
   // Prune versions not in sitemap
