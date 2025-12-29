@@ -568,11 +568,27 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       // Sort by score descending (lines with more matching terms first)
       scoredLines.sort((a, b) => b.score - a.score);
 
-      // Take top 5 and build snippets
+      // Take top 5 non-overlapping snippets
       const matches: string[] = [];
-      for (const { lineNum } of scoredLines.slice(0, 5)) {
+      const coveredLines = new Set<number>();
+      for (const { lineNum } of scoredLines) {
+        if (matches.length >= 5) {
+          break;
+        }
+
+        // Skip if this line is already covered by a previous snippet
+        if (coveredLines.has(lineNum)) {
+          continue;
+        }
+
         const start = Math.max(0, lineNum - 2);
         const end = Math.min(lines.length, lineNum + 3);
+
+        // Mark all lines in this snippet as covered
+        for (let i = start; i < end; i++) {
+          coveredLines.add(i);
+        }
+
         const snippet = lines
           .slice(start, end)
           .map((l, idx) => `${start + idx + 1}: ${l}`)
