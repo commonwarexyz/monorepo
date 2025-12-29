@@ -639,7 +639,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       if (words.length === 0) {
         return { ftsQuery: null, snippetMatcher: () => 0 };
       }
-      const ftsQuery = words.map((w) => `"${w}"*`).join(" ");
+      const ftsQuery = words.map((w) => `${w}*`).join(" ");
       const wordsLower = words.map((w) => w.toLowerCase());
       return {
         ftsQuery,
