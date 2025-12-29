@@ -111,7 +111,15 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         "Returns matching files with relevant snippets. Useful for finding function definitions, " +
         "usage patterns, or understanding how features are implemented.",
       {
-        query: z.string().describe("Search query (substring match, minimum 3 characters)"),
+        query: z.string().describe("Search query"),
+        mode: z
+          .enum(["substring", "word"])
+          .optional()
+          .default("substring")
+          .describe(
+            "Search mode: 'substring' for literal substring match (min 3 chars), " +
+              "'word' for word-based search with prefix matching"
+          ),
         crate: z
           .string()
           .optional()
@@ -130,14 +138,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
             `Maximum number of results to return (default: 10, max: ${MAX_SEARCH_RESULTS})`
           ),
       },
-      async ({ query, crate, file_type, version, max_results }) => {
-        // Trigram requires at least 3 characters
-        if (query.trim().length < 3) {
+      async ({ query, mode, crate, file_type, version, max_results }) => {
+        // Substring mode requires at least 3 characters (trigram tokenizer)
+        if (mode === "substring" && query.trim().length < 3) {
           return {
             content: [
               {
                 type: "text",
-                text: `Error: Query must be at least 3 characters`,
+                text: `Error: Substring search requires at least 3 characters`,
               },
             ],
             isError: true,
@@ -164,7 +172,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         }
 
         // Search using D1 FTS5
-        const results = await this.searchWithFTS(ver, query, crate, file_type, limit);
+        const results = await this.searchWithFTS(ver, query, mode, crate, file_type, limit);
 
         if (results.length === 0) {
           return {
@@ -492,23 +500,26 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   private async searchWithFTS(
     version: string,
     query: string,
+    mode: "substring" | "word",
     crate: string | undefined,
     fileType: string,
     limit: number
   ): Promise<Array<{ file: string; matches: string[] }>> {
-    // Build FTS trigram query
-    const parsed = this.buildFTSQuery(query);
-    if (parsed === null) {
+    // Build FTS query based on mode
+    const { ftsQuery, snippetMatcher } = this.buildFTSQuery(query, mode);
+    if (ftsQuery === null) {
       return [];
     }
-    const { ftsQuery, queryLower } = parsed;
+
+    // Select FTS table based on mode
+    const ftsTable = mode === "substring" ? "files_fts_substring" : "files_fts_word";
 
     // Build the SQL query with filters
     let sql = `
       SELECT f.path, f.content
-      FROM files_fts
-      JOIN files f ON files_fts.rowid = f.id
-      WHERE files_fts MATCH ?
+      FROM ${ftsTable}
+      JOIN files f ON ${ftsTable}.rowid = f.id
+      WHERE ${ftsTable} MATCH ?
         AND f.version = ?
     `;
     const params: (string | number)[] = [ftsQuery, version];
@@ -529,7 +540,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     }
 
     // Order by relevance and limit
-    sql += " ORDER BY bm25(files_fts) LIMIT ?";
+    sql += ` ORDER BY bm25(${ftsTable}) LIMIT ?`;
     params.push(limit);
 
     // Execute the SQL query
@@ -543,26 +554,46 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
     for (const row of results.results) {
       const lines = row.content.split("\n");
-      const matches: string[] = [];
 
+      // Score each line by number of matching terms
+      const scoredLines: Array<{ lineNum: number; score: number }> = [];
       for (let lineNum = 0; lineNum < lines.length; lineNum++) {
         const lineLower = lines[lineNum].toLowerCase();
-        // Check if query substring appears in this line
-        if (lineLower.includes(queryLower)) {
-          // Include context (2 lines before and after)
-          const start = Math.max(0, lineNum - 2);
-          const end = Math.min(lines.length, lineNum + 3);
-          const snippet = lines
-            .slice(start, end)
-            .map((l, idx) => `${start + idx + 1}: ${l}`)
-            .join("\n");
-          matches.push(snippet);
-
-          // Limit matches per file
-          if (matches.length >= 5) {
-            break;
-          }
+        const score = snippetMatcher(lineLower);
+        if (score > 0) {
+          scoredLines.push({ lineNum, score });
         }
+      }
+
+      // Sort by score descending (lines with more matching terms first)
+      scoredLines.sort((a, b) => b.score - a.score);
+
+      // Take top 5 non-overlapping snippets
+      const matches: string[] = [];
+      const coveredLines = new Set<number>();
+      for (const { lineNum } of scoredLines) {
+        if (matches.length >= 5) {
+          break;
+        }
+
+        // Skip if this line is already covered by a previous snippet
+        if (coveredLines.has(lineNum)) {
+          continue;
+        }
+
+        const start = Math.max(0, lineNum - 2);
+        const end = Math.min(lines.length, lineNum + 3);
+
+        // Mark all lines in this snippet as covered
+        for (let i = start; i < end; i++) {
+          coveredLines.add(i);
+        }
+
+        const snippet = lines
+          .slice(start, end)
+          .map((l, idx) => `${start + idx + 1}: ${l}`)
+          .join("\n");
+        matches.push(snippet);
       }
 
       // Always include file if FTS5 matched it
@@ -572,21 +603,60 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     return output;
   }
 
-  // Helper: Build FTS5 trigram query
-  // Returns null if query is too short (trigram requires 3+ characters)
-  private buildFTSQuery(query: string): { ftsQuery: string; queryLower: string } | null {
+  // Helper: Build FTS5 query based on mode
+  // Returns a snippetMatcher that scores lines (0 = no match, higher = more matches)
+  private buildFTSQuery(
+    query: string,
+    mode: "substring" | "word"
+  ): { ftsQuery: string | null; snippetMatcher: (line: string) => number } {
     const trimmed = query.trim();
 
-    // Trigram requires at least 3 characters
-    if (trimmed.length < 3) {
-      return null;
+    if (mode === "substring") {
+      // Trigram requires at least 3 characters
+      if (trimmed.length < 3) {
+        return { ftsQuery: null, snippetMatcher: () => 0 };
+      }
+      // Escape double quotes for FTS5
+      const escaped = trimmed.replace(/"/g, '""');
+      const queryLower = trimmed.toLowerCase();
+      return {
+        ftsQuery: `"${escaped}"`,
+        // Substring mode: count occurrences
+        snippetMatcher: (line) => {
+          let count = 0;
+          let idx = 0;
+          while ((idx = line.indexOf(queryLower, idx)) !== -1) {
+            count++;
+            idx += queryLower.length;
+          }
+          return count;
+        },
+      };
+    } else {
+      // Word mode: escape special chars and add prefix matching
+      const escaped = trimmed.replace(/["()*:^-]/g, " ").trim();
+      const words = escaped.split(/\s+/).filter((w) => w.length > 0);
+      if (words.length === 0) {
+        return { ftsQuery: null, snippetMatcher: () => 0 };
+      }
+      const ftsQuery = words.map((w) => `${w}*`).join(" ");
+      const wordsLower = words.map((w) => w.toLowerCase());
+      return {
+        ftsQuery,
+        // Word mode: count total occurrences of all query words
+        snippetMatcher: (line) => {
+          let count = 0;
+          for (const word of wordsLower) {
+            let idx = 0;
+            while ((idx = line.indexOf(word, idx)) !== -1) {
+              count++;
+              idx += word.length;
+            }
+          }
+          return count;
+        },
+      };
     }
-
-    // Escape double quotes for FTS5
-    const escaped = trimmed.replace(/"/g, '""');
-
-    // Return quoted literal query for trigram matching
-    return { ftsQuery: `"${escaped}"`, queryLower: trimmed.toLowerCase() };
   }
 }
 
