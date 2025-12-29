@@ -36,7 +36,6 @@
     "BASE_URL": "https://commonware.xyz"
   },
   // Scheduled trigger for syncing versions (runs every 10 minutes)
-  // Trigger manually after deploy: npx wrangler workflows trigger commonware-mcp
   "triggers": {
     "crons": [
       "*/10 * * * *"

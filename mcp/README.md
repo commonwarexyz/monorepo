@@ -110,8 +110,7 @@ npx wrangler d1 migrations apply commonware-mcp-search
 # Deploy
 npm run deploy
 
-# Trigger initial sync (or wait for cron)
-npx wrangler workflows trigger commonware-mcp
+# Indexing runs automatically via cron (every 10 minutes)
 ```
 
 ## Architecture
