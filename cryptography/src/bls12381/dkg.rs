@@ -681,7 +681,7 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DealerPrivMsg {
     share: Secret<Scalar>,
 }
@@ -729,15 +729,6 @@ impl arbitrary::Arbitrary<'_> for DealerPrivMsg {
         Ok(Self::new(share))
     }
 }
-
-impl PartialEq for DealerPrivMsg {
-    fn eq(&self, other: &Self) -> bool {
-        // Use Secret's constant-time comparison
-        self.share == other.share
-    }
-}
-
-impl Eq for DealerPrivMsg {}
 
 #[derive(Clone, Debug)]
 pub struct PlayerAck<P: PublicKey> {
