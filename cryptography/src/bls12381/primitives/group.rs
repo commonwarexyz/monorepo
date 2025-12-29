@@ -1467,6 +1467,7 @@ mod tests {
         let mut scalar_set = BTreeSet::new();
         let mut g1_set = BTreeSet::new();
         let mut g2_set = BTreeSet::new();
+        #[allow(clippy::mutable_key_type)]
         let mut share_set = BTreeSet::new();
         while scalar_set.len() < NUM_ITEMS {
             let scalar = Scalar::random(&mut rng);
@@ -1500,6 +1501,7 @@ mod tests {
         let scalar_map: HashMap<_, _> = scalar_set.iter().cloned().zip(0..).collect();
         let g1_map: HashMap<_, _> = g1_set.iter().cloned().zip(0..).collect();
         let g2_map: HashMap<_, _> = g2_set.iter().cloned().zip(0..).collect();
+        #[allow(clippy::mutable_key_type)]
         let share_map: HashMap<_, _> = share_set.iter().cloned().zip(0..).collect();
 
         // Verify that the maps contain the expected number of unique items.

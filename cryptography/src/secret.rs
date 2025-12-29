@@ -65,7 +65,10 @@ unsafe fn zeroize_ptr<T>(ptr: *mut T) {
 // Use protected implementation on Unix with the feature enabled
 #[cfg(unix)]
 mod implementation {
-    use core::ptr::NonNull;
+    use core::{
+        ptr::NonNull,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     /// Returns the system page size.
     fn page_size() -> usize {
@@ -78,33 +81,117 @@ mod implementation {
         }
     }
 
-    /// Guard that unprotects memory on creation and re-protects on drop.
+    /// State values for the reader count state machine.
+    /// - 0: Memory is protected, no readers
+    /// - 1: Transition in progress (unprotecting or protecting)
+    /// - n >= 2: Memory is readable with (n - 1) active readers
+    const PROTECTED: usize = 0;
+    const TRANSITIONING: usize = 1;
+
+    /// Guard that manages concurrent read access to protected memory.
     ///
-    /// This ensures memory is always re-protected, even during panic unwinding.
-    struct AccessGuard {
+    /// Uses a state machine to support multiple concurrent readers:
+    /// - State 0 (PROTECTED): Memory is protected
+    /// - State 1 (TRANSITIONING): mprotect in progress
+    /// - State n >= 2: (n-1) readers are active, memory is readable
+    ///
+    /// This ensures thread-safety when `Secret<T>` is shared across threads.
+    struct AccessGuard<'a> {
         ptr: *mut libc::c_void,
         size: usize,
+        readers: &'a AtomicUsize,
     }
 
-    impl AccessGuard {
-        /// Unprotects memory for read access, returning a guard that re-protects on drop.
+    impl<'a> AccessGuard<'a> {
+        /// Acquires read access to protected memory.
+        ///
+        /// Uses a state machine to coordinate mprotect calls:
+        /// - If state is PROTECTED (0), transition to TRANSITIONING, call mprotect, then set to 2
+        /// - If state is TRANSITIONING (1), spin-wait until readable
+        /// - If state >= 2, increment and proceed (memory already readable)
         ///
         /// # Panics
         ///
         /// Panics if mprotect fails to unprotect the memory.
-        fn new(ptr: *mut libc::c_void, size: usize) -> Self {
-            // SAFETY: ptr points to valid mmap'd memory of the given size
-            let result = unsafe { libc::mprotect(ptr, size, libc::PROT_READ) };
-            assert_eq!(result, 0, "mprotect failed to unprotect memory");
-            Self { ptr, size }
+        fn acquire(ptr: *mut libc::c_void, size: usize, readers: &'a AtomicUsize) -> Self {
+            loop {
+                let state = readers.load(Ordering::Acquire);
+
+                if state == PROTECTED {
+                    // Try to become the thread that unprotects
+                    if readers
+                        .compare_exchange(
+                            PROTECTED,
+                            TRANSITIONING,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        // We won the race - unprotect memory
+                        // SAFETY: ptr points to valid mmap'd memory of the given size
+                        let result = unsafe { libc::mprotect(ptr, size, libc::PROT_READ) };
+                        assert_eq!(result, 0, "mprotect failed to unprotect memory");
+
+                        // Transition to readable state with 1 reader (state = 2)
+                        readers.store(2, Ordering::Release);
+                        break;
+                    }
+                    // CAS failed, another thread is transitioning - retry
+                } else if state == TRANSITIONING {
+                    // Another thread is calling mprotect - spin wait
+                    core::hint::spin_loop();
+                } else {
+                    // state >= 2: memory is readable, try to increment
+                    if readers
+                        .compare_exchange(state, state + 1, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        break;
+                    }
+                    // CAS failed, state changed - retry
+                }
+            }
+
+            Self { ptr, size, readers }
         }
     }
 
-    impl Drop for AccessGuard {
+    impl Drop for AccessGuard<'_> {
         fn drop(&mut self) {
-            // SAFETY: ptr and size are valid from the Secret that created us
-            unsafe {
-                libc::mprotect(self.ptr, self.size, libc::PROT_NONE);
+            loop {
+                let state = self.readers.load(Ordering::Acquire);
+                debug_assert!(state >= 2, "invalid reader state on drop");
+
+                if state == 2 {
+                    // We're the last reader - try to transition to protecting
+                    if self
+                        .readers
+                        .compare_exchange(2, TRANSITIONING, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        // Re-protect memory
+                        // SAFETY: ptr and size are valid from the Secret that created us
+                        unsafe {
+                            libc::mprotect(self.ptr, self.size, libc::PROT_NONE);
+                        }
+
+                        // Transition to protected state
+                        self.readers.store(PROTECTED, Ordering::Release);
+                        break;
+                    }
+                    // CAS failed - another reader appeared, retry
+                } else {
+                    // state > 2: other readers exist, just decrement
+                    if self
+                        .readers
+                        .compare_exchange(state, state - 1, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        break;
+                    }
+                    // CAS failed, state changed - retry
+                }
             }
         }
     }
@@ -122,20 +209,25 @@ mod implementation {
     /// - Memory is marked no-access except during expose() (mprotect)
     /// - Zeroized on drop
     ///
-    /// Access requires explicit `expose()` call which returns a guard.
-    /// Memory is re-protected when the guard is dropped.
+    /// Access requires explicit `expose()` call. Multiple concurrent readers are
+    /// supported via atomic reference counting - memory remains readable as long
+    /// as at least one reader holds access.
     pub struct Secret<T> {
         ptr: NonNull<T>,
         size: usize,
+        /// Tracks the number of concurrent readers for safe mprotect management.
+        readers: AtomicUsize,
     }
 
-    // SAFETY: Secret owns its memory and ensures proper synchronization
-    // through the guard pattern. Access to the protected memory region is
-    // controlled by mprotect calls that make the memory accessible only
-    // during the lifetime of guard objects.
+    // SAFETY: Secret owns its memory and ensures proper synchronization through
+    // atomic reference counting. The readers counter ensures mprotect calls are
+    // coordinated: memory is unprotected when readers > 0 and protected when
+    // readers == 0.
     unsafe impl<T: Send> Send for Secret<T> {}
-    // SAFETY: Same reasoning as Send - the guard pattern ensures proper
-    // synchronization of memory access.
+
+    // SAFETY: Concurrent expose() calls are safe because AccessGuard uses atomic
+    // operations to coordinate mprotect calls. Memory remains readable as long as
+    // any reader holds an AccessGuard.
     unsafe impl<T: Sync> Sync for Secret<T> {}
 
     impl<T> Secret<T> {
@@ -143,16 +235,32 @@ mod implementation {
         ///
         /// # Panics
         ///
-        /// Panics if memory protection fails (allocation, mlock, or mprotect).
+        /// Panics if memory protection fails (allocation, mlock, or mprotect),
+        /// or if `T` requires alignment greater than the system page size.
         #[inline]
         pub fn new(value: T) -> Self {
             Self::try_new(value).expect("failed to create protected secret")
         }
 
         /// Creates a new `Secret`, returning an error on failure.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if:
+        /// - `T` requires alignment greater than the system page size
+        /// - Memory allocation (mmap) fails
+        /// - Memory locking (mlock) fails (except in test/soft-mlock mode)
+        /// - Memory protection (mprotect) fails
         pub fn try_new(value: T) -> Result<Self, &'static str> {
             let page_size = page_size();
+            let type_align = core::mem::align_of::<T>();
             let type_size = core::mem::size_of::<T>();
+
+            // Ensure T's alignment doesn't exceed page size (mmap returns page-aligned memory)
+            if type_align > page_size {
+                return Err("type alignment exceeds page size");
+            }
+
             // Round up to page boundary (minimum one page)
             let size = type_size.max(1).next_multiple_of(page_size);
 
@@ -174,7 +282,8 @@ mod implementation {
 
             let ptr = ptr as *mut T;
 
-            // SAFETY: ptr is valid and properly aligned (mmap returns page-aligned memory)
+            // SAFETY: ptr is valid and properly aligned (mmap returns page-aligned memory,
+            // and we verified type_align <= page_size above)
             unsafe { core::ptr::write(ptr, value) };
 
             // SAFETY: ptr points to valid mmap'd memory of size `size`
@@ -208,16 +317,32 @@ mod implementation {
                 // SAFETY: ptr is non-null (mmap succeeded)
                 ptr: unsafe { NonNull::new_unchecked(ptr) },
                 size,
+                readers: AtomicUsize::new(0),
             })
         }
 
         /// Exposes the secret value for read-only access within a closure.
         ///
-        /// Memory is re-protected immediately after the closure returns, even if
-        /// the closure panics.
+        /// Memory is re-protected when all concurrent readers have finished,
+        /// even if a closure panics.
+        ///
+        /// # Thread Safety
+        ///
+        /// Multiple threads can call `expose` concurrently. The memory remains
+        /// readable as long as at least one reader is active.
+        ///
+        /// # Note
+        ///
+        /// The closure uses a higher-ranked trait bound (`for<'a>`) to prevent
+        /// the returned value from containing references to the secret data.
+        /// This ensures the reference cannot escape the closure scope.
         #[inline]
-        pub fn expose<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-            let _guard = AccessGuard::new(self.ptr.as_ptr() as *mut libc::c_void, self.size);
+        pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a T) -> R) -> R {
+            let _guard = AccessGuard::acquire(
+                self.ptr.as_ptr() as *mut libc::c_void,
+                self.size,
+                &self.readers,
+            );
 
             // SAFETY: Memory is now readable and ptr is valid
             let value = unsafe { self.ptr.as_ref() };
@@ -229,7 +354,8 @@ mod implementation {
         fn drop(&mut self) {
             // SAFETY: self.ptr points to valid mmap'd memory of self.size bytes.
             // We unprotect, drop inner value, zeroize, unlock, and unmap in proper sequence.
-            // This is safe because we have exclusive access (&mut self).
+            // This is safe because we have exclusive access (&mut self) - Drop requires &mut.
+            // No concurrent readers can exist because &mut self means no shared references.
             unsafe {
                 libc::mprotect(
                     self.ptr.as_ptr() as *mut libc::c_void,
@@ -267,8 +393,14 @@ mod implementation {
         }
 
         /// Exposes the secret value for read-only access within a closure.
+        ///
+        /// # Note
+        ///
+        /// The closure uses a higher-ranked trait bound (`for<'a>`) to prevent
+        /// the returned value from containing references to the secret data.
+        /// This ensures the reference cannot escape the closure scope.
         #[inline]
-        pub fn expose<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a T) -> R) -> R {
             // SAFETY: self.0 is always initialized (set in new, only zeroed in drop)
             f(unsafe { self.0.assume_init_ref() })
         }
@@ -547,5 +679,38 @@ mod tests {
         let cmp1 = s_zero.cmp(&s_one);
         let cmp2 = s_zero.cmp(&s_one);
         assert_eq!(cmp1, cmp2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_concurrent_expose() {
+        use std::{sync::Arc, thread};
+
+        let secret = Arc::new(Secret::new([42u8; 32]));
+        let mut handles = vec![];
+
+        // Spawn multiple threads that concurrently expose the secret
+        for _ in 0..10 {
+            let secret = Arc::clone(&secret);
+            handles.push(thread::spawn(move || {
+                for _ in 0..100 {
+                    secret.expose(|v| {
+                        // Verify the value is correct
+                        assert_eq!(v[0], 42);
+                        assert_eq!(v[31], 42);
+                    });
+                }
+            }));
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("thread panicked");
+        }
+
+        // Verify the secret is still accessible after concurrent access
+        secret.expose(|v| {
+            assert_eq!(v, &[42u8; 32]);
+        });
     }
 }
