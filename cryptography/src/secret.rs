@@ -54,7 +54,6 @@ mod implementation {
         ops::{Deref, DerefMut},
         ptr::NonNull,
     };
-    use std::alloc::{alloc, dealloc, Layout};
     use subtle::ConstantTimeEq;
     use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -71,7 +70,13 @@ mod implementation {
 
     /// A wrapper for secret values with OS-level memory protection.
     ///
+    /// Uses `mmap` for allocation instead of the global allocator because:
+    /// - The global allocator may sub-allocate within pages, sharing pages with other data
+    /// - `mmap` guarantees page-aligned, exclusively-owned memory
+    /// - This ensures `mlock` and `mprotect` apply only to our secret data
+    ///
     /// On Unix:
+    /// - Memory is allocated via mmap (page-isolated)
     /// - Memory is locked to prevent swapping (mlock)
     /// - Memory is marked no-access except during expose() (mprotect)
     /// - Zeroized on drop
@@ -104,16 +109,6 @@ mod implementation {
         }
 
         /// Creates a new `Secret`, returning an error on failure.
-        ///
-        /// # Safety Invariants
-        ///
-        /// This function performs several unsafe operations to set up protected memory:
-        /// - Allocates page-aligned memory using the global allocator
-        /// - Writes the value to the allocated memory
-        /// - Locks the memory with mlock to prevent swapping
-        /// - Protects the memory with mprotect to prevent unauthorized access
-        ///
-        /// All unsafe operations are properly sequenced and cleaned up on failure.
         #[allow(clippy::undocumented_unsafe_blocks)]
         pub fn try_new(value: T) -> Result<Self, &'static str> {
             let page_size = page_size();
@@ -121,37 +116,46 @@ mod implementation {
             // Round up to page boundary (minimum one page)
             let size = type_size.max(1).next_multiple_of(page_size);
 
-            let layout = Layout::from_size_align(size, page_size).map_err(|_| "invalid layout")?;
+            // SAFETY: mmap with MAP_ANONYMOUS returns page-aligned memory or MAP_FAILED
+            let ptr = unsafe {
+                libc::mmap(
+                    core::ptr::null_mut(),
+                    size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
 
-            // SAFETY: layout is valid (checked above), ptr may be null (checked below)
-            let ptr = unsafe { alloc(layout) } as *mut T;
-
-            if ptr.is_null() {
-                return Err("allocation failed");
+            if ptr == libc::MAP_FAILED {
+                return Err("mmap failed");
             }
 
-            // SAFETY: ptr is non-null and properly aligned for T
+            let ptr = ptr as *mut T;
+
+            // SAFETY: ptr is valid and properly aligned (mmap returns page-aligned memory)
             unsafe { core::ptr::write(ptr, value) };
 
-            // SAFETY: ptr points to valid allocated memory of size `size`
+            // SAFETY: ptr points to valid mmap'd memory of size `size`
             if unsafe { libc::mlock(ptr as *const libc::c_void, size) } != 0 {
-                // SAFETY: ptr and layout match the allocation above
-                unsafe { dealloc(ptr as *mut u8, layout) };
+                // SAFETY: ptr and size match the mmap above
+                unsafe { libc::munmap(ptr as *mut libc::c_void, size) };
                 return Err("mlock failed");
             }
 
             // SAFETY: ptr points to valid locked memory of size `size`
             if unsafe { libc::mprotect(ptr as *mut libc::c_void, size, libc::PROT_NONE) } != 0 {
-                // SAFETY: cleanup on failure - unlock and deallocate
+                // SAFETY: cleanup on failure - unlock and unmap
                 unsafe {
                     libc::munlock(ptr as *const libc::c_void, size);
-                    dealloc(ptr as *mut u8, layout);
+                    libc::munmap(ptr as *mut libc::c_void, size);
                 }
                 return Err("mprotect failed");
             }
 
             Ok(Self {
-                // SAFETY: ptr is non-null (checked above)
+                // SAFETY: ptr is non-null (mmap succeeded)
                 ptr: unsafe { NonNull::new_unchecked(ptr) },
                 size,
             })
@@ -206,10 +210,9 @@ mod implementation {
 
     impl<T: Zeroize> Drop for Secret<T> {
         fn drop(&mut self) {
-            let page_size = page_size();
-            // SAFETY: self.ptr points to valid memory that was allocated with page_size
-            // alignment and self.size bytes. We unprotect, zeroize, unlock, and deallocate
-            // in proper sequence. This is safe because we have exclusive access (&mut self).
+            // SAFETY: self.ptr points to valid mmap'd memory of self.size bytes.
+            // We unprotect, zeroize, unlock, and unmap in proper sequence.
+            // This is safe because we have exclusive access (&mut self).
             unsafe {
                 libc::mprotect(
                     self.ptr.as_ptr() as *mut libc::c_void,
@@ -218,8 +221,7 @@ mod implementation {
                 );
                 (*self.ptr.as_ptr()).zeroize();
                 libc::munlock(self.ptr.as_ptr() as *const libc::c_void, self.size);
-                let layout = Layout::from_size_align_unchecked(self.size, page_size);
-                dealloc(self.ptr.as_ptr() as *mut u8, layout);
+                libc::munmap(self.ptr.as_ptr() as *mut libc::c_void, self.size);
             }
         }
     }
