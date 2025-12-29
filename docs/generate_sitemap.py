@@ -122,6 +122,12 @@ def write_llms_txt(versions: list[str]) -> None:
 
 Start with [README.md](/code/{latest}/README.md) for an overview.
 
+## MCP Server
+
+An MCP (Model Context Protocol) server is available at https://mcp.commonware.xyz
+for AI assistants that support MCP (Claude Code, Cursor, etc.). The server
+provides tools to search code, list crates, and fetch files directly.
+
 ## Versions
 
 {chr(10).join(version_lines)}
