@@ -128,3 +128,44 @@ export function parseCrateInfo(
 
   return { name, description };
 }
+
+/**
+ * Build a file tree string from a list of file paths.
+ * Groups files by directory and formats as an indented tree.
+ */
+export function buildFileTree(files: string[], prefix: string): string {
+  // Remove prefix and organize into tree
+  const tree: Map<string, string[]> = new Map();
+
+  for (const file of files) {
+    const relative = file.slice(prefix.length);
+    const parts = relative.split("/");
+    const dir = parts.length > 1 ? parts.slice(0, -1).join("/") : ".";
+    const filename = parts[parts.length - 1];
+
+    if (!tree.has(dir)) {
+      tree.set(dir, []);
+    }
+    tree.get(dir)!.push(filename);
+  }
+
+  // Build output
+  const lines: string[] = [];
+  const sortedDirs = [...tree.keys()].sort();
+
+  for (const dir of sortedDirs) {
+    if (dir !== ".") {
+      lines.push(`${dir}/`);
+    }
+    const filesInDir = tree.get(dir)!.sort();
+    for (const file of filesInDir) {
+      if (dir === ".") {
+        lines.push(file);
+      } else {
+        lines.push(`  ${file}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}

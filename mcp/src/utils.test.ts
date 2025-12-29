@@ -7,6 +7,7 @@ import {
   parseSitemap,
   parseWorkspaceMembers,
   parseCrateInfo,
+  buildFileTree,
 } from "./utils.ts";
 
 describe("sortVersionsDesc", () => {
@@ -303,5 +304,81 @@ test-crate = { name = "also-wrong" }`;
     const info = parseCrateInfo(cargoToml, "fallback");
     expect(info.name).toBe("correct-name");
     expect(info.description).toBe("The correct description");
+  });
+});
+
+describe("buildFileTree", () => {
+  it("should build tree from files with prefix", () => {
+    const files = [
+      "cryptography/src/lib.rs",
+      "cryptography/src/bls12381/mod.rs",
+      "cryptography/src/bls12381/keys.rs",
+      "cryptography/Cargo.toml",
+      "cryptography/README.md",
+    ];
+    const result = buildFileTree(files, "cryptography/");
+
+    expect(result).toBe(
+      `Cargo.toml
+README.md
+src/
+  lib.rs
+src/bls12381/
+  keys.rs
+  mod.rs`
+    );
+  });
+
+  it("should handle files only in root directory", () => {
+    const files = ["crate/Cargo.toml", "crate/README.md", "crate/LICENSE"];
+    const result = buildFileTree(files, "crate/");
+
+    expect(result).toBe(`Cargo.toml
+LICENSE
+README.md`);
+  });
+
+  it("should handle deeply nested directories", () => {
+    const files = ["pkg/src/a/b/c/deep.rs", "pkg/src/a/b/shallow.rs", "pkg/src/a/top.rs"];
+    const result = buildFileTree(files, "pkg/");
+
+    expect(result).toBe(
+      `src/a/
+  top.rs
+src/a/b/
+  shallow.rs
+src/a/b/c/
+  deep.rs`
+    );
+  });
+
+  it("should sort directories and files alphabetically", () => {
+    const files = [
+      "pkg/src/zebra.rs",
+      "pkg/src/alpha.rs",
+      "pkg/tests/z_test.rs",
+      "pkg/tests/a_test.rs",
+    ];
+    const result = buildFileTree(files, "pkg/");
+
+    expect(result).toBe(
+      `src/
+  alpha.rs
+  zebra.rs
+tests/
+  a_test.rs
+  z_test.rs`
+    );
+  });
+
+  it("should handle empty file list", () => {
+    const result = buildFileTree([], "pkg/");
+    expect(result).toBe("");
+  });
+
+  it("should handle single file", () => {
+    const files = ["pkg/README.md"];
+    const result = buildFileTree(files, "pkg/");
+    expect(result).toBe("README.md");
   });
 });

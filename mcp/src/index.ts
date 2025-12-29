@@ -11,6 +11,7 @@
  * - list_crates: List all crates in the workspace (from Cargo.toml)
  * - get_crate_readme: Get the README for a specific crate
  * - get_overview: Get the repository overview
+ * - list_files: List files in a crate or directory
  */
 
 import { McpAgent } from "agents/mcp";
@@ -18,6 +19,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Env } from "./env.d.ts";
 import {
+  buildFileTree,
   getLanguage,
   isValidPath,
   parseSitemap,
@@ -349,6 +351,80 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
         return {
           content: [{ type: "text", text: content }],
+        };
+      }
+    );
+
+    // Tool: List files in a crate or directory
+    this.server.tool(
+      "list_files",
+      "List all files in a crate or directory. Useful for discovering the structure " +
+        "of a crate before fetching specific files.",
+      {
+        crate: z
+          .string()
+          .optional()
+          .describe(
+            "Crate name (e.g., 'commonware-cryptography') or directory path. " +
+              "If omitted, lists top-level directories."
+          ),
+        version: z.string().optional().describe("Version tag. Defaults to latest."),
+      },
+      async ({ crate, version }) => {
+        const ver = version || (await this.getLatestVersion());
+        const allFiles = await this.getFileList(ver);
+
+        let filtered: string[];
+        let prefix: string;
+
+        if (crate) {
+          // Strip commonware- prefix for folder matching
+          const folderName = stripCratePrefix(crate);
+          prefix = `${folderName}/`;
+          filtered = allFiles.filter((f) => f.startsWith(prefix));
+
+          if (filtered.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Error: No files found for '${crate}' (version ${ver})`,
+                },
+              ],
+              isError: true,
+            };
+          }
+        } else {
+          // List top-level directories
+          prefix = "";
+          const dirs = new Set<string>();
+          for (const file of allFiles) {
+            const topDir = file.split("/")[0];
+            dirs.add(topDir);
+          }
+          const sortedDirs = [...dirs].sort();
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `# Top-level directories (${ver})\n\n` +
+                  sortedDirs.map((d) => `- ${d}/`).join("\n"),
+              },
+            ],
+          };
+        }
+
+        // Build tree structure
+        const tree = buildFileTree(filtered, prefix);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `# Files in ${crate} (${ver})\n\n\`\`\`\n${tree}\n\`\`\``,
+            },
+          ],
         };
       }
     );

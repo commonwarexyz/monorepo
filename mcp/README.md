@@ -16,6 +16,7 @@ Interact with the Commonware Library via [MCP](https://modelcontextprotocol.io/)
 | `list_crates` | List all crates with descriptions |
 | `get_crate_readme` | Get README documentation for a specific crate |
 | `get_overview` | Get the repository README/overview |
+| `list_files` | List files in a crate or directory |
 
 ## Connecting
 
