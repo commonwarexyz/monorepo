@@ -22,6 +22,15 @@
     }
   ],
 
+  // Workers KV for search index storage (versioned indices are immutable)
+  "kv_namespaces": [
+    {
+      "binding": "SEARCH_INDEX",
+      "id": "PLACEHOLDER_PRODUCTION_ID",
+      "preview_id": "PLACEHOLDER_PREVIEW_ID"
+    }
+  ],
+
   // Environment variables for the base URL
   "vars": {
     "BASE_URL": "https://commonware.xyz"

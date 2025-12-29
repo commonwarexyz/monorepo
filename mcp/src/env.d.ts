@@ -2,6 +2,7 @@
 
 export interface Env {
   MCP: DurableObjectNamespace;
+  SEARCH_INDEX: KVNamespace;
   BASE_URL: string;
 }
 

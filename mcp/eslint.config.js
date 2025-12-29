@@ -22,6 +22,7 @@ export default [
         console: "readonly",
         DurableObjectNamespace: "readonly",
         ExecutionContext: "readonly",
+        KVNamespace: "readonly",
       },
     },
     plugins: {

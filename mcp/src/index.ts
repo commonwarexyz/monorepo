@@ -41,11 +41,21 @@ interface SitemapData {
   files: Record<string, string[]>; // version -> file paths (JSON-serializable)
 }
 
+// Search index entry: file path and its full content
+interface SearchIndexEntry {
+  file: string;
+  content: string;
+}
+
+// Full search index for a version
+type SearchIndex = SearchIndexEntry[];
+
 // Constants
 const FILE_CACHE_TTL = 60 * 60 * 24 * 365; // 1 year (versioned files are immutable)
 const SITEMAP_CACHE_TTL = 60 * 60; // 1 hour
 const MAX_SEARCH_RESULTS = 50;
-const SEARCH_BATCH_SIZE = 10;
+const INDEX_BUILD_BATCH_SIZE = 50; // Larger batches for index building (one-time cost)
+const SEARCH_INDEX_EXTENSIONS = new Set(["rs", "md", "toml"]); // File types to index
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
@@ -141,66 +151,12 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         const limit = Math.min(max_results, MAX_SEARCH_RESULTS);
 
         const ver = version || (await this.getLatestVersion());
-        const files = await this.getFileList(ver);
 
-        // Filter files by crate and type
-        // Strip commonware- prefix since folder paths don't include it
-        let filtered = files;
-        if (crate) {
-          const folderName = stripCratePrefix(crate);
-          filtered = filtered.filter((f) => f.startsWith(`${folderName}/`));
-        }
-        if (file_type && file_type !== "all") {
-          filtered = filtered.filter((f) => f.endsWith(`.${file_type}`));
-        }
+        // Get or build the search index (cached in Workers KV)
+        const index = await this.getSearchIndex(ver);
 
-        const results: Array<{ file: string; matches: string[] }> = [];
-        const queryLower = query.toLowerCase();
-
-        // Search through files (limit concurrent requests)
-        for (let i = 0; i < filtered.length && results.length < limit; i += SEARCH_BATCH_SIZE) {
-          const batch = filtered.slice(i, i + SEARCH_BATCH_SIZE);
-          const responses = await Promise.all(
-            batch.map(async (file) => {
-              const content = await this.fetchFile(ver, file);
-              if (content === null) {
-                return null;
-              }
-              return { file, content };
-            })
-          );
-
-          for (const resp of responses) {
-            if (!resp || results.length >= limit) {
-              continue;
-            }
-
-            const lines = resp.content.split("\n");
-            const matches: string[] = [];
-
-            for (let lineNum = 0; lineNum < lines.length; lineNum++) {
-              if (lines[lineNum].toLowerCase().includes(queryLower)) {
-                // Include context (2 lines before and after)
-                const start = Math.max(0, lineNum - 2);
-                const end = Math.min(lines.length, lineNum + 3);
-                const snippet = lines
-                  .slice(start, end)
-                  .map((l, idx) => `${start + idx + 1}: ${l}`)
-                  .join("\n");
-                matches.push(snippet);
-
-                // Limit matches per file
-                if (matches.length >= 3) {
-                  break;
-                }
-              }
-            }
-
-            if (matches.length > 0) {
-              results.push({ file: resp.file, matches });
-            }
-          }
-        }
+        // Search the in-memory index
+        const results = this.searchIndex(index, query, crate, file_type, limit);
 
         if (results.length === 0) {
           return {
@@ -560,6 +516,116 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     crates.sort((a, b) => a.name.localeCompare(b.name));
 
     return crates;
+  }
+
+  // Helper: Get or build search index for a version
+  private async getSearchIndex(version: string): Promise<SearchIndex> {
+    const kvKey = `search-index:${version}`;
+
+    // Check KV first
+    const cached = await this.env.SEARCH_INDEX.get<SearchIndex>(kvKey, "json");
+    if (cached !== null) {
+      return cached;
+    }
+
+    // Build the index
+    const index = await this.buildSearchIndex(version);
+
+    // Store in KV (no expiration since versioned content is immutable)
+    await this.env.SEARCH_INDEX.put(kvKey, JSON.stringify(index));
+
+    return index;
+  }
+
+  // Helper: Build search index for a version by fetching all indexable files
+  private async buildSearchIndex(version: string): Promise<SearchIndex> {
+    const allFiles = await this.getFileList(version);
+
+    // Filter to indexable file types
+    const indexableFiles = allFiles.filter((file) => {
+      const ext = file.split(".").pop() || "";
+      return SEARCH_INDEX_EXTENSIONS.has(ext);
+    });
+
+    const index: SearchIndex = [];
+
+    // Fetch files in batches
+    for (let i = 0; i < indexableFiles.length; i += INDEX_BUILD_BATCH_SIZE) {
+      const batch = indexableFiles.slice(i, i + INDEX_BUILD_BATCH_SIZE);
+      const results = await Promise.all(
+        batch.map(async (file) => {
+          const content = await this.fetchFile(version, file);
+          return content !== null ? { file, content } : null;
+        })
+      );
+
+      for (const result of results) {
+        if (result !== null) {
+          index.push(result);
+        }
+      }
+    }
+
+    return index;
+  }
+
+  // Helper: Search the index for matches
+  private searchIndex(
+    index: SearchIndex,
+    query: string,
+    crate: string | undefined,
+    fileType: string,
+    limit: number
+  ): Array<{ file: string; matches: string[] }> {
+    const queryLower = query.toLowerCase();
+    const results: Array<{ file: string; matches: string[] }> = [];
+
+    for (const entry of index) {
+      if (results.length >= limit) {
+        break;
+      }
+
+      // Filter by crate
+      if (crate) {
+        const folderName = stripCratePrefix(crate);
+        if (!entry.file.startsWith(`${folderName}/`)) {
+          continue;
+        }
+      }
+
+      // Filter by file type
+      if (fileType !== "all" && !entry.file.endsWith(`.${fileType}`)) {
+        continue;
+      }
+
+      // Search for matches
+      const lines = entry.content.split("\n");
+      const matches: string[] = [];
+
+      for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+        if (lines[lineNum].toLowerCase().includes(queryLower)) {
+          // Include context (2 lines before and after)
+          const start = Math.max(0, lineNum - 2);
+          const end = Math.min(lines.length, lineNum + 3);
+          const snippet = lines
+            .slice(start, end)
+            .map((l, idx) => `${start + idx + 1}: ${l}`)
+            .join("\n");
+          matches.push(snippet);
+
+          // Limit matches per file
+          if (matches.length >= 3) {
+            break;
+          }
+        }
+      }
+
+      if (matches.length > 0) {
+        results.push({ file: entry.file, matches });
+      }
+    }
+
+    return results;
   }
 }
 
