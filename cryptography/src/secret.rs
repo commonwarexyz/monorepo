@@ -24,49 +24,38 @@
 //! self-contained types (no heap pointers). Types like `Vec<T>` or `String`
 //! will only have their metadata protected, not heap data.
 
-/// Constant-time equality comparison for byte slices.
-///
-/// XORs all bytes together and checks if the result is zero.
-/// This prevents timing attacks by always comparing all bytes.
-#[inline]
-fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
+use core::cmp::Ordering;
+use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeLess};
 
-/// Constant-time less-than comparison for byte slices (big-endian).
-///
-/// Returns true if a < b, using constant-time operations.
+/// Constant-time lexicographic comparison for byte slices.
 #[inline]
-fn ct_lt_bytes(a: &[u8], b: &[u8]) -> bool {
-    debug_assert_eq!(a.len(), b.len());
-    let mut result = 0u8; // 0 = equal so far, 1 = a < b, 2 = a > b
-    for (x, y) in a.iter().zip(b.iter()) {
-        // Only update result if we haven't found a difference yet (result == 0)
-        let is_equal_so_far = result.wrapping_sub(1) >> 7; // 1 if result == 0, 0 otherwise
-        let x_lt_y = ((*x as u16).wrapping_sub(*y as u16) >> 8) as u8; // 1 if x < y
-        let x_gt_y = ((*y as u16).wrapping_sub(*x as u16) >> 8) as u8; // 1 if x > y
-        result |= is_equal_so_far & ((x_lt_y) | (x_gt_y << 1));
+fn ct_cmp_bytes(a: &[u8], b: &[u8]) -> Ordering {
+    let mut result = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        let is_eq = result.ct_eq(&0);
+        result = u8::conditional_select(&result, &1, is_eq & x.ct_lt(&y));
+        result = u8::conditional_select(&result, &2, is_eq & y.ct_lt(&x));
     }
-    result == 1
+
+    match result {
+        1 => Ordering::Less,
+        2 => Ordering::Greater,
+        _ => a.len().cmp(&b.len()),
+    }
 }
 
 // Use protected implementation on Unix with the feature enabled
 #[cfg(unix)]
 mod implementation {
     use core::{
+        cmp::Ordering,
         fmt::{Debug, Display, Formatter},
         hash::{Hash, Hasher},
         ops::{Deref, DerefMut},
         ptr::NonNull,
     };
     use std::alloc::{alloc, dealloc, Layout};
+    use subtle::ConstantTimeEq;
     use zeroize::{Zeroize, ZeroizeOnDrop};
 
     /// Returns the system page size.
@@ -248,22 +237,20 @@ mod implementation {
         fn eq(&self, other: &Self) -> bool {
             let guard_self = self.expose();
             let guard_other = other.expose();
-            // SAFETY: We're reading the raw bytes of T for constant-time comparison.
-            // This is safe because T is Sized and we only read size_of::<T>() bytes.
-            let self_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &*guard_self as *const T as *const u8,
-                    core::mem::size_of::<T>(),
+            // SAFETY: Reading raw bytes of T for constant-time comparison.
+            let (a, b) = unsafe {
+                (
+                    core::slice::from_raw_parts(
+                        &*guard_self as *const T as *const u8,
+                        core::mem::size_of::<T>(),
+                    ),
+                    core::slice::from_raw_parts(
+                        &*guard_other as *const T as *const u8,
+                        core::mem::size_of::<T>(),
+                    ),
                 )
             };
-            // SAFETY: Same as above - reading raw bytes of a Sized type.
-            let other_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &*guard_other as *const T as *const u8,
-                    core::mem::size_of::<T>(),
-                )
-            };
-            super::ct_eq_bytes(self_bytes, other_bytes)
+            a.ct_eq(b).into()
         }
     }
 
@@ -277,37 +264,30 @@ mod implementation {
     }
 
     impl<T: Zeroize> PartialOrd for Secret<T> {
-        fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
             Some(self.cmp(other))
         }
     }
 
     impl<T: Zeroize> Ord for Secret<T> {
-        fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        fn cmp(&self, other: &Self) -> Ordering {
             let guard_self = self.expose();
             let guard_other = other.expose();
-            // SAFETY: We're reading the raw bytes of T for constant-time comparison.
-            // This is safe because T is Sized and we only read size_of::<T>() bytes.
-            let self_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &*guard_self as *const T as *const u8,
-                    core::mem::size_of::<T>(),
+            // SAFETY: Reading raw bytes of T for constant-time comparison.
+            let (a, b) = unsafe {
+                (
+                    core::slice::from_raw_parts(
+                        &*guard_self as *const T as *const u8,
+                        core::mem::size_of::<T>(),
+                    ),
+                    core::slice::from_raw_parts(
+                        &*guard_other as *const T as *const u8,
+                        core::mem::size_of::<T>(),
+                    ),
                 )
             };
-            // SAFETY: Same as above - reading raw bytes of a Sized type.
-            let other_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &*guard_other as *const T as *const u8,
-                    core::mem::size_of::<T>(),
-                )
-            };
-            if super::ct_eq_bytes(self_bytes, other_bytes) {
-                core::cmp::Ordering::Equal
-            } else if super::ct_lt_bytes(self_bytes, other_bytes) {
-                core::cmp::Ordering::Less
-            } else {
-                core::cmp::Ordering::Greater
-            }
+
+            super::ct_cmp_bytes(a, b)
         }
     }
 
@@ -385,9 +365,11 @@ mod implementation {
 #[cfg(not(unix))]
 mod implementation {
     use core::{
+        cmp::Ordering,
         fmt::{Debug, Display, Formatter},
         hash::{Hash, Hasher},
     };
+    use subtle::ConstantTimeEq;
     use zeroize::{Zeroize, ZeroizeOnDrop};
 
     /// A wrapper for secret values that prevents accidental leakage.
@@ -462,21 +444,20 @@ mod implementation {
 
     impl<T: Zeroize> PartialEq for Secret<T> {
         fn eq(&self, other: &Self) -> bool {
-            // SAFETY: We're reading the raw bytes of T for constant-time comparison.
-            // This is safe because T is Sized and we only read size_of::<T>() bytes.
-            let self_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &self.0 as *const T as *const u8,
-                    core::mem::size_of::<T>(),
+            // SAFETY: Reading raw bytes of T for constant-time comparison.
+            let (a, b) = unsafe {
+                (
+                    core::slice::from_raw_parts(
+                        &self.0 as *const T as *const u8,
+                        core::mem::size_of::<T>(),
+                    ),
+                    core::slice::from_raw_parts(
+                        &other.0 as *const T as *const u8,
+                        core::mem::size_of::<T>(),
+                    ),
                 )
             };
-            let other_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &other.0 as *const T as *const u8,
-                    core::mem::size_of::<T>(),
-                )
-            };
-            super::ct_eq_bytes(self_bytes, other_bytes)
+            a.ct_eq(b).into()
         }
     }
 
@@ -489,34 +470,28 @@ mod implementation {
     }
 
     impl<T: Zeroize> PartialOrd for Secret<T> {
-        fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
             Some(self.cmp(other))
         }
     }
 
     impl<T: Zeroize> Ord for Secret<T> {
-        fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-            // SAFETY: We're reading the raw bytes of T for constant-time comparison.
-            // This is safe because T is Sized and we only read size_of::<T>() bytes.
-            let self_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &self.0 as *const T as *const u8,
-                    core::mem::size_of::<T>(),
+        fn cmp(&self, other: &Self) -> Ordering {
+            // SAFETY: Reading raw bytes of T for constant-time comparison.
+            let (a, b) = unsafe {
+                (
+                    core::slice::from_raw_parts(
+                        &self.0 as *const T as *const u8,
+                        core::mem::size_of::<T>(),
+                    ),
+                    core::slice::from_raw_parts(
+                        &other.0 as *const T as *const u8,
+                        core::mem::size_of::<T>(),
+                    ),
                 )
             };
-            let other_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &other.0 as *const T as *const u8,
-                    core::mem::size_of::<T>(),
-                )
-            };
-            if super::ct_eq_bytes(self_bytes, other_bytes) {
-                core::cmp::Ordering::Equal
-            } else if super::ct_lt_bytes(self_bytes, other_bytes) {
-                core::cmp::Ordering::Less
-            } else {
-                core::cmp::Ordering::Greater
-            }
+
+            super::ct_cmp_bytes(a, b)
         }
     }
 
@@ -608,6 +583,31 @@ mod tests {
         let s3 = Secret::new([5u8, 6, 7, 8]);
         assert_eq!(s1, s2);
         assert_ne!(s1, s3);
+    }
+
+    #[test]
+    fn test_ordering() {
+        use core::cmp::Ordering;
+
+        // Test the specific bug case: [2, 1] vs [1, 2]
+        let a = Secret::new([2u8, 1]);
+        let b = Secret::new([1u8, 2]);
+        assert_eq!(a.cmp(&b), Ordering::Greater); // [2, 1] > [1, 2] lexicographically
+
+        // Additional ordering tests
+        let c = Secret::new([1u8, 1]);
+        let d = Secret::new([1u8, 2]);
+        assert_eq!(c.cmp(&d), Ordering::Less);
+
+        let e = Secret::new([1u8, 2]);
+        let f = Secret::new([1u8, 2]);
+        assert_eq!(e.cmp(&f), Ordering::Equal);
+
+        // Single byte
+        let g = Secret::new([0u8]);
+        let h = Secret::new([255u8]);
+        assert_eq!(g.cmp(&h), Ordering::Less);
+        assert_eq!(h.cmp(&g), Ordering::Greater);
     }
 
     #[test]
