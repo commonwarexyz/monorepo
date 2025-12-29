@@ -59,6 +59,7 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = [ "std" ]
+soft-mlock = []
 parallel = [ "blake3/rayon", "rayon", "std" ]
 mocks = [ "std" ]
 arbitrary = [
@@ -97,6 +98,7 @@ std = [
 name = "bls12381"
 harness = false
 path = "src/bls12381/benches/bench.rs"
+required-features = ["soft-mlock"]
 
 [[bench]]
 name = "ed25519"

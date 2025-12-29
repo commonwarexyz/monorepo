@@ -137,15 +137,20 @@ mod implementation {
             unsafe { core::ptr::write(ptr, value) };
 
             // SAFETY: ptr points to valid mmap'd memory of size `size`
+            // In soft-mlock mode (tests/benchmarks), we continue even if mlock fails.
+            // The memory will still be protected via mprotect, just not pinned in RAM.
             if unsafe { libc::mlock(ptr as *const libc::c_void, size) } != 0 {
-                // SAFETY: ptr and size match the mmap above
-                unsafe { libc::munmap(ptr as *mut libc::c_void, size) };
-                return Err("mlock failed");
+                #[cfg(not(any(test, feature = "soft-mlock")))]
+                {
+                    // SAFETY: ptr and size match the mmap above
+                    unsafe { libc::munmap(ptr as *mut libc::c_void, size) };
+                    return Err("mlock failed");
+                }
             }
 
-            // SAFETY: ptr points to valid locked memory of size `size`
+            // SAFETY: ptr points to valid memory of size `size`
             if unsafe { libc::mprotect(ptr as *mut libc::c_void, size, libc::PROT_NONE) } != 0 {
-                // SAFETY: cleanup on failure - unlock and unmap
+                // SAFETY: cleanup on failure - unlock (if locked) and unmap
                 unsafe {
                     libc::munlock(ptr as *const libc::c_void, size);
                     libc::munmap(ptr as *mut libc::c_void, size);
