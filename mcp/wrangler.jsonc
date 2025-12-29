@@ -22,12 +22,12 @@
     }
   ],
 
-  // Workers KV for search index storage (versioned indices are immutable)
-  "kv_namespaces": [
+  // D1 database for full-text search index
+  "d1_databases": [
     {
-      "binding": "SEARCH_INDEX",
-      "id": "PLACEHOLDER_PRODUCTION_ID",
-      "preview_id": "PLACEHOLDER_PREVIEW_ID"
+      "binding": "SEARCH_DB",
+      "database_name": "commonware-mcp-search",
+      "database_id": "PLACEHOLDER_DATABASE_ID"
     }
   ],
 

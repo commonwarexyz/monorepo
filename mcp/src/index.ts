@@ -41,20 +41,12 @@ interface SitemapData {
   files: Record<string, string[]>; // version -> file paths (JSON-serializable)
 }
 
-// Word index entry: locations where a word appears
-interface WordLocation {
-  file: string;
-  lines: number[]; // 0-indexed line numbers
-}
-
 // Constants
 const FILE_CACHE_TTL = 60 * 60 * 24 * 365; // 1 year (versioned files are immutable)
 const SITEMAP_CACHE_TTL = 60 * 60; // 1 hour
 const MAX_SEARCH_RESULTS = 50;
 const INDEX_BUILD_BATCH_SIZE = 50; // Larger batches for index building (one-time cost)
 const SEARCH_INDEX_EXTENSIONS = new Set(["rs", "md", "toml"]); // File types to index
-const WORD_REGEX = /[a-zA-Z_][a-zA-Z0-9_]*/g; // Match identifiers/words
-const INDEX_BUILT_KEY_SUFFIX = ":built"; // Marker key to indicate index is complete
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
@@ -151,11 +143,11 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
         const ver = version || (await this.getLatestVersion());
 
-        // Ensure the word index is built for this version
-        await this.ensureWordIndex(ver);
+        // Ensure the search index is built for this version
+        await this.ensureSearchIndex(ver);
 
-        // Search using KV prefix lookup
-        const results = await this.searchWithWordIndex(ver, query, crate, file_type, limit);
+        // Search using D1 FTS5
+        const results = await this.searchWithFTS(ver, query, crate, file_type, limit);
 
         if (results.length === 0) {
           return {
@@ -517,23 +509,24 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     return crates;
   }
 
-  // Helper: Check if word index is built for a version
-  private async ensureWordIndex(version: string): Promise<void> {
-    const builtKey = `word:${version}${INDEX_BUILT_KEY_SUFFIX}`;
-    const isBuilt = await this.env.SEARCH_INDEX.get(builtKey);
-    if (isBuilt !== null) {
+  // Helper: Check if search index is built for a version
+  private async ensureSearchIndex(version: string): Promise<void> {
+    const result = await this.env.SEARCH_DB.prepare(
+      "SELECT 1 FROM indexed_versions WHERE version = ?"
+    )
+      .bind(version)
+      .first();
+
+    if (result !== null) {
       return;
     }
 
-    // Build the word index
-    await this.buildWordIndex(version);
-
-    // Mark as built
-    await this.env.SEARCH_INDEX.put(builtKey, "1");
+    // Build the search index
+    await this.buildSearchIndex(version);
   }
 
-  // Helper: Build inverted word index for a version
-  private async buildWordIndex(version: string): Promise<void> {
+  // Helper: Build search index for a version by inserting files into D1
+  private async buildSearchIndex(version: string): Promise<void> {
     const allFiles = await this.getFileList(version);
 
     // Filter to indexable file types
@@ -542,10 +535,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       return SEARCH_INDEX_EXTENSIONS.has(ext);
     });
 
-    // word -> file -> lines
-    const wordIndex = new Map<string, Map<string, number[]>>();
-
-    // Fetch files in batches and extract words
+    // Fetch files in batches and insert into D1
     for (let i = 0; i < indexableFiles.length; i += INDEX_BUILD_BATCH_SIZE) {
       const batch = indexableFiles.slice(i, i + INDEX_BUILD_BATCH_SIZE);
       const results = await Promise.all(
@@ -555,142 +545,116 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         })
       );
 
-      for (const result of results) {
-        if (result === null) {
-          continue;
-        }
+      // Batch insert into D1
+      const statements = results
+        .filter((r) => r !== null)
+        .map((r) =>
+          this.env.SEARCH_DB.prepare(
+            "INSERT OR REPLACE INTO files (version, path, content) VALUES (?, ?, ?)"
+          ).bind(version, r.file, r.content)
+        );
 
-        const lines = result.content.split("\n");
-        for (let lineNum = 0; lineNum < lines.length; lineNum++) {
-          // Extract all words from this line
-          const words = lines[lineNum].match(WORD_REGEX) || [];
-          for (const word of words) {
-            const wordLower = word.toLowerCase();
-
-            let fileMap = wordIndex.get(wordLower);
-            if (!fileMap) {
-              fileMap = new Map();
-              wordIndex.set(wordLower, fileMap);
-            }
-
-            let lineList = fileMap.get(result.file);
-            if (!lineList) {
-              lineList = [];
-              fileMap.set(result.file, lineList);
-            }
-
-            // Avoid duplicate line numbers
-            if (lineList.length === 0 || lineList[lineList.length - 1] !== lineNum) {
-              lineList.push(lineNum);
-            }
-          }
-        }
+      if (statements.length > 0) {
+        await this.env.SEARCH_DB.batch(statements);
       }
     }
 
-    // Store each word entry in KV
-    const kvWrites: Promise<void>[] = [];
-    for (const [word, fileMap] of wordIndex) {
-      const locations: WordLocation[] = [];
-      for (const [file, lines] of fileMap) {
-        locations.push({ file, lines });
-      }
-
-      const kvKey = `word:${version}:${word}`;
-      kvWrites.push(this.env.SEARCH_INDEX.put(kvKey, JSON.stringify(locations)));
-    }
-
-    // Write in parallel (KV handles this efficiently)
-    await Promise.all(kvWrites);
+    // Mark version as indexed
+    await this.env.SEARCH_DB.prepare("INSERT OR REPLACE INTO indexed_versions (version) VALUES (?)")
+      .bind(version)
+      .run();
   }
 
-  // Helper: Search using the word index with KV prefix lookup
-  private async searchWithWordIndex(
+  // Helper: Search using D1 FTS5
+  private async searchWithFTS(
     version: string,
     query: string,
     crate: string | undefined,
     fileType: string,
     limit: number
   ): Promise<Array<{ file: string; matches: string[] }>> {
-    const queryLower = query.toLowerCase();
-    const prefix = `word:${version}:${queryLower}`;
+    // Escape special FTS5 characters and add prefix matching
+    const ftsQuery = this.buildFTSQuery(query);
 
-    // Use KV list to find all words that start with the query
-    const listResult = await this.env.SEARCH_INDEX.list({ prefix });
+    // Build the SQL query with filters
+    let sql = `
+      SELECT f.path, f.content
+      FROM files_fts
+      JOIN files f ON files_fts.rowid = f.id
+      WHERE files_fts MATCH ?
+        AND f.version = ?
+    `;
+    const params: (string | number)[] = [ftsQuery, version];
 
-    // Aggregate file -> lines from all matching words
-    const fileLines = new Map<string, Set<number>>();
-
-    for (const key of listResult.keys) {
-      const locations = await this.env.SEARCH_INDEX.get<WordLocation[]>(key.name, "json");
-      if (locations === null) {
-        continue;
-      }
-
-      for (const loc of locations) {
-        // Apply crate filter
-        if (crate) {
-          const folderName = stripCratePrefix(crate);
-          if (!loc.file.startsWith(`${folderName}/`)) {
-            continue;
-          }
-        }
-
-        // Apply file type filter
-        if (fileType !== "all" && !loc.file.endsWith(`.${fileType}`)) {
-          continue;
-        }
-
-        let lineSet = fileLines.get(loc.file);
-        if (!lineSet) {
-          lineSet = new Set();
-          fileLines.set(loc.file, lineSet);
-        }
-        for (const line of loc.lines) {
-          lineSet.add(line);
-        }
-      }
+    // Add crate filter
+    if (crate) {
+      const folderName = stripCratePrefix(crate);
+      sql += " AND f.path LIKE ?";
+      params.push(`${folderName}/%`);
     }
 
-    // Fetch files and extract snippets
-    const results: Array<{ file: string; matches: string[] }> = [];
-    const fileEntries = Array.from(fileLines.entries());
+    // Add file type filter
+    if (fileType !== "all") {
+      sql += " AND f.path LIKE ?";
+      params.push(`%.${fileType}`);
+    }
 
-    for (const [file, lineSet] of fileEntries) {
-      if (results.length >= limit) {
-        break;
-      }
+    // Order by relevance and limit
+    sql += " ORDER BY bm25(files_fts) LIMIT ?";
+    params.push(limit);
 
-      const content = await this.fetchFile(version, file);
-      if (content === null) {
-        continue;
-      }
+    const results = await this.env.SEARCH_DB.prepare(sql)
+      .bind(...params)
+      .all<{ path: string; content: string }>();
 
-      const lines = content.split("\n");
+    // Extract snippets with context
+    const queryLower = query.toLowerCase();
+    const output: Array<{ file: string; matches: string[] }> = [];
+
+    for (const row of results.results) {
+      const lines = row.content.split("\n");
       const matches: string[] = [];
-      const sortedLines = Array.from(lineSet).sort((a, b) => a - b);
 
-      for (const lineNum of sortedLines) {
-        if (matches.length >= 3) {
-          break;
+      for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+        if (lines[lineNum].toLowerCase().includes(queryLower)) {
+          // Include context (2 lines before and after)
+          const start = Math.max(0, lineNum - 2);
+          const end = Math.min(lines.length, lineNum + 3);
+          const snippet = lines
+            .slice(start, end)
+            .map((l, idx) => `${start + idx + 1}: ${l}`)
+            .join("\n");
+          matches.push(snippet);
+
+          // Limit matches per file
+          if (matches.length >= 3) {
+            break;
+          }
         }
-
-        // Include context (2 lines before and after)
-        const start = Math.max(0, lineNum - 2);
-        const end = Math.min(lines.length, lineNum + 3);
-        const snippet = lines
-          .slice(start, end)
-          .map((l, idx) => `${start + idx + 1}: ${l}`)
-          .join("\n");
-        matches.push(snippet);
       }
 
       if (matches.length > 0) {
-        results.push({ file, matches });
+        output.push({ file: row.path, matches });
       }
     }
 
-    return results;
+    return output;
+  }
+
+  // Helper: Build FTS5 query with prefix matching
+  private buildFTSQuery(query: string): string {
+    // Escape special FTS5 characters: " ( ) * : ^
+    const escaped = query.replace(/["()*:^]/g, " ").trim();
+
+    // Split into words and add prefix matching to each
+    const words = escaped.split(/\s+/).filter((w) => w.length > 0);
+
+    if (words.length === 0) {
+      return '""'; // Empty query
+    }
+
+    // Use prefix matching for each word
+    return words.map((w) => `"${w}"*`).join(" ");
   }
 }
 
