@@ -42,7 +42,6 @@ interface SitemapData {
 // Constants
 const FILE_CACHE_TTL = 60 * 60 * 24 * 365; // 1 year (versioned files are immutable)
 const SITEMAP_CACHE_TTL = 60 * 60; // 1 hour
-const CRATES_CACHE_TTL = 60 * 60; // 1 hour
 const MAX_SEARCH_RESULTS = 50;
 const SEARCH_BATCH_SIZE = 10;
 
@@ -59,8 +58,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "get_file",
       "Retrieve a file from the Commonware repository by its path. " +
-      "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
-      "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
+        "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
+        "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
       {
         path: z
           .string()
@@ -113,8 +112,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     this.server.tool(
       "search_code",
       "Search for a pattern across source code files in the Commonware repository. " +
-      "Returns matching files with relevant snippets. Useful for finding function definitions, " +
-      "usage patterns, or understanding how features are implemented.",
+        "Returns matching files with relevant snippets. Useful for finding function definitions, " +
+        "usage patterns, or understanding how features are implemented.",
       {
         query: z.string().describe("Search pattern (case-insensitive substring match)"),
         crate: z
@@ -404,57 +403,53 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     return sitemap.files[version] || [];
   }
 
-  // Helper: Get sitemap with Cache API caching
-  private async getSitemap(): Promise<SitemapData> {
+  // Helper: Fetch sitemap.xml with Cache API caching
+  private async fetchSitemap(): Promise<string> {
+    const url = `${this.env.BASE_URL}/sitemap.xml`;
+    const cacheKey = new Request(url);
     const cache = caches.default;
-    const cacheKey = new Request(`${this.env.BASE_URL}/_cache/sitemap`);
 
     // Check cache first
     const cachedResponse = await cache.match(cacheKey);
     if (cachedResponse) {
-      return cachedResponse.json();
+      return cachedResponse.text();
     }
 
-    // Fetch and parse sitemap
-    const response = await fetch(`${this.env.BASE_URL}/sitemap.xml`);
+    // Fetch from origin
+    const response = await fetch(url);
     if (!response.ok) {
       throw new Error("Failed to fetch sitemap");
     }
 
+    // Cache the raw response
     const xml = await response.text();
-    const { versions, files } = parseSitemap(xml);
-
-    // Convert Map to plain object for JSON serialization
-    const filesObj: Record<string, string[]> = {};
-    for (const [version, paths] of files) {
-      filesObj[version] = paths;
-    }
-
-    const sitemapData: SitemapData = { versions, files: filesObj };
-
-    // Cache the parsed sitemap
-    const cacheResponse = new Response(JSON.stringify(sitemapData), {
+    const cacheResponse = new Response(xml, {
       headers: {
-        "Content-Type": "application/json",
+        "Content-Type": "application/xml",
         "Cache-Control": `public, max-age=${SITEMAP_CACHE_TTL}`,
       },
     });
     await cache.put(cacheKey, cacheResponse);
 
-    return sitemapData;
+    return xml;
   }
 
-  // Helper: Get crates list with Cache API caching
-  private async getCrates(version: string): Promise<CrateInfo[]> {
-    const cache = caches.default;
-    const cacheKey = new Request(`${this.env.BASE_URL}/_cache/crates/${version}`);
+  // Helper: Get parsed sitemap data
+  private async getSitemap(): Promise<SitemapData> {
+    const xml = await this.fetchSitemap();
+    const { versions, files } = parseSitemap(xml);
 
-    // Check cache first
-    const cachedResponse = await cache.match(cacheKey);
-    if (cachedResponse) {
-      return cachedResponse.json();
+    // Convert Map to plain object
+    const filesObj: Record<string, string[]> = {};
+    for (const [version, paths] of files) {
+      filesObj[version] = paths;
     }
 
+    return { versions, files: filesObj };
+  }
+
+  // Helper: Get crates list (individual Cargo.toml files are cached via fetchFile)
+  private async getCrates(version: string): Promise<CrateInfo[]> {
     // Fetch workspace Cargo.toml to get members
     const workspaceToml = await this.fetchFile(version, "Cargo.toml");
     if (workspaceToml === null) {
@@ -487,15 +482,6 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
     // Sort alphabetically by name
     crates.sort((a, b) => a.name.localeCompare(b.name));
-
-    // Cache the crates list
-    const cacheResponse = new Response(JSON.stringify(crates), {
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": `public, max-age=${CRATES_CACHE_TTL}`,
-      },
-    });
-    await cache.put(cacheKey, cacheResponse);
 
     return crates;
   }
