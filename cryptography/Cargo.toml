@@ -104,6 +104,7 @@ required-features = ["soft-mlock"]
 name = "ed25519"
 harness = false
 path = "src/ed25519/benches/bench.rs"
+required-features = ["soft-mlock"]
 
 [[bench]]
 name = "secp256r1"
