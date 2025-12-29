@@ -393,9 +393,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
   // Helper: Get indexed versions from D1 (sorted descending)
   private async getIndexedVersions(): Promise<string[]> {
-    const result = await this.env.SEARCH_DB.prepare("SELECT version FROM indexed_versions").all<{
-      version: string;
-    }>();
+    const result = await this.env.SEARCH_DB.withSession()
+      .prepare("SELECT version FROM indexed_versions")
+      .all<{ version: string }>();
 
     const versions = result.results.map((r) => r.version);
     sortVersionsDesc(versions);
@@ -418,7 +418,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
   // Helper: Get file list for a version (from D1)
   private async getFileList(version: string): Promise<string[]> {
-    const result = await this.env.SEARCH_DB.prepare("SELECT path FROM files WHERE version = ?")
+    const result = await this.env.SEARCH_DB.withSession()
+      .prepare("SELECT path FROM files WHERE version = ?")
       .bind(version)
       .all<{ path: string }>();
 
@@ -465,9 +466,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
   // Helper: Check if a version has been indexed
   private async isVersionIndexed(version: string): Promise<boolean> {
-    const result = await this.env.SEARCH_DB.prepare(
-      "SELECT 1 FROM indexed_versions WHERE version = ?"
-    )
+    const result = await this.env.SEARCH_DB.withSession()
+      .prepare("SELECT 1 FROM indexed_versions WHERE version = ?")
       .bind(version)
       .first();
     return result !== null;
@@ -516,7 +516,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     sql += " ORDER BY bm25(files_fts) LIMIT ?";
     params.push(limit);
 
-    const results = await this.env.SEARCH_DB.prepare(sql)
+    const results = await this.env.SEARCH_DB.withSession()
+      .prepare(sql)
       .bind(...params)
       .all<{ path: string; content: string }>();
 
@@ -592,8 +593,9 @@ async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: s
   const { versions: sitemapVersions, files } = parseSitemap(xml);
   const sitemapSet = new Set(sitemapVersions);
 
-  // Get already indexed versions
-  const indexedResult = await env.SEARCH_DB.prepare("SELECT version FROM indexed_versions").all<{
+  // Get already indexed versions (use primary for writes)
+  const session = env.SEARCH_DB.withSession("first-primary");
+  const indexedResult = await session.prepare("SELECT version FROM indexed_versions").all<{
     version: string;
   }>();
   const indexedSet = new Set(indexedResult.results.map((r) => r.version));
@@ -626,20 +628,21 @@ async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: s
 
       const successfulResults = results.filter((r) => r !== null);
       const statements = successfulResults.map((r) =>
-        env.SEARCH_DB.prepare(
-          "INSERT OR REPLACE INTO files (version, path, content) VALUES (?, ?, ?)"
-        ).bind(version, r.file, r.content)
+        session
+          .prepare("INSERT OR REPLACE INTO files (version, path, content) VALUES (?, ?, ?)")
+          .bind(version, r.file, r.content)
       );
 
       if (statements.length > 0) {
-        await env.SEARCH_DB.batch(statements);
+        await session.batch(statements);
         filesIndexed += statements.length;
       }
     }
 
     // Only mark as indexed if at least one file was successfully indexed
     if (filesIndexed > 0) {
-      await env.SEARCH_DB.prepare("INSERT OR REPLACE INTO indexed_versions (version) VALUES (?)")
+      await session
+        .prepare("INSERT OR REPLACE INTO indexed_versions (version) VALUES (?)")
         .bind(version)
         .run();
       indexed.push(version);
@@ -650,8 +653,9 @@ async function reindexVersions(env: Env): Promise<{ indexed: string[]; pruned: s
   const pruned: string[] = [];
   for (const oldVersion of indexedSet) {
     if (!sitemapSet.has(oldVersion)) {
-      await env.SEARCH_DB.prepare("DELETE FROM files WHERE version = ?").bind(oldVersion).run();
-      await env.SEARCH_DB.prepare("DELETE FROM indexed_versions WHERE version = ?")
+      await session.prepare("DELETE FROM files WHERE version = ?").bind(oldVersion).run();
+      await session
+        .prepare("DELETE FROM indexed_versions WHERE version = ?")
         .bind(oldVersion)
         .run();
       pruned.push(oldVersion);
