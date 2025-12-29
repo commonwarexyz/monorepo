@@ -73,7 +73,17 @@ npm install
 ### Local Development
 
 ```bash
+# Create local D1 database and run migrations
+npx wrangler d1 migrations apply commonware-mcp-search --local
+
+# Start dev server
 npm run dev
+```
+
+In a separate terminal, trigger indexing to populate the search index:
+
+```bash
+curl "http://localhost:8787/__scheduled?cron=*"
 ```
 
 The server will be available at `http://localhost:8787`. Use the MCP inspector to test:
