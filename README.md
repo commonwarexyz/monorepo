@@ -69,7 +69,7 @@ Connect your LLM to the Commonware Library via [MCP](https://modelcontextprotoco
 ### Claude Code
 
 ```bash
-claude mcp add --transport http commonware https://mcp.commonware.xyz
+claude mcp add --transport http commonware-library https://mcp.commonware.xyz
 ```
 
 ### Cursor, Windsurf, etc.
@@ -77,7 +77,7 @@ claude mcp add --transport http commonware https://mcp.commonware.xyz
 ```json
 {
   "mcpServers": {
-    "commonware": {
+    "commonware-library": {
       "url": "https://mcp.commonware.xyz"
     }
   }
