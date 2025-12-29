@@ -182,9 +182,25 @@ mod implementation {
 
         /// Exposes the secret value for read-only access within a closure.
         ///
-        /// Memory is re-protected immediately after the closure returns.
+        /// Memory is re-protected immediately after the closure returns, even if
+        /// the closure panics.
         #[inline]
         pub fn expose<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+            // Scope guard that re-protects memory on drop (including panic unwinding)
+            struct ReprotectGuard {
+                ptr: *mut libc::c_void,
+                size: usize,
+            }
+
+            impl Drop for ReprotectGuard {
+                fn drop(&mut self) {
+                    // SAFETY: ptr and size are valid from the Secret that created us
+                    unsafe {
+                        libc::mprotect(self.ptr, self.size, libc::PROT_NONE);
+                    }
+                }
+            }
+
             // SAFETY: self.ptr points to valid protected memory of self.size bytes
             let result = unsafe {
                 libc::mprotect(
@@ -195,19 +211,15 @@ mod implementation {
             };
             assert_eq!(result, 0, "mprotect failed to unprotect memory");
 
+            // Create guard AFTER unprotecting - it will re-protect on drop
+            let _guard = ReprotectGuard {
+                ptr: self.ptr.as_ptr() as *mut libc::c_void,
+                size: self.size,
+            };
+
             // SAFETY: Memory is now readable and ptr is valid
             let value = unsafe { self.ptr.as_ref() };
-            let result = f(value);
-
-            // SAFETY: Re-protect after use
-            unsafe {
-                libc::mprotect(
-                    self.ptr.as_ptr() as *mut libc::c_void,
-                    self.size,
-                    libc::PROT_NONE,
-                );
-            }
-            result
+            f(value)
         }
     }
 
@@ -531,6 +543,27 @@ mod tests {
 
         secret.expose(|v| {
             let _ = format!("{:?}", *v);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_expose_reprotects_on_panic() {
+        use std::panic;
+
+        let secret = Secret::new([42u8; 32]);
+
+        // Panic inside expose - memory should still be re-protected
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            secret.expose(|_v| {
+                panic!("intentional panic");
+            });
+        }));
+        assert!(result.is_err());
+
+        // Should be able to expose again (memory was re-protected)
+        secret.expose(|v| {
+            assert_eq!(v[0], 42);
         });
     }
 }

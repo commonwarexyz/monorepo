@@ -110,6 +110,7 @@ required-features = ["soft-mlock"]
 name = "secp256r1"
 harness = false
 path = "src/secp256r1/benches/bench.rs"
+required-features = ["soft-mlock"]
 
 [[bench]]
 name = "sha256"
