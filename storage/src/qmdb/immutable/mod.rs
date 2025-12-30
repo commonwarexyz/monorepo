@@ -7,6 +7,7 @@ use crate::{
         authenticated,
         contiguous::variable::{self, Config as JournalConfig},
     },
+    kv,
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         mem::{Clean, Dirty, State},
@@ -452,8 +453,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     }
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    crate::store::Store for Immutable<E, K, V, H, T, Clean<H::Digest>>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator> kv::Store
+    for Immutable<E, K, V, H, T, Clean<H::Digest>>
 {
     type Key = K;
     type Value = V;

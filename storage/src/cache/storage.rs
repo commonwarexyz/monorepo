@@ -310,7 +310,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
     }
 }
 
-impl<E: Storage + Metrics, V: Codec> crate::store::Store for Cache<E, V> {
+impl<E: Storage + Metrics, V: Codec> crate::kv::Store for Cache<E, V> {
     type Key = u64;
     type Value = V;
     type Error = Error;

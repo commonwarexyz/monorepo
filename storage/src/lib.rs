@@ -25,10 +25,10 @@ cfg_if::cfg_if! {
         pub mod freezer;
         pub mod index;
         pub mod journal;
+        pub mod kv;
         pub mod metadata;
         pub mod ordinal;
         pub mod rmap;
-        pub mod store;
         pub mod translator;
     }
 }

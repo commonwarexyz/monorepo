@@ -1,8 +1,8 @@
 //! Support for batching changes to an underlying database.
 
 use crate::{
+    kv::{Store, StoreDeletable},
     qmdb::Error,
-    store::{Store, StoreDeletable},
 };
 use commonware_codec::Codec;
 use commonware_utils::Array;

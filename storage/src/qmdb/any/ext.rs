@@ -6,12 +6,12 @@
 
 use super::{CleanAny, DirtyAny};
 use crate::{
+    kv::{Store as StoreTrait, StoreDeletable, StoreMut},
     mmr::Location,
     qmdb::{
         store::{Batchable, CleanStore, DirtyStore, LogStore, LogStorePrunable},
         Error,
     },
-    store::{Store as StoreTrait, StoreDeletable, StoreMut},
     Persistable,
 };
 

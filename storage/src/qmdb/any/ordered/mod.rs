@@ -4,6 +4,7 @@ use crate::{
         contiguous::{Contiguous, MutableContiguous},
         Error as JournalError,
     },
+    kv,
     mmr::{
         mem::{Dirty, State},
         Location,
@@ -834,7 +835,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::Store for Db<E, C, I, H, Update<K, V>>
+    > kv::Store for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -854,7 +855,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreMut for Db<E, C, I, H, Update<K, V>>
+    > kv::StoreMut for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -870,7 +871,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreDeletable for Db<E, C, I, H, Update<K, V>>
+    > kv::StoreDeletable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {

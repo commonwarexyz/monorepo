@@ -1,4 +1,4 @@
-//! Traits for interacting with a storage system.
+//! Traits for interacting with a key/value store.
 
 use std::future::Future;
 
@@ -42,8 +42,8 @@ pub trait StoreMut: Store {
         }
     }
 
-    /// Creates a new key-value pair in the db.
-    /// Returns true if the key was created, false if it already existed.
+    /// Creates a new key-value pair in the db. Returns true if the key was created, false if it
+    /// already existed. The key is not modified if it already existed.
     fn create(
         &mut self,
         key: Self::Key,
