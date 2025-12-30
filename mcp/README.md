@@ -22,7 +22,9 @@ _Try these tools out on the [Commonware Library MCP Explorer](https://commonware
 
 ## Connecting
 
-LLMs are trained on code from months ago. Web search (the default fallback for finding missing information) returns GitHub links that must be iterated file-by-file to extract relevant information (if not rate-limited first), and the results probably won't match the version you're building against. We built this MCP server from scratch to remedy these issues for those building with the Commonware Library. It provides unlimited access to a version-pinned index of all source code and documentation, along with a ranked search tool that surfaces more relevant snippets than grep (with surrounding context).
+LLMs are trained on code from months ago. Web search (the default fallback for finding missing information) returns GitHub links that must be iterated file-by-file to extract relevant information (if not rate-limited first). And, the results you do find probably don't match the version you're building against.
+
+We built our own MCP server to make LLMs building with the Commonware Library more effective. [mcp.commonware.xyz](https://mcp.commonware.xyz) provides unlimited access to a version-pinned index of all source code and documentation, along with a ranked search tool that surfaces more relevant snippets than grep (with surrounding context).
 
 ### Claude Code
 
