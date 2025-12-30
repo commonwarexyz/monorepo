@@ -488,7 +488,7 @@ describe("hasMajorityOverlap", () => {
 });
 
 describe("selectTopSnippets", () => {
-  it("should select top snippets by score", () => {
+  it("should select top snippets by score descending", () => {
     const snippets = [
       { start: 0, end: 3, score: 5 },
       { start: 10, end: 13, score: 10 },
@@ -498,8 +498,9 @@ describe("selectTopSnippets", () => {
     const selected = selectTopSnippets(snippets, 3);
 
     expect(selected).toHaveLength(3);
-    // Should be sorted by score descending
-    expect(selected[0].start).toBeLessThanOrEqual(selected[0].end);
+    expect(selected[0]).toEqual({ start: 10, end: 13 }); // score 10
+    expect(selected[1]).toEqual({ start: 0, end: 3 }); // score 5
+    expect(selected[2]).toEqual({ start: 20, end: 23 }); // score 3
   });
 
   it("should preserve snippet boundaries without modification", () => {

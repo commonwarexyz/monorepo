@@ -182,12 +182,9 @@ export function hasMajorityOverlap(
   selectedStart: number,
   selectedEnd: number
 ): boolean {
-  let overlapCount = 0;
-  for (let i = candidateStart; i < candidateEnd; i++) {
-    if (i >= selectedStart && i < selectedEnd) {
-      overlapCount++;
-    }
-  }
+  const overlapStart = Math.max(candidateStart, selectedStart);
+  const overlapEnd = Math.min(candidateEnd, selectedEnd);
+  const overlapCount = Math.max(0, overlapEnd - overlapStart);
   const candidateSize = candidateEnd - candidateStart;
   return overlapCount > candidateSize / 2;
 }
