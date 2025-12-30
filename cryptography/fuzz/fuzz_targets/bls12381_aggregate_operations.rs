@@ -28,25 +28,25 @@ enum FuzzOperation {
     CombineSignaturesMinSig {
         signatures: Vec<G1>,
     },
-    AggregateVerifyMultiplePublicKeysMinPk {
+    AggregateVerifyPublicKeysMinPk {
         public_keys: Vec<G1>,
         namespace: Option<Vec<u8>>,
         message: Vec<u8>,
         signature: G2,
     },
-    AggregateVerifyMultiplePublicKeysMinSig {
+    AggregateVerifyPublicKeysMinSig {
         public_keys: Vec<G2>,
         namespace: Option<Vec<u8>>,
         message: Vec<u8>,
         signature: G1,
     },
-    AggregateVerifyMultipleMessagesMinPk {
+    AggregateVerifyMessagesMinPk {
         public_key: G1,
         messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
         signature: G2,
         concurrency: usize,
     },
-    AggregateVerifyMultipleMessagesMinSig {
+    AggregateVerifyMessagesMinSig {
         public_key: G2,
         messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
         signature: G1,
@@ -71,25 +71,25 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             3 => Ok(FuzzOperation::CombineSignaturesMinSig {
                 signatures: arbitrary_vec_g1(u, 0, 20)?,
             }),
-            4 => Ok(FuzzOperation::AggregateVerifyMultiplePublicKeysMinPk {
+            4 => Ok(FuzzOperation::AggregateVerifyPublicKeysMinPk {
                 public_keys: arbitrary_vec_g1(u, 0, 20)?,
                 namespace: arbitrary_optional_bytes(u, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g2(u)?,
             }),
-            5 => Ok(FuzzOperation::AggregateVerifyMultiplePublicKeysMinSig {
+            5 => Ok(FuzzOperation::AggregateVerifyPublicKeysMinSig {
                 public_keys: arbitrary_vec_g2(u, 0, 20)?,
                 namespace: arbitrary_optional_bytes(u, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g1(u)?,
             }),
-            6 => Ok(FuzzOperation::AggregateVerifyMultipleMessagesMinPk {
+            6 => Ok(FuzzOperation::AggregateVerifyMessagesMinPk {
                 public_key: arbitrary_g1(u)?,
                 messages: arbitrary_messages(u, 0, 20)?,
                 signature: arbitrary_g2(u)?,
                 concurrency: u.int_in_range(1..=8)?,
             }),
-            7 => Ok(FuzzOperation::AggregateVerifyMultipleMessagesMinSig {
+            7 => Ok(FuzzOperation::AggregateVerifyMessagesMinSig {
                 public_key: arbitrary_g2(u)?,
                 messages: arbitrary_messages(u, 0, 20)?,
                 signature: arbitrary_g1(u)?,
@@ -128,7 +128,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::AggregateVerifyMultiplePublicKeysMinPk {
+        FuzzOperation::AggregateVerifyPublicKeysMinPk {
             public_keys,
             namespace,
             message,
@@ -136,7 +136,7 @@ fn fuzz(op: FuzzOperation) {
         } => {
             if !public_keys.is_empty() {
                 let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
-                let _ = aggregate::verify_multiple_public_keys::<MinPk, _>(
+                let _ = aggregate::verify_public_keys::<MinPk, _>(
                     &public_keys,
                     namespace.as_deref(),
                     &message,
@@ -145,7 +145,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::AggregateVerifyMultiplePublicKeysMinSig {
+        FuzzOperation::AggregateVerifyPublicKeysMinSig {
             public_keys,
             namespace,
             message,
@@ -153,7 +153,7 @@ fn fuzz(op: FuzzOperation) {
         } => {
             if !public_keys.is_empty() {
                 let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
-                let _ = aggregate::verify_multiple_public_keys::<MinSig, _>(
+                let _ = aggregate::verify_public_keys::<MinSig, _>(
                     &public_keys,
                     namespace.as_deref(),
                     &message,
@@ -162,7 +162,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::AggregateVerifyMultipleMessagesMinPk {
+        FuzzOperation::AggregateVerifyMessagesMinPk {
             public_key,
             messages,
             signature,
@@ -175,7 +175,7 @@ fn fuzz(op: FuzzOperation) {
                     .collect();
 
                 let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
-                let _ = aggregate::verify_multiple_messages::<MinPk, _>(
+                let _ = aggregate::verify_messages::<MinPk, _>(
                     &public_key,
                     &messages_refs,
                     &agg_sig,
@@ -184,7 +184,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::AggregateVerifyMultipleMessagesMinSig {
+        FuzzOperation::AggregateVerifyMessagesMinSig {
             public_key,
             messages,
             signature,
@@ -197,7 +197,7 @@ fn fuzz(op: FuzzOperation) {
                     .collect();
 
                 let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
-                let _ = aggregate::verify_multiple_messages::<MinSig, _>(
+                let _ = aggregate::verify_messages::<MinSig, _>(
                     &public_key,
                     &messages_refs,
                     &agg_sig,

@@ -36,23 +36,23 @@ enum FuzzOperation {
         public: Sharing<MinSig>,
         partial: PartialSignature<MinSig>,
     },
-    PartialVerifyMultipleMessagesMinPk {
+    PartialBatchVerifyMessagesMinPk {
         public: Sharing<MinPk>,
         index: u32,
         entries: Vec<(Option<Vec<u8>>, Vec<u8>, G2)>,
     },
-    PartialVerifyMultipleMessagesMinSig {
+    PartialBatchVerifyMessagesMinSig {
         public: Sharing<MinSig>,
         index: u32,
         entries: Vec<(Option<Vec<u8>>, Vec<u8>, G1)>,
     },
-    PartialVerifyMultiplePublicKeysMinPk {
+    PartialBatchVerifyPublicKeysMinPk {
         public: Sharing<MinPk>,
         namespace: Option<Vec<u8>>,
         message: Vec<u8>,
         partials: Vec<(u32, G2)>,
     },
-    PartialVerifyMultiplePublicKeysMinSig {
+    PartialBatchVerifyPublicKeysMinSig {
         public: Sharing<MinSig>,
         namespace: Option<Vec<u8>>,
         message: Vec<u8>,
@@ -117,7 +117,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                     .zip(partials)
                     .map(|((ns, msg), sig)| (ns, msg, sig))
                     .collect();
-                Ok(FuzzOperation::PartialVerifyMultipleMessagesMinPk {
+                Ok(FuzzOperation::PartialBatchVerifyMessagesMinPk {
                     public: u.arbitrary()?,
                     index: u.int_in_range(1..=100)?,
                     entries,
@@ -131,19 +131,19 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                     .zip(partials)
                     .map(|((ns, msg), sig)| (ns, msg, sig))
                     .collect();
-                Ok(FuzzOperation::PartialVerifyMultipleMessagesMinSig {
+                Ok(FuzzOperation::PartialBatchVerifyMessagesMinSig {
                     public: u.arbitrary()?,
                     index: u.int_in_range(1..=100)?,
                     entries,
                 })
             }
-            6 => Ok(FuzzOperation::PartialVerifyMultiplePublicKeysMinPk {
+            6 => Ok(FuzzOperation::PartialBatchVerifyPublicKeysMinPk {
                 public: u.arbitrary()?,
                 namespace: arbitrary_optional_bytes(u, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 partials: arbitrary_vec_indexed_g2(u, 0, 10)?,
             }),
-            7 => Ok(FuzzOperation::PartialVerifyMultiplePublicKeysMinSig {
+            7 => Ok(FuzzOperation::PartialBatchVerifyPublicKeysMinSig {
                 public: u.arbitrary()?,
                 namespace: arbitrary_optional_bytes(u, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
@@ -210,7 +210,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::PartialVerifyMultipleMessagesMinPk {
+        FuzzOperation::PartialBatchVerifyMessagesMinPk {
             public,
             index,
             entries,
@@ -230,7 +230,7 @@ fn fuzz(op: FuzzOperation) {
                         )
                     })
                     .collect();
-                let _ = threshold::verify_multiple_messages::<_, MinPk, _>(
+                let _ = threshold::batch_verify_messages::<_, MinPk, _>(
                     &mut thread_rng(),
                     &public,
                     index,
@@ -240,7 +240,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::PartialVerifyMultipleMessagesMinSig {
+        FuzzOperation::PartialBatchVerifyMessagesMinSig {
             public,
             index,
             entries,
@@ -260,7 +260,7 @@ fn fuzz(op: FuzzOperation) {
                         )
                     })
                     .collect();
-                let _ = threshold::verify_multiple_messages::<_, MinSig, _>(
+                let _ = threshold::batch_verify_messages::<_, MinSig, _>(
                     &mut thread_rng(),
                     &public,
                     index,
@@ -270,7 +270,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::PartialVerifyMultiplePublicKeysMinPk {
+        FuzzOperation::PartialBatchVerifyPublicKeysMinPk {
             public,
             namespace,
             message,
@@ -284,7 +284,7 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
-                let _ = threshold::verify_multiple_public_keys::<_, MinPk, _>(
+                let _ = threshold::batch_verify_public_keys::<_, MinPk, _>(
                     &mut thread_rng(),
                     &public,
                     namespace.as_deref(),
@@ -294,7 +294,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::PartialVerifyMultiplePublicKeysMinSig {
+        FuzzOperation::PartialBatchVerifyPublicKeysMinSig {
             public,
             namespace,
             message,
@@ -308,7 +308,7 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
-                let _ = threshold::verify_multiple_public_keys::<_, MinSig, _>(
+                let _ = threshold::batch_verify_public_keys::<_, MinSig, _>(
                     &mut thread_rng(),
                     &public,
                     namespace.as_deref(),

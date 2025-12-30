@@ -2,7 +2,7 @@ use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 
-fn benchmark_aggregate_verify_multiple_public_keys(c: &mut Criterion) {
+fn benchmark_aggregate_verify_public_keys(c: &mut Criterion) {
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
     thread_rng().fill(&mut msg);
@@ -25,7 +25,7 @@ fn benchmark_aggregate_verify_multiple_public_keys(c: &mut Criterion) {
                     )
                 },
                 |(public_keys, signature)| {
-                    ops::aggregate::verify_multiple_public_keys::<MinSig, _>(
+                    ops::aggregate::verify_public_keys::<MinSig, _>(
                         &public_keys,
                         Some(namespace),
                         &msg,
@@ -42,5 +42,5 @@ fn benchmark_aggregate_verify_multiple_public_keys(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_aggregate_verify_multiple_public_keys
+    targets = benchmark_aggregate_verify_public_keys
 }

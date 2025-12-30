@@ -30,7 +30,7 @@ use rand_core::CryptoRngCore;
 ///
 /// This function assumes a group check was already performed on each public key
 /// and signature.
-pub fn verify_multiple_public_keys<R, V>(
+pub fn verify_public_keys<R, V>(
     rng: &mut R,
     namespace: Option<&[u8]>,
     message: &[u8],
@@ -105,7 +105,7 @@ where
 /// This function assumes a group check was already performed on `public` and each `signature`.
 /// It is not safe to provide an aggregate public key. Duplicate messages are safe because
 /// random scalar weights ensure each (message, signature) pair is verified independently.
-pub fn verify_multiple_messages<'a, R, V, I>(
+pub fn verify_messages<'a, R, V, I>(
     rng: &mut R,
     public: &V::Public,
     entries: I,
@@ -152,7 +152,7 @@ mod tests {
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_utils::test_rng;
 
-    fn verify_multiple_messages_correct<V: Variant>() {
+    fn verify_messages_correct<V: Variant>() {
         let mut rng = test_rng();
         let (private, public) = keypair::<_, V>(&mut rng);
         let namespace = Some(&b"test"[..]);
@@ -166,20 +166,20 @@ mod tests {
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(&private, *ns, msg)))
             .collect();
 
-        verify_multiple_messages::<_, V, _>(&mut rng, &public, &entries, 1)
+        verify_messages::<_, V, _>(&mut rng, &public, &entries, 1)
             .expect("valid signatures should be accepted");
 
-        verify_multiple_messages::<_, V, _>(&mut rng, &public, &entries, 4)
+        verify_messages::<_, V, _>(&mut rng, &public, &entries, 4)
             .expect("valid signatures should be accepted with parallelism");
     }
 
     #[test]
-    fn test_verify_multiple_messages_correct() {
-        verify_multiple_messages_correct::<MinPk>();
-        verify_multiple_messages_correct::<MinSig>();
+    fn test_verify_messages_correct() {
+        verify_messages_correct::<MinPk>();
+        verify_messages_correct::<MinSig>();
     }
 
-    fn verify_multiple_messages_wrong_signature<V: Variant>() {
+    fn verify_messages_wrong_signature<V: Variant>() {
         let mut rng = test_rng();
         let (private, public) = keypair::<_, V>(&mut rng);
         let namespace = Some(&b"test"[..]);
@@ -196,14 +196,14 @@ mod tests {
         let random_scalar = Scalar::random(&mut rng);
         entries[1].2 += &(V::Signature::generator() * &random_scalar);
 
-        let result = verify_multiple_messages::<_, V, _>(&mut rng, &public, &entries, 1);
+        let result = verify_messages::<_, V, _>(&mut rng, &public, &entries, 1);
         assert!(result.is_err(), "corrupted signature should be rejected");
     }
 
     #[test]
-    fn test_verify_multiple_messages_wrong_signature() {
-        verify_multiple_messages_wrong_signature::<MinPk>();
-        verify_multiple_messages_wrong_signature::<MinSig>();
+    fn test_verify_messages_wrong_signature() {
+        verify_messages_wrong_signature::<MinPk>();
+        verify_messages_wrong_signature::<MinSig>();
     }
 
     fn resists_signature_redistribution<V: Variant>() {
@@ -248,7 +248,7 @@ mod tests {
 
         // Batch verification (with random weights) rejects forged signatures
         let forged_entries = vec![(None, msg1, forged_sig1), (None, msg2, forged_sig2)];
-        let result = verify_multiple_messages::<_, V, _>(&mut rng, &public, &forged_entries, 1);
+        let result = verify_messages::<_, V, _>(&mut rng, &public, &forged_entries, 1);
         assert!(
             result.is_err(),
             "batch verification should reject forged signatures"
@@ -256,7 +256,7 @@ mod tests {
 
         // Batch verification accepts valid signatures
         let valid_entries = vec![(None, msg1, sig1), (None, msg2, sig2)];
-        verify_multiple_messages::<_, V, _>(&mut rng, &public, &valid_entries, 1)
+        verify_messages::<_, V, _>(&mut rng, &public, &valid_entries, 1)
             .expect("batch verification should accept valid signatures");
     }
 

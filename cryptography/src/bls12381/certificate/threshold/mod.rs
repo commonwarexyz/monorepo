@@ -238,7 +238,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         let polynomial = self.polynomial();
         let (namespace, message) = subject.namespace_and_message(namespace);
-        if let Err(errs) = threshold::verify_multiple_public_keys::<_, V, _>(
+        if let Err(errs) = threshold::batch_verify_public_keys::<_, V, _>(
             rng,
             polynomial,
             Some(namespace.as_ref()),
@@ -339,7 +339,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
             .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_ref(), *sig))
             .collect();
 
-        batch::verify_multiple_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
+        batch::verify_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
     }
 
     pub const fn is_attributable(&self) -> bool {

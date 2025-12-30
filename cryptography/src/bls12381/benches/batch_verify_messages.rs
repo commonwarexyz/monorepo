@@ -2,7 +2,7 @@ use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 
-fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
+fn benchmark_verify_messages(c: &mut Criterion) {
     let namespace = b"namespace";
     for n in [2, 10, 100, 1000, 10000].into_iter() {
         let mut msgs: Vec<[u8; 32]> = Vec::with_capacity(n);
@@ -18,28 +18,21 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
                     b.iter_batched(
                         || {
                             let (private, public) = ops::keypair::<_, MinSig>(&mut thread_rng());
-                            let sigs: Vec<_> = msgs
+                            let entries: Vec<_> = msgs
                                 .iter()
                                 .map(|msg| {
                                     let ns: Option<&[u8]> = Some(&namespace[..]);
-                                    ops::sign_message::<MinSig>(&private, ns, msg)
+                                    let sig = ops::sign_message::<MinSig>(&private, ns, msg);
+                                    (ns, msg.as_ref(), sig)
                                 })
                                 .collect();
-                            let agg_sig = ops::aggregate::combine_signatures::<MinSig, _>(&sigs);
-                            let messages: Vec<_> = msgs
-                                .iter()
-                                .map(|msg| {
-                                    let ns: Option<&[u8]> = Some(&namespace[..]);
-                                    (ns, msg.as_ref())
-                                })
-                                .collect();
-                            (public, messages, agg_sig)
+                            (public, entries)
                         },
-                        |(public, messages, agg_sig)| {
-                            ops::aggregate::verify_multiple_messages::<MinSig, _>(
+                        |(public, entries)| {
+                            ops::batch::verify_messages::<_, MinSig, _>(
+                                &mut thread_rng(),
                                 &public,
-                                &messages,
-                                &agg_sig,
+                                &entries,
                                 concurrency,
                             )
                             .unwrap();
@@ -55,5 +48,5 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_aggregate_verify_multiple_messages
+    targets = benchmark_verify_messages
 }

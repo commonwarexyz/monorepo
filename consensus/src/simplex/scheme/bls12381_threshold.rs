@@ -458,7 +458,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
-        batch::verify_multiple_messages::<_, V, _>(
+        batch::verify_messages::<_, V, _>(
             rng,
             &evaluated,
             &[
@@ -509,7 +509,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
 
         let polynomial = self.polynomial();
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
-        if let Err(errs) = threshold::verify_multiple_public_keys::<_, V, _>(
+        if let Err(errs) = threshold::batch_verify_public_keys::<_, V, _>(
             rng,
             polynomial,
             Some(vote_namespace.as_ref()),
@@ -522,7 +522,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         }
 
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
-        if let Err(errs) = threshold::verify_multiple_public_keys::<_, V, _>(
+        if let Err(errs) = threshold::batch_verify_public_keys::<_, V, _>(
             rng,
             polynomial,
             Some(seed_namespace.as_ref()),
@@ -599,7 +599,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
 
-        batch::verify_multiple_messages::<_, V, _>(
+        batch::verify_messages::<_, V, _>(
             rng,
             identity,
             &[
@@ -700,7 +700,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             .iter()
             .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_ref(), *sig))
             .collect();
-        batch::verify_multiple_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
+        batch::verify_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
     }
 
     fn is_attributable(&self) -> bool {
