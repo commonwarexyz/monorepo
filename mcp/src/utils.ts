@@ -139,43 +139,35 @@ export interface Snippet {
 }
 
 /**
- * Build snippets from lines by grouping consecutive non-empty lines.
- * Each snippet contains lines from the first non-empty line to the last
- * non-empty line in a contiguous block.
+ * Build snippets using a rolling window approach.
+ * Creates a window centered on each line with a positive score,
+ * allowing overlapping windows that will be filtered later.
  */
-export function buildSnippets(lines: string[], lineScores: number[]): Snippet[] {
+export function buildSnippets(
+  lines: string[],
+  lineScores: number[],
+  windowSize: number = 7
+): Snippet[] {
   const snippets: Snippet[] = [];
-  let snippetStart: number | null = null;
+  const halfWindow = Math.floor(windowSize / 2);
 
   for (let lineNum = 0; lineNum < lines.length; lineNum++) {
-    const hasContent = lines[lineNum].trim().length > 0;
-
-    if (hasContent) {
-      if (snippetStart === null) {
-        snippetStart = lineNum;
-      }
-    } else if (snippetStart !== null) {
-      // End of snippet - calculate total score
-      let totalScore = 0;
-      for (let i = snippetStart; i < lineNum; i++) {
-        totalScore += lineScores[i];
-      }
-      if (totalScore > 0) {
-        snippets.push({ start: snippetStart, end: lineNum, score: totalScore });
-      }
-      snippetStart = null;
+    // Only create windows centered on lines with matches
+    if (lineScores[lineNum] <= 0) {
+      continue;
     }
-  }
 
-  // Handle snippet at end of file
-  if (snippetStart !== null) {
+    // Create window centered on this line
+    const start = Math.max(0, lineNum - halfWindow);
+    const end = Math.min(lines.length, lineNum + halfWindow + 1);
+
+    // Calculate total score for this window
     let totalScore = 0;
-    for (let i = snippetStart; i < lines.length; i++) {
+    for (let i = start; i < end; i++) {
       totalScore += lineScores[i];
     }
-    if (totalScore > 0) {
-      snippets.push({ start: snippetStart, end: lines.length, score: totalScore });
-    }
+
+    snippets.push({ start, end, score: totalScore });
   }
 
   return snippets;

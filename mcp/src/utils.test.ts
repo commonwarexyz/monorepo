@@ -388,49 +388,44 @@ tests/
 });
 
 describe("buildSnippets", () => {
-  it("should create snippets from consecutive non-empty lines", () => {
-    const lines = ["line 1", "line 2", "", "line 4", "line 5"];
-    const scores = [1, 2, 0, 1, 1];
+  it("should create rolling windows centered on matching lines", () => {
+    const lines = ["a", "b", "c", "d", "e", "f", "g"];
+    const scores = [0, 0, 0, 5, 0, 0, 0]; // match on line 3 (0-indexed)
 
-    const snippets = buildSnippets(lines, scores);
+    const snippets = buildSnippets(lines, scores, 5);
 
+    // Window of 5 centered on line 3: lines 1-6 (exclusive)
+    expect(snippets).toHaveLength(1);
+    expect(snippets[0]).toEqual({ start: 1, end: 6, score: 5 });
+  });
+
+  it("should create multiple overlapping windows for adjacent matches", () => {
+    const lines = ["a", "b", "c", "d", "e"];
+    const scores = [0, 2, 3, 0, 0]; // matches on lines 1 and 2
+
+    const snippets = buildSnippets(lines, scores, 3);
+
+    // Window size 3: halfWindow = 1
+    // Line 1: window 0-3, score = 0+2+3 = 5
+    // Line 2: window 1-4, score = 2+3+0 = 5
     expect(snippets).toHaveLength(2);
-    expect(snippets[0]).toEqual({ start: 0, end: 2, score: 3 });
-    expect(snippets[1]).toEqual({ start: 3, end: 5, score: 2 });
+    expect(snippets[0]).toEqual({ start: 0, end: 3, score: 5 });
+    expect(snippets[1]).toEqual({ start: 1, end: 4, score: 5 });
   });
 
-  it("should handle single snippet without trailing empty line", () => {
-    const lines = ["line 1", "line 2", "line 3"];
-    const scores = [1, 1, 1];
+  it("should clamp windows to file boundaries", () => {
+    const lines = ["a", "b", "c"];
+    const scores = [5, 0, 0]; // match on first line
 
-    const snippets = buildSnippets(lines, scores);
+    const snippets = buildSnippets(lines, scores, 7);
 
+    // Window of 7 centered on line 0, clamped to 0-3
     expect(snippets).toHaveLength(1);
-    expect(snippets[0]).toEqual({ start: 0, end: 3, score: 3 });
+    expect(snippets[0]).toEqual({ start: 0, end: 3, score: 5 });
   });
 
-  it("should ignore snippets with zero score", () => {
-    const lines = ["line 1", "line 2", "", "line 4"];
-    const scores = [0, 0, 0, 1];
-
-    const snippets = buildSnippets(lines, scores);
-
-    expect(snippets).toHaveLength(1);
-    expect(snippets[0]).toEqual({ start: 3, end: 4, score: 1 });
-  });
-
-  it("should handle empty lines at start and end", () => {
-    const lines = ["", "", "line 3", "line 4", "", ""];
-    const scores = [0, 0, 2, 3, 0, 0];
-
-    const snippets = buildSnippets(lines, scores);
-
-    expect(snippets).toHaveLength(1);
-    expect(snippets[0]).toEqual({ start: 2, end: 4, score: 5 });
-  });
-
-  it("should handle all empty lines", () => {
-    const lines = ["", "", ""];
+  it("should handle no matches", () => {
+    const lines = ["a", "b", "c"];
     const scores = [0, 0, 0];
 
     const snippets = buildSnippets(lines, scores);
@@ -438,15 +433,33 @@ describe("buildSnippets", () => {
     expect(snippets).toHaveLength(0);
   });
 
-  it("should handle whitespace-only lines as empty", () => {
-    const lines = ["line 1", "   ", "\t", "line 4"];
-    const scores = [1, 0, 0, 2];
+  it("should accumulate scores from all lines in window", () => {
+    const lines = ["a", "b", "c", "d", "e"];
+    const scores = [1, 2, 3, 2, 1]; // all lines have scores
+
+    const snippets = buildSnippets(lines, scores, 3);
+
+    // Each line creates a window, scores accumulate
+    expect(snippets).toHaveLength(5);
+    // Line 0: window 0-2, score = 1+2 = 3 (clamped start)
+    expect(snippets[0]).toEqual({ start: 0, end: 2, score: 3 });
+    // Line 1: window 0-3, score = 1+2+3 = 6
+    expect(snippets[1]).toEqual({ start: 0, end: 3, score: 6 });
+    // Line 2: window 1-4, score = 2+3+2 = 7
+    expect(snippets[2]).toEqual({ start: 1, end: 4, score: 7 });
+  });
+
+  it("should use default window size of 7", () => {
+    const lines = Array(20).fill("line");
+    const scores = Array(20).fill(0);
+    scores[10] = 5; // match in middle
 
     const snippets = buildSnippets(lines, scores);
 
-    expect(snippets).toHaveLength(2);
-    expect(snippets[0]).toEqual({ start: 0, end: 1, score: 1 });
-    expect(snippets[1]).toEqual({ start: 3, end: 4, score: 2 });
+    // Default window 7, halfWindow = 3
+    // Line 10: window 7-14
+    expect(snippets).toHaveLength(1);
+    expect(snippets[0]).toEqual({ start: 7, end: 14, score: 5 });
   });
 });
 
