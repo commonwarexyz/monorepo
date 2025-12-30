@@ -490,8 +490,6 @@ mod tests {
 
     #[test]
     fn test_acceptable_allow_unknown_ips() {
-        use std::net::IpAddr;
-
         let egress_ip: IpAddr = [8, 8, 8, 8].into();
         let wrong_ip: IpAddr = [1, 2, 3, 4].into();
         let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
