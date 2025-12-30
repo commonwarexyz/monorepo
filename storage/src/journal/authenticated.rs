@@ -1231,9 +1231,9 @@ mod tests {
         });
     }
 
-    /// Verify that close() syncs pending operations.
+    /// Verify that sync() persists operations.
     #[test_traced("INFO")]
-    fn test_close_with_pending_operations() {
+    fn test_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut journal = create_empty_journal(context.clone(), "close_pending").await;
