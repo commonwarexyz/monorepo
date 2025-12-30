@@ -135,6 +135,9 @@ fn fuzz(input: FuzzInput) {
                 JournalOperation::Restart => {
                     drop(journal);
                     journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+                    // Reset tracking variables to match recovered state
+                    journal_size = journal.size();
+                    oldest_retained_pos = journal.oldest_retained_pos().unwrap_or(0);
                 }
 
                 JournalOperation::Destroy => {
