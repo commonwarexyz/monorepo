@@ -38,6 +38,7 @@ enum JournalOperation {
         buffer: usize,
         start_pos: u64,
     },
+    Restart,
     Destroy,
     AppendMany {
         count: u8,
@@ -64,7 +65,7 @@ fn fuzz(input: FuzzInput) {
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
 
-        let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
+        let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
 
         let mut next_value = 0u64;
         let mut journal_size = 0u64;
@@ -129,6 +130,11 @@ fn fuzz(input: FuzzInput) {
                         }
                         Err(e) => panic!("unexpected replay error: {e:?}"),
                     }
+                }
+
+                JournalOperation::Restart => {
+                    drop(journal);
+                    journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
                 }
 
                 JournalOperation::Destroy => {
