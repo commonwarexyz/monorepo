@@ -61,7 +61,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 allow_private_ips: cfg.allow_private_ips,
                 allow_dns: cfg.allow_dns,
-                allow_unregistered: cfg.attempt_unregistered_handshakes,
+                allow_unknown_ips: cfg.attempt_unregistered_handshakes,
                 listener: listener_mailbox,
             },
         );

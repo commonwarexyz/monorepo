@@ -169,13 +169,13 @@ impl Record {
     ///
     /// A peer is acceptable if:
     /// - The peer is eligible (in a peer set, not blocked, not ourselves)
-    /// - The source IP matches the expected egress IP for this peer (if not allow_unregistered)
+    /// - The source IP matches the expected egress IP for this peer (if not allow_unknown_ips)
     /// - We are not already connected or reserved
-    pub fn acceptable(&self, source_ip: IpAddr, allow_unregistered: bool) -> bool {
+    pub fn acceptable(&self, source_ip: IpAddr, allow_unknown_ips: bool) -> bool {
         if !self.eligible() || self.status != Status::Inert {
             return false;
         }
-        if allow_unregistered {
+        if allow_unknown_ips {
             return true;
         }
         match &self.address {
@@ -489,26 +489,26 @@ mod tests {
     }
 
     #[test]
-    fn test_acceptable_allow_unregistered() {
+    fn test_acceptable_allow_unknown_ips() {
         use std::net::IpAddr;
 
         let egress_ip: IpAddr = [8, 8, 8, 8].into();
         let wrong_ip: IpAddr = [1, 2, 3, 4].into();
         let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
 
-        // With allow_unregistered=true, accepts even with wrong IP (skips IP check)
+        // With allow_unknown_ips=true, accepts even with wrong IP (skips IP check)
         let mut record = Record::known(types::Address::Symmetric(public_socket));
         record.increment();
         assert!(
             record.acceptable(wrong_ip, true),
-            "Acceptable with wrong IP when allow_unregistered=true"
+            "Acceptable with wrong IP when allow_unknown_ips=true"
         );
 
-        // Still requires eligible (sets > 0), even with allow_unregistered=true
+        // Still requires eligible (sets > 0), even with allow_unknown_ips=true
         let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
         assert!(
             !record_not_eligible.acceptable(egress_ip, true),
-            "Not acceptable when not eligible (sets=0), even with allow_unregistered=true"
+            "Not acceptable when not eligible (sets=0), even with allow_unknown_ips=true"
         );
 
         // Still not acceptable when blocked
