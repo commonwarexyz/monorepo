@@ -7,6 +7,7 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
 use commonware_storage::{
+    kv::Deletable,
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
@@ -20,8 +21,8 @@ use commonware_storage::{
         store::{Batchable, Config as SConfig, Store},
         Error,
     },
-    store::{StoreDeletable, StorePersistable},
     translator::EightCap,
+    Persistable,
 };
 use commonware_utils::{NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -241,11 +242,11 @@ async fn gen_random_kv<A>(
     commit_frequency: Option<u32>,
 ) -> A
 where
-    A: StorePersistable<
+    A: Deletable<
             Key = <Sha256 as Hasher>::Digest,
             Value = <Sha256 as Hasher>::Digest,
             Error = Error,
-        > + StoreDeletable,
+        > + Persistable<Error = Error>,
 {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
@@ -282,8 +283,8 @@ async fn gen_random_kv_batched<A>(
     commit_frequency: Option<u32>,
 ) -> A
 where
-    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
-        + Batchable,
+    A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
+        + Persistable<Error = Error>,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();

@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, MutableContiguous, PersistableContiguous},
+        contiguous::{fixed, variable, Contiguous, MutableContiguous},
         Error as JournalError,
     },
     mmr::{
@@ -15,6 +15,7 @@ use crate::{
         mem::{Clean, Dirty, State},
         Location, Position, Proof, StandardHasher,
     },
+    Persistable,
 };
 use commonware_codec::{Codec, CodecFixed, Encode};
 use commonware_cryptography::{DigestOf, Hasher};
@@ -109,7 +110,7 @@ where
 impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: PersistableContiguous<Item: Encode>,
+    C: MutableContiguous<Item: Encode> + Persistable<Error = JournalError>,
     H: Hasher,
     S: State<DigestOf<H>>,
 {
@@ -320,7 +321,7 @@ where
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: PersistableContiguous<Item: Encode>,
+    C: MutableContiguous<Item: Encode> + Persistable<Error = JournalError>,
     H: Hasher,
 {
     /// Close the authenticated journal, syncing all pending writes.
@@ -593,12 +594,14 @@ where
     }
 }
 
-impl<E, C, H> PersistableContiguous for Journal<E, C, H, Clean<H::Digest>>
+impl<E, C, H> Persistable for Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: PersistableContiguous<Item: Encode>,
+    C: MutableContiguous<Item: Encode> + Persistable<Error = JournalError>,
     H: Hasher,
 {
+    type Error = JournalError;
+
     async fn commit(&mut self) -> Result<(), JournalError> {
         self.commit().await.map_err(|e| match e {
             Error::Journal(inner) => inner,

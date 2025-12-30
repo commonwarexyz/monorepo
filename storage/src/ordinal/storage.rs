@@ -1,5 +1,5 @@
 use super::{Config, Error};
-use crate::rmap::RMap;
+use crate::{kv, rmap::RMap, Persistable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
@@ -424,7 +424,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::Store for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Gettable for Ordinal<E, V> {
     type Key = u64;
     type Value = V;
     type Error = Error;
@@ -434,19 +434,25 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::Store 
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreMut
-    for Ordinal<E, V>
-{
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Updatable for Ordinal<E, V> {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StorePersistable
-    for Ordinal<E, V>
-{
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Persistable for Ordinal<E, V> {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Self::Error> {
         self.sync().await
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        self.sync().await
+    }
+
+    async fn close(self) -> Result<(), Self::Error> {
+        self.close().await
     }
 
     async fn destroy(self) -> Result<(), Self::Error> {

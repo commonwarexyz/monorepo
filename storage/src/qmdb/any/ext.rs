@@ -6,12 +6,13 @@
 
 use super::{CleanAny, DirtyAny};
 use crate::{
+    kv,
     mmr::Location,
     qmdb::{
         store::{Batchable, CleanStore, DirtyStore, LogStore, LogStorePrunable},
         Error,
     },
-    store::{Store as StoreTrait, StoreDeletable, StoreMut, StorePersistable},
+    Persistable,
 };
 
 /// An extension wrapper for [CleanAny] databases that provides a traditional mutable key-value
@@ -64,7 +65,7 @@ impl<A: CleanAny> AnyExt<A> {
     }
 }
 
-impl<A> StoreTrait for AnyExt<A>
+impl<A> kv::Gettable for AnyExt<A>
 where
     A: CleanAny,
 {
@@ -80,7 +81,7 @@ where
     }
 }
 
-impl<A> StoreMut for AnyExt<A>
+impl<A> kv::Updatable for AnyExt<A>
 where
     A: CleanAny,
 {
@@ -93,7 +94,7 @@ where
     }
 }
 
-impl<A> StoreDeletable for AnyExt<A>
+impl<A> kv::Deletable for AnyExt<A>
 where
     A: CleanAny,
 {
@@ -106,10 +107,12 @@ where
     }
 }
 
-impl<A> StorePersistable for AnyExt<A>
+impl<A> Persistable for AnyExt<A>
 where
     A: CleanAny,
 {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Self::Error> {
         // Merkleize before commit
         self.ensure_clean().await?;
@@ -117,6 +120,19 @@ where
             State::Clean(clean) => clean.commit(None).await.map(|_| ()),
             _ => unreachable!("ensure_clean guarantees Clean state"),
         }
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        // Merkleize before sync
+        self.ensure_clean().await?;
+        match self.inner.as_mut().expect("wrapper should never be empty") {
+            State::Clean(clean) => clean.sync().await,
+            _ => unreachable!("ensure_clean guarantees Clean state"),
+        }
+    }
+
+    async fn close(self) -> Result<(), Self::Error> {
+        self.close().await
     }
 
     async fn destroy(mut self) -> Result<(), Self::Error> {

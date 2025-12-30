@@ -8,6 +8,7 @@
 
 use crate::{
     bitmap::{CleanBitMap, DirtyBitMap},
+    kv,
     mmr::{
         mem::{Clean, Dirty, State},
         Location, Proof, StandardHasher,
@@ -514,7 +515,7 @@ impl<
         T: Translator,
         const N: usize,
         S: State<DigestOf<H>>,
-    > crate::store::Store for Db<E, K, V, H, T, N, S>
+    > kv::Gettable for Db<E, K, V, H, T, N, S>
 {
     type Key = K;
     type Value = V;
@@ -532,7 +533,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreMut for Db<E, K, V, H, T, N, Dirty>
+    > kv::Updatable for Db<E, K, V, H, T, N, Dirty>
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
@@ -546,7 +547,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreDeletable for Db<E, K, V, H, T, N, Dirty>
+    > kv::Deletable for Db<E, K, V, H, T, N, Dirty>
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await

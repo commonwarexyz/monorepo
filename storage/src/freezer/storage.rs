@@ -1,5 +1,8 @@
 use super::{Config, Error, Identifier};
-use crate::journal::segmented::variable::{Config as JournalConfig, Journal};
+use crate::{
+    journal::segmented::variable::{Config as JournalConfig, Journal},
+    kv, Persistable,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
@@ -1038,7 +1041,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::Store for Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> kv::Gettable for Freezer<E, K, V> {
     type Key = K;
     type Value = V;
     type Error = Error;
@@ -1048,23 +1051,34 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::Store for F
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StoreMut for Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> kv::Updatable for Freezer<E, K, V> {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await?;
         Ok(())
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StorePersistable
-    for Freezer<E, K, V>
-{
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Persistable for Freezer<E, K, V> {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Self::Error> {
         self.sync().await?;
         Ok(())
     }
 
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        self.sync().await?;
+        Ok(())
+    }
+
+    async fn close(self) -> Result<(), Self::Error> {
+        self.close().await?;
+        Ok(())
+    }
+
     async fn destroy(self) -> Result<(), Self::Error> {
-        self.destroy().await
+        self.destroy().await?;
+        Ok(())
     }
 }
 

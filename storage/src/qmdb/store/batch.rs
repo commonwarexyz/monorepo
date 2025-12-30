@@ -1,9 +1,6 @@
 //! Support for batching changes to an underlying database.
 
-use crate::{
-    qmdb::Error,
-    store::{Store, StoreDeletable},
-};
+use crate::{kv, qmdb::Error};
 use commonware_codec::Codec;
 use commonware_utils::Array;
 use core::future::Future;
@@ -18,12 +15,12 @@ pub trait Getter<K, V> {
 /// All databases implement the [Getter] trait.
 impl<D> Getter<D::Key, D::Value> for D
 where
-    D: Store<Error = Error>,
+    D: kv::Gettable<Error = Error>,
     D::Key: Array,
     D::Value: Codec + Clone,
 {
     async fn get(&self, key: &D::Key) -> Result<Option<D::Value>, Error> {
-        Store::get(self, key).await
+        kv::Gettable::get(self, key).await
     }
 }
 
@@ -143,7 +140,7 @@ where
 }
 
 /// A database that supports making batched changes.
-pub trait Batchable: StoreDeletable<Key: Array, Value: Codec + Clone, Error = Error> {
+pub trait Batchable: kv::Deletable<Key: Array, Value: Codec + Clone, Error = Error> {
     /// Returns a new empty batch of changes.
     fn start_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>
     where
@@ -176,7 +173,7 @@ pub trait Batchable: StoreDeletable<Key: Array, Value: Codec + Clone, Error = Er
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::store::StorePersistable;
+    use crate::Persistable;
     use commonware_cryptography::{blake3, sha256};
     use commonware_runtime::{
         deterministic::{self, Context},
@@ -200,7 +197,7 @@ pub mod tests {
     where
         F: FnMut(Context) -> Fut + Clone,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -231,7 +228,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -249,7 +246,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -271,7 +268,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -302,7 +299,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -331,7 +328,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -358,7 +355,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -390,10 +387,10 @@ pub mod tests {
         db.commit().await?;
         for i in 0..100 {
             if deleted.contains(&i) {
-                assert_eq!(Store::get(&db, &D::Key::from_seed(i)).await?, None);
+                assert_eq!(kv::Gettable::get(&db, &D::Key::from_seed(i)).await?, None);
             } else {
                 assert_eq!(
-                    Store::get(&db, &D::Key::from_seed(i)).await?,
+                    kv::Gettable::get(&db, &D::Key::from_seed(i)).await?,
                     Some(D::Value::from_seed(i))
                 );
             }
@@ -415,7 +412,7 @@ pub mod tests {
 
         for i in 0..100 {
             assert_eq!(
-                Store::get(&db, &D::Key::from_seed(i)).await?,
+                kv::Gettable::get(&db, &D::Key::from_seed(i)).await?,
                 Some(D::Value::from_seed(i))
             );
         }
@@ -431,7 +428,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -452,11 +449,11 @@ pub mod tests {
         db.write_batch(batch.into_iter()).await?;
 
         assert_eq!(
-            Store::get(&db, &created1).await?,
+            kv::Gettable::get(&db, &created1).await?,
             Some(D::Value::from_seed(3))
         );
         assert_eq!(
-            Store::get(&db, &created2).await?,
+            kv::Gettable::get(&db, &created2).await?,
             Some(D::Value::from_seed(2))
         );
 
@@ -464,8 +461,8 @@ pub mod tests {
         delete_batch.delete(created1.clone()).await?;
         delete_batch.delete(created2.clone()).await?;
         db.write_batch(delete_batch.into_iter()).await?;
-        assert_eq!(Store::get(&db, &created1).await?, None);
-        assert_eq!(Store::get(&db, &created2).await?, None);
+        assert_eq!(kv::Gettable::get(&db, &created1).await?, None);
+        assert_eq!(kv::Gettable::get(&db, &created2).await?, None);
 
         db.destroy().await?;
 
@@ -478,13 +475,13 @@ pub mod tests {
             .await?;
         db.write_batch(batch.into_iter()).await?;
         assert_eq!(
-            Store::get(&db, &created1).await?,
+            kv::Gettable::get(&db, &created1).await?,
             Some(D::Value::from_seed(1))
         );
         let mut delete_batch = db.start_batch();
         delete_batch.delete(created1.clone()).await?;
         db.write_batch(delete_batch.into_iter()).await?;
-        assert_eq!(Store::get(&db, &created1).await?, None);
+        assert_eq!(kv::Gettable::get(&db, &created1).await?, None);
 
         db.destroy().await?;
 
@@ -495,7 +492,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -514,18 +511,18 @@ pub mod tests {
         db.write_batch(batch.into_iter()).await?;
 
         assert_eq!(
-            Store::get(&db, &existing).await?,
+            kv::Gettable::get(&db, &existing).await?,
             Some(D::Value::from_seed(8))
         );
         assert_eq!(
-            Store::get(&db, &created).await?,
+            kv::Gettable::get(&db, &created).await?,
             Some(D::Value::from_seed(9))
         );
 
         let mut delete_batch = db.start_batch();
         delete_batch.delete(existing.clone()).await?;
         db.write_batch(delete_batch.into_iter()).await?;
-        assert_eq!(Store::get(&db, &existing).await?, None);
+        assert_eq!(kv::Gettable::get(&db, &existing).await?, None);
 
         db.destroy().await?;
         Ok(())

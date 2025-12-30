@@ -1,9 +1,9 @@
-//! Traits for interacting with a storage system.
+//! Traits for interacting with a key/value store.
 
 use std::future::Future;
 
-/// A read-only key-value store.
-pub trait Store {
+/// A readable key-value store.
+pub trait Gettable {
     type Key;
     type Value;
     type Error;
@@ -16,7 +16,7 @@ pub trait Store {
 }
 
 /// A mutable key-value store.
-pub trait StoreMut: Store {
+pub trait Updatable: Gettable {
     /// Update the value of a key.
     fn update(
         &mut self,
@@ -42,8 +42,8 @@ pub trait StoreMut: Store {
         }
     }
 
-    /// Creates a new key-value pair in the db.
-    /// Returns true if the key was created, false if it already existed.
+    /// Creates a new key-value pair in the db. Returns true if the key was created, false if it
+    /// already existed. The key is not modified if it already existed.
     fn create(
         &mut self,
         key: Self::Key,
@@ -61,18 +61,9 @@ pub trait StoreMut: Store {
 }
 
 /// A mutable key-value store that supports deleting values.
-pub trait StoreDeletable: StoreMut {
+pub trait Deletable: Updatable {
     /// Delete the value of a key.
     ///
     /// Returns `true` if the key existed and was deleted, `false` if it did not exist.
     fn delete(&mut self, key: Self::Key) -> impl Future<Output = Result<bool, Self::Error>>;
-}
-
-/// A mutable key-value store that can be persisted.
-pub trait StorePersistable: StoreMut {
-    /// Commit the store to disk, ensuring all changes are durably persisted.
-    fn commit(&mut self) -> impl Future<Output = Result<(), Self::Error>>;
-
-    /// Destroy the store, removing all persisted data.
-    fn destroy(self) -> impl Future<Output = Result<(), Self::Error>>;
 }
