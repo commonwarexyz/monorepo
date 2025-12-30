@@ -278,7 +278,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > kv::Store for Db<E, C, I, H, Update<K, V>>
+    > kv::Gettable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -298,7 +298,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > kv::StoreMut for Db<E, C, I, H, Update<K, V>>
+    > kv::Updatable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -314,7 +314,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > kv::StoreDeletable for Db<E, C, I, H, Update<K, V>>
+    > kv::Deletable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {

@@ -453,8 +453,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     }
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator> kv::Store
-    for Immutable<E, K, V, H, T, Clean<H::Digest>>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    kv::Gettable for Immutable<E, K, V, H, T, Clean<H::Digest>>
 {
     type Key = K;
     type Value = V;

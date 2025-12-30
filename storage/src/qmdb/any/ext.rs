@@ -6,7 +6,7 @@
 
 use super::{CleanAny, DirtyAny};
 use crate::{
-    kv::{Store as StoreTrait, StoreDeletable, StoreMut},
+    kv,
     mmr::Location,
     qmdb::{
         store::{Batchable, CleanStore, DirtyStore, LogStore, LogStorePrunable},
@@ -65,7 +65,7 @@ impl<A: CleanAny> AnyExt<A> {
     }
 }
 
-impl<A> StoreTrait for AnyExt<A>
+impl<A> kv::Gettable for AnyExt<A>
 where
     A: CleanAny,
 {
@@ -81,7 +81,7 @@ where
     }
 }
 
-impl<A> StoreMut for AnyExt<A>
+impl<A> kv::Updatable for AnyExt<A>
 where
     A: CleanAny,
 {
@@ -94,7 +94,7 @@ where
     }
 }
 
-impl<A> StoreDeletable for AnyExt<A>
+impl<A> kv::Deletable for AnyExt<A>
 where
     A: CleanAny,
 {

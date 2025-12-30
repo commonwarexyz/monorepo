@@ -615,7 +615,7 @@ where
     }
 }
 
-impl<E, K, V, T> kv::Store for Store<E, K, V, T>
+impl<E, K, V, T> kv::Gettable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -631,7 +631,7 @@ where
     }
 }
 
-impl<E, K, V, T> kv::StoreMut for Store<E, K, V, T>
+impl<E, K, V, T> kv::Updatable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -643,7 +643,7 @@ where
     }
 }
 
-impl<E, K, V, T> kv::StoreDeletable for Store<E, K, V, T>
+impl<E, K, V, T> kv::Deletable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -667,7 +667,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{kv::StoreMut as _, qmdb::store::batch_tests, translator::TwoCap};
+    use crate::{kv::Updatable as _, qmdb::store::batch_tests, translator::TwoCap};
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
         Hasher as _,

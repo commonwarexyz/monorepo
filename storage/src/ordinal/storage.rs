@@ -424,7 +424,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Store for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Gettable for Ordinal<E, V> {
     type Key = u64;
     type Value = V;
     type Error = Error;
@@ -434,7 +434,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Store for Ordina
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::StoreMut for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Updatable for Ordinal<E, V> {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }

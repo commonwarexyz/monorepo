@@ -1041,7 +1041,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> kv::Store for Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> kv::Gettable for Freezer<E, K, V> {
     type Key = K;
     type Value = V;
     type Error = Error;
@@ -1051,7 +1051,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> kv::Store for Freezer<E, 
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> kv::StoreMut for Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> kv::Updatable for Freezer<E, K, V> {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await?;
         Ok(())

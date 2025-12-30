@@ -11,7 +11,7 @@ use commonware_runtime::{
     tokio::{Config, Context},
 };
 use commonware_storage::{
-    kv::StoreDeletable,
+    kv::Deletable,
     qmdb::{
         store::{Batchable, LogStorePrunable},
         Error,
@@ -109,7 +109,7 @@ async fn test_db<A>(
 where
     A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
         + Persistable<Error = Error>
-        + StoreDeletable
+        + Deletable
         + LogStorePrunable,
 {
     let start = Instant::now();

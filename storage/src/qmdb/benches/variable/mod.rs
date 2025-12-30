@@ -3,7 +3,7 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
 use commonware_storage::{
-    kv::StoreDeletable,
+    kv::Deletable,
     qmdb::{
         any::{
             ordered::variable::Db as OVariable, unordered::variable::Db as UVariable,
@@ -122,7 +122,7 @@ async fn gen_random_kv<A>(
     commit_frequency: u32,
 ) -> A
 where
-    A: StoreDeletable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>, Error = Error>
+    A: Deletable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>, Error = Error>
         + Persistable<Error = Error>
         + LogStorePrunable,
 {
