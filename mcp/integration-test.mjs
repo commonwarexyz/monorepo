@@ -38,6 +38,49 @@ async function checkHealth() {
   return data;
 }
 
+async function checkCORS() {
+  console.log("Checking CORS headers...");
+
+  // Test preflight request
+  const preflightResponse = await fetch(`${BASE_URL}/health`, {
+    method: "OPTIONS",
+  });
+  if (preflightResponse.status !== 204) {
+    throw new Error(`CORS preflight failed: expected 204, got ${preflightResponse.status}`);
+  }
+
+  const allowOrigin = preflightResponse.headers.get("Access-Control-Allow-Origin");
+  if (allowOrigin !== "*") {
+    throw new Error(`CORS: expected Access-Control-Allow-Origin: *, got ${allowOrigin}`);
+  }
+
+  const allowMethods = preflightResponse.headers.get("Access-Control-Allow-Methods");
+  if (!allowMethods || !allowMethods.includes("POST")) {
+    throw new Error(`CORS: Access-Control-Allow-Methods missing POST: ${allowMethods}`);
+  }
+
+  const allowHeaders = preflightResponse.headers.get("Access-Control-Allow-Headers");
+  if (!allowHeaders || !allowHeaders.includes("mcp-session-id")) {
+    throw new Error(`CORS: Access-Control-Allow-Headers missing mcp-session-id: ${allowHeaders}`);
+  }
+
+  console.log("CORS preflight passed");
+
+  // Test that actual response has CORS headers
+  const response = await fetch(`${BASE_URL}/health`);
+  const responseAllowOrigin = response.headers.get("Access-Control-Allow-Origin");
+  if (responseAllowOrigin !== "*") {
+    throw new Error(`CORS: health response missing Access-Control-Allow-Origin header`);
+  }
+
+  const exposeHeaders = response.headers.get("Access-Control-Expose-Headers");
+  if (!exposeHeaders || !exposeHeaders.includes("mcp-session-id")) {
+    throw new Error(`CORS: Access-Control-Expose-Headers missing mcp-session-id: ${exposeHeaders}`);
+  }
+
+  console.log("CORS headers check passed");
+}
+
 async function testMcpTools() {
   console.log("Connecting to MCP server...");
 
@@ -132,6 +175,9 @@ async function main() {
   try {
     // Check health first
     await checkHealth();
+
+    // Check CORS headers
+    await checkCORS();
 
     // Trigger indexing and wait for it to complete
     await triggerIndexing();

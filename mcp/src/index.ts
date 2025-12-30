@@ -745,10 +745,37 @@ async function reindexVersions(
   return { indexed, pruned };
 }
 
+// CORS headers for browser access
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, mcp-session-id",
+  "Access-Control-Expose-Headers": "mcp-session-id",
+};
+
+// Helper to add CORS headers to a response
+function withCORS(response: Response): Response {
+  const headers: Record<string, string> = {};
+  response.headers.forEach((value, key) => {
+    headers[key] = value;
+  });
+  Object.assign(headers, CORS_HEADERS);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 // Worker fetch handler
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    // Handle CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
 
     // Health check endpoint
     if (url.pathname === "/health") {
@@ -759,13 +786,14 @@ export default {
           status: "ok",
         }),
         {
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...CORS_HEADERS },
         }
       );
     }
 
-    // Route to MCP agent
-    return mcpHandler.fetch(request, env, ctx);
+    // Route to MCP agent and add CORS headers
+    const response = await mcpHandler.fetch(request, env, ctx);
+    return withCORS(response);
   },
 
   // Scheduled handler for automatic indexing
