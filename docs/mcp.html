@@ -263,6 +263,15 @@
                             }
                             input.appendChild(option);
                         }
+                    } else if (schema.type === 'boolean') {
+                        input = document.createElement('input');
+                        input.type = 'checkbox';
+                        input.id = `param-${name}`;
+                        input.dataset.paramName = name;
+                        input.dataset.paramType = 'boolean';
+                        if (schema.default === true) {
+                            input.checked = true;
+                        }
                     } else if (schema.type === 'number' || schema.type === 'integer') {
                         input = document.createElement('input');
                         input.type = 'number';
@@ -313,25 +322,38 @@
             for (const input of params.querySelectorAll('input, select')) {
                 const name = input.dataset.paramName;
                 const type = input.dataset.paramType;
-                let value = input.value;
 
+                if (type === 'boolean') {
+                    args[name] = input.checked;
+                    continue;
+                }
+
+                let value = input.value;
                 if (value === '') {
                     continue;
                 }
 
                 if (type === 'integer') {
-                    value = parseInt(value, 10);
+                    const parsed = parseInt(value, 10);
+                    if (!isNaN(parsed)) {
+                        args[name] = parsed;
+                    }
                 } else if (type === 'number') {
-                    value = parseFloat(value);
+                    const parsed = parseFloat(value);
+                    if (!isNaN(parsed)) {
+                        args[name] = parsed;
+                    }
+                } else {
+                    args[name] = value;
                 }
-
-                args[name] = value;
             }
 
+            const executeButton = document.getElementById('execute-tool');
             const resultDiv = document.getElementById('tool-result');
             const resultTitle = document.getElementById('result-title');
             const resultContent = document.getElementById('result-content');
 
+            executeButton.disabled = true;
             resultTitle.textContent = 'Result';
             resultContent.textContent = 'Executing...';
             resultDiv.style.display = 'block';
@@ -363,6 +385,8 @@
                 const latency = (performance.now() - startTime).toFixed(0);
                 resultTitle.textContent = `Result (${latency}ms)`;
                 resultContent.textContent = 'Error: ' + error.message;
+            } finally {
+                executeButton.disabled = false;
             }
         }
 
