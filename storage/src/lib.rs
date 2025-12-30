@@ -36,6 +36,7 @@ cfg_if::cfg_if! {
 /// A storage structure with capabilities to persist and recover state across restarts.
 #[cfg(feature = "std")]
 pub trait Persistable {
+    /// The error type returned when there is a failure from the underlying storage system.
     type Error;
 
     /// Durably persist the structure, guaranteeing the current state will survive a crash.
