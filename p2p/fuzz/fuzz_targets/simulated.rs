@@ -19,7 +19,7 @@ use std::{
 const MAX_OPERATIONS: usize = 50;
 const MAX_PEERS: usize = 16;
 const MIN_PEERS: usize = 2;
-const MAX_MSG_SIZE: usize = 1024 * 1024;
+const MAX_MSG_SIZE: u32 = 1024 * 1024;
 const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
 /// Default rate limit set high enough to not interfere with normal operation
@@ -176,7 +176,7 @@ fn fuzz(input: FuzzInput) {
                     let to_idx = (to_idx as usize) % peer_pks.len();
 
                     // Clamp message size to not exceed max (accounting for channel overhead)
-                    let msg_size = msg_size.clamp(0, MAX_MSG_SIZE - Channel::SIZE);
+                    let msg_size = msg_size.clamp(0, MAX_MSG_SIZE as usize - Channel::SIZE);
 
                     // Skip if receiver hasn't registered this channel - they won't be able to receive
                     if !channels.contains_key(&(to_idx, channel_id)) {

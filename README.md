@@ -48,6 +48,7 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 * [docs](./docs): Access information about Commonware at https://commonware.xyz.
 * [docker](./docker): Dockerfiles used for cross-compilation and CI.
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
+* [mcp](./mcp/README.md): Interact with the Commonware Library via MCP at https://mcp.commonware.xyz.
 * [pipeline](./pipeline): Mechanisms under development.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 
@@ -60,6 +61,28 @@ This repository is dual-licensed under both the [Apache 2.0](./LICENSE-APACHE) a
 We encourage external contributors to submit issues and pull requests to the Commonware Library. To learn more, please refer to our [contributing guidelines](./CONTRIBUTING.md).
 
 All work is coordinated via the [tracker](https://github.com/orgs/commonwarexyz/projects/2). If something in [the backlog](https://github.com/orgs/commonwarexyz/projects/2/views/3) looks particularly useful, leave a comment so we can prioritize it!
+
+## MCP Support (for LLMs)
+
+LLMs are trained on code from months ago. Web search (the default fallback for finding missing information) returns GitHub links that must be iterated file-by-file to extract relevant information (if not rate-limited first), and the results probably won't match the version you're building against. We built an [MCP](https://modelcontextprotocol.io) server from scratch to remedy these issues for those building with the Commonware Library. It provides unlimited access to a version-pinned index of all source code and documentation, along with a ranked search tool that surfaces more relevant snippets than grep (with surrounding context).
+
+### Claude Code
+
+```bash
+claude mcp add --transport http commonware-library https://mcp.commonware.xyz
+```
+
+### Cursor
+
+```json
+{
+  "mcpServers": {
+    "commonware-library": {
+      "url": "https://mcp.commonware.xyz"
+    }
+  }
+}
+```
 
 ## Support
 

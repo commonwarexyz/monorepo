@@ -99,7 +99,7 @@
 //! // Configure network
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
-//! const MAX_MESSAGE_SIZE: usize = 1_024; // 1KB
+//! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let p2p_cfg = lookup::Config::local(
 //!     my_sk.clone(),
 //!     application_namespace,
@@ -219,7 +219,7 @@ mod tests {
     /// errors when tests are run immediately after each other.
     async fn run_network(
         context: impl Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics,
-        max_message_size: usize,
+        max_message_size: u32,
         base_port: u16,
         n: usize,
         mode: Mode,
@@ -243,7 +243,7 @@ mod tests {
             let public_key = public_key.clone();
 
             // Create peer context
-            let context = context.with_label(&format!("peer-{i}"));
+            let context = context.with_label(&format!("peer_{i}"));
 
             // Create network
             let config = Config::test(private_key.clone(), *address, max_message_size);
@@ -413,7 +413,7 @@ mod tests {
 
     fn run_deterministic_test(seed: u64, mode: Mode) {
         // Configure test
-        const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
+        const MAX_MESSAGE_SIZE: u32 = 1_024 * 1_024; // 1MB
         const NUM_PEERS: usize = 25;
         const BASE_PORT: u16 = 3000;
 
@@ -475,7 +475,7 @@ mod tests {
     fn test_tokio_connectivity() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
+            const MAX_MESSAGE_SIZE: u32 = 1_024 * 1_024; // 1MB
             let base_port = 4000;
             let n = 10;
             run_network(context, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
@@ -508,7 +508,7 @@ mod tests {
             let mut waiters = Vec::new();
             for (i, (peer_sk, peer_pk, peer_addr)) in peers_and_sks.iter().enumerate() {
                 // Create peer context
-                let context = context.with_label(&format!("peer-{i}"));
+                let context = context.with_label(&format!("peer_{i}"));
 
                 // Create network
                 let config = Config::test(
@@ -659,7 +659,7 @@ mod tests {
 
             // Create network for peer 0
             let config0 = Config::test(sk0, addr0, 1_024 * 1_024); // 1MB
-            let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
+            let (mut network0, mut oracle0) = Network::new(context.with_label("peer_0"), config0);
             oracle0.update(0, peers.clone()).await;
             let (mut sender0, _receiver0) =
                 network0.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
@@ -667,7 +667,7 @@ mod tests {
 
             // Create network for peer 1
             let config1 = Config::test(sk1, addr1, 1_024 * 1_024); // 1MB
-            let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
+            let (mut network1, mut oracle1) = Network::new(context.with_label("peer_1"), config1);
             oracle1.update(0, peers.clone()).await;
             let (_sender1, _receiver1) =
                 network1.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
@@ -795,7 +795,7 @@ mod tests {
             // Create networks for all peers
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
             for (i, (sk, pk, addr)) in peers_and_sks.iter().enumerate() {
-                let peer_context = context.with_label(&format!("peer-{i}"));
+                let peer_context = context.with_label(&format!("peer_{i}"));
                 let config = Config::test(sk.clone(), *addr, 1_024 * 1_024);
                 let (mut network, mut oracle) =
                     Network::new(peer_context.with_label("network"), config);
@@ -864,26 +864,26 @@ mod tests {
                 })
             };
             for i in 0..n {
-                let prefix = format!("peer-{i}_network");
+                let prefix = format!("peer_{i}_network");
                 assert!(
                     is_running(&format!("{prefix}_tracker")),
-                    "peer-{i} tracker should be running"
+                    "peer_{i} tracker should be running"
                 );
                 assert!(
                     is_running(&format!("{prefix}_router")),
-                    "peer-{i} router should be running"
+                    "peer_{i} router should be running"
                 );
                 assert!(
                     is_running(&format!("{prefix}_spawner")),
-                    "peer-{i} spawner should be running"
+                    "peer_{i} spawner should be running"
                 );
                 assert!(
                     is_running(&format!("{prefix}_listener")),
-                    "peer-{i} listener should be running"
+                    "peer_{i} listener should be running"
                 );
                 assert!(
                     is_running(&format!("{prefix}_dialer")),
-                    "peer-{i} dialer should be running"
+                    "peer_{i} dialer should be running"
                 );
             }
 
@@ -917,26 +917,26 @@ mod tests {
                 })
             };
             for i in 0..n {
-                let prefix = format!("peer-{i}_network");
+                let prefix = format!("peer_{i}_network");
                 assert!(
                     is_stopped(&format!("{prefix}_tracker")),
-                    "peer-{i} tracker should be stopped"
+                    "peer_{i} tracker should be stopped"
                 );
                 assert!(
                     is_stopped(&format!("{prefix}_router")),
-                    "peer-{i} router should be stopped"
+                    "peer_{i} router should be stopped"
                 );
                 assert!(
                     is_stopped(&format!("{prefix}_spawner")),
-                    "peer-{i} spawner should be stopped"
+                    "peer_{i} spawner should be stopped"
                 );
                 assert!(
                     is_stopped(&format!("{prefix}_listener")),
-                    "peer-{i} listener should be stopped"
+                    "peer_{i} listener should be stopped"
                 );
                 assert!(
                     is_stopped(&format!("{prefix}_dialer")),
-                    "peer-{i} dialer should be stopped"
+                    "peer_{i} dialer should be stopped"
                 );
             }
         });
@@ -1073,7 +1073,7 @@ mod tests {
             // Create networks
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
             for (i, (private_key, public_key, socket, _, _)) in peers_and_sks.iter().enumerate() {
-                let context = context.with_label(&format!("peer-{i}"));
+                let context = context.with_label(&format!("peer_{i}"));
 
                 // Create network
                 let config = Config::test(private_key.clone(), *socket, 1_024 * 1_024);
@@ -1203,7 +1203,7 @@ mod tests {
             // Create networks
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
             for (i, (private_key, public_key, socket)) in peers_and_sks.iter().enumerate() {
-                let context = context.with_label(&format!("peer-{i}"));
+                let context = context.with_label(&format!("peer_{i}"));
 
                 // Create network
                 let config = Config::test(private_key.clone(), *socket, 1_024 * 1_024);
@@ -1306,7 +1306,7 @@ mod tests {
             // Create peer 0 with allow_private_ips=true
             let mut config0 = Config::test(peer0.clone(), socket0, 1_024 * 1_024);
             config0.allow_private_ips = true;
-            let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
+            let (mut network0, mut oracle0) = Network::new(context.with_label("peer_0"), config0);
 
             // Peer 0 knows about peer 1 with a socket address
             let peers0: Vec<(_, Address)> = vec![
@@ -1322,7 +1322,7 @@ mod tests {
             // Create peer 1 with allow_private_ips=false
             let mut config1 = Config::test(peer1.clone(), socket1, 1_024 * 1_024);
             config1.allow_private_ips = false; // This should prevent dialing the private IP
-            let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
+            let (mut network1, mut oracle1) = Network::new(context.with_label("peer_1"), config1);
 
             // Peer 1 knows about peer 0 with a DNS address that resolves to private IP
             let peers1: Vec<(_, Address)> = vec![
@@ -1431,7 +1431,7 @@ mod tests {
                 // Create peer 0
                 let config0 = Config::test(peer0.clone(), socket0, 1_024 * 1_024);
                 let (mut network0, mut oracle0) =
-                    Network::new(context.with_label("peer-0"), config0);
+                    Network::new(context.with_label("peer_0"), config0);
                 oracle0.update(0, peers.clone().try_into().unwrap()).await;
                 let (_sender0, mut receiver0) =
                     network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1440,7 +1440,7 @@ mod tests {
                 // Create peer 1
                 let config1 = Config::test(peer1.clone(), socket1, 1_024 * 1_024);
                 let (mut network1, mut oracle1) =
-                    Network::new(context.with_label("peer-1"), config1);
+                    Network::new(context.with_label("peer_1"), config1);
                 oracle1.update(0, peers.clone().try_into().unwrap()).await;
                 let (mut sender1, _receiver1) =
                     network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);

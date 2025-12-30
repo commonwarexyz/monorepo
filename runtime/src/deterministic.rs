@@ -51,7 +51,7 @@ use crate::{
         supervision::Tree,
         Panicker,
     },
-    Clock, Error, Execution, Handle, ListenerOf, Panicked, METRICS_PREFIX,
+    validate_label, Clock, Error, Execution, Handle, ListenerOf, Panicked, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -1055,6 +1055,10 @@ impl crate::Spawner for Context {
 
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
+        // Ensure the label is well-formatted
+        validate_label(label);
+
+        // Construct the full label name
         let name = {
             let prefix = self.name.clone();
             if prefix.is_empty() {

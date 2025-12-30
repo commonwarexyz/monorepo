@@ -22,13 +22,14 @@
 //!
 //! # Targeting
 //!
-//! Callers can restrict fetches to specific target peers using [`Mailbox::fetch_targeted`]. Only
-//! target peers are tried, there is no automatic fallback to other peers. Targets persist through
+//! Callers can restrict fetches to specific target peers using [`Resolver::fetch_targeted`](crate::Resolver::fetch_targeted).
+//! Only target peers are tried, there is no automatic fallback to other peers. Targets persist through
 //! transient failures (timeout, "no data" response, send failure) since the peer might be slow or
 //! receive the data later.
 //!
 //! While a fetch is in progress, callers can modify targeting:
-//! - [`Mailbox::fetch_targeted`] adds peers to the existing target set
+//! - [`Resolver::fetch_targeted`](crate::Resolver::fetch_targeted) adds peers to the existing target set
+//!   (only if the fetch already has targets, an "all" fetch remains unrestricted)
 //! - [`Resolver::fetch`](crate::Resolver::fetch) clears all targets, allowing fallback to any peer
 //!
 //! These modifications only apply to in-progress fetches. Once a fetch completes (success, cancel,
@@ -84,7 +85,7 @@ mod tests {
         Blocker, Manager,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::NZU32;
+    use commonware_utils::{non_empty_vec, NZU32};
     use futures::StreamExt;
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
@@ -938,7 +939,10 @@ mod tests {
             // When peer 2 returns invalid data, only peer 2 should be removed from targets
             // Peer 3 should still be tried as a target and succeed
             mailbox1
-                .fetch_targeted(key.clone(), vec![peers[1].clone(), peers[2].clone()])
+                .fetch_targeted(
+                    key.clone(),
+                    non_empty_vec![peers[1].clone(), peers[2].clone()],
+                )
                 .await;
 
             // Should eventually succeed from peer 3
@@ -1036,7 +1040,10 @@ mod tests {
             // Start fetch with targets for peers 2 and 3 (both don't have data)
             // Peer 4 has data but is NOT a target - it should NEVER be tried
             mailbox1
-                .fetch_targeted(key.clone(), vec![peers[1].clone(), peers[2].clone()])
+                .fetch_targeted(
+                    key.clone(),
+                    non_empty_vec![peers[1].clone(), peers[2].clone()],
+                )
                 .await;
 
             // Wait enough time for targets to fail and retry multiple times
@@ -1142,8 +1149,8 @@ mod tests {
             // - key3 no targeting -> fetched from any peer (peer 3 has it)
             mailbox1
                 .fetch_all_targeted(vec![
-                    (key1.clone(), vec![peers[1].clone()]), // peer 2 has key1
-                    (key2.clone(), vec![peers[3].clone()]), // peer 4 has key2
+                    (key1.clone(), non_empty_vec![peers[1].clone()]), // peer 2 has key1
+                    (key2.clone(), non_empty_vec![peers[3].clone()]), // peer 4 has key2
                 ])
                 .await;
             mailbox1.fetch(key3.clone()).await; // no targeting for key3
@@ -1234,7 +1241,7 @@ mod tests {
 
             // Start fetch with target for peer 2 only (who doesn't have data)
             mailbox1
-                .fetch_targeted(key.clone(), vec![peers[1].clone()])
+                .fetch_targeted(key.clone(), non_empty_vec![peers[1].clone()])
                 .await;
 
             // Wait for the targeted fetch to fail a few times
@@ -1244,6 +1251,89 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
 
             // Should now succeed from peer 3 (who has data but wasn't originally targeted)
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, valid_data);
+                }
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_fetch_targeted_does_not_restrict_all() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let key = Key(1);
+            let valid_data = Bytes::from("valid data");
+
+            // Peer 2 has no data, peer 3 has the data
+            let mut prod3 = Producer::default();
+            prod3.insert(key.clone(), valid_data.clone());
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                Producer::default(), // no data
+            )
+            .await;
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            )
+            .await;
+
+            // Wait for peer set to be established
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Start fetch without targets (can try any peer)
+            mailbox1.fetch(key.clone()).await;
+
+            // Wait a bit for the fetch to start
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Call fetch_targeted with peer 2 only (who doesn't have data)
+            // This should NOT restrict the existing "all" fetch
+            mailbox1
+                .fetch_targeted(key.clone(), non_empty_vec![peers[1].clone()])
+                .await;
+
+            // Should still succeed from peer 3 (who has data but wasn't in the targeted call)
+            // because the original fetch was "all" and shouldn't be restricted
             let event = cons_out1.next().await.unwrap();
             match event {
                 Event::Success(key_actual, value) => {

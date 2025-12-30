@@ -44,7 +44,7 @@ pub struct Config<C: Signer> {
     ///
     /// The actual size of the network message will be higher due to overhead from the protocol;
     /// this may include additional metadata, data from the codec, and/or cryptographic signatures.
-    pub max_message_size: usize,
+    pub max_message_size: u32,
 
     /// Message backlog allowed for internal actors.
     ///
@@ -134,7 +134,7 @@ impl<C: Signer> Config<C> {
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_message_size: usize,
+        max_message_size: u32,
     ) -> Self {
         Self {
             crypto,
@@ -177,7 +177,7 @@ impl<C: Signer> Config<C> {
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_message_size: usize,
+        max_message_size: u32,
     ) -> Self {
         Self {
             crypto,
@@ -213,7 +213,7 @@ impl<C: Signer> Config<C> {
         crypto: C,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_message_size: usize,
+        max_message_size: u32,
     ) -> Self {
         Self {
             crypto,

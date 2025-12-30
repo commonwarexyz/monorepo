@@ -368,7 +368,7 @@ mod tests {
 
     const STREAM_NAMESPACE: &[u8] = b"test_peer_actor";
     const IP_NAMESPACE: &[u8] = b"test_peer_actor_IP";
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024;
+    const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
     fn default_peer_config(me: PublicKey) -> Config<PublicKey> {
         Config {

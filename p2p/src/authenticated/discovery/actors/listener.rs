@@ -219,8 +219,8 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
 
                 // Cleanup the rate limiters periodically
                 if accepted > CLEANUP_INTERVAL {
-                    ip_rate_limiter.shrink_to_fit();
-                    subnet_rate_limiter.shrink_to_fit();
+                    ip_rate_limiter.retain_recent();
+                    subnet_rate_limiter.retain_recent();
                     accepted = 0;
                 }
                 accepted += 1;
@@ -260,7 +260,7 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
-                            context.into(),
+                            context.into_present(),
                             address,
                             stream_cfg,
                             sink,

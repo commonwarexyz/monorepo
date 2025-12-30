@@ -54,7 +54,7 @@ pub struct PeerCtx {
 const MAX_OPERATIONS: usize = 30;
 const MAX_PEERS: usize = 8;
 const MIN_PEERS: usize = 4;
-const MAX_MSG_SIZE: usize = 1024 * 1024; // 1MB
+const MAX_MSG_SIZE: u32 = 1024 * 1024; // 1MB
 const MAX_INDEX: u8 = 10;
 const TRACKED_PEER_SETS: usize = 5;
 const DEFAULT_MESSAGE_BACKLOG: usize = 128;
@@ -249,7 +249,7 @@ impl NetworkScheme for Discovery {
 
         // Create the network and oracle for controlling it
         let (mut network, mut oracle) =
-            discovery::Network::new(context.with_label("fuzzed-discovery-network"), config);
+            discovery::Network::new(context.with_label("fuzzed_discovery_network"), config);
 
         // Pre-register some peer subsets to seed the network
         // Each index gets a randomized subset of 3 peers
@@ -318,7 +318,7 @@ impl NetworkScheme for Lookup {
 
         // Create the network and oracle
         let (mut network, mut oracle) =
-            LookupNetwork::new(context.with_label("fuzzed-lookup-network"), config);
+            LookupNetwork::new(context.with_label("fuzzed_lookup_network"), config);
 
         // For lookup, we must provide both public keys AND addresses
         // (unlike discovery which finds addresses through the protocol)
@@ -451,7 +451,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
             };
 
             // Create network instance for this peer
-            let peer_context = context.with_label(&format!("peer-{id}"));
+            let peer_context = context.with_label(&format!("peer_{id}"));
             let network = N::create_network(peer_context, &peer_ctx).await;
 
             // Create and store peer state
@@ -482,7 +482,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     let from_idx = (from_idx as usize) % peers.len();
 
                     // Clamp message size to not exceed max (accounting for channel overhead)
-                    let msg_size = msg_size.clamp(0, MAX_MSG_SIZE - Channel::SIZE);
+                    let msg_size = msg_size.clamp(0, MAX_MSG_SIZE as usize - Channel::SIZE);
 
                     // Generate random message payload
                     let mut bytes = vec![0u8; msg_size];

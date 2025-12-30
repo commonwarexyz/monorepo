@@ -17,7 +17,6 @@ pub mod aggregation;
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod types;
-pub mod utils;
 
 use types::{Epoch, View};
 
@@ -100,6 +99,33 @@ cfg_if::cfg_if! {
                 context: Self::Context,
                 payload: Self::Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+        }
+
+        /// CertifiableAutomaton extends [Automaton] with the ability to certify payloads before finalization.
+        ///
+        /// This trait is required by consensus implementations (like Simplex) that support a certification
+        /// phase between notarization and finalization. Applications that do not need custom certification
+        /// logic can use the default implementation which always certifies.
+        pub trait CertifiableAutomaton: Automaton {
+            /// Determine whether a verified payload is safe to commit.
+            ///
+            /// If context is required during certify, it must be included in the
+            /// data associated with the payload.
+            ///
+            /// Applications that employ erasure coding can override this method to delay or prevent
+            /// finalization until they have reconstructed and validated the full block (e.g. after
+            /// receiving enough shards).
+            fn certify(
+                &mut self,
+                _payload: Self::Digest,
+            ) -> impl Future<Output = oneshot::Receiver<bool>> + Send {
+                #[allow(clippy::async_yields_async)]
+                async move {
+                    let (sender, receiver) = oneshot::channel();
+                    let _ = sender.send(true);
+                    receiver
+                }
+            }
         }
 
         /// Application is a minimal interface for standard implementations that operate over a stream
