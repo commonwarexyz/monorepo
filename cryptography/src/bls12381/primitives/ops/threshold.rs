@@ -154,8 +154,8 @@ where
     batch::verify_multiple_messages::<_, V, _>(rng, &public, &combined, concurrency)
 }
 
-/// Verify a list of [PartialSignature]s by performing aggregate verification with random
-/// scalar weights, performing repeated bisection to find invalid signatures (if any exist).
+/// Verify a list of [PartialSignature]s by performing batch verification with random
+/// scalar weights, using repeated bisection to find invalid signatures (if any exist).
 ///
 /// Random scalar weights prevent signature malleability attacks where an attacker could
 /// redistribute signature components while keeping the aggregate unchanged.
@@ -186,8 +186,8 @@ where
         .collect()
 }
 
-/// Attempts to verify multiple [PartialSignature]s over the same message as a single
-/// aggregate signature (or returns any invalid signature found).
+/// Batch verifies multiple [PartialSignature]s over the same message, returning
+/// any invalid signatures found.
 ///
 /// This function applies random scalar weights to prevent signature malleability attacks
 /// where an attacker could redistribute signature components while keeping the aggregate
