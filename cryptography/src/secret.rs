@@ -31,9 +31,15 @@ use core::{
 use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeLess};
 use zeroize::ZeroizeOnDrop;
 
-/// Constant-time lexicographic comparison for byte slices.
+/// Constant-time lexicographic comparison for equal-length byte slices.
+///
+/// # Panics
+///
+/// Panics if `a` and `b` have different lengths.
 #[inline]
 fn ct_cmp_bytes(a: &[u8], b: &[u8]) -> Ordering {
+    assert_eq!(a.len(), b.len());
+
     let mut result = 0u8;
     for (&x, &y) in a.iter().zip(b.iter()) {
         let is_eq = result.ct_eq(&0);
@@ -42,9 +48,10 @@ fn ct_cmp_bytes(a: &[u8], b: &[u8]) -> Ordering {
     }
 
     match result {
+        0 => Ordering::Equal,
         1 => Ordering::Less,
         2 => Ordering::Greater,
-        _ => a.len().cmp(&b.len()),
+        _ => unreachable!(),
     }
 }
 
