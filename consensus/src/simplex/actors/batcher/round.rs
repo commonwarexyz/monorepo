@@ -355,9 +355,12 @@ impl<
     /// quorum votes. If we used verified, we would always consider the slowest `f` peers offline.
     ///
     /// This approach does mean, however, that we may consider a peer active that has sent an invalid
-    /// vote. This mechanism is used to optimistically skip leader timeouts for honest
-    /// crashed peers (our only recourse to counteracting Byzantine peers is blocking them when we detect
-    /// incorrect behavior).
+    /// vote. This is fine (and preferred to verifying all votes from all peers in each round). Recall,
+    /// Byzantine peers can act arbitrarily, so what would prevent them from just sending valid votes until
+    /// the view where they propose and then maximizing the duration of their view (by sending different proposals
+    /// to all peers)?
+    ///
+    /// Recall, the purpose of this mechanism is to minimize the timeout for views with honest crashed leaders.
     pub fn is_active(&self, leader: u32) -> bool {
         self.pending_votes.has_notarize(leader)
             || self.pending_votes.has_nullify(leader)
