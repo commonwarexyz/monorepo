@@ -28,7 +28,7 @@ pub struct Config {
     /// Whether DNS-based ingress addresses are allowed.
     pub allow_dns: bool,
 
-    /// Whether to allow unregistered peers to connect.
+    /// Whether to skip IP verification for incoming connections (allows unregistered IPs).
     pub allow_unregistered: bool,
 
     /// The maximum number of peer sets to track.
@@ -50,7 +50,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Whether DNS-based ingress addresses are allowed.
     allow_dns: bool,
 
-    /// Whether to allow unregistered peers to connect.
+    /// Whether to skip IP verification for incoming connections (allows unregistered IPs).
     allow_unregistered: bool,
 
     // ---------- State ----------
