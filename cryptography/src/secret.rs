@@ -39,7 +39,7 @@ use zeroize::ZeroizeOnDrop;
 fn ct_cmp_bytes(a: &[u8], b: &[u8]) -> Ordering {
     assert_eq!(a.len(), b.len());
 
-    let mut result = 0u8;
+    let mut result = 0;
     for (&x, &y) in a.iter().zip(b.iter()) {
         let is_eq = result.ct_eq(&0);
         result = u8::conditional_select(&result, &1, is_eq & x.ct_lt(&y));
