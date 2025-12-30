@@ -169,13 +169,13 @@ impl Record {
     ///
     /// A peer is acceptable if:
     /// - The peer is eligible (in a peer set, not blocked, not ourselves)
-    /// - The source IP matches the expected egress IP for this peer (if not allow_unknown_ips)
+    /// - The source IP matches the expected egress IP for this peer (if not bypass_ip_check)
     /// - We are not already connected or reserved
-    pub fn acceptable(&self, source_ip: IpAddr, allow_unknown_ips: bool) -> bool {
+    pub fn acceptable(&self, source_ip: IpAddr, bypass_ip_check: bool) -> bool {
         if !self.eligible() || self.status != Status::Inert {
             return false;
         }
-        if allow_unknown_ips {
+        if bypass_ip_check {
             return true;
         }
         match &self.address {
@@ -489,24 +489,24 @@ mod tests {
     }
 
     #[test]
-    fn test_acceptable_allow_unknown_ips() {
+    fn test_acceptable_bypass_ip_check() {
         let egress_ip: IpAddr = [8, 8, 8, 8].into();
         let wrong_ip: IpAddr = [1, 2, 3, 4].into();
         let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
 
-        // With allow_unknown_ips=true, accepts even with wrong IP (skips IP check)
+        // With bypass_ip_check=true, accepts even with wrong IP (skips IP check)
         let mut record = Record::known(types::Address::Symmetric(public_socket));
         record.increment();
         assert!(
             record.acceptable(wrong_ip, true),
-            "Acceptable with wrong IP when allow_unknown_ips=true"
+            "Acceptable with wrong IP when bypass_ip_check=true"
         );
 
-        // Still requires eligible (sets > 0), even with allow_unknown_ips=true
+        // Still requires eligible (sets > 0), even with bypass_ip_check=true
         let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
         assert!(
             !record_not_eligible.acceptable(egress_ip, true),
-            "Not acceptable when not eligible (sets=0), even with allow_unknown_ips=true"
+            "Not acceptable when not eligible (sets=0), even with bypass_ip_check=true"
         );
 
         // Still not acceptable when blocked

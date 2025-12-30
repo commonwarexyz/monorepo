@@ -32,7 +32,7 @@ pub struct Config<C: Signer> {
 
     /// Whether or not to skip IP verification for incoming connections
     /// (allows known peers to connect from unknown IPs).
-    pub allow_unknown_ips: bool,
+    pub bypass_ip_check: bool,
 
     /// Maximum size allowed for messages over any connection.
     ///
@@ -113,7 +113,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: false,
             allow_dns: true,
-            allow_unknown_ips: false,
+            bypass_ip_check: false,
             max_message_size,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
@@ -144,7 +144,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: true,
             allow_dns: true,
-            allow_unknown_ips: false,
+            bypass_ip_check: false,
             max_message_size,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
@@ -170,7 +170,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: true,
             allow_dns: true,
-            allow_unknown_ips: false,
+            bypass_ip_check: false,
             max_message_size,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),

@@ -67,7 +67,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             rate_limit: cfg.allowed_connection_rate_per_peer,
             allow_private_ips: cfg.allow_private_ips,
             allow_dns: cfg.allow_dns,
-            allow_unknown_ips: cfg.allow_unknown_ips,
+            bypass_ip_check: cfg.bypass_ip_check,
         };
 
         // Create the mailboxes
@@ -243,7 +243,7 @@ mod tests {
     // Test Configuration Setup
     fn test_config<C: Signer>(
         crypto: C,
-        allow_unknown_ips: bool,
+        bypass_ip_check: bool,
     ) -> (Config<C>, mpsc::Receiver<HashSet<IpAddr>>) {
         let (registered_ips_sender, registered_ips_receiver) = Mailbox::new(1);
         (
@@ -253,7 +253,7 @@ mod tests {
                 allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
                 allow_private_ips: true,
                 allow_dns: true,
-                allow_unknown_ips,
+                bypass_ip_check,
                 listener: registered_ips_sender,
             },
             registered_ips_receiver,
@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn test_acceptable_allow_unknown_ips() {
+    fn test_acceptable_bypass_ip_check() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (peer_signer, peer_pk) = new_signer_and_pk(1);
@@ -435,7 +435,7 @@ mod tests {
             let (_peer_signer3, peer_pk3) = new_signer_and_pk(3);
             let peer_addr3 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 3).into(), 1003);
 
-            // Create a tracker with allow_unknown_ips=true (skips IP verification)
+            // Create a tracker with bypass_ip_check=true (skips IP verification)
             let (cfg, _) = test_config(peer_signer, true);
             let TestHarness {
                 mut mailbox,
@@ -443,7 +443,7 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg);
 
-            // Unknown peer is NOT acceptable (allow_unknown_ips only skips IP check)
+            // Unknown peer is NOT acceptable (bypass_ip_check only skips IP check)
             assert!(
                 !mailbox.acceptable(peer_pk3.clone(), peer_addr3.ip()).await,
                 "Unknown peer should not be acceptable"
@@ -462,10 +462,10 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
-            // With allow_unknown_ips=true, registered peer with wrong IP is acceptable
+            // With bypass_ip_check=true, registered peer with wrong IP is acceptable
             assert!(
                 mailbox.acceptable(peer_pk2.clone(), peer_addr.ip()).await,
-                "Registered peer with wrong IP should be acceptable with allow_unknown_ips=true"
+                "Registered peer with wrong IP should be acceptable with bypass_ip_check=true"
             );
 
             // Self is still not acceptable
