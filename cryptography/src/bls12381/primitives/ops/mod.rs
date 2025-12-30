@@ -67,6 +67,17 @@ pub fn hash_message_namespace<V: Variant>(
     V::Signature::hash_to_group(dst, &union_unique(namespace, message))
 }
 
+/// Hashes a message with an optional namespace to the signature curve.
+pub fn hash_message_with_namespace<V: Variant>(
+    namespace: Option<&[u8]>,
+    message: &[u8],
+) -> V::Signature {
+    namespace.map_or_else(
+        || hash_message::<V>(V::MESSAGE, message),
+        |ns| hash_message_namespace::<V>(V::MESSAGE, ns, message),
+    )
+}
+
 /// Signs the provided message with the private key.
 pub fn sign<V: Variant>(private: &Scalar, dst: DST, message: &[u8]) -> V::Signature {
     hash_message::<V>(dst, message) * private

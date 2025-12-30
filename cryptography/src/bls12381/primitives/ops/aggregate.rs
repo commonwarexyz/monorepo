@@ -11,7 +11,7 @@
 
 use super::{
     super::{variant::Variant, Error},
-    hash_message, hash_message_namespace,
+    hash_message_with_namespace,
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -30,7 +30,7 @@ pub struct PublicKey<V: Variant>(V::Public);
 
 impl<V: Variant> PublicKey<V> {
     /// Returns the inner public key value.
-    pub const fn inner(&self) -> &V::Public {
+    pub(crate) const fn inner(&self) -> &V::Public {
         &self.0
     }
 }
@@ -72,12 +72,13 @@ pub struct Signature<V: Variant>(V::Signature);
 
 impl<V: Variant> Signature<V> {
     /// Returns the inner signature value.
-    pub const fn inner(&self) -> &V::Signature {
+    pub(crate) const fn inner(&self) -> &V::Signature {
         &self.0
     }
 
     /// Creates a zero aggregate signature.
-    pub fn zero() -> Self {
+    #[cfg(test)]
+    pub(crate) fn zero() -> Self {
         Self(V::Signature::zero())
     }
 }
@@ -176,29 +177,18 @@ where
     let agg_public = combine_public_keys::<V, _>(public);
 
     // Compute the hash of the message
-    let hm = namespace.map_or_else(
-        || hash_message::<V>(V::MESSAGE, message),
-        |ns| hash_message_namespace::<V>(V::MESSAGE, ns, message),
-    );
+    let hm = hash_message_with_namespace::<V>(namespace, message);
 
     // Verify the signature
     V::verify(agg_public.inner(), &hm, signature.inner())
 }
 
-/// Verifies an aggregate signature over multiple unique messages from a single public key.
-///
-/// Each entry is a tuple of (namespace, message). The signature must be the aggregate
-/// of all individual signatures.
+/// Verifies the aggregate signature over multiple messages from a single public key.
 ///
 /// # Warning
 ///
-/// This function is vulnerable to signature malleability when used with signatures
-/// that were aggregated from different messages. An attacker can redistribute
-/// signature components between messages while keeping the aggregate unchanged.
-/// Use [`batch::verify_multiple_messages`](super::batch::verify_multiple_messages) instead when signatures are provided individually.
-///
 /// This function assumes a group check was already performed on `public` and `signature`.
-/// It is not safe to provide an aggregate public key or to provide duplicate messages.
+/// It is not safe to provide duplicate messages.
 pub fn verify_multiple_messages<'a, V, I>(
     public: &V::Public,
     messages: I,
@@ -226,12 +216,7 @@ where
             messages
                 .into_iter()
                 .par_bridge()
-                .map(|(namespace, msg)| {
-                    namespace.as_ref().map_or_else(
-                        || hash_message::<V>(V::MESSAGE, msg),
-                        |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-                    )
-                })
+                .map(|(namespace, msg)| hash_message_with_namespace::<V>(*namespace, msg))
                 .reduce(V::Signature::zero, |mut sum, hm| {
                     sum += &hm;
                     sum
@@ -250,11 +235,7 @@ where
 {
     let mut hm_sum = V::Signature::zero();
     for (namespace, msg) in messages {
-        let hm = namespace.as_ref().map_or_else(
-            || hash_message::<V>(V::MESSAGE, msg),
-            |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-        );
-        hm_sum += &hm;
+        hm_sum += &hash_message_with_namespace::<V>(*namespace, msg);
     }
     hm_sum
 }

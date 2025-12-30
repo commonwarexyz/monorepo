@@ -116,9 +116,8 @@ pub fn verify_proof_of_possession<V: Variant>(
 /// Verifies the signatures from multiple partial signatures over multiple unique messages from a single
 /// signer.
 ///
-/// This function applies random scalar weights to each message/signature pair before verification
-/// to prevent signature malleability attacks where an attacker could redistribute signature
-/// components while keeping the aggregate unchanged.
+/// Randomness ensures batch verification returns the same result as checking each signature
+/// individually.
 ///
 /// Each entry is a tuple of (namespace, message, partial_signature).
 ///
@@ -154,11 +153,11 @@ where
     batch::verify_multiple_messages::<_, V, _>(rng, &public, &combined, concurrency)
 }
 
-/// Verify a list of [PartialSignature]s by performing batch verification with random
-/// scalar weights, using repeated bisection to find invalid signatures (if any exist).
+/// Verify a list of [PartialSignature]s using batch verification with repeated
+/// bisection to find invalid signatures (if any exist).
 ///
-/// Random scalar weights prevent signature malleability attacks where an attacker could
-/// redistribute signature components while keeping the aggregate unchanged.
+/// Randomness ensures batch verification returns the same result as checking each signature
+/// individually.
 fn verify_multiple_public_keys_bisect<'a, R, V>(
     rng: &mut R,
     pending: &[(V::Public, &'a PartialSignature<V>)],
@@ -189,9 +188,8 @@ where
 /// Batch verifies multiple [PartialSignature]s over the same message, returning
 /// any invalid signatures found.
 ///
-/// This function applies random scalar weights to prevent signature malleability attacks
-/// where an attacker could redistribute signature components while keeping the aggregate
-/// unchanged.
+/// Randomness ensures batch verification returns the same result as checking each signature
+/// individually.
 ///
 /// # Warning
 ///

@@ -13,11 +13,11 @@
 
 use super::{
     super::{group::Scalar, variant::Variant, Error},
-    hash_message, hash_message_namespace,
+    hash_message_with_namespace,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
-use commonware_math::algebra::{Random, Space};
+use commonware_math::algebra::{Additive, Random, Space};
 use rand_core::CryptoRngCore;
 
 /// Verifies multiple signatures over the same message from different public keys,
@@ -45,39 +45,49 @@ where
     }
 
     // Hash the message once
-    let hm = namespace.map_or_else(
-        || hash_message::<V>(V::MESSAGE, message),
-        |ns| hash_message_namespace::<V>(V::MESSAGE, ns, message),
-    );
+    let hm = hash_message_with_namespace::<V>(namespace, message);
+
+    // Generate random scalars once for all entries
+    let scalars: Vec<Scalar> = (0..entries.len())
+        .map(|_| Scalar::random(&mut *rng))
+        .collect();
+
+    // Pre-compute weighted values once: weighted_pk[i] = scalar[i] * pk[i]
+    let weighted_pks: Vec<V::Public> = entries
+        .iter()
+        .zip(&scalars)
+        .map(|((pk, _), s)| *pk * s)
+        .collect();
+    let weighted_sigs: Vec<V::Signature> = entries
+        .iter()
+        .zip(&scalars)
+        .map(|((_, sig), s)| *sig * s)
+        .collect();
 
     // Iteratively bisect to find invalid signatures
     let mut invalid = Vec::new();
     let mut stack = vec![(0, entries.len())];
     while let Some((start, end)) = stack.pop() {
-        let slice = &entries[start..end];
-        if slice.is_empty() {
+        if start >= end {
             continue;
         }
 
-        // Generate random scalars for each signature in this slice
-        let scalars: Vec<Scalar> = (0..slice.len())
-            .map(|_| Scalar::random(&mut *rng))
-            .collect();
+        // Sum pre-computed weighted values for this slice
+        let mut sum_pk = V::Public::zero();
+        let mut sum_sig = V::Signature::zero();
+        for i in start..end {
+            sum_pk += &weighted_pks[i];
+            sum_sig += &weighted_sigs[i];
+        }
 
-        // Compute weighted sums: sum(r_i * pk_i) and sum(r_i * sig_i)
-        let pks: Vec<V::Public> = slice.iter().map(|(pk, _)| *pk).collect();
-        let sigs: Vec<V::Signature> = slice.iter().map(|(_, sig)| *sig).collect();
-        let weighted_pk = V::Public::msm(&pks, &scalars, 1);
-        let weighted_sig = V::Signature::msm(&sigs, &scalars, 1);
-
-        // Verify: e(weighted_pk, H(m)) == e(weighted_sig, G)
-        if V::verify(&weighted_pk, &hm, &weighted_sig).is_err() {
-            if slice.len() == 1 {
+        // Verify: e(sum_pk, H(m)) == e(sum_sig, G)
+        if V::verify(&sum_pk, &hm, &sum_sig).is_err() {
+            if end - start == 1 {
                 invalid.push(start);
             } else {
-                let mid = slice.len() / 2;
-                stack.push((start + mid, end));
-                stack.push((start, start + mid));
+                let mid = start + (end - start) / 2;
+                stack.push((mid, end));
+                stack.push((start, mid));
             }
         }
     }
@@ -85,7 +95,7 @@ where
     invalid
 }
 
-/// Verifies multiple signatures over multiple unique messages from a single public key,
+/// Verifies multiple signatures over multiple messages from a single public key,
 /// ensuring each individual signature is valid.
 ///
 /// Each entry is a tuple of (namespace, message, signature).
@@ -93,7 +103,8 @@ where
 /// # Warning
 ///
 /// This function assumes a group check was already performed on `public` and each `signature`.
-/// It is not safe to provide an aggregate public key or to provide duplicate messages.
+/// It is not safe to provide an aggregate public key. Duplicate messages are safe because
+/// random scalar weights ensure each (message, signature) pair is verified independently.
 pub fn verify_multiple_messages<'a, R, V, I>(
     rng: &mut R,
     public: &V::Public,
@@ -119,12 +130,7 @@ where
     // Hash all messages and collect signatures
     let hms: Vec<V::Signature> = entries
         .iter()
-        .map(|(namespace, msg, _)| {
-            namespace.as_ref().map_or_else(
-                || hash_message::<V>(V::MESSAGE, msg),
-                |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-            )
-        })
+        .map(|(namespace, msg, _)| hash_message_with_namespace::<V>(*namespace, msg))
         .collect();
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
 
