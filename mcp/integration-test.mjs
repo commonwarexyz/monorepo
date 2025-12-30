@@ -27,15 +27,35 @@ async function triggerIndexing() {
   console.log("Indexing triggered successfully");
 }
 
-async function checkHealth() {
-  console.log("Checking health endpoint...");
-  const response = await fetch(`${BASE_URL}/health`);
-  if (!response.ok) {
-    throw new Error(`Health check failed: ${response.status}`);
+async function testCors() {
+  console.log("Testing CORS support...");
+
+  // Test OPTIONS preflight (handled by MCP handler's WorkerTransport)
+  console.log("  Testing OPTIONS preflight...");
+  const preflightResponse = await fetch(`${BASE_URL}/`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://example.com",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "Content-Type, mcp-session-id",
+    },
+  });
+  if (preflightResponse.status !== 200 && preflightResponse.status !== 204) {
+    throw new Error(`CORS preflight failed: expected 200/204, got ${preflightResponse.status}`);
   }
-  const data = await response.json();
-  console.log("Health check passed:", data);
-  return data;
+  const preflightHeaders = Object.fromEntries(preflightResponse.headers.entries());
+  if (!preflightHeaders["access-control-allow-origin"]) {
+    throw new Error("CORS preflight missing Access-Control-Allow-Origin header");
+  }
+  if (!preflightHeaders["access-control-allow-methods"]) {
+    throw new Error("CORS preflight missing Access-Control-Allow-Methods header");
+  }
+  if (!preflightHeaders["access-control-allow-headers"]) {
+    throw new Error("CORS preflight missing Access-Control-Allow-Headers header");
+  }
+  console.log("  OPTIONS preflight passed");
+
+  console.log("CORS tests passed!");
 }
 
 async function testMcpTools() {
@@ -130,8 +150,8 @@ async function testMcpTools() {
 
 async function main() {
   try {
-    // Check health first
-    await checkHealth();
+    // Test CORS support
+    await testCors();
 
     // Trigger indexing and wait for it to complete
     await triggerIndexing();
