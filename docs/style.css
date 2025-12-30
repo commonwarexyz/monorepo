@@ -370,26 +370,6 @@ details.podcast-episode summary.podcast-title {
 }
 
 /* MCP page styles */
-details.mcp-tool {
-    border-color: #ddd;
-}
-
-details.mcp-tool summary.tool-title {
-    font-weight: 500;
-    font-size: 1em;
-    color: -webkit-link;
-    text-decoration: underline;
-}
-
-.tool-params-info {
-    margin-top: 10px;
-    font-size: 0.9em;
-}
-
-.tool-params-info ul {
-    margin: 5px 0;
-}
-
 #tool-selector {
     margin: 20px 0;
 }

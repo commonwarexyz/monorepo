@@ -98,12 +98,9 @@
         <p>Use the Streamable HTTP endpoint: <code>https://mcp.commonware.xyz</code></p>
         <p><em>If your AI assistant does not support MCP, you can use <a href="/llms.txt">llms.txt</a> to provide context manually.</em></p>
 
-        <h2>Tools</h2>
-        <div id="tools-loading">Loading tools...</div>
-        <div id="tools-container" style="display: none;"></div>
-        <div id="tools-error" style="display: none; color: red;"></div>
-
         <h2>Try It</h2>
+        <div id="tools-loading">Loading tools...</div>
+        <div id="tools-error" style="display: none; color: red;"></div>
         <div id="tool-selector" style="display: none;">
             <label for="tool-select">Select a tool:</label>
             <select id="tool-select">
@@ -161,51 +158,10 @@
 
         // Render tool list
         function renderTools(tools) {
-            const container = document.getElementById('tools-container');
             const select = document.getElementById('tool-select');
-
-            container.innerHTML = '';
             select.innerHTML = '<option value="">-- Select a tool --</option>';
 
             for (const tool of tools) {
-                // Add to tools list
-                const details = document.createElement('details');
-                details.className = 'mcp-tool collapsible';
-
-                const summary = document.createElement('summary');
-                summary.className = 'tool-title';
-                summary.textContent = tool.name;
-                details.appendChild(summary);
-
-                const desc = document.createElement('p');
-                desc.textContent = tool.description;
-                details.appendChild(desc);
-
-                if (tool.inputSchema && tool.inputSchema.properties) {
-                    const params = document.createElement('div');
-                    params.className = 'tool-params-info';
-
-                    const paramsTitle = document.createElement('strong');
-                    paramsTitle.textContent = 'Parameters:';
-                    params.appendChild(paramsTitle);
-
-                    const paramsList = document.createElement('ul');
-                    for (const [name, schema] of Object.entries(tool.inputSchema.properties)) {
-                        const li = document.createElement('li');
-                        const code = document.createElement('code');
-                        code.textContent = name;
-                        li.appendChild(code);
-                        const required = tool.inputSchema.required?.includes(name) ? ' (required)' : '';
-                        li.appendChild(document.createTextNode(required + ': ' + (schema.description || schema.type || 'any')));
-                        paramsList.appendChild(li);
-                    }
-                    params.appendChild(paramsList);
-                    details.appendChild(params);
-                }
-
-                container.appendChild(details);
-
-                // Add to select dropdown
                 const option = document.createElement('option');
                 option.value = tool.name;
                 option.textContent = tool.name;
@@ -213,7 +169,6 @@
             }
 
             document.getElementById('tools-loading').style.display = 'none';
-            container.style.display = 'block';
             document.getElementById('tool-selector').style.display = 'block';
         }
 
