@@ -64,7 +64,7 @@ All work is coordinated via the [tracker](https://github.com/orgs/commonwarexyz/
 
 ## LLM Integration
 
-Connect your LLM to the Commonware Library via [MCP](https://modelcontextprotocol.io) at https://mcp.commonware.xyz. This gives your AI assistant direct access to browse source code, search for patterns, and read documentation so it can provide accurate, up-to-date answers without hallucinating.
+Connect your LLM to the Commonware Library via [MCP](https://modelcontextprotocol.io) at https://mcp.commonware.xyz. This gives your AI assistant direct access to browse source code, search for patterns, and read documentation so it can provide accurate, up-to-date answers instead of hallucinating. This tends to be more effective than default web search, which often returns stale or irrelevant results.
 
 ### Claude Code
 
