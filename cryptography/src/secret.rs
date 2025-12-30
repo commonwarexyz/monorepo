@@ -26,7 +26,6 @@ use crate::bls12381::primitives::group::Scalar;
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter},
-    hash::{Hash, Hasher},
 };
 use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeLess};
 use zeroize::ZeroizeOnDrop;
@@ -486,12 +485,6 @@ impl<const N: usize> Ord for Secret<[u8; N]> {
     }
 }
 
-impl<T: Hash> Hash for Secret<T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.expose(|v| v.hash(state));
-    }
-}
-
 impl PartialEq for Secret<Scalar> {
     fn eq(&self, other: &Self) -> bool {
         self.expose(|a| other.expose(|b| a.as_slice().ct_eq(&b.as_slice()).into()))
@@ -630,26 +623,6 @@ mod tests {
         secret.expose(|v| {
             assert_eq!(v[0], 42);
         });
-    }
-
-    #[test]
-    fn test_hash() {
-        use std::collections::hash_map::DefaultHasher;
-
-        let s1 = Secret::new([1u8, 2, 3, 4]);
-        let s2 = Secret::new([1u8, 2, 3, 4]);
-        let s3 = Secret::new([5u8, 6, 7, 8]);
-
-        let hash = |s: &Secret<[u8; 4]>| {
-            let mut hasher = DefaultHasher::new();
-            s.hash(&mut hasher);
-            hasher.finish()
-        };
-
-        // Equal secrets should hash equal
-        assert_eq!(hash(&s1), hash(&s2));
-        // Different secrets should (very likely) hash differently
-        assert_ne!(hash(&s1), hash(&s3));
     }
 
     #[test]

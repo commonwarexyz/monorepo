@@ -493,7 +493,7 @@ impl Random for Scalar {
 }
 
 /// A share of a threshold signing key.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
@@ -1141,7 +1141,7 @@ mod tests {
     use commonware_math::algebra::test_suites;
     use proptest::prelude::*;
     use rand::prelude::*;
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     impl Arbitrary for Scalar {
         type Parameters = ();
@@ -1490,7 +1490,7 @@ mod tests {
         let g1_map: HashMap<_, _> = g1_set.iter().cloned().zip(0..).collect();
         let g2_map: HashMap<_, _> = g2_set.iter().cloned().zip(0..).collect();
         #[allow(clippy::mutable_key_type)]
-        let share_map: HashMap<_, _> = share_set.iter().cloned().zip(0..).collect();
+        let share_map: BTreeMap<_, _> = share_set.iter().cloned().zip(0..).collect();
 
         // Verify that the maps contain the expected number of unique items.
         assert_eq!(scalar_map.len(), NUM_ITEMS);
