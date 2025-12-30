@@ -615,10 +615,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           coveredLines.add(i);
         }
 
-        const snippet = lines
-          .slice(start, end)
-          .map((l, idx) => `${start + idx}: ${l}`)
-          .join("\n");
+        const snippet = formatWithLineNumbers(row.content, start, end - 1);
         matches.push(snippet);
       }
 
