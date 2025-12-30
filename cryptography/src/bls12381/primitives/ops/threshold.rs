@@ -20,7 +20,6 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
-use commonware_math::algebra::Additive;
 use commonware_utils::ordered::Map;
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
@@ -108,31 +107,6 @@ pub fn verify_proof_of_possession<V: Variant>(
         &sharing.public().encode(),
         &partial.value,
     )
-}
-
-/// Aggregates multiple partial signatures into a single signature.
-///
-/// # Warning
-///
-/// This function assumes a group check was already performed on each `signature` and
-/// that each `signature` is unique. If any of these assumptions are violated, an attacker can
-/// exploit this function to verify an incorrect aggregate signature.
-pub fn aggregate_signatures<'a, V, I>(partials: I) -> Option<(u32, V::Signature)>
-where
-    V: Variant,
-    I: IntoIterator<Item = &'a PartialSignature<V>>,
-    V::Signature: 'a,
-{
-    let mut iter = partials.into_iter().peekable();
-    let index = iter.peek()?.index;
-    let mut s = V::Signature::zero();
-    for partial in iter {
-        if partial.index != index {
-            return None;
-        }
-        s += &partial.value;
-    }
-    Some((index, s))
 }
 
 // =============================================================================
