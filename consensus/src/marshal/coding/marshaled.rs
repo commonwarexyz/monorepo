@@ -61,8 +61,9 @@ use crate::{
     simplex::{scheme::Scheme, types::Context},
     types::{CodingCommitment, Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
-    VerifyingApplication, Viewable,
+    VerifyingApplication,
 };
+use commonware_codec::RangeCfg;
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
@@ -79,7 +80,7 @@ use futures::{
 };
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
-use std::{sync::Arc, time::Instant};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tracing::{debug, warn};
 
 /// The [`CodingConfig`] used for genesis blocks. These blocks are never broadcasted in
@@ -92,7 +93,10 @@ const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
 type VerificationContexts<E, B, Z> = Metadata<
     E,
     <B as Digestible>::Digest,
-    Context<CodingCommitment, <<Z as Provider>::Scheme as CertificateScheme>::PublicKey>,
+    BTreeMap<
+        Round,
+        Context<CodingCommitment, <<Z as Provider>::Scheme as CertificateScheme>::PublicKey>,
+    >,
 >;
 
 /// Configuration for initializing [`Marshaled`].
@@ -213,7 +217,8 @@ where
             context.with_label("verification_contexts_metadata"),
             metadata::Config {
                 partition: format!("{partition_prefix}_verification_contexts"),
-                codec_config: (),
+                // BTreeMap codec config: (RangeCfg<usize> for length, (Round::Cfg, Context::Cfg))
+                codec_config: (RangeCfg::from(..), ((), ())),
             },
         )
         .await
@@ -249,9 +254,12 @@ where
         context: Context<CodingCommitment, <Z::Scheme as CertificateScheme>::PublicKey>,
         block_digest: B::Digest,
     ) {
+        let round = context.round;
         let mut contexts_guard = lock.lock().await;
         contexts_guard
-            .put_sync(block_digest, context)
+            .upsert_sync(block_digest, |map| {
+                map.insert(round, context);
+            })
             .await
             .expect("must persist verification context");
     }
@@ -278,6 +286,7 @@ where
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let verify_duration = self.verify_duration.clone();
+        let verification_contexts = self.verification_contexts.clone();
 
         let (mut tx, rx) = oneshot::channel();
         self.context
@@ -285,6 +294,27 @@ where
             .spawn(move |runtime_context| async move {
                 let tx_closed = tx.closed();
                 pin_mut!(tx_closed);
+
+                // Extract values needed for cleanup before any moves
+                let block_digest: B::Digest = commitment.block_digest();
+                let round = context.round;
+
+                // Helper to clean up verification context for this round
+                let cleanup = || async {
+                    let mut contexts_guard = verification_contexts.lock().await;
+                    if contexts_guard.get(&block_digest).is_some() {
+                        let mut is_empty = false;
+                        contexts_guard.upsert(block_digest, |map| {
+                            map.remove(&round);
+                            is_empty = map.is_empty();
+                        });
+                        if is_empty {
+                            contexts_guard.remove(&block_digest);
+                        }
+                        // Sync is best-effort; failure just means stale data after crash
+                        let _ = contexts_guard.sync().await;
+                    }
+                };
 
                 let (parent_view, parent_commitment) = context.parent;
                 let parent_request = fetch_parent(
@@ -323,6 +353,7 @@ where
                     let last_in_epoch = epocher
                         .last(context.epoch())
                         .expect("current epoch should exist");
+                    cleanup().await;
                     let _ = tx.send(block.height() == last_in_epoch);
                     return;
                 }
@@ -333,10 +364,12 @@ where
                         height = block.height(),
                         "block height not covered by epoch strategy"
                     );
+                    cleanup().await;
                     let _ = tx.send(false);
                     return;
                 };
                 if block_bounds.epoch() != context.epoch() {
+                    cleanup().await;
                     let _ = tx.send(false);
                     return;
                 }
@@ -348,6 +381,7 @@ where
                         expected_parent = %parent.digest(),
                         "block parent digest does not match expected parent"
                     );
+                    cleanup().await;
                     let _ = tx.send(false);
                     return;
                 }
@@ -359,6 +393,7 @@ where
                         block_height = block.height(),
                         "block height is not contiguous with parent height"
                     );
+                    cleanup().await;
                     let _ = tx.send(false);
                     return;
                 }
@@ -386,6 +421,7 @@ where
                     }
                 };
                 let _ = verify_duration.try_set(start.elapsed().as_millis());
+                cleanup().await;
                 let _ = tx.send(application_valid);
             });
 
@@ -683,8 +719,11 @@ where
     async fn certify(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
         // Look up context by block digest extracted from the CodingCommitment
         let block_digest: B::Digest = payload.block_digest();
-        let contexts_guard = self.verification_contexts.lock().await;
-        let context = contexts_guard.get(&block_digest).cloned();
+        let mut contexts_guard = self.verification_contexts.lock().await;
+        // Get any context from the map for this block digest
+        let context = contexts_guard
+            .get_mut(&block_digest)
+            .and_then(|map| map.first_entry().map(|v| v.get().clone()));
         drop(contexts_guard);
 
         if let Some(context) = context {
@@ -773,30 +812,8 @@ where
 {
     type Activity = A::Activity;
 
-    /// Relays a report to the underlying [`Application`] and cleans up verification contexts.
-    ///
-    /// Verification contexts are kept on disk until finalization to support crash recovery.
-    /// When a block is finalized, its context (and its ancestors' contexts) is no longer
-    /// needed and is removed here.
+    /// Relays a report to the underlying [`Application`].
     async fn report(&mut self, update: Self::Activity) {
-        // Clean up verification contexts for finalized blocks
-        if let Update::Block(ref block, _) = update {
-            let mut contexts_guard = self.verification_contexts.lock().await;
-            // Prune all contexts that are at or below the view of the finalized block,
-            // as they are no longer needed.
-            if let Some(ours) = contexts_guard.get(&block.digest()).cloned() {
-                contexts_guard.retain(|_, theirs| {
-                    theirs.epoch() > ours.epoch()
-                        || (theirs.epoch() == ours.epoch() && theirs.view() > ours.view())
-                });
-                contexts_guard
-                    .sync()
-                    .await
-                    .expect("must sync verification contexts");
-            }
-            drop(contexts_guard);
-        }
-
         self.application.report(update).await
     }
 }
