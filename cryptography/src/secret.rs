@@ -371,13 +371,19 @@ mod implementation {
             // We unprotect, drop inner value, zeroize, unlock, and unmap in proper sequence.
             // This is safe because we have exclusive access (&mut self), no concurrent readers can exist.
             unsafe {
-                libc::mprotect(
+                // Only drop and zeroize if we successfully unprotected the memory.
+                // If mprotect failed attempting to access PROT_NONE memory would cause a segfault.
+                if libc::mprotect(
                     self.ptr.as_ptr() as *mut libc::c_void,
                     self.size,
                     libc::PROT_READ | libc::PROT_WRITE,
-                );
-                core::ptr::drop_in_place(self.ptr.as_ptr());
-                super::zeroize_ptr(self.ptr.as_ptr());
+                ) == 0
+                {
+                    core::ptr::drop_in_place(self.ptr.as_ptr());
+                    super::zeroize_ptr(self.ptr.as_ptr());
+                }
+
+                // Always clean up the mapping regardless of mprotect result
                 libc::munlock(self.ptr.as_ptr() as *const libc::c_void, self.size);
                 libc::munmap(self.ptr.as_ptr() as *mut libc::c_void, self.size);
             }
