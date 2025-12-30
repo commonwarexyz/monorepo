@@ -224,7 +224,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           content: [
             {
               type: "text",
-              text: `# Search results for "${query}" (${ver})\n\nFound ${results.length} file(s):\n\n${output}\n\n---\nUse \`get_file\` with \`start_line\` and \`end_line\` to fetch specific line ranges instead of entire files.`,
+              text: `# Search results for "${query}" (${ver})\n\nFound ${results.length} file(s):\n\n${output}\n\n---\nFiles are listed by path. Use \`list_crates\` to see crate name to path mappings. Use \`get_file\` with \`start_line\` and \`end_line\` to fetch specific line ranges instead of entire files.`,
             },
           ],
         };
@@ -589,7 +589,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
       // Build and select top non-overlapping snippets
       const snippets = buildSnippets(lineScores);
-      const selected = selectTopSnippets(snippets, 7);
+      const selected = selectTopSnippets(snippets, 5);
 
       // Format selected snippets
       const matches = selected.map(({ start, end }) => formatSnippet(lines, start, end));
