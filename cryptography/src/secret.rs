@@ -184,7 +184,7 @@ mod implementation {
                         if unsafe { libc::mprotect(self.ptr, self.size, libc::PROT_NONE) } != 0 {
                             // Restore to PROTECTED so future expose calls can retry.
                             // Memory remains readable but next expose()'s mprotect(PROT_READ)
-                            // will succeed, allowing recovery.
+                            // may succeed, allowing recovery.
                             self.readers.store(PROTECTED, Ordering::Release);
                             panic!("mprotect failed to re-protect memory");
                         }
@@ -370,8 +370,7 @@ mod implementation {
         fn drop(&mut self) {
             // SAFETY: self.ptr points to valid mmap'd memory of self.size bytes.
             // We unprotect, drop inner value, zeroize, unlock, and unmap in proper sequence.
-            // This is safe because we have exclusive access (&mut self) - Drop requires &mut.
-            // No concurrent readers can exist because &mut self means no shared references.
+            // This is safe because we have exclusive access (&mut self), no concurrent readers can exist.
             unsafe {
                 libc::mprotect(
                     self.ptr.as_ptr() as *mut libc::c_void,
@@ -406,6 +405,14 @@ mod implementation {
         #[allow(clippy::missing_const_for_fn)]
         pub fn new(value: T) -> Self {
             Self(MaybeUninit::new(value))
+        }
+
+        /// Creates a new `Secret`, returning an error on failure.
+        ///
+        /// On non-Unix platforms, this always succeeds.
+        #[inline]
+        pub fn try_new(value: T) -> Result<Self, &'static str> {
+            Ok(Self::new(value))
         }
 
         /// Exposes the secret value for read-only access within a closure.
