@@ -350,9 +350,12 @@ impl<
     }
 
     pub fn is_active(&self, leader: u32) -> bool {
-        self.pending_votes.has_notarize(leader)
-            || self.pending_votes.has_nullify(leader)
-            || self.pending_votes.has_finalize(leader)
+        // Use verified votes to ensure only cryptographically valid votes count
+        // toward activity. This prevents malicious validators from appearing
+        // "active" by sending invalid signatures.
+        self.verified_votes.has_notarize(leader)
+            || self.verified_votes.has_nullify(leader)
+            || self.verified_votes.has_finalize(leader)
     }
 
     /// Stores a verified vote for certificate construction.
