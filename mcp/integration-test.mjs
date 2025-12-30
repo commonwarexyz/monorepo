@@ -4,9 +4,9 @@
  * Integration test for the Commonware MCP server.
  *
  * This script:
- * 1. Triggers the scheduled handler to index versions
- * 2. Verifies the health endpoint
- * 3. Tests MCP tools via StreamableHTTP transport
+ * 1. Tests CORS support
+ * 2. Verifies server info via MCP protocol
+ * 3. Triggers indexing and tests MCP tools
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -56,6 +56,30 @@ async function testCors() {
   console.log("  OPTIONS preflight passed");
 
   console.log("CORS tests passed!");
+}
+
+async function testServerInfo() {
+  console.log("Testing server info...");
+
+  const transport = new StreamableHTTPClientTransport(new URL(BASE_URL));
+  const client = new Client({ name: "integration-test", version: "1.0.0" }, { capabilities: {} });
+
+  await client.connect(transport);
+
+  const serverInfo = client.getServerVersion();
+  if (!serverInfo) {
+    throw new Error("Server info not available after connection");
+  }
+  if (serverInfo.name !== "commonware-library") {
+    throw new Error(`Expected server name 'commonware-library', got '${serverInfo.name}'`);
+  }
+  if (!serverInfo.version || !/^\d+\.\d+\.\d+$/.test(serverInfo.version)) {
+    throw new Error(`Invalid server version format: '${serverInfo.version}'`);
+  }
+  console.log(`Server info: ${serverInfo.name} v${serverInfo.version}`);
+
+  await client.close();
+  console.log("Server info test passed!");
 }
 
 async function testMcpTools() {
@@ -152,6 +176,9 @@ async function main() {
   try {
     // Test CORS support
     await testCors();
+
+    // Test server info via MCP protocol
+    await testServerInfo();
 
     // Trigger indexing and wait for it to complete
     await triggerIndexing();

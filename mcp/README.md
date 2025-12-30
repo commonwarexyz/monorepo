@@ -121,11 +121,6 @@ The server uses Cloudflare's [Agents SDK](https://developers.cloudflare.com/agen
 - **Sitemap-based discovery**: Parses `commonware.xyz/sitemap.xml` to discover available versions
 - **D1 + FTS5**: Full-text search index powered by SQLite FTS5
 
-### Endpoints
-
-- `/` - MCP server (Streamable HTTP transport)
-- `/health` - Health check (JSON status)
-
 ## Example Usage
 
 Once connected, you can ask your AI assistant questions like:
