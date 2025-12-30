@@ -431,6 +431,7 @@ fn fuzz(input: FuzzInput) {
 
                 MmrJournaledOperation::Reinit => {
                     // Init a new MMR
+                    drop(mmr);
                     let new_mmr = Mmr::init(
                         context.clone(),
                         &mut hasher,
