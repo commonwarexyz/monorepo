@@ -192,8 +192,11 @@
                     const paramsList = document.createElement('ul');
                     for (const [name, schema] of Object.entries(tool.inputSchema.properties)) {
                         const li = document.createElement('li');
+                        const code = document.createElement('code');
+                        code.textContent = name;
+                        li.appendChild(code);
                         const required = tool.inputSchema.required?.includes(name) ? ' (required)' : '';
-                        li.innerHTML = `<code>${name}</code>${required}: ${schema.description || schema.type || 'any'}`;
+                        li.appendChild(document.createTextNode(required + ': ' + (schema.description || schema.type || 'any')));
                         paramsList.appendChild(li);
                     }
                     params.appendChild(paramsList);
@@ -263,9 +266,12 @@
                     } else if (schema.type === 'number' || schema.type === 'integer') {
                         input = document.createElement('input');
                         input.type = 'number';
+                        if (schema.type === 'integer') {
+                            input.step = '1';
+                        }
                         input.id = `param-${name}`;
                         input.dataset.paramName = name;
-                        input.dataset.paramType = 'number';
+                        input.dataset.paramType = schema.type;
                         if (schema.default !== undefined) {
                             input.value = schema.default;
                         }
@@ -313,7 +319,9 @@
                     continue;
                 }
 
-                if (type === 'number') {
+                if (type === 'integer') {
+                    value = parseInt(value, 10);
+                } else if (type === 'number') {
                     value = parseFloat(value);
                 }
 
