@@ -5,6 +5,7 @@ use crate::authenticated::{
     mailbox::UnboundedMailbox,
     Mailbox,
 };
+use commonware_codec::ReadExt;
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -103,22 +104,11 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
         mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
-        // Track the rejection reason from the bouncer
-        let rejection_reason = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let rejection_reason_clone = rejection_reason.clone();
-
         let (peer, send, recv) = match listen(
             context,
             |peer| {
                 let mut tracker = tracker.clone();
-                let rejection_reason = rejection_reason_clone.clone();
-                async move {
-                    let result = tracker.acceptable(peer).await;
-                    if result != tracker::Acceptable::Yes {
-                        *rejection_reason.lock().unwrap() = Some(result);
-                    }
-                    result == tracker::Acceptable::Yes
-                }
+                async move { tracker.acceptable(peer).await == tracker::Acceptable::Yes }
             },
             stream_cfg,
             stream,
@@ -127,17 +117,19 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
         .await
         {
             Ok(x) => x,
-            Err(StreamError::PeerRejected(_)) => {
-                // The bouncer returned false - check the captured reason
-                let reason = rejection_reason.lock().unwrap().take();
-                match reason {
-                    Some(tracker::Acceptable::Blocked) => {
-                        debug!(?address, "peer is blocked");
+            Err(StreamError::PeerRejected(bytes)) => {
+                // Decode the peer public key and query for rejection reason
+                if let Ok(peer) = C::PublicKey::read(&mut bytes.as_slice()) {
+                    match tracker.acceptable(peer).await {
+                        tracker::Acceptable::Blocked => {
+                            debug!(?address, "peer is blocked");
+                        }
+                        tracker::Acceptable::Unknown | tracker::Acceptable::Yes => {
+                            debug!(?address, "peer not acceptable (unknown or not in peer set)");
+                        }
                     }
-                    Some(tracker::Acceptable::Unknown) | None => {
-                        debug!(?address, "peer not acceptable (unknown or not in peer set)");
-                    }
-                    Some(tracker::Acceptable::Yes) => unreachable!(),
+                } else {
+                    debug!(?address, "peer rejected (unable to decode peer key)");
                 }
                 return;
             }
