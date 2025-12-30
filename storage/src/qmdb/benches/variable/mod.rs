@@ -9,9 +9,11 @@ use commonware_storage::{
             VariableConfig as AConfig,
         },
         store::{Batchable, Config as SConfig, LogStorePrunable, Store},
+        Error,
     },
-    store::{StoreDeletable, StorePersistable},
+    store::StoreDeletable,
     translator::EightCap,
+    Persistable,
 };
 use commonware_utils::{NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -120,10 +122,9 @@ async fn gen_random_kv<A>(
     commit_frequency: u32,
 ) -> A
 where
-    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + StoreDeletable
+    A: StoreDeletable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>, Error = Error>
+        + Persistable<Error = Error>
         + LogStorePrunable,
-    A::Error: std::fmt::Debug,
 {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
@@ -159,10 +160,9 @@ async fn gen_random_kv_batched<A>(
     commit_frequency: u32,
 ) -> A
 where
-    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + Batchable
+    A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+        + Persistable<Error = Error>
         + LogStorePrunable,
-    A::Error: std::fmt::Debug,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();

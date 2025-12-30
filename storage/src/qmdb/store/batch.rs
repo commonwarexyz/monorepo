@@ -176,7 +176,7 @@ pub trait Batchable: StoreDeletable<Key: Array, Value: Codec + Clone, Error = Er
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::store::StorePersistable;
+    use crate::Persistable;
     use commonware_cryptography::{blake3, sha256};
     use commonware_runtime::{
         deterministic::{self, Context},
@@ -200,7 +200,7 @@ pub mod tests {
     where
         F: FnMut(Context) -> Fut + Clone,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -231,7 +231,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -249,7 +249,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -271,7 +271,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -302,7 +302,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -331,7 +331,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -358,7 +358,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -431,7 +431,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -495,7 +495,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {

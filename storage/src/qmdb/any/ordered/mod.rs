@@ -1,6 +1,9 @@
 use crate::{
     index::{Cursor as _, Ordered as Index},
-    journal::contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
+    journal::{
+        contiguous::{Contiguous, MutableContiguous},
+        Error as JournalError,
+    },
     mmr::{
         mem::{Dirty, State},
         Location,
@@ -15,6 +18,7 @@ use crate::{
         store::Batchable,
         update_known_loc, Error,
     },
+    Persistable,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
@@ -797,15 +801,25 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: PersistableContiguous<Item = Operation<K, V>>,
+        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StorePersistable for Db<E, C, I, H, Update<K, V>>
+    > Persistable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        self.close().await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -869,7 +883,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: PersistableContiguous<Item = Operation<K, V>>,
+        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
         I: Index<Value = Location>,
         H: Hasher,
     > CleanAny for Db<E, C, I, H, Update<K, V>>
