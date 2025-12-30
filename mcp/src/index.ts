@@ -20,12 +20,15 @@ import { z } from "zod";
 import type { Env } from "./env.d.ts";
 import {
   buildFileTree,
+  buildSnippets,
+  formatSnippet,
   formatWithLineNumbers,
   getLanguage,
   isValidPath,
   parseSitemap,
   parseWorkspaceMembers,
   parseCrateInfo,
+  selectTopSnippets,
   sortVersionsDesc,
   stripCratePrefix,
 } from "./utils.ts";
@@ -221,7 +224,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           content: [
             {
               type: "text",
-              text: `# Search results for "${query}" (${ver})\n\nFound ${results.length} file(s):\n\n${output}\n\n---\nFiles are listed by path. Use \`list_crates\` to see crate name to path mappings.`,
+              text: `# Search results for "${query}" (${ver})\n\nFound ${results.length} file(s):\n\n${output}\n\n---\nFiles are listed by path. Use \`list_crates\` to see crate name to path mappings. Use \`get_file\` with \`start_line\` and \`end_line\` to fetch specific line ranges instead of entire files.`,
             },
           ],
         };
@@ -582,42 +585,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       const lines = row.content.split("\n");
 
       // Score each line by number of matching terms
-      const scoredLines: Array<{ lineNum: number; score: number }> = [];
-      for (let lineNum = 0; lineNum < lines.length; lineNum++) {
-        const lineLower = lines[lineNum].toLowerCase();
-        const score = snippetMatcher(lineLower);
-        if (score > 0) {
-          scoredLines.push({ lineNum, score });
-        }
-      }
+      const lineScores = lines.map((line) => snippetMatcher(line.toLowerCase()));
 
-      // Sort by score descending (lines with more matching terms first)
-      scoredLines.sort((a, b) => b.score - a.score);
+      // Build and select top non-overlapping snippets
+      const snippets = buildSnippets(lineScores);
+      const selected = selectTopSnippets(snippets, 5);
 
-      // Take top 5 non-overlapping snippets
-      const matches: string[] = [];
-      const coveredLines = new Set<number>();
-      for (const { lineNum } of scoredLines) {
-        if (matches.length >= 5) {
-          break;
-        }
-
-        // Skip if this line is already covered by a previous snippet
-        if (coveredLines.has(lineNum)) {
-          continue;
-        }
-
-        const start = Math.max(0, lineNum - 2);
-        const end = Math.min(lines.length, lineNum + 3);
-
-        // Mark all lines in this snippet as covered
-        for (let i = start; i < end; i++) {
-          coveredLines.add(i);
-        }
-
-        const snippet = formatWithLineNumbers(row.content, start, end - 1);
-        matches.push(snippet);
-      }
+      // Format selected snippets
+      const matches = selected.map(({ start, end }) => formatSnippet(lines, start, end));
 
       // Always include file if FTS5 matched it
       output.push({ file: row.path, matches });
