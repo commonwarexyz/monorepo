@@ -20,6 +20,7 @@ import { z } from "zod";
 import type { Env } from "./env.d.ts";
 import {
   buildFileTree,
+  formatWithLineNumbers,
   getLanguage,
   isValidPath,
   parseSitemap,
@@ -55,7 +56,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       "get_file",
       "Retrieve a file from the Commonware repository by its path. " +
         "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
-        "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
+        "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest. " +
+        "Optionally specify start_line and end_line to fetch a specific range (0-indexed, inclusive). " +
+        "Line numbers in output match those returned by search_code.",
       {
         path: z
           .string()
@@ -66,8 +69,20 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           .string()
           .optional()
           .describe("Version tag (e.g., 'v0.0.64'). Defaults to latest."),
+        start_line: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Start line number (0-indexed, inclusive). Defaults to beginning of file."),
+        end_line: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("End line number (0-indexed, inclusive). Defaults to end of file."),
       },
-      async ({ path, version }) => {
+      async ({ path, version, start_line, end_line }) => {
         // Basic path validation - no path traversal
         if (!isValidPath(path)) {
           return {
@@ -93,11 +108,21 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           };
         }
 
+        // Format with line numbers (and optionally filter to range)
+        const formatted = formatWithLineNumbers(content, start_line, end_line);
+
+        // Build header with line range info if specified
+        const totalLines = content.split("\n").length;
+        const rangeInfo =
+          start_line !== undefined || end_line !== undefined
+            ? ` [lines ${start_line ?? 0}-${end_line ?? totalLines - 1}]`
+            : "";
+
         return {
           content: [
             {
               type: "text",
-              text: `# ${path} (${ver})\n\n\`\`\`${getLanguage(path)}\n${content}\n\`\`\``,
+              text: `# ${path} (${ver})${rangeInfo}\n\n\`\`\`${getLanguage(path)}\n${formatted}\n\`\`\``,
             },
           ],
         };
@@ -590,10 +615,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           coveredLines.add(i);
         }
 
-        const snippet = lines
-          .slice(start, end)
-          .map((l, idx) => `${start + idx + 1}: ${l}`)
-          .join("\n");
+        const snippet = formatWithLineNumbers(row.content, start, end - 1);
         matches.push(snippet);
       }
 
