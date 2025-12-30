@@ -2,7 +2,7 @@ use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 
-fn benchmark_verify_messages(c: &mut Criterion) {
+fn benchmark_batch_verify_messages(c: &mut Criterion) {
     let namespace = b"namespace";
     for n in [2, 10, 100, 1000, 10000].into_iter() {
         let mut msgs: Vec<[u8; 32]> = Vec::with_capacity(n);
@@ -48,5 +48,5 @@ fn benchmark_verify_messages(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_verify_messages
+    targets = benchmark_batch_verify_messages
 }

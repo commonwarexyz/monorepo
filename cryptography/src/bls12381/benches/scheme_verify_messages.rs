@@ -4,7 +4,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
 
-fn benchmark_batch_verify_messages(c: &mut Criterion) {
+fn benchmark_scheme_verify_messages(c: &mut Criterion) {
     let namespace = b"namespace";
     for n_messages in [1, 10, 100, 1000, 10000].into_iter() {
         let mut msgs = Vec::with_capacity(n_messages);
@@ -36,5 +36,5 @@ fn benchmark_batch_verify_messages(c: &mut Criterion) {
 criterion_group!(
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_batch_verify_messages
+    targets = benchmark_scheme_verify_messages
 );

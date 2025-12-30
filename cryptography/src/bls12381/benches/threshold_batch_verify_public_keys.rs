@@ -11,7 +11,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::hint::black_box;
 
-fn benchmark_partial_batch_verify_public_keys(c: &mut Criterion) {
+fn benchmark_threshold_batch_verify_public_keys(c: &mut Criterion) {
     let namespace = b"benchmark";
     let msg = b"hello";
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
@@ -87,5 +87,5 @@ fn benchmark_partial_batch_verify_public_keys(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_partial_batch_verify_public_keys
+    targets = benchmark_threshold_batch_verify_public_keys
 }
