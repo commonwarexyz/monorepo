@@ -451,6 +451,11 @@ details.mcp-tool summary.tool-title {
     cursor: pointer;
 }
 
+#execute-tool:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 #tool-result {
     margin: 20px 0;
 }
