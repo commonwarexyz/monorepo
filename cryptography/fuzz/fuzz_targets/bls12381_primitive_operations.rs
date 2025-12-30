@@ -159,8 +159,8 @@ enum FuzzOperation {
         signature: G1,
     },
 
-    // Partial signature operations - simplified
-    PartialSignMessage {
+    // Sign message with share
+    SignMessage {
         share: Share,
         message: Vec<u8>,
         use_minpk: bool,
@@ -176,13 +176,13 @@ enum FuzzOperation {
         use_g1: bool,
     },
 
-    // Verify multiple messages (individual signatures)
-    VerifyMultipleMessagesMinPk {
+    // Verify messages (individual signatures)
+    VerifyMessagesMinPk {
         public_key: G1,
         entries: Vec<(Option<Vec<u8>>, Vec<u8>, G2)>,
         concurrency: usize,
     },
-    VerifyMultipleMessagesMinSig {
+    VerifyMessagesMinSig {
         public_key: G2,
         entries: Vec<(Option<Vec<u8>>, Vec<u8>, G1)>,
         concurrency: usize,
@@ -338,7 +338,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 public: arbitrary_g2(u)?,
                 signature: arbitrary_g1(u)?,
             }),
-            32 => Ok(FuzzOperation::PartialSignMessage {
+            32 => Ok(FuzzOperation::SignMessage {
                 share: arbitrary_share(u)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 use_minpk: u.arbitrary()?,
@@ -371,7 +371,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                     .zip(signatures)
                     .map(|((ns, msg), sig)| (ns, msg, sig))
                     .collect();
-                Ok(FuzzOperation::VerifyMultipleMessagesMinPk {
+                Ok(FuzzOperation::VerifyMessagesMinPk {
                     public_key: arbitrary_g1(u)?,
                     entries,
                     concurrency: u.int_in_range(1..=8)?,
@@ -385,7 +385,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                     .zip(signatures)
                     .map(|((ns, msg), sig)| (ns, msg, sig))
                     .collect();
-                Ok(FuzzOperation::VerifyMultipleMessagesMinSig {
+                Ok(FuzzOperation::VerifyMessagesMinSig {
                     public_key: arbitrary_g2(u)?,
                     entries,
                     concurrency: u.int_in_range(1..=8)?,
@@ -724,7 +724,7 @@ fn fuzz(op: FuzzOperation) {
             let _ = ops::verify_proof_of_possession::<MinSig>(&public, &signature);
         }
 
-        FuzzOperation::PartialSignMessage {
+        FuzzOperation::SignMessage {
             share,
             message,
             use_minpk,
@@ -783,7 +783,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::VerifyMultipleMessagesMinPk {
+        FuzzOperation::VerifyMessagesMinPk {
             public_key,
             entries,
             concurrency,
@@ -794,7 +794,7 @@ fn fuzz(op: FuzzOperation) {
                     .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_slice(), *sig))
                     .collect();
 
-                let _ = batch::verify_multiple_messages::<_, MinPk, _>(
+                let _ = batch::verify_messages::<_, MinPk, _>(
                     &mut thread_rng(),
                     &public_key,
                     &entries_refs,
@@ -803,7 +803,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::VerifyMultipleMessagesMinSig {
+        FuzzOperation::VerifyMessagesMinSig {
             public_key,
             entries,
             concurrency,
@@ -814,7 +814,7 @@ fn fuzz(op: FuzzOperation) {
                     .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_slice(), *sig))
                     .collect();
 
-                let _ = batch::verify_multiple_messages::<_, MinSig, _>(
+                let _ = batch::verify_messages::<_, MinSig, _>(
                     &mut thread_rng(),
                     &public_key,
                     &entries_refs,

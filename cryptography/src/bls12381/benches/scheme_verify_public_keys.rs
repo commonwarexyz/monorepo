@@ -4,7 +4,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
 
-fn benchmark_batch_verify_multiple_public_keys(c: &mut Criterion) {
+fn benchmark_scheme_verify_public_keys(c: &mut Criterion) {
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
     thread_rng().fill(&mut msg);
@@ -32,5 +32,5 @@ fn benchmark_batch_verify_multiple_public_keys(c: &mut Criterion) {
 criterion_group!(
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_batch_verify_multiple_public_keys
+    targets = benchmark_scheme_verify_public_keys
 );

@@ -2,7 +2,7 @@ use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 
-fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
+fn benchmark_aggregate_verify_messages(c: &mut Criterion) {
     let namespace = b"namespace";
     for n in [2, 10, 100, 1000, 10000].into_iter() {
         let mut msgs: Vec<[u8; 32]> = Vec::with_capacity(n);
@@ -36,7 +36,7 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
                             (public, messages, agg_sig)
                         },
                         |(public, messages, agg_sig)| {
-                            ops::aggregate::verify_multiple_messages::<MinSig, _>(
+                            ops::aggregate::verify_messages::<MinSig, _>(
                                 &public,
                                 &messages,
                                 &agg_sig,
@@ -55,5 +55,5 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_aggregate_verify_multiple_messages
+    targets = benchmark_aggregate_verify_messages
 }
