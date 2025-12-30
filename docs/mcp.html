@@ -79,7 +79,7 @@
         <p>Interact with the <a href="https://github.com/commonwarexyz/monorepo">Commonware Library</a> via <a href="https://modelcontextprotocol.io">Model Context Protocol</a>.</p>
 
         <h2>Why Connect?</h2>
-        <p>Web search often returns stale or irrelevant results about code. The Commonware Library MCP server gives your AI assistant direct access to source code and documentation pinned to a specific version, so it provides accurate answers instead of hallucinating.</p>
+        <p>LLMs are trained on code from months ago. Web search (the default fallback to finding missing information) returns GitHub links for code that must be iterated over file-by-file for relevant information (not to mention, it may not be related to the version of code you're building against). The Commonware Library MCP server is built from scratch to improve the effectiveness of LLMs building with the Commonware Library. It provides a version-pinned index of all source code and documentation and a ranked search tool that does a better job at providing relevant snippets than grep.</p>
 
         <h3>Claude Code</h3>
         <pre><code>claude mcp add --transport http commonware-library https://mcp.commonware.xyz</code></pre>
