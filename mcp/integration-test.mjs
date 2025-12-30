@@ -168,8 +168,124 @@ async function testMcpTools() {
   }
   console.log("list_crates result:", cratesResult.content[0].text.slice(0, 200) + "...");
 
+  // Test get_file with line numbers
+  console.log("\nTesting get_file with line numbers...");
+  const getFileResult = await client.callTool({
+    name: "get_file",
+    arguments: {
+      path: "cryptography/src/lib.rs",
+    },
+  });
+  if (getFileResult.isError) {
+    throw new Error(`get_file failed: ${getFileResult.content[0].text}`);
+  }
+  // Verify output has line numbers (0-indexed)
+  if (!getFileResult.content[0].text.includes("0: ")) {
+    throw new Error("get_file output missing line numbers");
+  }
+  console.log("get_file result:", getFileResult.content[0].text.slice(0, 300) + "...");
+
+  // Test get_file with line range
+  console.log("\nTesting get_file with line range...");
+  const getFileRangeResult = await client.callTool({
+    name: "get_file",
+    arguments: {
+      path: "cryptography/src/lib.rs",
+      start_line: 5,
+      end_line: 10,
+    },
+  });
+  if (getFileRangeResult.isError) {
+    throw new Error(`get_file (range) failed: ${getFileRangeResult.content[0].text}`);
+  }
+  // Verify header shows line range
+  if (!getFileRangeResult.content[0].text.includes("[lines 5-10]")) {
+    throw new Error("get_file (range) output missing line range in header");
+  }
+  // Verify first line starts with 5:
+  if (!getFileRangeResult.content[0].text.includes("\n5: ")) {
+    throw new Error("get_file (range) output should start at line 5");
+  }
+  console.log("get_file (range) result:", getFileRangeResult.content[0].text.slice(0, 300) + "...");
+
+  // Test line number alignment between search_code and get_file
+  await testLineNumberAlignment(client);
+
   await client.close();
   console.log("\nAll MCP tool tests passed!");
+}
+
+async function testLineNumberAlignment(client) {
+  console.log("\nTesting line number alignment between search_code and get_file...");
+
+  // Search for a specific pattern that will have predictable results
+  const searchResult = await client.callTool({
+    name: "search_code",
+    arguments: {
+      query: "pub struct",
+      mode: "substring",
+      crate: "commonware-cryptography",
+      max_results: 1,
+    },
+  });
+  if (searchResult.isError) {
+    throw new Error(`search_code failed: ${searchResult.content[0].text}`);
+  }
+
+  const searchText = searchResult.content[0].text;
+  console.log("search_code snippet:", searchText.slice(0, 500));
+
+  // Extract file path from search result (format: "## path/to/file.rs")
+  const fileMatch = searchText.match(/## ([^\n]+\.rs)/);
+  if (!fileMatch) {
+    throw new Error("Could not extract file path from search_code result");
+  }
+  const filePath = fileMatch[1];
+  console.log("Extracted file path:", filePath);
+
+  // Extract a line number and its content from the snippet
+  // Format: "N: line content" where N is 0-indexed
+  const lineMatch = searchText.match(/(\d+): (.+)/);
+  if (!lineMatch) {
+    throw new Error("Could not extract line number from search_code snippet");
+  }
+  const lineNum = parseInt(lineMatch[1], 10);
+  const expectedContent = lineMatch[2];
+  console.log(`Extracted line ${lineNum}: "${expectedContent.slice(0, 50)}..."`);
+
+  // Now fetch that exact line using get_file with start_line/end_line
+  const getFileResult = await client.callTool({
+    name: "get_file",
+    arguments: {
+      path: filePath,
+      start_line: lineNum,
+      end_line: lineNum,
+    },
+  });
+  if (getFileResult.isError) {
+    throw new Error(`get_file failed: ${getFileResult.content[0].text}`);
+  }
+
+  const getFileText = getFileResult.content[0].text;
+  console.log("get_file result:", getFileText);
+
+  // Extract the line content from get_file result
+  const getFileLineMatch = getFileText.match(new RegExp(`${lineNum}: (.+)`));
+  if (!getFileLineMatch) {
+    throw new Error(`get_file output missing line ${lineNum}`);
+  }
+  const actualContent = getFileLineMatch[1];
+
+  // Verify the content matches
+  if (actualContent !== expectedContent) {
+    throw new Error(
+      `Line content mismatch!\n` +
+        `  search_code line ${lineNum}: "${expectedContent}"\n` +
+        `  get_file line ${lineNum}: "${actualContent}"`
+    );
+  }
+
+  console.log("Line number alignment verified: search_code and get_file produce matching output!");
 }
 
 async function main() {

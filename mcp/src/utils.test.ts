@@ -12,6 +12,7 @@ import {
   hasMajorityOverlap,
   selectTopSnippets,
   formatSnippet,
+  formatWithLineNumbers,
 } from "./utils.ts";
 
 describe("sortVersionsDesc", () => {
@@ -571,12 +572,12 @@ describe("selectTopSnippets", () => {
 });
 
 describe("formatSnippet", () => {
-  it("should format lines with 1-based line numbers", () => {
+  it("should format lines with 0-based line numbers", () => {
     const lines = ["line 0", "line 1", "line 2", "line 3", "line 4"];
 
     const result = formatSnippet(lines, 1, 4);
 
-    expect(result).toBe("2: line 1\n3: line 2\n4: line 3");
+    expect(result).toBe("1: line 1\n2: line 2\n3: line 3");
   });
 
   it("should handle first lines of file", () => {
@@ -584,7 +585,7 @@ describe("formatSnippet", () => {
 
     const result = formatSnippet(lines, 0, 2);
 
-    expect(result).toBe("1: first\n2: second");
+    expect(result).toBe("0: first\n1: second");
   });
 
   it("should handle single line", () => {
@@ -592,6 +593,91 @@ describe("formatSnippet", () => {
 
     const result = formatSnippet(lines, 0, 1);
 
-    expect(result).toBe("1: only line");
+    expect(result).toBe("0: only line");
+  });
+});
+
+describe("formatWithLineNumbers", () => {
+  const sampleContent = `fn main() {
+    println!("Hello, world!");
+}
+
+fn helper() {
+    // do something
+}`;
+
+  it("should format entire file with line numbers (0-indexed)", () => {
+    const result = formatWithLineNumbers(sampleContent);
+    // Note: empty line 3 produces "3: " with trailing space from the format string
+    const expected = [
+      "0: fn main() {",
+      '1:     println!("Hello, world!");',
+      "2: }",
+      "3: ",
+      "4: fn helper() {",
+      "5:     // do something",
+      "6: }",
+    ].join("\n");
+    expect(result).toBe(expected);
+  });
+
+  it("should format a range of lines (start_line only)", () => {
+    const result = formatWithLineNumbers(sampleContent, 4);
+    expect(result).toBe(`4: fn helper() {
+5:     // do something
+6: }`);
+  });
+
+  it("should format a range of lines (end_line only)", () => {
+    const result = formatWithLineNumbers(sampleContent, undefined, 2);
+    expect(result).toBe(`0: fn main() {
+1:     println!("Hello, world!");
+2: }`);
+  });
+
+  it("should format a range of lines (both start and end)", () => {
+    const result = formatWithLineNumbers(sampleContent, 1, 3);
+    // Note: line 3 is empty, produces "3: " with trailing space
+    const expected = ['1:     println!("Hello, world!");', "2: }", "3: "].join("\n");
+    expect(result).toBe(expected);
+  });
+
+  it("should clamp start_line to 0", () => {
+    const result = formatWithLineNumbers(sampleContent, -5, 1);
+    expect(result).toBe(`0: fn main() {
+1:     println!("Hello, world!");`);
+  });
+
+  it("should clamp end_line to last line index", () => {
+    const result = formatWithLineNumbers(sampleContent, 4, 100);
+    expect(result).toBe(`4: fn helper() {
+5:     // do something
+6: }`);
+  });
+
+  it("should return empty string if start > end", () => {
+    const result = formatWithLineNumbers(sampleContent, 5, 2);
+    expect(result).toBe("");
+  });
+
+  it("should return empty string if start >= total lines", () => {
+    const result = formatWithLineNumbers(sampleContent, 100);
+    expect(result).toBe("");
+  });
+
+  it("should handle single line file", () => {
+    const result = formatWithLineNumbers("single line");
+    expect(result).toBe("0: single line");
+  });
+
+  it("should handle empty content", () => {
+    const result = formatWithLineNumbers("");
+    expect(result).toBe("0: ");
+  });
+
+  it("should use 0-indexed line numbers matching search_code", () => {
+    const content = "line one\nline two\nline three";
+    const result = formatWithLineNumbers(content, 1, 1);
+    expect(result).toBe("1: line two");
   });
 });

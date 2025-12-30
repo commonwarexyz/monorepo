@@ -228,11 +228,40 @@ export function selectTopSnippets(
 
 /**
  * Format a snippet as a string with line numbers.
+ * Line numbers are 0-indexed to match formatWithLineNumbers.
  */
 export function formatSnippet(lines: string[], start: number, end: number): string {
   return lines
     .slice(start, end)
-    .map((l, idx) => `${start + idx + 1}: ${l}`)
+    .map((l, idx) => `${start + idx}: ${l}`)
+    .join("\n");
+}
+
+/**
+ * Format file content with line numbers.
+ * Line numbers are 0-indexed to match search_code output.
+ * If startLine/endLine are provided, only that range is returned.
+ */
+export function formatWithLineNumbers(
+  content: string,
+  startLine?: number,
+  endLine?: number
+): string {
+  const lines = content.split("\n");
+
+  // Determine range (0-indexed, inclusive)
+  const start = startLine !== undefined ? Math.max(0, startLine) : 0;
+  const end = endLine !== undefined ? Math.min(lines.length - 1, endLine) : lines.length - 1;
+
+  // Validate range
+  if (start > end || start >= lines.length) {
+    return "";
+  }
+
+  // Extract and format lines (inclusive range)
+  return lines
+    .slice(start, end + 1)
+    .map((line, idx) => `${start + idx}: ${line}`)
     .join("\n");
 }
 
