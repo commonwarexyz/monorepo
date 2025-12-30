@@ -349,6 +349,15 @@ impl<
         self.verifier.verify_finalizes(rng, namespace)
     }
 
+    /// Returns true if the leader was active in this round.
+    ///
+    /// We use pending votes to determine activeness because we only verify the first
+    /// `2f+1` votes. If we used verified, we would always consider the slowest `f` peers offline.
+    ///
+    /// This approach does mean, however, that we may consider a peer active that has sent an invalid
+    /// vote (this is fine and preferred to verifying all votes from all peers in each round). Recall,
+    /// the purpose of this mechanism is to minimize the timeout for crashed peers (not some tool to detect
+    /// and skip Byzantine leaders, which is only possible once we detect incorrect behavior and block them for).
     pub fn is_active(&self, leader: u32) -> bool {
         self.pending_votes.has_notarize(leader)
             || self.pending_votes.has_nullify(leader)
