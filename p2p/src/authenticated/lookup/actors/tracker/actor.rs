@@ -241,11 +241,7 @@ mod tests {
     };
 
     // Test Configuration Setup
-    fn default_test_config<C: Signer>(crypto: C) -> (Config<C>, mpsc::Receiver<HashSet<IpAddr>>) {
-        test_config_with_unknown_ips(crypto, false)
-    }
-
-    fn test_config_with_unknown_ips<C: Signer>(
+    fn test_config<C: Signer>(
         crypto: C,
         allow_unknown_ips: bool,
     ) -> (Config<C>, mpsc::Receiver<HashSet<IpAddr>>) {
@@ -292,7 +288,7 @@ mod tests {
     fn test_connect_unauthorized_peer_is_killed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (cfg, _) = default_test_config(PrivateKey::from_seed(0));
+            let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
@@ -311,7 +307,7 @@ mod tests {
     fn test_block_peer_standard_behavior() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (cfg_initial, _) = default_test_config(PrivateKey::from_seed(0));
+            let (cfg_initial, _) = test_config(PrivateKey::from_seed(0), false);
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -340,7 +336,7 @@ mod tests {
     fn test_block_peer_already_blocked_is_noop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (cfg_initial, _) = default_test_config(PrivateKey::from_seed(0));
+            let (cfg_initial, _) = test_config(PrivateKey::from_seed(0), false);
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -372,7 +368,7 @@ mod tests {
     fn test_block_peer_non_existent_is_noop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (cfg_initial, _) = default_test_config(PrivateKey::from_seed(0));
+            let (cfg_initial, _) = test_config(PrivateKey::from_seed(0), false);
             let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg_initial);
 
             let (_s1_signer, pk_non_existent) = new_signer_and_pk(100);
@@ -392,7 +388,7 @@ mod tests {
             let peer_addr2 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), 1002);
             let (_peer_signer3, peer_pk3) = new_signer_and_pk(3);
             let peer_addr3 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 3).into(), 1003);
-            let (cfg_initial, _) = default_test_config(peer_signer);
+            let (cfg_initial, _) = test_config(peer_signer, false);
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -440,7 +436,7 @@ mod tests {
             let peer_addr3 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 3).into(), 1003);
 
             // Create a tracker with allow_unknown_ips=true (skips IP verification)
-            let (cfg, _) = test_config_with_unknown_ips(peer_signer, true);
+            let (cfg, _) = test_config(peer_signer, true);
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -493,7 +489,7 @@ mod tests {
     fn test_listen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (cfg_initial, _) = default_test_config(PrivateKey::from_seed(0));
+            let (cfg_initial, _) = test_config(PrivateKey::from_seed(0), false);
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -535,7 +531,7 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let (cfg_initial, _) = default_test_config(PrivateKey::from_seed(0));
+            let (cfg_initial, _) = test_config(PrivateKey::from_seed(0), false);
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -557,7 +553,7 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let (cfg_initial, _) = default_test_config(PrivateKey::from_seed(0));
+            let (cfg_initial, _) = test_config(PrivateKey::from_seed(0), false);
 
             let TestHarness {
                 mut mailbox,
@@ -592,7 +588,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // 1) Setup actor
-            let (cfg, _) = default_test_config(PrivateKey::from_seed(0));
+            let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -644,7 +640,7 @@ mod tests {
             let pk_2 = new_signer_and_pk(2).1;
             let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
 
-            let (mut cfg, mut listener_receiver) = default_test_config(my_sk);
+            let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
             cfg.tracked_peer_sets = 1;
 
             let TestHarness {
