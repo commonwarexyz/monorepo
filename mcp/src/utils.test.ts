@@ -8,6 +8,10 @@ import {
   parseWorkspaceMembers,
   parseCrateInfo,
   buildFileTree,
+  buildSnippets,
+  hasMajorityOverlap,
+  selectTopSnippets,
+  formatSnippet,
 } from "./utils.ts";
 
 describe("sortVersionsDesc", () => {
@@ -380,5 +384,190 @@ tests/
     const files = ["pkg/README.md"];
     const result = buildFileTree(files, "pkg/");
     expect(result).toBe("README.md");
+  });
+});
+
+describe("buildSnippets", () => {
+  it("should create snippets from consecutive non-empty lines", () => {
+    const lines = ["line 1", "line 2", "", "line 4", "line 5"];
+    const scores = [1, 2, 0, 1, 1];
+
+    const snippets = buildSnippets(lines, scores);
+
+    expect(snippets).toHaveLength(2);
+    expect(snippets[0]).toEqual({ start: 0, end: 2, score: 3 });
+    expect(snippets[1]).toEqual({ start: 3, end: 5, score: 2 });
+  });
+
+  it("should handle single snippet without trailing empty line", () => {
+    const lines = ["line 1", "line 2", "line 3"];
+    const scores = [1, 1, 1];
+
+    const snippets = buildSnippets(lines, scores);
+
+    expect(snippets).toHaveLength(1);
+    expect(snippets[0]).toEqual({ start: 0, end: 3, score: 3 });
+  });
+
+  it("should ignore snippets with zero score", () => {
+    const lines = ["line 1", "line 2", "", "line 4"];
+    const scores = [0, 0, 0, 1];
+
+    const snippets = buildSnippets(lines, scores);
+
+    expect(snippets).toHaveLength(1);
+    expect(snippets[0]).toEqual({ start: 3, end: 4, score: 1 });
+  });
+
+  it("should handle empty lines at start and end", () => {
+    const lines = ["", "", "line 3", "line 4", "", ""];
+    const scores = [0, 0, 2, 3, 0, 0];
+
+    const snippets = buildSnippets(lines, scores);
+
+    expect(snippets).toHaveLength(1);
+    expect(snippets[0]).toEqual({ start: 2, end: 4, score: 5 });
+  });
+
+  it("should handle all empty lines", () => {
+    const lines = ["", "", ""];
+    const scores = [0, 0, 0];
+
+    const snippets = buildSnippets(lines, scores);
+
+    expect(snippets).toHaveLength(0);
+  });
+
+  it("should handle whitespace-only lines as empty", () => {
+    const lines = ["line 1", "   ", "\t", "line 4"];
+    const scores = [1, 0, 0, 2];
+
+    const snippets = buildSnippets(lines, scores);
+
+    expect(snippets).toHaveLength(2);
+    expect(snippets[0]).toEqual({ start: 0, end: 1, score: 1 });
+    expect(snippets[1]).toEqual({ start: 3, end: 4, score: 2 });
+  });
+});
+
+describe("hasMajorityOverlap", () => {
+  it("should return false when no overlap", () => {
+    expect(hasMajorityOverlap(0, 5, 10, 15)).toBe(false);
+  });
+
+  it("should return false when overlap is less than half of candidate", () => {
+    // candidate: 0-10 (10 lines), selected: 8-12, overlap: 8-10 (2 lines)
+    // 2 / 10 = 0.2, not > 0.5
+    expect(hasMajorityOverlap(0, 10, 8, 12)).toBe(false);
+  });
+
+  it("should return true when overlap is more than half of candidate", () => {
+    // candidate: 5-10 (5 lines), selected: 0-8, overlap: 5-8 (3 lines)
+    // 3 / 5 = 0.6 > 0.5
+    expect(hasMajorityOverlap(5, 10, 0, 8)).toBe(true);
+  });
+
+  it("should return true when candidate is fully contained in selected", () => {
+    // candidate: 5-10 (5 lines), selected: 0-20, all 5 lines overlap
+    // 5 / 5 = 1.0 > 0.5
+    expect(hasMajorityOverlap(5, 10, 0, 20)).toBe(true);
+  });
+
+  it("should return false when selected is fully contained in large candidate", () => {
+    // candidate: 0-20 (20 lines), selected: 5-10, overlap: 5 lines
+    // 5 / 20 = 0.25 < 0.5
+    expect(hasMajorityOverlap(0, 20, 5, 10)).toBe(false);
+  });
+});
+
+describe("selectTopSnippets", () => {
+  it("should select top snippets by score", () => {
+    const snippets = [
+      { start: 0, end: 3, score: 5 },
+      { start: 10, end: 13, score: 10 },
+      { start: 20, end: 23, score: 3 },
+    ];
+
+    const selected = selectTopSnippets(snippets, 30, 3);
+
+    expect(selected).toHaveLength(3);
+    // Should be sorted by score descending
+    expect(selected[0].start).toBeLessThanOrEqual(selected[0].end);
+  });
+
+  it("should add context lines", () => {
+    const snippets = [{ start: 5, end: 8, score: 10 }];
+
+    const selected = selectTopSnippets(snippets, 20, 1, 2);
+
+    expect(selected).toHaveLength(1);
+    expect(selected[0]).toEqual({ start: 3, end: 10 }); // 5-2=3, 8+2=10
+  });
+
+  it("should clamp context to file boundaries", () => {
+    const snippets = [{ start: 1, end: 3, score: 10 }];
+
+    const selected = selectTopSnippets(snippets, 5, 1, 2);
+
+    expect(selected).toHaveLength(1);
+    expect(selected[0]).toEqual({ start: 0, end: 5 }); // clamped to 0 and 5
+  });
+
+  it("should filter overlapping snippets", () => {
+    const snippets = [
+      { start: 0, end: 6, score: 10 }, // highest score - 6 lines
+      { start: 2, end: 6, score: 8 }, // 4 lines, overlaps 4/4 = 100% with first
+      { start: 20, end: 25, score: 5 }, // no overlap
+    ];
+
+    const selected = selectTopSnippets(snippets, 30, 3, 0);
+
+    expect(selected).toHaveLength(2);
+    // First snippet (score 10) and third snippet (score 5)
+    // Second is skipped due to majority overlap with first (100% > 50%)
+  });
+
+  it("should respect maxSnippets limit", () => {
+    const snippets = [
+      { start: 0, end: 3, score: 10 },
+      { start: 10, end: 13, score: 8 },
+      { start: 20, end: 23, score: 6 },
+      { start: 30, end: 33, score: 4 },
+    ];
+
+    const selected = selectTopSnippets(snippets, 40, 2);
+
+    expect(selected).toHaveLength(2);
+  });
+
+  it("should handle empty snippets array", () => {
+    const selected = selectTopSnippets([], 10, 5);
+    expect(selected).toHaveLength(0);
+  });
+});
+
+describe("formatSnippet", () => {
+  it("should format lines with 1-based line numbers", () => {
+    const lines = ["line 0", "line 1", "line 2", "line 3", "line 4"];
+
+    const result = formatSnippet(lines, 1, 4);
+
+    expect(result).toBe("2: line 1\n3: line 2\n4: line 3");
+  });
+
+  it("should handle first lines of file", () => {
+    const lines = ["first", "second", "third"];
+
+    const result = formatSnippet(lines, 0, 2);
+
+    expect(result).toBe("1: first\n2: second");
+  });
+
+  it("should handle single line", () => {
+    const lines = ["only line"];
+
+    const result = formatSnippet(lines, 0, 1);
+
+    expect(result).toBe("1: only line");
   });
 });

@@ -130,6 +130,130 @@ export function parseCrateInfo(
 }
 
 /**
+ * Represents a snippet of consecutive lines with content.
+ */
+export interface Snippet {
+  start: number; // First line index (0-based)
+  end: number; // One past last line index (exclusive)
+  score: number; // Cumulative score of all lines
+}
+
+/**
+ * Build snippets from lines by grouping consecutive non-empty lines.
+ * Each snippet contains lines from the first non-empty line to the last
+ * non-empty line in a contiguous block.
+ */
+export function buildSnippets(lines: string[], lineScores: number[]): Snippet[] {
+  const snippets: Snippet[] = [];
+  let snippetStart: number | null = null;
+
+  for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+    const hasContent = lines[lineNum].trim().length > 0;
+
+    if (hasContent) {
+      if (snippetStart === null) {
+        snippetStart = lineNum;
+      }
+    } else if (snippetStart !== null) {
+      // End of snippet - calculate total score
+      let totalScore = 0;
+      for (let i = snippetStart; i < lineNum; i++) {
+        totalScore += lineScores[i];
+      }
+      if (totalScore > 0) {
+        snippets.push({ start: snippetStart, end: lineNum, score: totalScore });
+      }
+      snippetStart = null;
+    }
+  }
+
+  // Handle snippet at end of file
+  if (snippetStart !== null) {
+    let totalScore = 0;
+    for (let i = snippetStart; i < lines.length; i++) {
+      totalScore += lineScores[i];
+    }
+    if (totalScore > 0) {
+      snippets.push({ start: snippetStart, end: lines.length, score: totalScore });
+    }
+  }
+
+  return snippets;
+}
+
+/**
+ * Check if a candidate snippet has majority overlap with a selected snippet.
+ * Returns true if more than half of the candidate snippet's lines overlap
+ * with the selected snippet.
+ */
+export function hasMajorityOverlap(
+  candidateStart: number,
+  candidateEnd: number,
+  selectedStart: number,
+  selectedEnd: number
+): boolean {
+  let overlapCount = 0;
+  for (let i = candidateStart; i < candidateEnd; i++) {
+    if (i >= selectedStart && i < selectedEnd) {
+      overlapCount++;
+    }
+  }
+  const candidateSize = candidateEnd - candidateStart;
+  return overlapCount > candidateSize / 2;
+}
+
+/**
+ * Select top snippets while filtering out those with majority overlap.
+ * Returns snippets with context lines added (2 before, 2 after).
+ */
+export function selectTopSnippets(
+  snippets: Snippet[],
+  totalLines: number,
+  maxSnippets: number,
+  contextLines: number = 2
+): Array<{ start: number; end: number }> {
+  // Sort by score descending
+  const sorted = [...snippets].sort((a, b) => b.score - a.score);
+
+  const selected: Array<{ start: number; end: number }> = [];
+
+  for (const snippet of sorted) {
+    if (selected.length >= maxSnippets) {
+      break;
+    }
+
+    // Add context lines around the snippet
+    const start = Math.max(0, snippet.start - contextLines);
+    const end = Math.min(totalLines, snippet.end + contextLines);
+
+    // Check for majority overlap with already selected snippets
+    let hasOverlap = false;
+    for (const sel of selected) {
+      if (hasMajorityOverlap(start, end, sel.start, sel.end)) {
+        hasOverlap = true;
+        break;
+      }
+    }
+
+    if (!hasOverlap) {
+      selected.push({ start, end });
+    }
+  }
+
+  return selected;
+}
+
+/**
+ * Format a snippet as a string with line numbers.
+ */
+export function formatSnippet(lines: string[], start: number, end: number): string {
+  return lines
+    .slice(start, end)
+    .map((l, idx) => `${start + idx + 1}: ${l}`)
+    .join("\n");
+}
+
+/**
  * Build a file tree string from a list of file paths.
  * Groups files by directory and formats as an indented tree.
  */
