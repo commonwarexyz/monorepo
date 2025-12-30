@@ -19,7 +19,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS files_fts_substring USING fts5(
   content,
   content='files',
   content_rowid='id',
-  tokenize='trigram case_sensitive 0'
+  tokenize='trigram'
 );
 
 -- FTS5 table for word search (unicode61 tokenizer)
@@ -28,7 +28,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS files_fts_word USING fts5(
   content,
   content='files',
   content_rowid='id',
-  tokenize='unicode61 case_sensitive 0'
+  tokenize='unicode61'
 );
 
 -- Triggers to keep both FTS indexes in sync with files table
