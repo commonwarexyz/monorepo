@@ -1,6 +1,9 @@
 //! Primitive implementations of [Translator].
 
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::{
+    hash::{BuildHasher, Hash, Hasher},
+    marker::PhantomData,
+};
 
 /// Translate keys into a new representation (often a smaller one).
 ///
@@ -32,8 +35,8 @@ pub trait Translator: Clone + BuildHasher {
 ///
 /// # Warning
 ///
-/// This hasher is not suitable for general use. If the hasher is called over some type that is not
-/// [u8], [u16], [u32] or [u64], it will panic.
+/// This hasher is not suitable for general use. If the hasher is called on a byte slice longer
+/// than `size_of::<u64>()`, it will panic.
 #[derive(Default, Clone)]
 pub struct UintIdentity {
     value: u64,
@@ -41,8 +44,11 @@ pub struct UintIdentity {
 
 impl Hasher for UintIdentity {
     #[inline]
-    fn write(&mut self, _: &[u8]) {
-        unimplemented!("we should only ever call type-specific write methods");
+    fn write(&mut self, bytes: &[u8]) {
+        assert!(bytes.len() <= 8, "UintIdenty hasher cannot handle >8 bytes");
+        // Treat the input array as a little-endian int to ensure low-order bits don't end up mostly
+        // 0s, given that we right-pad.
+        self.value = u64::from_le_bytes(cap::<8>(bytes));
     }
 
     #[inline]
@@ -120,6 +126,73 @@ define_cap_translator!(TwoCap, 2, u16);
 define_cap_translator!(FourCap, 4, u32);
 define_cap_translator!(EightCap, 8, u64);
 
+/// Define a special array type for which we'll implement our own identity hasher. This avoids the
+/// overhead of the default Array hasher which unnecessarily (for our use case) includes a length
+/// prefix.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct UnhashedArray<const N: usize> {
+    pub inner: [u8; N],
+}
+
+impl<const N: usize> Hash for UnhashedArray<N> {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write(&self.inner);
+    }
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for UnhashedArray<N> {
+    fn eq(&self, other: &[u8; N]) -> bool {
+        &self.inner == other
+    }
+}
+
+/// Translators for keys that are not the length of a standard integer.
+#[derive(Clone, Copy)]
+pub struct Cap<const N: usize> {
+    _phantom: PhantomData<[u8; N]>,
+}
+
+impl<const N: usize> Cap<N> {
+    pub const fn new() -> Self {
+        const {
+            assert!(N <= 8 && N > 0, "Cap must be between 1 and 8");
+        };
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<const N: usize> Default for Cap<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> Translator for Cap<N> {
+    type Key = UnhashedArray<N>;
+
+    #[inline]
+    fn transform(&self, key: &[u8]) -> Self::Key {
+        const {
+            assert!(N <= 8 && N > 0, "Cap must be between 1 and 8");
+        };
+        UnhashedArray {
+            inner: cap::<N>(key),
+        }
+    }
+}
+
+impl<const N: usize> BuildHasher for Cap<N> {
+    type Hasher = UintIdentity;
+
+    #[inline]
+    fn build_hasher(&self) -> Self::Hasher {
+        UintIdentity::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +237,24 @@ mod tests {
     }
 
     #[test]
+    fn test_cap_3() {
+        let t = Cap::<3>::new();
+        assert_eq!(t.transform(b""), [0; 3]);
+        assert_eq!(t.transform(b"abc"), *b"abc");
+        assert_eq!(t.transform(b"abcdef"), *b"abc");
+        assert_eq!(t.transform(b"ab"), [b'a', b'b', 0]);
+    }
+
+    #[test]
+    fn test_cap_6() {
+        let t = Cap::<6>::new();
+        assert_eq!(t.transform(b""), [0; 6]);
+        assert_eq!(t.transform(b"abcdef"), *b"abcdef");
+        assert_eq!(t.transform(b"abcdefghi"), *b"abcdef");
+        assert_eq!(t.transform(b"abc"), [b'a', b'b', b'c', 0, 0, 0]);
+    }
+
+    #[test]
     fn test_eight_cap() {
         let t = EightCap;
         let t1 = t.transform(b"");
@@ -181,9 +272,16 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "we should only ever call type-specific write methods")]
-    fn identity_hasher_panics_on_write_slice() {
+    fn identity_hasher_works_on_small_slice() {
         let mut h = UintIdentity::default();
-        h.write(b"not an int");
+        h.write(b"abc");
+        assert_eq!(h.finish(), u64::from_le_bytes(cap::<8>(b"abc")));
+    }
+
+    #[test]
+    #[should_panic]
+    fn identity_hasher_panics_on_large_write_slice() {
+        let mut h = UintIdentity::default();
+        h.write(b"too big for an int");
     }
 }

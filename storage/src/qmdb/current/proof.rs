@@ -108,8 +108,8 @@ impl<D: Digest> RangeProof<D> {
 
         // Gather the chunks necessary to verify the proof.
         let chunk_bits = CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
-        let start = *start_loc / chunk_bits; // chunk that contains the very first bit.
-        let end = (*end_loc - 1) / chunk_bits; // chunk that contains the very last bit.
+        let start = *start_loc / chunk_bits; // chunk that contains the first bit
+        let end = (*end_loc - 1) / chunk_bits; // chunk that contains the last bit
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
             let bit_offset = i * chunk_bits;
@@ -135,6 +135,10 @@ impl<D: Digest> RangeProof<D> {
             debug!("verification failed, invalid proof size");
             return false;
         };
+        if ops.is_empty() || chunks.is_empty() {
+            debug!("verification failed, empty input");
+            return false;
+        }
 
         // Compute the (non-inclusive) end location of the range.
         let Some(end_loc) = start_loc.checked_add(ops.len() as u64) else {
@@ -144,8 +148,19 @@ impl<D: Digest> RangeProof<D> {
         if end_loc > op_count {
             debug!(
                 loc = ?end_loc,
-                ?op_count, "proof verification failed, invalid range"
+                ?op_count, "verification failed, invalid range"
             );
+            return false;
+        }
+
+        // Validate the number of input chunks.
+        let chunk_bits = CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
+        let start = *start_loc / chunk_bits; // chunk that contains first bit
+        let end = (*end_loc.saturating_sub(1)) / chunk_bits; // chunk that contains the last bit
+        let expected = end - start + 1;
+        let actual = chunks.len() as u64;
+        if expected != actual {
+            debug!(expected, actual, "verification failed, chunk mismatch");
             return false;
         }
 

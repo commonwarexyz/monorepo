@@ -308,6 +308,7 @@ impl crate::Runner for Runner {
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         ..Default::default()
                     },
+                    ..Default::default()
                 };
                 let network = MeteredNetwork::new(
                     IoUringNetwork::start(config, iouring_registry).unwrap(),

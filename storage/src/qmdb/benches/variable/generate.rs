@@ -11,11 +11,12 @@ use commonware_runtime::{
     tokio::{Config, Context},
 };
 use commonware_storage::{
+    kv::Deletable,
     qmdb::{
         store::{Batchable, LogStorePrunable},
         Error,
     },
-    store::{StoreDeletable, StorePersistable},
+    Persistable,
 };
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -106,9 +107,9 @@ async fn test_db<A>(
     commit_frequency: u32,
 ) -> Result<Duration, Error>
 where
-    A: StorePersistable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + Batchable
-        + StoreDeletable
+    A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+        + Persistable<Error = Error>
+        + Deletable
         + LogStorePrunable,
 {
     let start = Instant::now();
