@@ -662,6 +662,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 }
 
 // Create MCP handler using McpAgent.serve() for proper session management
+// CORS is handled automatically by the WorkerTransport with permissive defaults
 const mcpHandler = McpAgent.serve("/", { binding: "MCP" });
 
 // Helper: Sync indexed versions with sitemap (index one version per run to avoid timeout)
@@ -748,23 +749,7 @@ async function reindexVersions(
 // Worker fetch handler
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-
-    // Health check endpoint
-    if (url.pathname === "/health") {
-      return new Response(
-        JSON.stringify({
-          name: "commonware-mcp",
-          version: pkg.version,
-          status: "ok",
-        }),
-        {
-          headers: { "Content-Type": "application/json" },
-        }
-      );
-    }
-
-    // Route to MCP agent
+    // Route all requests to MCP agent (handles CORS including OPTIONS preflight)
     return mcpHandler.fetch(request, env, ctx);
   },
 
