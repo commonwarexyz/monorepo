@@ -1176,8 +1176,10 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
         info.dealer_index(&me.public_key())?;
         let share = info.unwrap_or_random_share(
             &mut rng,
-            // We are leaking the private scalar since `Poly::new_with_constant`
-            // needs an owned scalar for polynomial arithmetic
+            // We are extracting the private scalar from `Secret` protection because
+            // `Poly::new_with_constant` requires an owned value. The extracted scalar is
+            // scoped to this function and will be zeroized on drop (i.e. the secret is
+            // only exposed for the duration of this function).
             share.map(|x| x.private.expose(|private| private.clone())),
         )?;
         let my_poly = Poly::new_with_constant(&mut rng, info.degree(), share);
@@ -1477,14 +1479,17 @@ impl<V: Variant, S: Signer> Player<V, S> {
         concurrency: usize,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
         let selected = select(&self.info, logs)?;
+        // We are extracting the private scalars from `Secret` protection
+        // because interpolation/summation needs owned scalars for polynomial
+        // arithmetic. The extracted scalars are scoped to this function and
+        // will be zeroized on drop (i.e. the secrets are only exposed for the
+        // duration of this function).
         let dealings = selected
             .iter_pairs()
             .map(|(dealer, log)| {
                 let share = self
                     .view
                     .get(dealer)
-                    // We are leaking private scalars since interpolation/summation needs
-                    // owned scalars for polynomial arithmetic
                     .map(|(_, priv_msg)| priv_msg.share.expose(|share| share.clone()))
                     .unwrap_or_else(|| {
                         log.get_reveal(&self.me_pub).map_or_else(
@@ -1493,8 +1498,6 @@ impl<V: Variant, S: Signer> Player<V, S> {
                                     "select didn't check dealer reveal, or we're not a player?"
                                 )
                             },
-                            // We are leaking private scalars since interpolation/summation
-                            // needs owned scalars for polynomial arithmetic
                             |priv_msg| priv_msg.share.expose(|share| share.clone()),
                         )
                     });
