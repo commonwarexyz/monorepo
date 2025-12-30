@@ -6,6 +6,10 @@ Interact with the Commonware Library via [MCP](https://modelcontextprotocol.io/)
 
 `commonware-mcp` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
+## Why Connect?
+
+LLMs are trained on code from months ago. Web search (the default fallback for finding missing information) returns GitHub links that must be iterated file-by-file to extract relevant information (if not rate-limited first), and the results probably won't match the version you're building against. We built this MCP server from scratch to remedy these issues for those building with the Commonware Library. It provides unlimited access to a version-pinned index of all source code and documentation, along with a ranked search tool that surfaces more relevant snippets than grep (with surrounding context).
+
 ## Tools
 
 | Tool | Description |

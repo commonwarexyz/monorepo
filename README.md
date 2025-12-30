@@ -62,9 +62,9 @@ We encourage external contributors to submit issues and pull requests to the Com
 
 All work is coordinated via the [tracker](https://github.com/orgs/commonwarexyz/projects/2). If something in [the backlog](https://github.com/orgs/commonwarexyz/projects/2/views/3) looks particularly useful, leave a comment so we can prioritize it!
 
-## LLM Integration
+## MCP Support (for LLMs)
 
-Connect your LLM to the Commonware Library via [MCP](https://modelcontextprotocol.io) at https://mcp.commonware.xyz. This gives your AI assistant direct access to browse source code, search for patterns, and read documentation so it can provide accurate, up-to-date answers instead of hallucinating. This tends to be more effective than default web search, which often returns stale or irrelevant results.
+LLMs are trained on code from months ago. Web search (the default fallback for finding missing information) returns GitHub links that must be iterated file-by-file to extract relevant information (if not rate-limited first), and the results probably won't match the version you're building against. We built an [MCP](https://modelcontextprotocol.io) server from scratch to remedy these issues for those building with the Commonware Library. It provides unlimited access to a version-pinned index of all source code and documentation, along with a ranked search tool that surfaces more relevant snippets than grep (with surrounding context).
 
 ### Claude Code
 
