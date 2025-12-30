@@ -142,16 +142,14 @@ export interface Snippet {
  * Build snippets using a rolling window approach.
  * Creates a window centered on each line with a positive score,
  * allowing overlapping windows that will be filtered later.
+ * Only stores metadata (line span + score), not the actual text.
  */
-export function buildSnippets(
-  lines: string[],
-  lineScores: number[],
-  windowSize: number = 7
-): Snippet[] {
+export function buildSnippets(lineScores: number[], windowSize: number = 7): Snippet[] {
   const snippets: Snippet[] = [];
   const halfWindow = Math.floor(windowSize / 2);
+  const totalLines = lineScores.length;
 
-  for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+  for (let lineNum = 0; lineNum < totalLines; lineNum++) {
     // Only create windows centered on lines with matches
     if (lineScores[lineNum] <= 0) {
       continue;
@@ -159,7 +157,7 @@ export function buildSnippets(
 
     // Create window centered on this line
     const start = Math.max(0, lineNum - halfWindow);
-    const end = Math.min(lines.length, lineNum + halfWindow + 1);
+    const end = Math.min(totalLines, lineNum + halfWindow + 1);
 
     // Calculate total score for this window
     let totalScore = 0;

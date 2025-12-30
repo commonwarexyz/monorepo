@@ -389,10 +389,9 @@ tests/
 
 describe("buildSnippets", () => {
   it("should create rolling windows centered on matching lines", () => {
-    const lines = ["a", "b", "c", "d", "e", "f", "g"];
     const scores = [0, 0, 0, 5, 0, 0, 0]; // match on line 3 (0-indexed)
 
-    const snippets = buildSnippets(lines, scores, 5);
+    const snippets = buildSnippets(scores, 5);
 
     // Window of 5 centered on line 3: lines 1-6 (exclusive)
     expect(snippets).toHaveLength(1);
@@ -400,10 +399,9 @@ describe("buildSnippets", () => {
   });
 
   it("should create multiple overlapping windows for adjacent matches", () => {
-    const lines = ["a", "b", "c", "d", "e"];
     const scores = [0, 2, 3, 0, 0]; // matches on lines 1 and 2
 
-    const snippets = buildSnippets(lines, scores, 3);
+    const snippets = buildSnippets(scores, 3);
 
     // Window size 3: halfWindow = 1
     // Line 1: window 0-3, score = 0+2+3 = 5
@@ -414,10 +412,9 @@ describe("buildSnippets", () => {
   });
 
   it("should clamp windows to file boundaries", () => {
-    const lines = ["a", "b", "c"];
     const scores = [5, 0, 0]; // match on first line
 
-    const snippets = buildSnippets(lines, scores, 7);
+    const snippets = buildSnippets(scores, 7);
 
     // Window of 7 centered on line 0, clamped to 0-3
     expect(snippets).toHaveLength(1);
@@ -425,19 +422,17 @@ describe("buildSnippets", () => {
   });
 
   it("should handle no matches", () => {
-    const lines = ["a", "b", "c"];
     const scores = [0, 0, 0];
 
-    const snippets = buildSnippets(lines, scores);
+    const snippets = buildSnippets(scores);
 
     expect(snippets).toHaveLength(0);
   });
 
   it("should accumulate scores from all lines in window", () => {
-    const lines = ["a", "b", "c", "d", "e"];
     const scores = [1, 2, 3, 2, 1]; // all lines have scores
 
-    const snippets = buildSnippets(lines, scores, 3);
+    const snippets = buildSnippets(scores, 3);
 
     // Each line creates a window, scores accumulate
     expect(snippets).toHaveLength(5);
@@ -450,11 +445,10 @@ describe("buildSnippets", () => {
   });
 
   it("should use default window size of 7", () => {
-    const lines = Array(20).fill("line");
     const scores = Array(20).fill(0);
     scores[10] = 5; // match in middle
 
-    const snippets = buildSnippets(lines, scores);
+    const snippets = buildSnippets(scores);
 
     // Default window 7, halfWindow = 3
     // Line 10: window 7-14
