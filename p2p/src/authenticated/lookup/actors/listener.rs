@@ -262,7 +262,8 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
-                            context.into_present(), address, stream_cfg, sink, stream, tracker, supervisor,
+                            context.into_present(), address, stream_cfg, sink, stream,
+                            tracker, supervisor,
                         )
                         .await;
 

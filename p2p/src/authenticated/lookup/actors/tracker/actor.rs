@@ -67,6 +67,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             rate_limit: cfg.allowed_connection_rate_per_peer,
             allow_private_ips: cfg.allow_private_ips,
             allow_dns: cfg.allow_dns,
+            allow_unregistered: cfg.allow_unregistered,
         };
 
         // Create the mailboxes
@@ -241,6 +242,13 @@ mod tests {
 
     // Test Configuration Setup
     fn default_test_config<C: Signer>(crypto: C) -> (Config<C>, mpsc::Receiver<HashSet<IpAddr>>) {
+        test_config_with_unregistered(crypto, false)
+    }
+
+    fn test_config_with_unregistered<C: Signer>(
+        crypto: C,
+        allow_unregistered: bool,
+    ) -> (Config<C>, mpsc::Receiver<HashSet<IpAddr>>) {
         let (registered_ips_sender, registered_ips_receiver) = Mailbox::new(1);
         (
             Config {
@@ -249,6 +257,7 @@ mod tests {
                 allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
                 allow_private_ips: true,
                 allow_dns: true,
+                allow_unregistered,
                 listener: registered_ips_sender,
             },
             registered_ips_receiver,
@@ -416,6 +425,67 @@ mod tests {
             assert!(!mailbox.acceptable(peer_pk2, peer_addr.ip()).await);
             // Not acceptable because not registered
             assert!(!mailbox.acceptable(peer_pk3, peer_addr3.ip()).await);
+        });
+    }
+
+    #[test]
+    fn test_acceptable_allow_unregistered() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (peer_signer, peer_pk) = new_signer_and_pk(1);
+            let peer_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 1001);
+            let (_peer_signer2, peer_pk2) = new_signer_and_pk(2);
+            let peer_addr2 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), 1002);
+            let (_peer_signer3, peer_pk3) = new_signer_and_pk(3);
+            let peer_addr3 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 3).into(), 1003);
+
+            // Create a tracker with allow_unregistered=true (skips IP verification)
+            let (cfg, _) = test_config_with_unregistered(peer_signer, true);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            // Unknown peer is NOT acceptable (allow_unregistered only skips IP check)
+            assert!(
+                !mailbox.acceptable(peer_pk3.clone(), peer_addr3.ip()).await,
+                "Unknown peer should not be acceptable"
+            );
+
+            oracle
+                .update(
+                    0,
+                    [
+                        (peer_pk.clone(), peer_addr.into()),
+                        (peer_pk2.clone(), peer_addr2.into()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            // With allow_unregistered=true, registered peer with wrong IP is acceptable
+            assert!(
+                mailbox.acceptable(peer_pk2.clone(), peer_addr.ip()).await,
+                "Registered peer with wrong IP should be acceptable with allow_unregistered=true"
+            );
+
+            // Self is still not acceptable
+            assert!(
+                !mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await,
+                "Self should not be acceptable"
+            );
+
+            // Block peer_pk2 and verify it's not acceptable
+            oracle.block(peer_pk2.clone()).await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(
+                !mailbox.acceptable(peer_pk2.clone(), peer_addr2.ip()).await,
+                "Blocked peer should not be acceptable"
+            );
         });
     }
 

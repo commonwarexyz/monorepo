@@ -25,5 +25,6 @@ pub struct Config<C: Signer> {
     pub allowed_connection_rate_per_peer: Quota,
     pub allow_private_ips: bool,
     pub allow_dns: bool,
+    pub allow_unregistered: bool,
     pub listener: Mailbox<HashSet<IpAddr>>,
 }
