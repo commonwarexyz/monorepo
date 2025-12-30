@@ -78,17 +78,39 @@
         <h1>MCP</h1>
         <p>Interact with the <a href="https://github.com/commonwarexyz/monorepo">Commonware Library</a> via <a href="https://modelcontextprotocol.io">Model Context Protocol</a>.</p>
 
+        <h2>Why Connect?</h2>
+        <p>Connecting your LLM to the Commonware Library via MCP gives it direct access to browse source code, search for patterns, and read documentation. This means your AI assistant can provide accurate, up-to-date answers about how primitives work, find relevant code examples, and help you integrate Commonware into your projects without hallucinating outdated or incorrect information.</p>
+
         <h2>Connect</h2>
-        <p>Add the following to your MCP client configuration:</p>
+
+        <h3>Claude Code</h3>
+        <pre><code>claude mcp add --transport http commonware-library https://mcp.commonware.xyz</code></pre>
+
+        <h3>Cursor</h3>
+        <p>Add to <code>~/.cursor/mcp.json</code> (global) or <code>.cursor/mcp.json</code> (project):</p>
         <pre><code>{
   "mcpServers": {
     "commonware-library": {
-      "url": "https://mcp.commonware.xyz/mcp"
+      "url": "https://mcp.commonware.xyz"
     }
   }
 }</code></pre>
 
+        <h3>Windsurf</h3>
+        <p>Add to <code>~/.codeium/windsurf/mcp_config.json</code>:</p>
+        <pre><code>{
+  "mcpServers": {
+    "commonware-library": {
+      "url": "https://mcp.commonware.xyz"
+    }
+  }
+}</code></pre>
+
+        <h3>Other Clients</h3>
+        <p>Use the Streamable HTTP endpoint: <code>https://mcp.commonware.xyz</code></p>
+
         <h2>Tools</h2>
+        <p class="meta-info"><a href="https://github.com/commonwarexyz/monorepo/tree/main/mcp">Add more tools by opening a PR</a></p>
         <div id="tools-loading">Loading tools...</div>
         <div id="tools-container" style="display: none;"></div>
         <div id="tools-error" style="display: none; color: red;"></div>
@@ -109,7 +131,7 @@
         </div>
 
         <div id="tool-result" style="display: none;">
-            <h3>Result</h3>
+            <h3 id="result-title">Result</h3>
             <pre id="result-content"></pre>
         </div>
     </div>
@@ -121,7 +143,7 @@
         import { Client } from 'https://esm.sh/@modelcontextprotocol/sdk@1.12.0/client';
         import { StreamableHTTPClientTransport } from 'https://esm.sh/@modelcontextprotocol/sdk@1.12.0/client/streamableHttp';
 
-        const MCP_ENDPOINT = 'https://mcp.commonware.xyz/mcp';
+        const MCP_ENDPOINT = 'https://mcp.commonware.xyz';
 
         let mcpClient = null;
         let toolsCache = null;
@@ -311,13 +333,21 @@
             }
 
             const resultDiv = document.getElementById('tool-result');
+            const resultTitle = document.getElementById('result-title');
             const resultContent = document.getElementById('result-content');
 
+            resultTitle.textContent = 'Result';
             resultContent.textContent = 'Executing...';
             resultDiv.style.display = 'block';
 
+            const startTime = performance.now();
+
             try {
                 const result = await callTool(toolName, args);
+                const latency = (performance.now() - startTime).toFixed(0);
+
+                // Update title with latency
+                resultTitle.textContent = `Result (${latency}ms)`;
 
                 // Format the result
                 let output = '';
@@ -334,6 +364,8 @@
 
                 resultContent.textContent = output.trim() || JSON.stringify(result, null, 2);
             } catch (error) {
+                const latency = (performance.now() - startTime).toFixed(0);
+                resultTitle.textContent = `Result (${latency}ms)`;
                 resultContent.textContent = 'Error: ' + error.message;
             }
         }
