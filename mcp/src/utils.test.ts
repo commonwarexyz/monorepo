@@ -495,29 +495,20 @@ describe("selectTopSnippets", () => {
       { start: 20, end: 23, score: 3 },
     ];
 
-    const selected = selectTopSnippets(snippets, 30, 3);
+    const selected = selectTopSnippets(snippets, 3);
 
     expect(selected).toHaveLength(3);
     // Should be sorted by score descending
     expect(selected[0].start).toBeLessThanOrEqual(selected[0].end);
   });
 
-  it("should add context lines", () => {
+  it("should preserve snippet boundaries without modification", () => {
     const snippets = [{ start: 5, end: 8, score: 10 }];
 
-    const selected = selectTopSnippets(snippets, 20, 1, 2);
+    const selected = selectTopSnippets(snippets, 1);
 
     expect(selected).toHaveLength(1);
-    expect(selected[0]).toEqual({ start: 3, end: 10 }); // 5-2=3, 8+2=10
-  });
-
-  it("should clamp context to file boundaries", () => {
-    const snippets = [{ start: 1, end: 3, score: 10 }];
-
-    const selected = selectTopSnippets(snippets, 5, 1, 2);
-
-    expect(selected).toHaveLength(1);
-    expect(selected[0]).toEqual({ start: 0, end: 5 }); // clamped to 0 and 5
+    expect(selected[0]).toEqual({ start: 5, end: 8 });
   });
 
   it("should filter overlapping snippets", () => {
@@ -527,7 +518,7 @@ describe("selectTopSnippets", () => {
       { start: 20, end: 25, score: 5 }, // no overlap
     ];
 
-    const selected = selectTopSnippets(snippets, 30, 3, 0);
+    const selected = selectTopSnippets(snippets, 3);
 
     expect(selected).toHaveLength(2);
     // First snippet (score 10) and third snippet (score 5)
@@ -542,13 +533,38 @@ describe("selectTopSnippets", () => {
       { start: 30, end: 33, score: 4 },
     ];
 
-    const selected = selectTopSnippets(snippets, 40, 2);
+    const selected = selectTopSnippets(snippets, 2);
 
     expect(selected).toHaveLength(2);
   });
 
   it("should handle empty snippets array", () => {
-    const selected = selectTopSnippets([], 10, 5);
+    const selected = selectTopSnippets([], 5);
+    expect(selected).toHaveLength(0);
+  });
+
+  it("should filter out snippets with score of 0", () => {
+    const snippets = [
+      { start: 0, end: 3, score: 10 },
+      { start: 10, end: 13, score: 0 }, // should be filtered out
+      { start: 20, end: 23, score: 5 },
+    ];
+
+    const selected = selectTopSnippets(snippets, 5);
+
+    expect(selected).toHaveLength(2);
+    expect(selected[0]).toEqual({ start: 0, end: 3 });
+    expect(selected[1]).toEqual({ start: 20, end: 23 });
+  });
+
+  it("should return empty array when all snippets have score 0", () => {
+    const snippets = [
+      { start: 0, end: 3, score: 0 },
+      { start: 10, end: 13, score: 0 },
+    ];
+
+    const selected = selectTopSnippets(snippets, 5);
+
     expect(selected).toHaveLength(0);
   });
 });

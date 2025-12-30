@@ -564,7 +564,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
       // Build and select top non-overlapping snippets
       const snippets = buildSnippets(lineScores);
-      const selected = selectTopSnippets(snippets, lines.length, 7);
+      const selected = selectTopSnippets(snippets, 7);
 
       // Format selected snippets
       const matches = selected.map(({ start, end }) => formatSnippet(lines, start, end));

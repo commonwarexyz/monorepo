@@ -194,16 +194,14 @@ export function hasMajorityOverlap(
 
 /**
  * Select top snippets while filtering out those with majority overlap.
- * Returns snippets with context lines added (2 before, 2 after).
+ * Skips snippets with a score of 0.
  */
 export function selectTopSnippets(
   snippets: Snippet[],
-  totalLines: number,
-  maxSnippets: number,
-  contextLines: number = 2
+  maxSnippets: number
 ): Array<{ start: number; end: number }> {
-  // Sort by score descending
-  const sorted = [...snippets].sort((a, b) => b.score - a.score);
+  // Sort by score descending, filter out zero-score snippets
+  const sorted = [...snippets].filter((s) => s.score > 0).sort((a, b) => b.score - a.score);
 
   const selected: Array<{ start: number; end: number }> = [];
 
@@ -212,9 +210,7 @@ export function selectTopSnippets(
       break;
     }
 
-    // Add context lines around the snippet
-    const start = Math.max(0, snippet.start - contextLines);
-    const end = Math.min(totalLines, snippet.end + contextLines);
+    const { start, end } = snippet;
 
     // Check for majority overlap with already selected snippets
     let hasOverlap = false;
