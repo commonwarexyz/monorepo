@@ -159,8 +159,8 @@ enum FuzzOperation {
         signature: G1,
     },
 
-    // Threshold signature operations - simplified
-    ThresholdSignMessage {
+    // Sign message with share
+    SignMessage {
         share: Share,
         message: Vec<u8>,
         use_minpk: bool,
@@ -338,7 +338,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 public: arbitrary_g2(u)?,
                 signature: arbitrary_g1(u)?,
             }),
-            32 => Ok(FuzzOperation::ThresholdSignMessage {
+            32 => Ok(FuzzOperation::SignMessage {
                 share: arbitrary_share(u)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 use_minpk: u.arbitrary()?,
@@ -724,7 +724,7 @@ fn fuzz(op: FuzzOperation) {
             let _ = ops::verify_proof_of_possession::<MinSig>(&public, &signature);
         }
 
-        FuzzOperation::ThresholdSignMessage {
+        FuzzOperation::SignMessage {
             share,
             message,
             use_minpk,
