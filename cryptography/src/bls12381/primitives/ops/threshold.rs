@@ -487,11 +487,7 @@ mod tests {
 
         let signer = &shares[0];
 
-        let messages: &[(&[u8], &[u8])] = &[
-            (b"ns", b"msg1"),
-            (b"ns", b"msg2"),
-            (b"ns", b"msg3"),
-        ];
+        let messages: &[(&[u8], &[u8])] = &[(b"ns", b"msg1"), (b"ns", b"msg2"), (b"ns", b"msg3")];
         let entries: Vec<_> = messages
             .iter()
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
@@ -499,11 +495,8 @@ mod tests {
         batch_verify_messages::<_, V, _>(&mut rng, &public, signer.index, &entries, 1)
             .expect("Verification with namespaced messages should succeed");
 
-        let messages_alt_ns: &[(&[u8], &[u8])] = &[
-            (b"alt", b"msg1"),
-            (b"alt", b"msg2"),
-            (b"alt", b"msg3"),
-        ];
+        let messages_alt_ns: &[(&[u8], &[u8])] =
+            &[(b"alt", b"msg1"), (b"alt", b"msg2"), (b"alt", b"msg3")];
         let entries_alt_ns: Vec<_> = messages_alt_ns
             .iter()
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
@@ -511,11 +504,8 @@ mod tests {
         batch_verify_messages::<_, V, _>(&mut rng, &public, signer.index, &entries_alt_ns, 1)
             .expect("Verification with alternate namespace messages should succeed");
 
-        let messages_mixed: &[(&[u8], &[u8])] = &[
-            (b"ns1", b"msg1"),
-            (b"ns2", b"msg2"),
-            (b"ns3", b"msg3"),
-        ];
+        let messages_mixed: &[(&[u8], &[u8])] =
+            &[(b"ns1", b"msg1"), (b"ns2", b"msg2"), (b"ns3", b"msg3")];
         let entries_mixed: Vec<_> = messages_mixed
             .iter()
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
