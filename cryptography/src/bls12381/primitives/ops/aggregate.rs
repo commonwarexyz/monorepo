@@ -26,22 +26,22 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 /// This type is returned by [`combine_public_keys`] and ensures that
 /// aggregated public keys are not confused with individual public keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Public<V: Variant>(V::Public);
+pub struct PublicKey<V: Variant>(V::Public);
 
-impl<V: Variant> Public<V> {
+impl<V: Variant> PublicKey<V> {
     /// Returns the inner public key value.
     pub(crate) const fn inner(&self) -> &V::Public {
         &self.0
     }
 }
 
-impl<V: Variant> Write for Public<V> {
+impl<V: Variant> Write for PublicKey<V> {
     fn write(&self, writer: &mut impl BufMut) {
         self.0.write(writer);
     }
 }
 
-impl<V: Variant> Read for Public<V> {
+impl<V: Variant> Read for PublicKey<V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -49,12 +49,12 @@ impl<V: Variant> Read for Public<V> {
     }
 }
 
-impl<V: Variant> FixedSize for Public<V> {
+impl<V: Variant> FixedSize for PublicKey<V> {
     const SIZE: usize = V::Public::SIZE;
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant> arbitrary::Arbitrary<'_> for Public<V>
+impl<V: Variant> arbitrary::Arbitrary<'_> for PublicKey<V>
 where
     V::Public: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -119,7 +119,7 @@ where
 /// that each `public_key` is unique, and that the caller has a Proof-of-Possession (PoP)
 /// for each `public_key`. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn combine_public_keys<'a, V, I>(public_keys: I) -> Public<V>
+pub fn combine_public_keys<'a, V, I>(public_keys: I) -> PublicKey<V>
 where
     V: Variant,
     I: IntoIterator<Item = &'a V::Public>,
@@ -129,7 +129,7 @@ where
     for pk in public_keys {
         p += pk;
     }
-    Public(p)
+    PublicKey(p)
 }
 
 /// Combines multiple signatures into an aggregate signature.
@@ -166,7 +166,7 @@ where
 /// for all provided `public`. This function assumes a group check was already performed on the
 /// `signature`. It is not safe to provide duplicate public keys.
 pub fn verify_public_keys<V: Variant>(
-    public: &Public<V>,
+    public: &PublicKey<V>,
     namespace: &[u8],
     message: &[u8],
     signature: &Signature<V>,
@@ -452,7 +452,7 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Public<MinSig>>,
+            CodecConformance<PublicKey<MinSig>>,
             CodecConformance<Signature<MinSig>>,
         }
     }
