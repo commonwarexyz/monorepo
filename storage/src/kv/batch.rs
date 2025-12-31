@@ -1,6 +1,6 @@
 //! Support for batching changes to an underlying key-value store.
 
-use super::{Deletable, Gettable};
+use super::{Deletable, Gettable, Updatable};
 use crate::qmdb::Error;
 use commonware_codec::Codec;
 use commonware_utils::Array;
@@ -41,19 +41,51 @@ where
         }
     }
 
+    /// Deletes `key` from the batch without checking if it is present in the batch or store.
+    pub async fn delete_unchecked(&mut self, key: K) -> Result<(), Error> {
+        self.diff.insert(key, None);
+
+        Ok(())
+    }
+}
+
+impl<'a, K, V, D> Gettable for Batch<'a, K, V, D>
+where
+    K: Array,
+    V: Codec + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error>,
+{
+    type Key = K;
+    type Value = V;
+    type Error = Error;
+
     /// Returns the value of `key` in the batch, or the value in the store if it is not present
     /// in the batch.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         if let Some(value) = self.diff.get(key) {
             return Ok(value.clone());
         }
 
         self.db.get(key).await
     }
+}
+
+impl<'a, K, V, D> Updatable for Batch<'a, K, V, D>
+where
+    K: Array,
+    V: Codec + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error>,
+{
+    /// Updates the value of `key` to `value` in the batch.
+    async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        self.diff.insert(key, Some(value));
+
+        Ok(())
+    }
 
     /// Creates a new key-value pair in the batch if it isn't present in the batch or store.
     /// Returns true if the key was created, false if it already existed.
-    pub async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
         if let Some(value_opt) = self.diff.get_mut(&key) {
             match value_opt {
                 Some(_) => return Ok(false),
@@ -71,17 +103,17 @@ where
         self.diff.insert(key, Some(value));
         Ok(true)
     }
+}
 
-    /// Updates the value of `key` to `value` in the batch.
-    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.diff.insert(key, Some(value));
-
-        Ok(())
-    }
-
+impl<'a, K, V, D> Deletable for Batch<'a, K, V, D>
+where
+    K: Array,
+    V: Codec + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error>,
+{
     /// Deletes `key` from the batch.
     /// Returns true if the key was in the batch or store, false otherwise.
-    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
+    async fn delete(&mut self, key: K) -> Result<bool, Error> {
         if let Some(entry) = self.diff.get_mut(&key) {
             match entry {
                 Some(_) => {
@@ -98,13 +130,6 @@ where
         }
 
         Ok(false)
-    }
-
-    /// Deletes `key` from the batch without checking if it is present in the batch or store.
-    pub async fn delete_unchecked(&mut self, key: K) -> Result<(), Error> {
-        self.diff.insert(key, None);
-
-        Ok(())
     }
 }
 
@@ -123,7 +148,9 @@ where
 }
 
 /// A k/v store that supports making batched changes.
-pub trait Batchable: Deletable<Key: Array, Value: Codec + Clone, Error = Error> {
+pub trait Batchable:
+    Gettable<Key: Array, Value: Codec + Clone, Error = Error> + Updatable + Deletable
+{
     /// Returns a new empty batch of changes.
     fn start_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>
     where

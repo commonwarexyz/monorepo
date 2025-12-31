@@ -3,7 +3,7 @@
 #[cfg(test)]
 pub mod tests {
     use crate::{
-        kv::{self, Batchable},
+        kv::{self, Batchable, Deletable as _, Gettable as _, Updatable as _},
         qmdb::Error,
         Persistable,
     };
