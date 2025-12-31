@@ -412,7 +412,7 @@ mod tests {
 
     fn aggregate_verify_messages_correct<V: Variant>() {
         let (private, public) = keypair::<_, V>(&mut test_rng());
-        let namespace = &b"test"[..];
+        let namespace = b"test";
         let messages: Vec<(&[u8], &[u8])> = vec![
             (namespace, b"Message 1"),
             (namespace, b"Message 2"),

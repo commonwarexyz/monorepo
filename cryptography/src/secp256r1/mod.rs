@@ -14,7 +14,7 @@
 //! let mut signer = secp256r1::standard::PrivateKey::random(&mut OsRng);
 //!
 //! // Create a message to sign
-//! let namespace = &b"demo"[..];
+//! let namespace = b"demo";
 //! let msg = b"hello, world!";
 //!
 //! // Sign the message

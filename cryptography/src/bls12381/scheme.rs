@@ -15,7 +15,7 @@
 //! let mut signer = bls12381::PrivateKey::random(&mut OsRng);
 //!
 //! // Create a message to sign
-//! let namespace = &b"demo"[..];
+//! let namespace = b"demo";
 //! let msg = b"hello, world!";
 //!
 //! // Sign the message
