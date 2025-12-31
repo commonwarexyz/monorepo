@@ -39,8 +39,8 @@
 //!   authenticated, evidence can be used locally (as it must be sent by said participant) but
 //!   cannot be used by an external observer.
 //!
-//! The [`Scheme::is_attributable()`] method signals whether evidence can be safely exposed to
-//! third parties.
+//! The [`Scheme::is_attributable()`] associated function signals whether evidence can be safely
+//! exposed to third parties.
 //!
 //! # Identity Keys vs Signing Keys
 //!
@@ -261,7 +261,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     ///
     /// Schemes where individual signatures can be safely reported as fault evidence should
     /// return `true`.
-    fn is_attributable(&self) -> bool;
+    fn is_attributable() -> bool;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;

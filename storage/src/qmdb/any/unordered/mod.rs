@@ -3,7 +3,7 @@ use crate::{
         contiguous::{Contiguous, MutableContiguous},
         Error as JournalError,
     },
-    kv,
+    kv::{self, Batchable},
     mmr::{
         mem::{Dirty, State},
         Location,
@@ -15,7 +15,6 @@ use crate::{
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
         operation::{Committable as _, Operation as OperationTrait},
-        store::Batchable,
         update_key, update_known_loc, Error, Index,
     },
     Persistable,

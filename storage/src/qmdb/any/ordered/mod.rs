@@ -4,7 +4,7 @@ use crate::{
         contiguous::{Contiguous, MutableContiguous},
         Error as JournalError,
     },
-    kv,
+    kv::{self, Batchable},
     mmr::{
         mem::{Dirty, State},
         Location,
@@ -16,7 +16,6 @@ use crate::{
         },
         delete_known_loc,
         operation::Operation as OperationTrait,
-        store::Batchable,
         update_known_loc, Error,
     },
     Persistable,
@@ -1000,6 +999,7 @@ where
 mod test {
     use super::*;
     use crate::{
+        kv::{Deletable as _, Updatable as _},
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
             store::{DirtyStore as _, LogStore as _},

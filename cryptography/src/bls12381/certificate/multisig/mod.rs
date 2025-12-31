@@ -286,7 +286,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         true
     }
 
-    pub const fn is_attributable(&self) -> bool {
+    pub const fn is_attributable() -> bool {
         true
     }
 
@@ -509,8 +509,8 @@ mod macros {
                     self.generic.verify_certificates::<Self, _, D, _>(rng, namespace, certificates)
                 }
 
-                fn is_attributable(&self) -> bool {
-                    self.generic.is_attributable()
+                fn is_attributable() -> bool {
+                    $crate::bls12381::certificate::multisig::Generic::<P, V>::is_attributable()
                 }
 
                 fn certificate_codec_config(

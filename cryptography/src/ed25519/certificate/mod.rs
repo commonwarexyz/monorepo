@@ -375,7 +375,7 @@ impl Generic {
         true
     }
 
-    pub const fn is_attributable(&self) -> bool {
+    pub const fn is_attributable() -> bool {
         true
     }
 
@@ -612,8 +612,8 @@ mod macros {
                         .verify_certificates::<Self, _, D, _>(rng, namespace, certificates)
                 }
 
-                fn is_attributable(&self) -> bool {
-                    self.generic.is_attributable()
+                fn is_attributable() -> bool {
+                    $crate::ed25519::certificate::Generic::is_attributable()
                 }
 
                 fn certificate_codec_config(
