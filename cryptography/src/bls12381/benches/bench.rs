@@ -7,8 +7,8 @@ mod combine_signatures;
 mod batch_verify_messages;
 mod dkg;
 mod evaluate_point;
-mod scheme_verify_messages;
-mod scheme_verify_public_keys;
+mod scheme_batch_verify_multiple_messages;
+mod scheme_batch_verify_multiple_public_keys;
 mod signature_generation;
 mod signature_verification;
 mod threshold_batch_verify_public_keys;
@@ -27,8 +27,8 @@ criterion_main!(
     signature_verification::benches,
     batch_verify_messages::benches,
     aggregate_verify_public_keys::benches,
-    scheme_verify_messages::benches,
-    scheme_verify_public_keys::benches,
+    scheme_batch_verify_multiple_messages::benches,
+    scheme_batch_verify_multiple_public_keys::benches,
     evaluate_point::benches,
     threshold_batch_verify_public_keys::benches,
     threshold_batch_verify_public_keys_precomputed::benches,
