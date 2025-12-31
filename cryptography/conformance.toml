@@ -58,7 +58,7 @@ hash = "d112d774a4c9b012b53e44dc2a3487a0e2f87cd7b14fb8433ec7cea4997f440a"
 n_cases = 65536
 hash = "169550a1597994aad7ba634091b89633424be84f6753fe95542d2f3fd4108b9f"
 
-["commonware_cryptography::bls12381::primitives::ops::aggregate::tests::conformance::CodecConformance<PublicKey<MinSig>>"]
+["commonware_cryptography::bls12381::primitives::ops::aggregate::tests::conformance::CodecConformance<Public<MinSig>>"]
 n_cases = 65536
 hash = "4164fc177bf0652f3711b2d86a975f604fdc5092a1d9c7110223d02d88bf5f79"
 

@@ -26,22 +26,22 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 /// This type is returned by [`combine_public_keys`] and ensures that
 /// aggregated public keys are not confused with individual public keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PublicKey<V: Variant>(V::Public);
+pub struct Public<V: Variant>(V::Public);
 
-impl<V: Variant> PublicKey<V> {
+impl<V: Variant> Public<V> {
     /// Returns the inner public key value.
     pub(crate) const fn inner(&self) -> &V::Public {
         &self.0
     }
 }
 
-impl<V: Variant> Write for PublicKey<V> {
+impl<V: Variant> Write for Public<V> {
     fn write(&self, writer: &mut impl BufMut) {
         self.0.write(writer);
     }
 }
 
-impl<V: Variant> Read for PublicKey<V> {
+impl<V: Variant> Read for Public<V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -49,12 +49,12 @@ impl<V: Variant> Read for PublicKey<V> {
     }
 }
 
-impl<V: Variant> FixedSize for PublicKey<V> {
+impl<V: Variant> FixedSize for Public<V> {
     const SIZE: usize = V::Public::SIZE;
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant> arbitrary::Arbitrary<'_> for PublicKey<V>
+impl<V: Variant> arbitrary::Arbitrary<'_> for Public<V>
 where
     V::Public: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -119,7 +119,7 @@ where
 /// that each `public_key` is unique, and that the caller has a Proof-of-Possession (PoP)
 /// for each `public_key`. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn combine_public_keys<'a, V, I>(public_keys: I) -> PublicKey<V>
+pub fn combine_public_keys<'a, V, I>(public_keys: I) -> Public<V>
 where
     V: Variant,
     I: IntoIterator<Item = &'a V::Public>,
@@ -129,7 +129,7 @@ where
     for pk in public_keys {
         p += pk;
     }
-    PublicKey(p)
+    Public(p)
 }
 
 /// Combines multiple signatures into an aggregate signature.
@@ -159,28 +159,17 @@ where
 /// This function assumes the caller has performed a group check and collected a proof-of-possession
 /// for all provided `public`. This function assumes a group check was already performed on the
 /// `signature`. It is not safe to provide duplicate public keys.
-pub fn verify_public_keys<'a, V, I>(
-    public: I,
+pub fn verify_public_keys<V: Variant>(
+    public: &Public<V>,
     namespace: Option<&[u8]>,
     message: &[u8],
     signature: &Signature<V>,
-) -> Result<(), Error>
-where
-    V: Variant,
-    I: IntoIterator<Item = &'a V::Public>,
-    V::Public: 'a,
-{
-    // Aggregate public keys
-    //
-    // We can take advantage of the bilinearity property of pairings to aggregate public keys
-    // that have all signed the same message (as long as all public keys are unique).
-    let agg_public = combine_public_keys::<V, _>(public);
-
+) -> Result<(), Error> {
     // Compute the hash of the message
     let hm = hash_message_with_namespace::<V>(namespace, message);
 
     // Verify the signature
-    V::verify(agg_public.inner(), &hm, signature.inner())
+    V::verify(public.inner(), &hm, signature.inner())
 }
 
 /// Verifies the aggregate signature over multiple messages from a single public key.
@@ -309,9 +298,10 @@ mod tests {
         let pks = vec![public1, public2, public3];
         let signatures = vec![sig1, sig2, sig3];
 
+        let aggregate_pk = aggregate::combine_public_keys::<V, _>(&pks);
         let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
 
-        verify_public_keys::<V, _>(&pks, Some(namespace), message, &aggregate_sig)
+        verify_public_keys::<V>(&aggregate_pk, Some(namespace), message, &aggregate_sig)
             .expect("Aggregated signature should be valid");
 
         let payload = union_unique(namespace, message);
@@ -337,12 +327,12 @@ mod tests {
         let sig3 = sign_message::<V>(&private3, Some(namespace), message);
         let signatures = vec![sig1, sig2, sig3];
 
-        let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
-
         let (_, public4) = keypair::<_, V>(&mut rng);
         let wrong_pks = vec![public1, public2, public4];
+        let wrong_aggregate_pk = aggregate::combine_public_keys::<V, _>(&wrong_pks);
+        let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
         let result =
-            verify_public_keys::<V, _>(&wrong_pks, Some(namespace), message, &aggregate_sig);
+            verify_public_keys::<V>(&wrong_aggregate_pk, Some(namespace), message, &aggregate_sig);
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
@@ -364,11 +354,11 @@ mod tests {
         let sig3 = sign_message::<V>(&private3, Some(namespace), message);
         let signatures = vec![sig1, sig2, sig3];
 
-        let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
-
         let wrong_pks = vec![public1, public2];
+        let wrong_aggregate_pk = aggregate::combine_public_keys::<V, _>(&wrong_pks);
+        let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
         let result =
-            verify_public_keys::<V, _>(&wrong_pks, Some(namespace), message, &aggregate_sig);
+            verify_public_keys::<V>(&wrong_aggregate_pk, Some(namespace), message, &aggregate_sig);
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
@@ -456,7 +446,7 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<PublicKey<MinSig>>,
+            CodecConformance<Public<MinSig>>,
             CodecConformance<Signature<MinSig>>,
         }
     }

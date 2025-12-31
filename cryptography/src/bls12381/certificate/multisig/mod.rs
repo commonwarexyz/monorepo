@@ -242,8 +242,9 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         // Verify the aggregate signature.
         let (namespace, message) = subject.namespace_and_message(namespace);
-        aggregate::verify_public_keys::<V, _>(
-            publics.iter(),
+        let agg_public = aggregate::combine_public_keys::<V, _>(&publics);
+        aggregate::verify_public_keys::<V>(
+            &agg_public,
             Some(namespace.as_ref()),
             message.as_ref(),
             &certificate.signature,
