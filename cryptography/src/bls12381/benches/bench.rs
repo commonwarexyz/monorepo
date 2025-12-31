@@ -1,9 +1,9 @@
 use criterion::criterion_main;
 
-mod aggregate_public_keys;
-mod aggregate_signatures;
 mod aggregate_verify_messages;
 mod aggregate_verify_public_keys;
+mod combine_public_keys;
+mod combine_signatures;
 mod batch_verify_messages;
 mod dkg;
 mod evaluate_point;
@@ -20,8 +20,8 @@ mod tle_encrypt;
 criterion_main!(
     dkg::benches,
     threshold_recover::benches,
-    aggregate_public_keys::benches,
-    aggregate_signatures::benches,
+    combine_public_keys::benches,
+    combine_signatures::benches,
     aggregate_verify_messages::benches,
     signature_generation::benches,
     signature_verification::benches,
