@@ -114,6 +114,7 @@ where
     // Convert durable → provable (clean) for pruning
     let mut clean = durable.into_merkleized().await?;
     clean.prune(clean.inactivity_floor_loc()).await?;
+    clean.sync().await?;
 
     let elapsed = start.elapsed();
     clean.destroy().await?; // don't time destroy
