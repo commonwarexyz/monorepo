@@ -28,7 +28,8 @@ use rand_core::CryptoRngCore;
 /// # Warning
 ///
 /// This function assumes a group check was already performed on each public key
-/// and signature.
+/// and signature. Duplicate public keys are safe because random scalar weights
+/// ensure each (public key, signature) pair is verified independently.
 pub fn verify_public_keys<R, V>(
     rng: &mut R,
     namespace: &[u8],

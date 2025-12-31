@@ -118,8 +118,7 @@ pub fn verify_proof_of_possession<V: Variant>(
 // BATCH VERIFICATION OF PARTIAL SIGNATURES
 // =============================================================================
 
-/// Verifies the signatures from multiple partial signatures over multiple unique messages from a single
-/// signer.
+/// Verifies multiple partial signatures over multiple messages from a single signer.
 ///
 /// Randomness ensures batch verification returns the same result as checking each signature
 /// individually.
@@ -129,6 +128,8 @@ pub fn verify_proof_of_possession<V: Variant>(
 /// # Warning
 ///
 /// This function assumes a group check was already performed on each `signature`.
+/// Duplicate messages are safe because random scalar weights ensure each
+/// (message, signature) pair is verified independently.
 pub fn batch_verify_messages<'a, R, V, I>(
     rng: &mut R,
     sharing: &Sharing<V>,
@@ -198,6 +199,8 @@ where
 /// # Warning
 ///
 /// This function assumes a group check was already performed on each `signature`.
+/// Duplicate signers are safe because random scalar weights ensure each
+/// (public key, signature) pair is verified independently.
 pub fn batch_verify_public_keys<'a, R, V, I>(
     rng: &mut R,
     sharing: &Sharing<V>,
