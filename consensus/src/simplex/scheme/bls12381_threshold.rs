@@ -197,7 +197,7 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
     let block = message.into();
     let seed_ns = seed_namespace(namespace);
     let target_message = target.encode();
-    tle::encrypt(rng, identity, (Some(&seed_ns), &target_message), &block)
+    tle::encrypt(rng, identity, (&seed_ns, &target_message), &block)
 }
 
 /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
@@ -292,7 +292,7 @@ impl<V: Variant> Seed<V> {
 
         ops::verify_message::<V>(
             scheme.identity(),
-            Some(&seed_namespace),
+            &seed_namespace,
             &seed_message,
             &self.signature,
         )
@@ -414,20 +414,14 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         let share = self.share()?;
 
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, &subject);
-        let vote_signature = threshold::sign_message::<V>(
-            share,
-            Some(vote_namespace.as_ref()),
-            vote_message.as_ref(),
-        )
-        .value;
+        let vote_signature =
+            threshold::sign_message::<V>(share, vote_namespace.as_ref(), vote_message.as_ref())
+                .value;
 
         let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, &subject);
-        let seed_signature = threshold::sign_message::<V>(
-            share,
-            Some(seed_namespace.as_ref()),
-            seed_message.as_ref(),
-        )
-        .value;
+        let seed_signature =
+            threshold::sign_message::<V>(share, seed_namespace.as_ref(), seed_message.as_ref())
+                .value;
 
         let signature = Signature {
             vote_signature,
@@ -463,12 +457,12 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             &evaluated,
             &[
                 (
-                    Some(vote_namespace.as_ref()),
+                    vote_namespace.as_ref(),
                     vote_message.as_ref(),
                     attestation.signature.vote_signature,
                 ),
                 (
-                    Some(seed_namespace.as_ref()),
+                    seed_namespace.as_ref(),
                     seed_message.as_ref(),
                     attestation.signature.seed_signature,
                 ),
@@ -512,7 +506,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         if let Err(errs) = threshold::batch_verify_public_keys::<_, V, _>(
             rng,
             polynomial,
-            Some(vote_namespace.as_ref()),
+            vote_namespace.as_ref(),
             vote_message.as_ref(),
             vote_partials.iter(),
         ) {
@@ -525,7 +519,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         if let Err(errs) = threshold::batch_verify_public_keys::<_, V, _>(
             rng,
             polynomial,
-            Some(seed_namespace.as_ref()),
+            seed_namespace.as_ref(),
             seed_message.as_ref(),
             seed_partials
                 .iter()
@@ -604,12 +598,12 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
             identity,
             &[
                 (
-                    Some(vote_namespace.as_ref()),
+                    vote_namespace.as_ref(),
                     vote_message.as_ref(),
                     certificate.vote_signature,
                 ),
                 (
-                    Some(seed_namespace.as_ref()),
+                    seed_namespace.as_ref(),
                     seed_message.as_ref(),
                     certificate.seed_signature,
                 ),
@@ -645,7 +639,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
                 Subject::Notarize { proposal } => {
                     let notarize_message = proposal.encode();
                     (
-                        Some(notarize_namespace.clone()),
+                        notarize_namespace.clone(),
                         notarize_message,
                         certificate.vote_signature,
                     )
@@ -653,7 +647,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
                 Subject::Nullify { round } => {
                     let nullify_message = round.encode();
                     (
-                        Some(nullify_namespace.clone()),
+                        nullify_namespace.clone(),
                         nullify_message,
                         certificate.vote_signature,
                     )
@@ -661,7 +655,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
                 Subject::Finalize { proposal } => {
                     let finalize_message = proposal.encode();
                     (
-                        Some(finalize_namespace.clone()),
+                        finalize_namespace.clone(),
                         finalize_message,
                         certificate.vote_signature,
                     )
@@ -686,7 +680,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
                 };
 
                 entries.push((
-                    Some(seed_namespace.clone()),
+                    seed_namespace.clone(),
                     seed_message,
                     certificate.seed_signature,
                 ));
@@ -698,7 +692,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         // than computing the aggregate signature and verifying it.
         let entries_refs: Vec<_> = entries
             .iter()
-            .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_ref(), *sig))
+            .map(|(ns, msg, sig)| (ns.as_ref(), msg.as_ref(), *sig))
             .collect();
         batch::verify_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
     }
@@ -1446,19 +1440,16 @@ mod tests {
         let notarize_message = proposal.encode();
         let expected_message = threshold::sign_message::<V>(
             share,
-            Some(notarize_namespace.as_ref()),
+            notarize_namespace.as_ref(),
             notarize_message.as_ref(),
         )
         .value;
 
         let seed_namespace = seed_namespace(NAMESPACE);
         let seed_message = proposal.round.encode();
-        let expected_seed = threshold::sign_message::<V>(
-            share,
-            Some(seed_namespace.as_ref()),
-            seed_message.as_ref(),
-        )
-        .value;
+        let expected_seed =
+            threshold::sign_message::<V>(share, seed_namespace.as_ref(), seed_message.as_ref())
+                .value;
 
         assert_eq!(vote.signer, share.index);
         assert_eq!(vote.signature.vote_signature, expected_message);

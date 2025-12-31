@@ -12,9 +12,9 @@ use rand::thread_rng;
 
 mod common;
 use common::{
-    arbitrary_bytes, arbitrary_messages, arbitrary_optional_bytes, arbitrary_partial_sig_g1,
-    arbitrary_partial_sig_g2, arbitrary_share, arbitrary_vec_g1, arbitrary_vec_g2,
-    arbitrary_vec_indexed_g1, arbitrary_vec_indexed_g2, arbitrary_vec_of_vec_partial_sig_g1,
+    arbitrary_bytes, arbitrary_messages, arbitrary_partial_sig_g1, arbitrary_partial_sig_g2,
+    arbitrary_share, arbitrary_vec_g1, arbitrary_vec_g2, arbitrary_vec_indexed_g1,
+    arbitrary_vec_indexed_g2, arbitrary_vec_of_vec_partial_sig_g1,
     arbitrary_vec_of_vec_partial_sig_g2, arbitrary_vec_partial_sig_g1,
     arbitrary_vec_partial_sig_g2,
 };
@@ -39,22 +39,22 @@ enum FuzzOperation {
     BatchVerifyMessagesMinPk {
         public: Sharing<MinPk>,
         index: u32,
-        entries: Vec<(Option<Vec<u8>>, Vec<u8>, G2)>,
+        entries: Vec<(Vec<u8>, Vec<u8>, G2)>,
     },
     BatchVerifyMessagesMinSig {
         public: Sharing<MinSig>,
         index: u32,
-        entries: Vec<(Option<Vec<u8>>, Vec<u8>, G1)>,
+        entries: Vec<(Vec<u8>, Vec<u8>, G1)>,
     },
     BatchVerifyPublicKeysMinPk {
         public: Sharing<MinPk>,
-        namespace: Option<Vec<u8>>,
+        namespace: Vec<u8>,
         message: Vec<u8>,
         partials: Vec<(u32, G2)>,
     },
     BatchVerifyPublicKeysMinSig {
         public: Sharing<MinSig>,
-        namespace: Option<Vec<u8>>,
+        namespace: Vec<u8>,
         message: Vec<u8>,
         partials: Vec<(u32, G1)>,
     },
@@ -139,13 +139,13 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }
             6 => Ok(FuzzOperation::BatchVerifyPublicKeysMinPk {
                 public: u.arbitrary()?,
-                namespace: arbitrary_optional_bytes(u, 50)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 partials: arbitrary_vec_indexed_g2(u, 0, 10)?,
             }),
             7 => Ok(FuzzOperation::BatchVerifyPublicKeysMinSig {
                 public: u.arbitrary()?,
-                namespace: arbitrary_optional_bytes(u, 50)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 partials: arbitrary_vec_indexed_g1(u, 0, 10)?,
             }),
@@ -216,12 +216,12 @@ fn fuzz(op: FuzzOperation) {
             entries,
         } => {
             if index <= public.required() && !entries.is_empty() {
-                let entries_refs: Vec<_> = entries
+                let entries_refs: Vec<(&[u8], &[u8], PartialSignature<MinPk>)> = entries
                     .iter()
                     .enumerate()
                     .map(|(i, (ns, msg, sig))| {
                         (
-                            ns.as_deref(),
+                            ns.as_slice(),
                             msg.as_slice(),
                             PartialSignature {
                                 index: index + i as u32,
@@ -246,12 +246,12 @@ fn fuzz(op: FuzzOperation) {
             entries,
         } => {
             if index <= public.required() && !entries.is_empty() {
-                let entries_refs: Vec<_> = entries
+                let entries_refs: Vec<(&[u8], &[u8], PartialSignature<MinSig>)> = entries
                     .iter()
                     .enumerate()
                     .map(|(i, (ns, msg, sig))| {
                         (
-                            ns.as_deref(),
+                            ns.as_slice(),
                             msg.as_slice(),
                             PartialSignature {
                                 index: index + i as u32,
@@ -287,7 +287,7 @@ fn fuzz(op: FuzzOperation) {
                 let _ = threshold::batch_verify_public_keys::<_, MinPk, _>(
                     &mut thread_rng(),
                     &public,
-                    namespace.as_deref(),
+                    &namespace,
                     &message,
                     &partials_evals,
                 );
@@ -311,7 +311,7 @@ fn fuzz(op: FuzzOperation) {
                 let _ = threshold::batch_verify_public_keys::<_, MinSig, _>(
                     &mut thread_rng(),
                     &public,
-                    namespace.as_deref(),
+                    &namespace,
                     &message,
                     &partials_evals,
                 );

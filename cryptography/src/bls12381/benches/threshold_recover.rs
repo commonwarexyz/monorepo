@@ -33,9 +33,7 @@ fn benchmark_threshold_recover(c: &mut Criterion) {
                             .iter()
                             .map(|s| {
                                 primitives::ops::threshold::sign_message::<MinSig>(
-                                    s,
-                                    Some(namespace),
-                                    msg,
+                                    s, namespace, msg,
                                 )
                             })
                             .collect::<Vec<_>>(),

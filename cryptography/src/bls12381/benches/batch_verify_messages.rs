@@ -21,9 +21,8 @@ fn benchmark_batch_verify_messages(c: &mut Criterion) {
                             let entries: Vec<_> = msgs
                                 .iter()
                                 .map(|msg| {
-                                    let ns: Option<&[u8]> = Some(&namespace[..]);
-                                    let sig = ops::sign_message::<MinSig>(&private, ns, msg);
-                                    (ns, msg.as_ref(), sig)
+                                    let sig = ops::sign_message::<MinSig>(&private, namespace, msg);
+                                    (namespace.as_ref(), msg.as_ref(), sig)
                                 })
                                 .collect();
                             (public, entries)

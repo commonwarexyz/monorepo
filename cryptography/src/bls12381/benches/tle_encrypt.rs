@@ -17,7 +17,7 @@ fn benchmark_tle_encrypt(c: &mut Criterion) {
             black_box(encrypt::<_, MinSig>(
                 &mut rng,
                 master_public,
-                (None, &target),
+                (b"", &target),
                 &message,
             ));
         });

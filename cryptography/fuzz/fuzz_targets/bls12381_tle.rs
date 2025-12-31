@@ -174,9 +174,9 @@ fn fuzz(op: FuzzOperation) {
 
             let mut rng = StdRng::seed_from_u64(rng_seed);
             let ciphertext =
-                encrypt::<_, MinPk>(&mut rng, master_public, (None, &target), &message_block);
+                encrypt::<_, MinPk>(&mut rng, master_public, (b"", &target), &message_block);
 
-            let signature = sign_message::<MinPk>(&master_secret, None, &target);
+            let signature = sign_message::<MinPk>(&master_secret, b"", &target);
             let decrypted = decrypt::<MinPk>(&signature, &ciphertext);
 
             if let Some(decrypted_block) = decrypted {
@@ -197,9 +197,9 @@ fn fuzz(op: FuzzOperation) {
 
             let mut rng = StdRng::seed_from_u64(rng_seed);
             let ciphertext =
-                encrypt::<_, MinSig>(&mut rng, master_public, (None, &target), &message_block);
+                encrypt::<_, MinSig>(&mut rng, master_public, (b"", &target), &message_block);
 
-            let signature = sign_message::<MinSig>(&master_secret, None, &target);
+            let signature = sign_message::<MinSig>(&master_secret, b"", &target);
             let decrypted = decrypt::<MinSig>(&signature, &ciphertext);
 
             if let Some(decrypted_block) = decrypted {
@@ -223,11 +223,11 @@ fn fuzz(op: FuzzOperation) {
             let ciphertext = encrypt::<_, MinPk>(
                 &mut rng,
                 master_public,
-                (Some(&namespace), &target),
+                (&namespace, &target),
                 &message_block,
             );
 
-            let signature = sign_message::<MinPk>(&master_secret, Some(&namespace), &target);
+            let signature = sign_message::<MinPk>(&master_secret, &namespace, &target);
             let decrypted = decrypt::<MinPk>(&signature, &ciphertext);
 
             if let Some(decrypted_block) = decrypted {
@@ -251,11 +251,11 @@ fn fuzz(op: FuzzOperation) {
             let ciphertext = encrypt::<_, MinSig>(
                 &mut rng,
                 master_public,
-                (Some(&namespace), &target),
+                (&namespace, &target),
                 &message_block,
             );
 
-            let signature = sign_message::<MinSig>(&master_secret, Some(&namespace), &target);
+            let signature = sign_message::<MinSig>(&master_secret, &namespace, &target);
             let decrypted = decrypt::<MinSig>(&signature, &ciphertext);
 
             if let Some(decrypted_block) = decrypted {
@@ -277,9 +277,9 @@ fn fuzz(op: FuzzOperation) {
 
             let mut rng = StdRng::seed_from_u64(rng_seed);
             let ciphertext =
-                encrypt::<_, MinPk>(&mut rng, master_public1, (None, &target), &message_block);
+                encrypt::<_, MinPk>(&mut rng, master_public1, (b"", &target), &message_block);
 
-            let wrong_signature = sign_message::<MinPk>(&master_secret2, None, &target);
+            let wrong_signature = sign_message::<MinPk>(&master_secret2, b"", &target);
             let _ = decrypt::<MinPk>(&wrong_signature, &ciphertext);
         }
 
@@ -295,9 +295,9 @@ fn fuzz(op: FuzzOperation) {
 
             let mut rng = StdRng::seed_from_u64(rng_seed);
             let ciphertext =
-                encrypt::<_, MinSig>(&mut rng, master_public1, (None, &target), &message_block);
+                encrypt::<_, MinSig>(&mut rng, master_public1, (b"", &target), &message_block);
 
-            let wrong_signature = sign_message::<MinSig>(&master_secret2, None, &target);
+            let wrong_signature = sign_message::<MinSig>(&master_secret2, b"", &target);
             let _ = decrypt::<MinSig>(&wrong_signature, &ciphertext);
         }
 
@@ -314,7 +314,7 @@ fn fuzz(op: FuzzOperation) {
 
             let mut rng = StdRng::seed_from_u64(rng_seed);
             let ciphertext =
-                encrypt::<_, MinPk>(&mut rng, master_public, (None, &target), &message_block);
+                encrypt::<_, MinPk>(&mut rng, master_public, (b"", &target), &message_block);
 
             let mut encoded = Vec::new();
             commonware_codec::Write::write(&ciphertext, &mut encoded);
@@ -323,7 +323,7 @@ fn fuzz(op: FuzzOperation) {
             }
 
             if let Ok(tampered) = Ciphertext::<MinPk>::read(&mut encoded.as_slice()) {
-                let signature = sign_message::<MinPk>(&master_secret, None, &target);
+                let signature = sign_message::<MinPk>(&master_secret, b"", &target);
                 let _ = decrypt::<MinPk>(&signature, &tampered);
             }
         }
@@ -341,7 +341,7 @@ fn fuzz(op: FuzzOperation) {
             let mut rng = StdRng::seed_from_u64(rng_seed);
 
             let ciphertext =
-                encrypt::<_, MinSig>(&mut rng, master_public, (None, &target), &message_block);
+                encrypt::<_, MinSig>(&mut rng, master_public, (b"", &target), &message_block);
 
             let mut encoded = Vec::new();
             commonware_codec::Write::write(&ciphertext, &mut encoded);
@@ -350,7 +350,7 @@ fn fuzz(op: FuzzOperation) {
             }
 
             if let Ok(tampered) = Ciphertext::<MinSig>::read(&mut encoded.as_slice()) {
-                let signature = sign_message::<MinSig>(&master_secret, None, &target);
+                let signature = sign_message::<MinSig>(&master_secret, b"", &target);
                 let _ = decrypt::<MinSig>(&signature, &tampered);
             }
         }

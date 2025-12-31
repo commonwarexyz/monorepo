@@ -91,8 +91,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         let (index, private_key) = self.signer.as_ref()?;
 
         let (namespace, message) = subject.namespace_and_message(namespace);
-        let signature =
-            ops::sign_message::<V>(private_key, Some(namespace.as_ref()), message.as_ref());
+        let signature = ops::sign_message::<V>(private_key, namespace.as_ref(), message.as_ref());
 
         Some(Attestation {
             signer: *index,
@@ -118,7 +117,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         let (namespace, message) = subject.namespace_and_message(namespace);
         ops::verify_message::<V>(
             public_key,
-            Some(namespace.as_ref()),
+            namespace.as_ref(),
             message.as_ref(),
             &attestation.signature,
         )
@@ -159,12 +158,8 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         // Verify attestations and return any invalid ones.
         let (namespace, message) = subject.namespace_and_message(namespace);
-        let invalid_indices = batch::verify_public_keys::<_, V>(
-            rng,
-            Some(namespace.as_ref()),
-            message.as_ref(),
-            &entries,
-        );
+        let invalid_indices =
+            batch::verify_public_keys::<_, V>(rng, namespace.as_ref(), message.as_ref(), &entries);
 
         // Mark invalid attestations.
         for idx in invalid_indices {
@@ -245,7 +240,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         let agg_public = aggregate::combine_public_keys::<V, _>(&publics);
         aggregate::verify_public_keys::<V>(
             &agg_public,
-            Some(namespace.as_ref()),
+            namespace.as_ref(),
             message.as_ref(),
             &certificate.signature,
         )

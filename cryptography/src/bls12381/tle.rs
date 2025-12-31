@@ -56,12 +56,12 @@
 //! let ciphertext = encrypt::<_, MinPk>(
 //!     &mut OsRng,
 //!     master_public,
-//!     (None, &target),
+//!     (b"", &target),
 //!     &message,
 //! );
 //!
 //! // Later, when someone has a signature over the target...
-//! let signature = sign_message::<MinPk>(&master_secret, None, &target);
+//! let signature = sign_message::<MinPk>(&master_secret, b"", &target);
 //!
 //! // They can decrypt the message
 //! let decrypted = decrypt::<MinPk>(&signature, &ciphertext)
@@ -82,7 +82,7 @@
 use crate::{
     bls12381::primitives::{
         group::{Scalar, DST, GT},
-        ops::{hash_message, hash_message_namespace},
+        ops::hash_message_namespace,
         variant::Variant,
     },
     sha256::Digest,
@@ -269,14 +269,12 @@ fn xor(a: &Block, b: &Block) -> Block {
 pub fn encrypt<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
     public: V::Public,
-    target: (Option<&[u8]>, &[u8]),
+    target: (&[u8], &[u8]),
     message: &Block,
 ) -> Ciphertext<V> {
     // Hash target to get Q_id in signature group using the variant's message DST
-    let q_id = match target {
-        (None, target) => hash_message::<V>(V::MESSAGE, target),
-        (Some(namespace), target) => hash_message_namespace::<V>(V::MESSAGE, namespace, target),
-    };
+    let (namespace, target) = target;
+    let q_id = hash_message_namespace::<V>(V::MESSAGE, namespace, target);
 
     // Generate random sigma
     let mut sigma_array = [0u8; BLOCK_SIZE];
@@ -368,13 +366,13 @@ mod tests {
         let message = b"Hello, IBE! This is exactly 32b!"; // 32 bytes
 
         // Generate signature over the target
-        let signature = ops::sign_message::<MinPk>(&master_secret, None, &target);
+        let signature = ops::sign_message::<MinPk>(&master_secret, b"", &target);
 
         // Encrypt
         let ciphertext = encrypt::<_, MinPk>(
             &mut rng,
             master_public,
-            (None, &target),
+            (b"", &target),
             &Block::new(*message),
         );
 
@@ -397,13 +395,13 @@ mod tests {
         let message = b"Testing MinSig variant - 32 byte";
 
         // Generate signature over the target
-        let signature = ops::sign_message::<MinSig>(&master_secret, None, &target);
+        let signature = ops::sign_message::<MinSig>(&master_secret, b"", &target);
 
         // Encrypt
         let ciphertext = encrypt::<_, MinSig>(
             &mut rng,
             master_public,
-            (None, &target),
+            (b"", &target),
             &Block::new(*message),
         );
 
@@ -429,12 +427,12 @@ mod tests {
         let ciphertext = encrypt::<_, MinPk>(
             &mut rng,
             master_public1,
-            (None, &target),
+            (b"", &target),
             &Block::new(*message),
         );
 
         // Try to decrypt with signature from second master
-        let wrong_signature = ops::sign_message::<MinPk>(&master_secret2, None, &target);
+        let wrong_signature = ops::sign_message::<MinPk>(&master_secret2, b"", &target);
         let result = decrypt::<MinPk>(&wrong_signature, &ciphertext);
 
         assert!(result.is_none());
@@ -449,13 +447,13 @@ mod tests {
         let message = b"Tamper test padded to 32 bytes.."; // 32 bytes
 
         // Generate signature over the target
-        let signature = ops::sign_message::<MinPk>(&master_secret, None, &target);
+        let signature = ops::sign_message::<MinPk>(&master_secret, b"", &target);
 
         // Encrypt
         let ciphertext = encrypt::<_, MinPk>(
             &mut rng,
             master_public,
-            (None, &target),
+            (b"", &target),
             &Block::new(*message),
         );
 
@@ -487,13 +485,13 @@ mod tests {
         let message = b"Message with namespace - 32 byte"; // 32 bytes
 
         // Generate signature over the namespaced target
-        let signature = ops::sign_message::<MinPk>(&master_secret, Some(namespace), &target);
+        let signature = ops::sign_message::<MinPk>(&master_secret, namespace, &target);
 
         // Encrypt with namespace
         let ciphertext = encrypt::<_, MinPk>(
             &mut rng,
             master_public,
-            (Some(namespace), &target),
+            (namespace, &target),
             &Block::new(*message),
         );
 
@@ -516,16 +514,16 @@ mod tests {
         let message = b"Namespace vs no namespace - 32by"; // 32 bytes
 
         // Generate signature without namespace
-        let signature_no_ns = ops::sign_message::<MinPk>(&master_secret, None, &target);
+        let signature_no_ns = ops::sign_message::<MinPk>(&master_secret, b"", &target);
 
         // Generate signature with namespace
-        let signature_ns = ops::sign_message::<MinPk>(&master_secret, Some(namespace), &target);
+        let signature_ns = ops::sign_message::<MinPk>(&master_secret, namespace, &target);
 
         // Encrypt with namespace
         let ciphertext_ns = encrypt::<_, MinPk>(
             &mut rng,
             master_public,
-            (Some(namespace), &target),
+            (namespace, &target),
             &Block::new(*message),
         );
 
@@ -533,7 +531,7 @@ mod tests {
         let ciphertext_no_ns = encrypt::<_, MinPk>(
             &mut rng,
             master_public,
-            (None, &target),
+            (b"", &target),
             &Block::new(*message),
         );
 
@@ -564,13 +562,13 @@ mod tests {
         let message = b"Another CCA test message 32bytes"; // 32 bytes
 
         // Generate signature over the target
-        let signature = ops::sign_message::<MinPk>(&master_secret, None, &target);
+        let signature = ops::sign_message::<MinPk>(&master_secret, b"", &target);
 
         // Encrypt
         let ciphertext = encrypt::<_, MinPk>(
             &mut rng,
             master_public,
-            (None, &target),
+            (b"", &target),
             &Block::new(*message),
         );
 
@@ -598,13 +596,13 @@ mod tests {
         let message = b"CCA security test message 32 byt"; // 32 bytes
 
         // Generate signature over the target
-        let signature = ops::sign_message::<MinPk>(&master_secret, None, &target);
+        let signature = ops::sign_message::<MinPk>(&master_secret, b"", &target);
 
         // Encrypt
         let mut ciphertext = encrypt::<_, MinPk>(
             &mut rng,
             master_public,
-            (None, &target),
+            (b"", &target),
             &Block::new(*message),
         );
 

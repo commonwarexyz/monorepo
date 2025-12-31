@@ -10,8 +10,8 @@ use libfuzzer_sys::fuzz_target;
 
 mod common;
 use common::{
-    arbitrary_bytes, arbitrary_g1, arbitrary_g2, arbitrary_messages, arbitrary_optional_bytes,
-    arbitrary_vec_g1, arbitrary_vec_g2,
+    arbitrary_bytes, arbitrary_g1, arbitrary_g2, arbitrary_messages, arbitrary_vec_g1,
+    arbitrary_vec_g2,
 };
 
 #[derive(Debug)]
@@ -30,25 +30,25 @@ enum FuzzOperation {
     },
     AggregateVerifyPublicKeysMinPk {
         public_keys: Vec<G1>,
-        namespace: Option<Vec<u8>>,
+        namespace: Vec<u8>,
         message: Vec<u8>,
         signature: G2,
     },
     AggregateVerifyPublicKeysMinSig {
         public_keys: Vec<G2>,
-        namespace: Option<Vec<u8>>,
+        namespace: Vec<u8>,
         message: Vec<u8>,
         signature: G1,
     },
     AggregateVerifyMessagesMinPk {
         public_key: G1,
-        messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
+        messages: Vec<(Vec<u8>, Vec<u8>)>,
         signature: G2,
         concurrency: usize,
     },
     AggregateVerifyMessagesMinSig {
         public_key: G2,
-        messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
+        messages: Vec<(Vec<u8>, Vec<u8>)>,
         signature: G1,
         concurrency: usize,
     },
@@ -73,13 +73,13 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             4 => Ok(FuzzOperation::AggregateVerifyPublicKeysMinPk {
                 public_keys: arbitrary_vec_g1(u, 0, 20)?,
-                namespace: arbitrary_optional_bytes(u, 50)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g2(u)?,
             }),
             5 => Ok(FuzzOperation::AggregateVerifyPublicKeysMinSig {
                 public_keys: arbitrary_vec_g2(u, 0, 20)?,
-                namespace: arbitrary_optional_bytes(u, 50)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g1(u)?,
             }),
@@ -135,13 +135,10 @@ fn fuzz(op: FuzzOperation) {
             signature,
         } => {
             if !public_keys.is_empty() {
+                let agg_pk = aggregate::combine_public_keys::<MinPk, _>(&public_keys);
                 let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
-                let _ = aggregate::verify_public_keys::<MinPk, _>(
-                    &public_keys,
-                    namespace.as_deref(),
-                    &message,
-                    &agg_sig,
-                );
+                let _ =
+                    aggregate::verify_public_keys::<MinPk>(&agg_pk, &namespace, &message, &agg_sig);
             }
         }
 
@@ -152,12 +149,10 @@ fn fuzz(op: FuzzOperation) {
             signature,
         } => {
             if !public_keys.is_empty() {
+                let agg_pk = aggregate::combine_public_keys::<MinSig, _>(&public_keys);
                 let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
-                let _ = aggregate::verify_public_keys::<MinSig, _>(
-                    &public_keys,
-                    namespace.as_deref(),
-                    &message,
-                    &agg_sig,
+                let _ = aggregate::verify_public_keys::<MinSig>(
+                    &agg_pk, &namespace, &message, &agg_sig,
                 );
             }
         }
@@ -169,9 +164,9 @@ fn fuzz(op: FuzzOperation) {
             concurrency,
         } => {
             if !messages.is_empty() && concurrency > 0 {
-                let messages_refs: Vec<_> = messages
+                let messages_refs: Vec<(&[u8], &[u8])> = messages
                     .iter()
-                    .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
+                    .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
                     .collect();
 
                 let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
@@ -191,9 +186,9 @@ fn fuzz(op: FuzzOperation) {
             concurrency,
         } => {
             if !messages.is_empty() && concurrency > 0 {
-                let messages_refs: Vec<_> = messages
+                let messages_refs: Vec<(&[u8], &[u8])> = messages
                     .iter()
-                    .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
+                    .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
                     .collect();
 
                 let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);

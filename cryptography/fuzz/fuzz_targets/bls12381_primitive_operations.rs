@@ -179,12 +179,12 @@ enum FuzzOperation {
     // Verify messages (individual signatures)
     VerifyMessagesMinPk {
         public_key: G1,
-        entries: Vec<(Option<Vec<u8>>, Vec<u8>, G2)>,
+        entries: Vec<(Vec<u8>, Vec<u8>, G2)>,
         concurrency: usize,
     },
     VerifyMessagesMinSig {
         public_key: G2,
-        entries: Vec<(Option<Vec<u8>>, Vec<u8>, G1)>,
+        entries: Vec<(Vec<u8>, Vec<u8>, G1)>,
         concurrency: usize,
     },
 
@@ -481,27 +481,16 @@ fn arbitrary_bytes(
     u.bytes(len).map(|b| b.to_vec())
 }
 
-fn arbitrary_optional_bytes(
-    u: &mut Unstructured,
-    max_len: usize,
-) -> Result<Option<Vec<u8>>, arbitrary::Error> {
-    if u.arbitrary()? {
-        Ok(Some(arbitrary_bytes(u, 0, max_len)?))
-    } else {
-        Ok(None)
-    }
-}
-
 #[allow(clippy::type_complexity)]
 fn arbitrary_messages(
     u: &mut Unstructured,
     min: usize,
     max: usize,
-) -> Result<Vec<(Option<Vec<u8>>, Vec<u8>)>, arbitrary::Error> {
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, arbitrary::Error> {
     let len = u.int_in_range(min..=max)?;
     (0..len)
         .map(|_| {
-            let ns = arbitrary_optional_bytes(u, 50)?;
+            let ns = arbitrary_bytes(u, 0, 50)?;
             let msg = arbitrary_bytes(u, 0, 100)?;
             Ok((ns, msg))
         })
@@ -607,9 +596,9 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::SignMinPk { private, message } => {
-            let sig = ops::sign_message::<MinPk>(&private, None, &message);
+            let sig = ops::sign_message::<MinPk>(&private, b"", &message);
             let pub_key = ops::compute_public::<MinPk>(&private);
-            let _ = ops::verify_message::<MinPk>(&pub_key, None, &message, &sig);
+            let _ = ops::verify_message::<MinPk>(&pub_key, b"", &message, &sig);
         }
 
         FuzzOperation::SignMinPkWithNamespace {
@@ -617,9 +606,9 @@ fn fuzz(op: FuzzOperation) {
             namespace,
             message,
         } => {
-            let sig = ops::sign_message::<MinPk>(&private, Some(&namespace), &message);
+            let sig = ops::sign_message::<MinPk>(&private, &namespace, &message);
             let pub_key = ops::compute_public::<MinPk>(&private);
-            let _ = ops::verify_message::<MinPk>(&pub_key, Some(&namespace), &message, &sig);
+            let _ = ops::verify_message::<MinPk>(&pub_key, &namespace, &message, &sig);
         }
 
         FuzzOperation::SignMinPkLowLevel { private, message } => {
@@ -634,7 +623,7 @@ fn fuzz(op: FuzzOperation) {
             message,
             signature,
         } => {
-            let _ = ops::verify_message::<MinPk>(&public, None, &message, &signature);
+            let _ = ops::verify_message::<MinPk>(&public, b"", &message, &signature);
         }
 
         FuzzOperation::VerifyMinPkWithNamespace {
@@ -643,7 +632,7 @@ fn fuzz(op: FuzzOperation) {
             message,
             signature,
         } => {
-            let _ = ops::verify_message::<MinPk>(&public, Some(&namespace), &message, &signature);
+            let _ = ops::verify_message::<MinPk>(&public, &namespace, &message, &signature);
         }
 
         FuzzOperation::VerifyMinPkLowLevel {
@@ -656,9 +645,9 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::SignMinSig { private, message } => {
-            let sig = ops::sign_message::<MinSig>(&private, None, &message);
+            let sig = ops::sign_message::<MinSig>(&private, b"", &message);
             let pub_key = ops::compute_public::<MinSig>(&private);
-            let _ = ops::verify_message::<MinSig>(&pub_key, None, &message, &sig);
+            let _ = ops::verify_message::<MinSig>(&pub_key, b"", &message, &sig);
         }
 
         FuzzOperation::SignMinSigWithNamespace {
@@ -666,9 +655,9 @@ fn fuzz(op: FuzzOperation) {
             namespace,
             message,
         } => {
-            let sig = ops::sign_message::<MinSig>(&private, Some(&namespace), &message);
+            let sig = ops::sign_message::<MinSig>(&private, &namespace, &message);
             let pub_key = ops::compute_public::<MinSig>(&private);
-            let _ = ops::verify_message::<MinSig>(&pub_key, Some(&namespace), &message, &sig);
+            let _ = ops::verify_message::<MinSig>(&pub_key, &namespace, &message, &sig);
         }
 
         FuzzOperation::SignMinSigLowLevel { private, message } => {
@@ -683,7 +672,7 @@ fn fuzz(op: FuzzOperation) {
             message,
             signature,
         } => {
-            let _ = ops::verify_message::<MinSig>(&public, None, &message, &signature);
+            let _ = ops::verify_message::<MinSig>(&public, b"", &message, &signature);
         }
 
         FuzzOperation::VerifyMinSigWithNamespace {
@@ -692,7 +681,7 @@ fn fuzz(op: FuzzOperation) {
             message,
             signature,
         } => {
-            let _ = ops::verify_message::<MinSig>(&public, Some(&namespace), &message, &signature);
+            let _ = ops::verify_message::<MinSig>(&public, &namespace, &message, &signature);
         }
 
         FuzzOperation::VerifyMinSigLowLevel {
@@ -730,9 +719,9 @@ fn fuzz(op: FuzzOperation) {
             use_minpk,
         } => {
             if use_minpk {
-                let _ = threshold::sign_message::<MinPk>(&share, None, &message);
+                let _ = threshold::sign_message::<MinPk>(&share, b"", &message);
             } else {
-                let _ = threshold::sign_message::<MinSig>(&share, None, &message);
+                let _ = threshold::sign_message::<MinSig>(&share, b"", &message);
             }
         }
 
@@ -791,7 +780,7 @@ fn fuzz(op: FuzzOperation) {
             if !entries.is_empty() && concurrency > 0 {
                 let entries_refs: Vec<_> = entries
                     .iter()
-                    .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_slice(), *sig))
+                    .map(|(ns, msg, sig)| (ns.as_slice(), msg.as_slice(), *sig))
                     .collect();
 
                 let _ = batch::verify_messages::<_, MinPk, _>(
@@ -811,7 +800,7 @@ fn fuzz(op: FuzzOperation) {
             if !entries.is_empty() && concurrency > 0 {
                 let entries_refs: Vec<_> = entries
                     .iter()
-                    .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_slice(), *sig))
+                    .map(|(ns, msg, sig)| (ns.as_slice(), msg.as_slice(), *sig))
                     .collect();
 
                 let _ = batch::verify_messages::<_, MinSig, _>(

@@ -30,12 +30,10 @@ use super::{
     Error,
 };
 #[cfg(not(feature = "std"))]
-use alloc::{borrow::Cow, vec::Vec};
+use alloc::vec::Vec;
 use commonware_codec::Encode;
 use commonware_math::algebra::{CryptoGroup, HashToGroup, Random};
 use commonware_utils::union_unique;
-#[cfg(feature = "std")]
-use std::borrow::Cow;
 
 /// Computes the public key from the private key.
 pub fn compute_public<V: Variant>(private: &Scalar) -> V::Public {
@@ -67,17 +65,6 @@ pub fn hash_message_namespace<V: Variant>(
     V::Signature::hash_to_group(dst, &union_unique(namespace, message))
 }
 
-/// Hashes a message with an optional namespace to the signature curve.
-pub fn hash_message_with_namespace<V: Variant>(
-    namespace: Option<&[u8]>,
-    message: &[u8],
-) -> V::Signature {
-    namespace.map_or_else(
-        || hash_message::<V>(V::MESSAGE, message),
-        |ns| hash_message_namespace::<V>(V::MESSAGE, ns, message),
-    )
-}
-
 /// Signs the provided message with the private key.
 pub fn sign<V: Variant>(private: &Scalar, dst: DST, message: &[u8]) -> V::Signature {
     hash_message::<V>(dst, message) * private
@@ -99,22 +86,23 @@ pub fn verify<V: Variant>(
 
 /// Signs the provided message with the private key.
 ///
+/// The message is transformed to `union_unique(namespace, message)` before signing.
+///
 /// # Determinism
 ///
 /// Signatures produced by this function are deterministic and are safe
 /// to use in a consensus-critical context.
 pub fn sign_message<V: Variant>(
     private: &group::Private,
-    namespace: Option<&[u8]>,
+    namespace: &[u8],
     message: &[u8],
 ) -> V::Signature {
-    let payload = namespace.map_or(Cow::Borrowed(message), |namespace| {
-        Cow::Owned(union_unique(namespace, message))
-    });
-    sign::<V>(private, V::MESSAGE, &payload)
+    sign::<V>(private, V::MESSAGE, &union_unique(namespace, message))
 }
 
 /// Verifies the signature with the provided public key.
+///
+/// The message is transformed to `union_unique(namespace, message)` before verification.
 ///
 /// # Warning
 ///
@@ -122,14 +110,16 @@ pub fn sign_message<V: Variant>(
 /// `public` and `signature`.
 pub fn verify_message<V: Variant>(
     public: &V::Public,
-    namespace: Option<&[u8]>,
+    namespace: &[u8],
     message: &[u8],
     signature: &V::Signature,
 ) -> Result<(), Error> {
-    let payload = namespace.map_or(Cow::Borrowed(message), |namespace| {
-        Cow::Owned(union_unique(namespace, message))
-    });
-    verify::<V>(public, V::MESSAGE, &payload, signature)
+    verify::<V>(
+        public,
+        V::MESSAGE,
+        &union_unique(namespace, message),
+        signature,
+    )
 }
 
 // =============================================================================
@@ -277,9 +267,9 @@ mod tests {
     fn bad_namespace<V: Variant>() {
         let (private, public) = keypair::<_, V>(&mut test_rng());
         let msg = &[1, 9, 6, 9];
-        let sig = sign_message::<V>(&private, Some(b"good"), msg);
+        let sig = sign_message::<V>(&private, b"good", msg);
         assert!(matches!(
-            verify_message::<V>(&public, Some(b"bad"), msg, &sig).unwrap_err(),
+            verify_message::<V>(&public, b"bad", msg, &sig).unwrap_err(),
             Error::InvalidSignature
         ));
     }
@@ -294,9 +284,8 @@ mod tests {
         let (private, public) = keypair::<_, V>(&mut test_rng());
         let msg = &[1, 9, 6, 9];
         let namespace = b"test";
-        let sig = sign_message::<V>(&private, Some(namespace), msg);
-        verify_message::<V>(&public, Some(namespace), msg, &sig)
-            .expect("signature should be valid");
+        let sig = sign_message::<V>(&private, namespace, msg);
+        verify_message::<V>(&public, namespace, msg, &sig).expect("signature should be valid");
         let payload = union_unique(namespace, msg);
         blst_verify_message::<V>(&public, &payload, &sig).expect("signature should be valid");
     }

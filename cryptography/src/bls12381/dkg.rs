@@ -2205,7 +2205,7 @@ mod test_plan {
 
                 // Generate and verify threshold signature
                 let test_message = format!("test message round {i_round}").into_bytes();
-                let namespace = Some(&b"test"[..]);
+                let namespace = b"test";
 
                 let mut partial_sigs = Vec::new();
                 for &i_player in &round.players {

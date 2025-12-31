@@ -38,13 +38,11 @@ fn benchmark_threshold_batch_verify_public_keys(c: &mut Criterion) {
                                 .map(|(idx, s)| {
                                     if idx < invalid as usize {
                                         primitives::ops::threshold::sign_message::<MinSig>(
-                                            s, None, msg,
+                                            s, b"wrong", msg,
                                         )
                                     } else {
                                         primitives::ops::threshold::sign_message::<MinSig>(
-                                            s,
-                                            Some(namespace),
-                                            msg,
+                                            s, namespace, msg,
                                         )
                                     }
                                 })
@@ -64,11 +62,7 @@ fn benchmark_threshold_batch_verify_public_keys(c: &mut Criterion) {
                                     MinSig,
                                     _,
                                 >(
-                                    &mut rng,
-                                    &polynomial,
-                                    Some(namespace),
-                                    msg,
-                                    &signatures,
+                                    &mut rng, &polynomial, namespace, msg, &signatures
                                 ));
                             if invalid == 0 {
                                 assert!(result.is_ok());

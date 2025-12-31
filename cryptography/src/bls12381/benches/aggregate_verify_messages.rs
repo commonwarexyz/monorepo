@@ -20,18 +20,12 @@ fn benchmark_aggregate_verify_messages(c: &mut Criterion) {
                             let (private, public) = ops::keypair::<_, MinSig>(&mut thread_rng());
                             let sigs: Vec<_> = msgs
                                 .iter()
-                                .map(|msg| {
-                                    let ns: Option<&[u8]> = Some(&namespace[..]);
-                                    ops::sign_message::<MinSig>(&private, ns, msg)
-                                })
+                                .map(|msg| ops::sign_message::<MinSig>(&private, namespace, msg))
                                 .collect();
                             let agg_sig = ops::aggregate::combine_signatures::<MinSig, _>(&sigs);
                             let messages: Vec<_> = msgs
                                 .iter()
-                                .map(|msg| {
-                                    let ns: Option<&[u8]> = Some(&namespace[..]);
-                                    (ns, msg.as_ref())
-                                })
+                                .map(|msg| (namespace.as_ref(), msg.as_ref()))
                                 .collect();
                             (public, messages, agg_sig)
                         },

@@ -46,7 +46,7 @@ fn prepare_evaluations<'a, V: Variant>(
 /// Signs the provided message with the key share.
 pub fn sign_message<V: Variant>(
     private: &Share,
-    namespace: Option<&[u8]>,
+    namespace: &[u8],
     message: &[u8],
 ) -> PartialSignature<V> {
     let sig = super::sign_message::<V>(&private.private, namespace, message);
@@ -80,7 +80,7 @@ pub fn sign_proof_of_possession<V: Variant>(
 /// This function assumes a group check was already performed on `signature`.
 pub fn verify_message<V: Variant>(
     sharing: &Sharing<V>,
-    namespace: Option<&[u8]>,
+    namespace: &[u8],
     message: &[u8],
     partial: &PartialSignature<V>,
 ) -> Result<(), Error> {
@@ -134,7 +134,7 @@ pub fn batch_verify_messages<'a, R, V, I>(
 where
     R: CryptoRngCore,
     V: Variant,
-    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8], PartialSignature<V>)>,
+    I: IntoIterator<Item = &'a (&'a [u8], &'a [u8], PartialSignature<V>)>,
 {
     // Verify all signatures have the correct index and build combined entries
     let combined: Vec<_> = entries
@@ -161,7 +161,7 @@ where
 fn batch_verify_public_keys_bisect<'a, R, V>(
     rng: &mut R,
     pending: &[(V::Public, &'a PartialSignature<V>)],
-    namespace: Option<&[u8]>,
+    namespace: &[u8],
     message: &[u8],
 ) -> Vec<&'a PartialSignature<V>>
 where
@@ -196,7 +196,7 @@ where
 pub fn batch_verify_public_keys<'a, R, V, I>(
     rng: &mut R,
     sharing: &Sharing<V>,
-    namespace: Option<&[u8]>,
+    namespace: &[u8],
     message: &[u8],
     partials: I,
 ) -> Result<(), Vec<&'a PartialSignature<V>>>
@@ -447,16 +447,15 @@ mod tests {
         let namespace = b"test";
         let partials: Vec<_> = shares
             .iter()
-            .map(|s| sign_message::<V>(s, Some(namespace), msg))
+            .map(|s| sign_message::<V>(s, namespace, msg))
             .collect();
         for p in &partials {
-            verify_message::<V>(&sharing, Some(namespace), msg, p)
-                .expect("signature should be valid");
+            verify_message::<V>(&sharing, namespace, msg, p).expect("signature should be valid");
         }
         let threshold_sig = recover::<V, _>(&sharing, &partials).unwrap();
         let threshold_pub = sharing.public();
 
-        ops::verify_message::<V>(threshold_pub, Some(namespace), msg, &threshold_sig)
+        ops::verify_message::<V>(threshold_pub, namespace, msg, &threshold_sig)
             .expect("signature should be valid");
 
         let payload = union_unique(namespace, msg);
@@ -477,35 +476,44 @@ mod tests {
 
         let signer = &shares[0];
 
-        let messages: &[(Option<&[u8]>, &[u8])] = &[
-            (Some(&b"ns"[..]), b"msg1"),
-            (Some(&b"ns"[..]), b"msg2"),
-            (Some(&b"ns"[..]), b"msg3"),
+        let messages: &[(&[u8], &[u8])] = &[
+            (&b"ns"[..], b"msg1"),
+            (&b"ns"[..], b"msg2"),
+            (&b"ns"[..], b"msg3"),
         ];
         let entries: Vec<_> = messages
             .iter()
-            .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, *ns, msg)))
+            .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
             .collect();
         batch_verify_messages::<_, V, _>(&mut test_rng(), &public, signer.index, &entries, 1)
             .expect("Verification with namespaced messages should succeed");
 
-        let messages_no_ns: &[(Option<&[u8]>, &[u8])] =
-            &[(None, b"msg1"), (None, b"msg2"), (None, b"msg3")];
-        let entries_no_ns: Vec<_> = messages_no_ns
+        let messages_empty_ns: &[(&[u8], &[u8])] = &[
+            (&b""[..], b"msg1"),
+            (&b""[..], b"msg2"),
+            (&b""[..], b"msg3"),
+        ];
+        let entries_empty_ns: Vec<_> = messages_empty_ns
             .iter()
-            .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, *ns, msg)))
+            .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
             .collect();
-        batch_verify_messages::<_, V, _>(&mut test_rng(), &public, signer.index, &entries_no_ns, 1)
-            .expect("Verification with non-namespaced messages should succeed");
+        batch_verify_messages::<_, V, _>(
+            &mut test_rng(),
+            &public,
+            signer.index,
+            &entries_empty_ns,
+            1,
+        )
+        .expect("Verification with empty namespace messages should succeed");
 
-        let messages_mixed: &[(Option<&[u8]>, &[u8])] = &[
-            (Some(&b"ns1"[..]), b"msg1"),
-            (None, b"msg2"),
-            (Some(&b"ns2"[..]), b"msg3"),
+        let messages_mixed: &[(&[u8], &[u8])] = &[
+            (&b"ns1"[..], b"msg1"),
+            (&b"ns2"[..], b"msg2"),
+            (&b"ns3"[..], b"msg3"),
         ];
         let entries_mixed: Vec<_> = messages_mixed
             .iter()
-            .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, *ns, msg)))
+            .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
             .collect();
         batch_verify_messages::<_, V, _>(&mut test_rng(), &public, signer.index, &entries_mixed, 1)
             .expect("Verification with mixed namespaces should succeed");
@@ -561,12 +569,12 @@ mod tests {
         let partials: Vec<_> = shares
             .iter()
             .take(t as usize)
-            .map(|s| sign_message::<V>(s, None, b"payload"))
+            .map(|s| sign_message::<V>(s, b"test", b"payload"))
             .collect();
 
         let sig1 = recover::<V, _>(&sharing, &partials).unwrap();
 
-        ops::verify_message::<V>(sharing.public(), None, b"payload", &sig1).unwrap();
+        ops::verify_message::<V>(sharing.public(), b"test", b"payload", &sig1).unwrap();
     }
 
     #[test]
@@ -583,18 +591,18 @@ mod tests {
         let partials_1: Vec<_> = shares
             .iter()
             .take(t as usize)
-            .map(|s| sign_message::<V>(s, None, b"payload1"))
+            .map(|s| sign_message::<V>(s, b"test", b"payload1"))
             .collect();
         let partials_2: Vec<_> = shares
             .iter()
             .take(t as usize)
-            .map(|s| sign_message::<V>(s, None, b"payload2"))
+            .map(|s| sign_message::<V>(s, b"test", b"payload2"))
             .collect();
 
         let (sig_1, sig_2) = recover_pair::<V, _>(&sharing, &partials_1, &partials_2).unwrap();
 
-        ops::verify_message::<V>(sharing.public(), None, b"payload1", &sig_1).unwrap();
-        ops::verify_message::<V>(sharing.public(), None, b"payload2", &sig_2).unwrap();
+        ops::verify_message::<V>(sharing.public(), b"test", b"payload1", &sig_1).unwrap();
+        ops::verify_message::<V>(sharing.public(), b"test", b"payload2", &sig_2).unwrap();
     }
 
     #[test]
@@ -609,7 +617,7 @@ mod tests {
 
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
 
-        let namespace = Some(&b"test"[..]);
+        let namespace = b"test";
         let msg = b"hello";
         let partials = shares
             .iter()
@@ -636,14 +644,14 @@ mod tests {
 
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
 
-        let namespace = Some(&b"test"[..]);
+        let namespace = b"test";
         let msg = b"hello";
         let partials = shares
             .iter()
             .map(|s| sign_message::<V>(s, namespace, msg))
             .collect::<Vec<_>>();
 
-        let namespace = Some(&b"bad"[..]);
+        let namespace = b"bad";
         partials.iter().for_each(|partial| {
             assert!(matches!(
                 verify_message::<V>(&sharing, namespace, msg, partial).unwrap_err(),
@@ -672,7 +680,7 @@ mod tests {
 
         let shares = shares.into_iter().take(t as usize - 1).collect::<Vec<_>>();
 
-        let namespace = Some(&b"test"[..]);
+        let namespace = b"test";
         let msg = b"hello";
         let partials = shares
             .iter()
@@ -705,7 +713,7 @@ mod tests {
         let share = shares.get_mut(3).unwrap();
         share.private = Private::random(&mut rng);
 
-        let namespace = Some(&b"test"[..]);
+        let namespace = b"test";
         let msg = b"hello";
         let partials = shares
             .iter()
@@ -733,7 +741,7 @@ mod tests {
         let n = 5;
         let (sharing, shares) =
             dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
-        let namespace = Some(&b"test"[..]);
+        let namespace = b"test";
         let msg = b"hello";
 
         let partials: Vec<_> = shares
@@ -758,7 +766,7 @@ mod tests {
         let n = 5;
         let (sharing, mut shares) =
             dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
-        let namespace = Some(&b"test"[..]);
+        let namespace = b"test";
         let msg = b"hello";
 
         let corrupted_index = 1;
@@ -799,7 +807,7 @@ mod tests {
         let n = 6;
         let (sharing, mut shares) =
             dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
-        let namespace = Some(&b"test"[..]);
+        let namespace = b"test";
         let msg = b"hello";
 
         let corrupted_indices = vec![1, 3];
@@ -845,7 +853,7 @@ mod tests {
         let n = 5;
         let (sharing, shares) =
             dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
-        let namespace = Some(&b"test"[..]);
+        let namespace = b"test";
         let msg = b"hello";
 
         let mut partials: Vec<_> = shares
@@ -884,7 +892,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let (sharing, shares) =
             dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(1));
-        let namespace = Some(&b"test"[..]);
+        let namespace = b"test";
         let msg = b"hello";
 
         let partials: Vec<_> = shares
@@ -907,7 +915,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let (sharing, mut shares) =
             dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(1));
-        let namespace = Some(&b"test"[..]);
+        let namespace = b"test";
         let msg = b"hello";
 
         shares[0].private = Private::random(&mut rng);
@@ -939,7 +947,7 @@ mod tests {
         let n = 5;
         let (sharing, mut shares) =
             dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
-        let namespace = Some(&b"test"[..]);
+        let namespace = b"test";
         let msg = b"hello";
 
         let corrupted_index = n - 1;
@@ -999,7 +1007,7 @@ mod tests {
         let (public, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), n);
         let scalars = public.mode().all_scalars(n).collect::<Vec<_>>();
 
-        let namespace = Some(&b"test"[..]);
+        let namespace = b"test";
         let msg = b"hello";
         let all_partials: Vec<_> = shares
             .iter()
@@ -1044,8 +1052,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(12345);
         let n = 5;
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
-        let namespace_bytes: &[u8] = b"test";
-        let namespace = Some(namespace_bytes);
+        let namespace = b"test";
         let msg = b"message";
 
         let partial1 = sign_message::<V>(&shares[0], namespace, msg);
@@ -1084,7 +1091,7 @@ mod tests {
         let pk1 = sharing.partial_public(partial1.index).unwrap();
         let pk2 = sharing.partial_public(partial2.index).unwrap();
         let pk_sum = pk1 + &pk2;
-        let hm = hash_message_namespace::<V>(V::MESSAGE, namespace_bytes, msg);
+        let hm = hash_message_namespace::<V>(V::MESSAGE, namespace, msg);
         V::verify(&pk_sum, &hm, &forged_sum)
             .expect("vulnerable naive verification accepts forged aggregate");
 
@@ -1122,8 +1129,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(54321);
         let n = 5;
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
-        let namespace_bytes: &[u8] = b"test";
-        let namespace = Some(namespace_bytes);
+        let namespace: &[u8] = b"test";
         let msg1: &[u8] = b"message 1";
         let msg2: &[u8] = b"message 2";
 
@@ -1164,8 +1170,8 @@ mod tests {
         );
 
         let pk = sharing.partial_public(signer.index).unwrap();
-        let hm1 = hash_message_namespace::<V>(V::MESSAGE, namespace_bytes, msg1);
-        let hm2 = hash_message_namespace::<V>(V::MESSAGE, namespace_bytes, msg2);
+        let hm1 = hash_message_namespace::<V>(V::MESSAGE, namespace, msg1);
+        let hm2 = hash_message_namespace::<V>(V::MESSAGE, namespace, msg2);
         let hm_sum = hm1 + &hm2;
         V::verify(&pk, &hm_sum, &forged_sum)
             .expect("vulnerable naive verification accepts forged aggregate");
