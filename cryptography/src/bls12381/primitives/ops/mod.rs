@@ -87,8 +87,6 @@ pub fn verify<V: Variant>(
 
 /// Signs the provided message with the private key.
 ///
-/// The message is transformed to `union_unique(namespace, message)` before signing.
-///
 /// # Determinism
 ///
 /// Signatures produced by this function are deterministic and are safe
@@ -102,8 +100,6 @@ pub fn sign_message<V: Variant>(
 }
 
 /// Verifies the signature with the provided public key.
-///
-/// The message is transformed to `union_unique(namespace, message)` before verification.
 ///
 /// # Warning
 ///
