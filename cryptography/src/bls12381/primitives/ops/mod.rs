@@ -516,6 +516,79 @@ mod tests {
         assert!(expected);
     }
 
+    #[test]
+    fn test_eth_batch_verify() {
+        let all_vectors = [
+            vector_verify_1(),
+            vector_verify_2(),
+            vector_verify_3(),
+            vector_verify_4(),
+            vector_verify_5(),
+            vector_verify_6(),
+            vector_verify_7(),
+            vector_verify_8(),
+            vector_verify_9(),
+            vector_verify_10(),
+            vector_verify_11(),
+            vector_verify_12(),
+            vector_verify_13(),
+            vector_verify_14(),
+            vector_verify_15(),
+            vector_verify_16(),
+            vector_verify_17(),
+            vector_verify_18(),
+            vector_verify_19(),
+            vector_verify_20(),
+            vector_verify_21(),
+            vector_verify_22(),
+            vector_verify_23(),
+            vector_verify_24(),
+            vector_verify_25(),
+            vector_verify_26(),
+            vector_verify_27(),
+            vector_verify_28(),
+            vector_verify_29(),
+        ];
+
+        let mut valid_publics = Vec::new();
+        let mut valid_hms = Vec::new();
+        let mut valid_signatures = Vec::new();
+        let mut all_publics = Vec::new();
+        let mut all_hms = Vec::new();
+        let mut all_signatures = Vec::new();
+
+        for (public_key, message, signature, expected) in all_vectors {
+            let Ok(public_key) = public_key else {
+                continue;
+            };
+            let Ok(signature) = signature else {
+                continue;
+            };
+            let hm = hash_message::<MinPk>(MinPk::MESSAGE, &message);
+            if expected {
+                valid_publics.push(public_key.clone());
+                valid_hms.push(hm.clone());
+                valid_signatures.push(signature.clone());
+            }
+            all_publics.push(public_key);
+            all_hms.push(hm);
+            all_signatures.push(signature);
+        }
+
+        MinPk::batch_verify(
+            &mut rand::thread_rng(),
+            &valid_publics,
+            &valid_hms,
+            &valid_signatures,
+        )
+        .expect("batch verify of valid vectors should succeed");
+
+        assert!(
+            MinPk::batch_verify(&mut rand::thread_rng(), &all_publics, &all_hms, &all_signatures)
+                .is_err()
+        );
+    }
+
     // sign_case_8cd3d4d0d9a5b265
     fn vector_sign_1() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
