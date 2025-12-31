@@ -5,7 +5,7 @@ use rand::{thread_rng, Rng};
 fn benchmark_aggregate_verify_messages(c: &mut Criterion) {
     let namespace = b"namespace";
     for n in [2, 10, 100, 1000, 10000].into_iter() {
-        let mut msgs: Vec<[u8; 32]> = Vec::with_capacity(n);
+        let mut msgs = Vec::with_capacity(n);
         for _ in 0..n {
             let mut msg = [0u8; 32];
             thread_rng().fill(&mut msg);
