@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
     group::{Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE},
-    ops::{self, batch, threshold},
+    ops,
     variant::{MinPk, MinSig, Variant},
 };
 use commonware_math::{
@@ -12,7 +12,7 @@ use commonware_math::{
     poly::Poly,
 };
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, thread_rng, SeedableRng};
+use rand::{rngs::StdRng, SeedableRng};
 
 #[derive(Debug, Clone)]
 enum FuzzOperation {
@@ -147,14 +147,6 @@ enum FuzzOperation {
         signature: G1,
     },
 
-    // Sign message with share
-    SignMessage {
-        share: Share,
-        namespace: Vec<u8>,
-        message: Vec<u8>,
-        use_minpk: bool,
-    },
-
     // Polynomial operations
     PolyAdd {
         a: Poly<Scalar>,
@@ -163,18 +155,6 @@ enum FuzzOperation {
     PolyCommit {
         scalar_poly: Poly<Scalar>,
         use_g1: bool,
-    },
-
-    // Verify messages (individual signatures)
-    VerifyMessagesMinPk {
-        public_key: G1,
-        entries: Vec<(Vec<u8>, Vec<u8>, G2)>,
-        concurrency: usize,
-    },
-    VerifyMessagesMinSig {
-        public_key: G2,
-        entries: Vec<(Vec<u8>, Vec<u8>, G1)>,
-        concurrency: usize,
     },
 
     // Serialization round-trip
@@ -187,14 +167,11 @@ enum FuzzOperation {
     SerializeG2 {
         point: G2,
     },
-    SerializeShare {
-        share: Share,
-    },
 }
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=36)?;
+        let choice = u.int_in_range(0..=32)?;
 
         match choice {
             0 => Ok(FuzzOperation::ScalarArithmetic {
@@ -313,59 +290,22 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 signature: arbitrary_g1(u)?,
             }),
-            28 => Ok(FuzzOperation::SignMessage {
-                share: arbitrary_share(u)?,
-                namespace: arbitrary_bytes(u, 0, 50)?,
-                message: arbitrary_bytes(u, 0, 100)?,
-                use_minpk: u.arbitrary()?,
-            }),
-            29 => Ok(FuzzOperation::PolyAdd {
+            28 => Ok(FuzzOperation::PolyAdd {
                 a: arbitrary_poly_scalar(u)?,
                 b: arbitrary_poly_scalar(u)?,
             }),
-            30 => Ok(FuzzOperation::PolyCommit {
+            29 => Ok(FuzzOperation::PolyCommit {
                 scalar_poly: arbitrary_poly_scalar(u)?,
                 use_g1: u.arbitrary()?,
             }),
-            31 => {
-                let messages = arbitrary_messages(u, 0, 20)?;
-                let signatures = arbitrary_vec_g2(u, messages.len(), messages.len())?;
-                let entries = messages
-                    .into_iter()
-                    .zip(signatures)
-                    .map(|((ns, msg), sig)| (ns, msg, sig))
-                    .collect();
-                Ok(FuzzOperation::VerifyMessagesMinPk {
-                    public_key: arbitrary_g1(u)?,
-                    entries,
-                    concurrency: u.int_in_range(1..=8)?,
-                })
-            }
-            32 => {
-                let messages = arbitrary_messages(u, 0, 20)?;
-                let signatures = arbitrary_vec_g1(u, messages.len(), messages.len())?;
-                let entries = messages
-                    .into_iter()
-                    .zip(signatures)
-                    .map(|((ns, msg), sig)| (ns, msg, sig))
-                    .collect();
-                Ok(FuzzOperation::VerifyMessagesMinSig {
-                    public_key: arbitrary_g2(u)?,
-                    entries,
-                    concurrency: u.int_in_range(1..=8)?,
-                })
-            }
-            33 => Ok(FuzzOperation::SerializeScalar {
+            30 => Ok(FuzzOperation::SerializeScalar {
                 scalar: arbitrary_scalar(u)?,
             }),
-            34 => Ok(FuzzOperation::SerializeG1 {
+            31 => Ok(FuzzOperation::SerializeG1 {
                 point: arbitrary_g1(u)?,
             }),
-            35 => Ok(FuzzOperation::SerializeG2 {
+            32 => Ok(FuzzOperation::SerializeG2 {
                 point: arbitrary_g2(u)?,
-            }),
-            36 => Ok(FuzzOperation::SerializeShare {
-                share: arbitrary_share(u)?,
             }),
             _ => Ok(FuzzOperation::KeypairGeneration),
         }
@@ -455,22 +395,6 @@ fn arbitrary_bytes(
 ) -> Result<Vec<u8>, arbitrary::Error> {
     let len = u.int_in_range(min..=max)?;
     u.bytes(len).map(|b| b.to_vec())
-}
-
-#[allow(clippy::type_complexity)]
-fn arbitrary_messages(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len)
-        .map(|_| {
-            let ns = arbitrary_bytes(u, 0, 50)?;
-            let msg = arbitrary_bytes(u, 0, 100)?;
-            Ok((ns, msg))
-        })
-        .collect()
 }
 
 fn fuzz(op: FuzzOperation) {
@@ -665,19 +589,6 @@ fn fuzz(op: FuzzOperation) {
             let _ = ops::verify_proof_of_possession::<MinSig>(&public, &namespace, &signature);
         }
 
-        FuzzOperation::SignMessage {
-            share,
-            namespace,
-            message,
-            use_minpk,
-        } => {
-            if use_minpk {
-                let _ = threshold::sign_message::<MinPk>(&share, &namespace, &message);
-            } else {
-                let _ = threshold::sign_message::<MinSig>(&share, &namespace, &message);
-            }
-        }
-
         FuzzOperation::PolyAdd { a, b } => {
             let _ = a + &b;
         }
@@ -714,54 +625,6 @@ fn fuzz(op: FuzzOperation) {
             point.write(&mut encoded);
             if let Ok(decoded) = G2::read(&mut encoded.as_slice()) {
                 assert_eq!(point, decoded);
-            }
-        }
-
-        FuzzOperation::SerializeShare { share } => {
-            let mut encoded = Vec::new();
-            share.write(&mut encoded);
-            if let Ok(decoded) = Share::read(&mut encoded.as_slice()) {
-                assert_eq!(share, decoded);
-            }
-        }
-
-        FuzzOperation::VerifyMessagesMinPk {
-            public_key,
-            entries,
-            concurrency,
-        } => {
-            if !entries.is_empty() && concurrency > 0 {
-                let entries_refs: Vec<_> = entries
-                    .iter()
-                    .map(|(ns, msg, sig)| (ns.as_slice(), msg.as_slice(), *sig))
-                    .collect();
-
-                let _ = batch::verify_messages::<_, MinPk, _>(
-                    &mut thread_rng(),
-                    &public_key,
-                    &entries_refs,
-                    concurrency,
-                );
-            }
-        }
-
-        FuzzOperation::VerifyMessagesMinSig {
-            public_key,
-            entries,
-            concurrency,
-        } => {
-            if !entries.is_empty() && concurrency > 0 {
-                let entries_refs: Vec<_> = entries
-                    .iter()
-                    .map(|(ns, msg, sig)| (ns.as_slice(), msg.as_slice(), *sig))
-                    .collect();
-
-                let _ = batch::verify_messages::<_, MinSig, _>(
-                    &mut thread_rng(),
-                    &public_key,
-                    &entries_refs,
-                    concurrency,
-                );
             }
         }
     }

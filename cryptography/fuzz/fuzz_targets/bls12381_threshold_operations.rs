@@ -1,6 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
+use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
     group::{Share, G1, G2},
     ops::threshold,
@@ -90,11 +91,24 @@ enum FuzzOperation {
         partials_1: Vec<PartialSignature<MinSig>>,
         partials_2: Vec<PartialSignature<MinSig>>,
     },
+    SignMessageMinPk {
+        share: Share,
+        namespace: Vec<u8>,
+        message: Vec<u8>,
+    },
+    SignMessageMinSig {
+        share: Share,
+        namespace: Vec<u8>,
+        message: Vec<u8>,
+    },
+    SerializeShare {
+        share: Share,
+    },
 }
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=13)?;
+        let choice = u.int_in_range(0..=16)?;
 
         match choice {
             0 => Ok(FuzzOperation::SignProofOfPossessionMinPk {
@@ -184,6 +198,19 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 sharing: u.arbitrary()?,
                 partials_1: arbitrary_vec_partial_sig_g1(u, 0, 10)?,
                 partials_2: arbitrary_vec_partial_sig_g1(u, 0, 10)?,
+            }),
+            14 => Ok(FuzzOperation::SignMessageMinPk {
+                share: arbitrary_share(u)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
+                message: arbitrary_bytes(u, 0, 100)?,
+            }),
+            15 => Ok(FuzzOperation::SignMessageMinSig {
+                share: arbitrary_share(u)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
+                message: arbitrary_bytes(u, 0, 100)?,
+            }),
+            16 => Ok(FuzzOperation::SerializeShare {
+                share: arbitrary_share(u)?,
             }),
             _ => {
                 panic!("Unsupported operation type");
@@ -395,6 +422,30 @@ fn fuzz(op: FuzzOperation) {
             partials_2,
         } => {
             let _ = threshold::recover_pair::<MinSig, _>(&sharing, &partials_1, &partials_2);
+        }
+
+        FuzzOperation::SignMessageMinPk {
+            share,
+            namespace,
+            message,
+        } => {
+            let _ = threshold::sign_message::<MinPk>(&share, &namespace, &message);
+        }
+
+        FuzzOperation::SignMessageMinSig {
+            share,
+            namespace,
+            message,
+        } => {
+            let _ = threshold::sign_message::<MinSig>(&share, &namespace, &message);
+        }
+
+        FuzzOperation::SerializeShare { share } => {
+            let mut encoded = Vec::new();
+            share.write(&mut encoded);
+            if let Ok(decoded) = Share::read(&mut encoded.as_slice()) {
+                assert_eq!(share, decoded);
+            }
         }
     }
 }
