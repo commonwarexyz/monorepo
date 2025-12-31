@@ -150,14 +150,15 @@ pub fn verify_proof_of_possession<V: Variant>(
 mod tests {
     use super::*;
     use crate::bls12381::primitives::{
-        group::{G1_MESSAGE, G2_MESSAGE},
+        group::{self, G1_MESSAGE, G2_MESSAGE},
         variant::{MinPk, MinSig},
     };
     use blst::BLST_ERROR;
-    use commonware_codec::{DecodeExt, Encode, ReadExt};
+    use commonware_codec::{DecodeExt, Encode, Error as CodecError, ReadExt};
     use commonware_math::algebra::CryptoGroup;
     use commonware_utils::{from_hex_formatted, test_rng, union_unique};
     use rand::rngs::OsRng;
+    use rstest::rstest;
 
     fn codec<V: Variant>() {
         let (private, public) = keypair::<_, V>(&mut test_rng());
@@ -300,7 +301,7 @@ mod tests {
     const MIN_SIG_TESTS: &str = include_str!("test_vectors/min_sig.txt");
 
     #[test]
-    fn test_min_sig() {
+    fn test_noble_min_sig() {
         const DST: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
 
         let mut publics = Vec::new();
@@ -339,7 +340,7 @@ mod tests {
     const MIN_PK_TESTS: &str = include_str!("test_vectors/min_pk.txt");
 
     #[test]
-    fn test_min_pk() {
+    fn test_noble_min_pk() {
         const DST: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
 
         let mut publics = Vec::new();
@@ -373,107 +374,9 @@ mod tests {
         signatures[0] += &<MinPk as Variant>::Signature::generator();
         assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_err());
     }
-}
-
-/// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
-#[cfg(test)]
-mod spec_tests {
-    use super::*;
-    use crate::bls12381::primitives::{group, variant::MinPk};
-    use commonware_codec::{DecodeExt, Error as CodecError};
-    use rstest::rstest;
 
     type Public = <MinPk as Variant>::Public;
     type Signature = <MinPk as Variant>::Signature;
-
-    #[rstest]
-    #[case(vector_sign_1())]
-    #[case(vector_sign_2())]
-    #[case(vector_sign_3())]
-    #[case(vector_sign_4())]
-    #[case(vector_sign_5())]
-    #[case(vector_sign_6())]
-    #[case(vector_sign_7())]
-    #[case(vector_sign_8())]
-    #[case(vector_sign_9())]
-    fn test_sign(#[case] (private_key, message, expected): (group::Private, Vec<u8>, Signature)) {
-        let signature = sign::<MinPk>(&private_key, MinPk::MESSAGE, &message);
-        assert_eq!(signature, expected);
-    }
-
-    #[test]
-    fn test_sign_zero_key() {
-        let result =
-            parse_private_key("0x0000000000000000000000000000000000000000000000000000000000000000");
-        assert!(result.is_err());
-    }
-
-    #[rstest]
-    #[case(vector_verify_1())]
-    #[case(vector_verify_2())]
-    #[case(vector_verify_3())]
-    #[case(vector_verify_4())]
-    #[case(vector_verify_5())]
-    #[case(vector_verify_6())]
-    #[case(vector_verify_7())]
-    #[case(vector_verify_8())]
-    #[case(vector_verify_9())]
-    #[case(vector_verify_10())]
-    #[case(vector_verify_11())]
-    #[case(vector_verify_12())]
-    #[case(vector_verify_13())]
-    #[case(vector_verify_14())]
-    #[case(vector_verify_15())]
-    #[case(vector_verify_16())]
-    #[case(vector_verify_17())]
-    #[case(vector_verify_18())]
-    #[case(vector_verify_19())]
-    #[case(vector_verify_20())]
-    #[case(vector_verify_21())]
-    #[case(vector_verify_22())]
-    #[case(vector_verify_23())]
-    #[case(vector_verify_24())]
-    #[case(vector_verify_25())]
-    #[case(vector_verify_26())]
-    #[case(vector_verify_27())]
-    #[case(vector_verify_28())]
-    #[case(vector_verify_29())]
-    fn test_verify(
-        #[case] (public_key, message, signature, expected): (
-            Result<Public, CodecError>,
-            Vec<u8>,
-            Result<Signature, CodecError>,
-            bool,
-        ),
-    ) {
-        let expected = if !expected {
-            public_key.is_err()
-                || signature.is_err()
-                || verify::<MinPk>(
-                    &public_key.unwrap(),
-                    MinPk::MESSAGE,
-                    &message,
-                    &signature.unwrap(),
-                )
-                .is_err()
-        } else {
-            let public_key = public_key.unwrap();
-            let signature = signature.unwrap();
-
-            // Verify using single verification
-            let single_result =
-                verify::<MinPk>(&public_key, MinPk::MESSAGE, &message, &signature).is_ok();
-
-            // Verify using batch verification
-            let hm = hash_message::<MinPk>(MinPk::MESSAGE, &message);
-            let batch_result =
-                MinPk::batch_verify(&mut rand::thread_rng(), &[public_key], &[hm], &[signature])
-                    .is_ok();
-
-            single_result && batch_result
-        };
-        assert!(expected);
-    }
 
     fn parse_sign_vector(
         private_key: &str,
@@ -516,6 +419,99 @@ mod spec_tests {
             commonware_utils::from_hex_formatted(msg).unwrap(),
             parse_signature(signature),
         )
+    }
+
+    #[test]
+    fn test_sign_zero_key() {
+        let result =
+            parse_private_key("0x0000000000000000000000000000000000000000000000000000000000000000");
+        assert!(result.is_err());
+    }
+
+    /// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
+    #[rstest]
+    #[case(vector_sign_1())]
+    #[case(vector_sign_2())]
+    #[case(vector_sign_3())]
+    #[case(vector_sign_4())]
+    #[case(vector_sign_5())]
+    #[case(vector_sign_6())]
+    #[case(vector_sign_7())]
+    #[case(vector_sign_8())]
+    #[case(vector_sign_9())]
+    fn test_eth_sign(
+        #[case] (private_key, message, expected): (group::Private, Vec<u8>, Signature),
+    ) {
+        let signature = sign::<MinPk>(&private_key, MinPk::MESSAGE, &message);
+        assert_eq!(signature, expected);
+    }
+
+    /// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
+    #[rstest]
+    #[case(vector_verify_1())]
+    #[case(vector_verify_2())]
+    #[case(vector_verify_3())]
+    #[case(vector_verify_4())]
+    #[case(vector_verify_5())]
+    #[case(vector_verify_6())]
+    #[case(vector_verify_7())]
+    #[case(vector_verify_8())]
+    #[case(vector_verify_9())]
+    #[case(vector_verify_10())]
+    #[case(vector_verify_11())]
+    #[case(vector_verify_12())]
+    #[case(vector_verify_13())]
+    #[case(vector_verify_14())]
+    #[case(vector_verify_15())]
+    #[case(vector_verify_16())]
+    #[case(vector_verify_17())]
+    #[case(vector_verify_18())]
+    #[case(vector_verify_19())]
+    #[case(vector_verify_20())]
+    #[case(vector_verify_21())]
+    #[case(vector_verify_22())]
+    #[case(vector_verify_23())]
+    #[case(vector_verify_24())]
+    #[case(vector_verify_25())]
+    #[case(vector_verify_26())]
+    #[case(vector_verify_27())]
+    #[case(vector_verify_28())]
+    #[case(vector_verify_29())]
+    fn test_eth_verify(
+        #[case] (public_key, message, signature, expected): (
+            Result<Public, CodecError>,
+            Vec<u8>,
+            Result<Signature, CodecError>,
+            bool,
+        ),
+    ) {
+        let expected = if !expected {
+            public_key.is_err()
+                || signature.is_err()
+                || verify::<MinPk>(
+                    &public_key.unwrap(),
+                    MinPk::MESSAGE,
+                    &message,
+                    &signature.unwrap(),
+                )
+                .is_err()
+        } else {
+            let public_key = public_key.unwrap();
+            let signature = signature.unwrap();
+
+            // Verify using single verification
+            let single_result =
+                verify::<MinPk>(&public_key, MinPk::MESSAGE, &message, &signature).is_ok();
+
+            // Verify using batch verification
+            let hm = hash_message::<MinPk>(MinPk::MESSAGE, &message);
+            let batch_result =
+                MinPk::batch_verify(&mut rand::thread_rng(), &[public_key], &[hm], &[signature])
+                    .is_ok();
+
+            single_result && batch_result
+        };
+        assert!(expected);
     }
 
     // sign_case_8cd3d4d0d9a5b265
