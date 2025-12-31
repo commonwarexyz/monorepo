@@ -17,8 +17,9 @@
 //!
 //! Use [`batch`] when you need to ensure each individual signature is valid. Use [`aggregate`]
 //! when you only need to verify that the aggregate is valid (more efficient, but an attacker
-//! could redistribute signature components between signers while keeping the aggregate unchanged).
-//! Batch verification uses random scalar weights internally to prevent this attack.
+//! could forge invalid signatures that cancel out when aggregated). Batch verification uses
+//! random scalar weights to ensure that it returns the same result as checking each signature
+//! individually.
 
 pub mod aggregate;
 pub mod batch;

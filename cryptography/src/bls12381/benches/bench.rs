@@ -2,9 +2,9 @@ use criterion::criterion_main;
 
 mod aggregate_verify_messages;
 mod aggregate_verify_public_keys;
+mod batch_verify_messages;
 mod combine_public_keys;
 mod combine_signatures;
-mod batch_verify_messages;
 mod dkg;
 mod evaluate_point;
 mod scheme_batch_verify_multiple_messages;

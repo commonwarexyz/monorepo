@@ -1007,7 +1007,7 @@ mod tests {
         threshold_derive_missing_partials::<MinSig>();
     }
 
-    fn batch_verify_public_keys_fail_on_malleability<V: Variant>() {
+    fn batch_verify_public_keys_rejects_malleability<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(12345);
         let n = 5;
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
@@ -1073,12 +1073,12 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_verify_public_keys_fail_on_malleability() {
-        batch_verify_public_keys_fail_on_malleability::<MinPk>();
-        batch_verify_public_keys_fail_on_malleability::<MinSig>();
+    fn test_batch_verify_public_keys_rejects_malleability() {
+        batch_verify_public_keys_rejects_malleability::<MinPk>();
+        batch_verify_public_keys_rejects_malleability::<MinSig>();
     }
 
-    fn batch_verify_messages_fail_on_malleability<V: Variant>() {
+    fn batch_verify_messages_rejects_malleability<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(54321);
         let n = 5;
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
@@ -1146,8 +1146,8 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_verify_messages_fail_on_malleability() {
-        batch_verify_messages_fail_on_malleability::<MinPk>();
-        batch_verify_messages_fail_on_malleability::<MinSig>();
+    fn test_batch_verify_messages_rejects_malleability() {
+        batch_verify_messages_rejects_malleability::<MinPk>();
+        batch_verify_messages_rejects_malleability::<MinSig>();
     }
 }

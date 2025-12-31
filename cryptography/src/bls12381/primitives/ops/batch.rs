@@ -6,10 +6,9 @@
 //!
 //! # How It Works
 //!
-//! These functions apply random scalar weights to prevent attacks where an attacker
-//! could redistribute signature components between signers while keeping the aggregate
-//! unchanged. This ensures that if batch verification passes, each individual signature
-//! was valid.
+//! These functions apply random scalar weights to ensure that the batch verification
+//! process returns the same result as checking each signature individually. Without
+//! randomness, an attacker could forge invalid signatures that cancel out when aggregated.
 
 use super::{
     super::{group::Scalar, variant::Variant, Error},
@@ -206,7 +205,7 @@ mod tests {
         verify_messages_wrong_signature::<MinSig>();
     }
 
-    fn resists_signature_redistribution<V: Variant>() {
+    fn rejects_malleability<V: Variant>() {
         let mut rng = test_rng();
         let (private, public) = keypair::<_, V>(&mut rng);
         let namespace = b"test";
@@ -219,7 +218,7 @@ mod tests {
         verify_message::<V>(&public, namespace, msg1, &sig1).expect("sig1 should be valid");
         verify_message::<V>(&public, namespace, msg2, &sig2).expect("sig2 should be valid");
 
-        // Create forged signatures by redistributing components
+        // Create forged signatures that cancel out when aggregated
         let random_scalar = Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let forged_sig1 = sig1 - &delta;
@@ -266,8 +265,8 @@ mod tests {
     }
 
     #[test]
-    fn test_resists_signature_redistribution() {
-        resists_signature_redistribution::<MinPk>();
-        resists_signature_redistribution::<MinSig>();
+    fn test_rejects_malleability() {
+        rejects_malleability::<MinPk>();
+        rejects_malleability::<MinSig>();
     }
 }

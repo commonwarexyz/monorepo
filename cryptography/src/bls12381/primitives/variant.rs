@@ -459,7 +459,7 @@ mod tests {
         let hm1 = ops::hash_message_namespace::<V>(V::MESSAGE, b"test", msg1);
         let hm2 = ops::hash_message_namespace::<V>(V::MESSAGE, b"test", msg2);
 
-        // Forge signatures by redistributing: sig1' = sig1 - delta, sig2' = sig2 + delta
+        // Forge signatures that cancel out: sig1' = sig1 - delta, sig2' = sig2 + delta
         let random_scalar = Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let forged_sig1 = sig1 - &delta;
