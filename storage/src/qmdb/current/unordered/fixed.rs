@@ -8,7 +8,7 @@
 
 use crate::{
     bitmap::{CleanBitMap, DirtyBitMap},
-    kv,
+    kv::{self, Batchable},
     mmr::{
         mem::{Clean, Dirty, State},
         Location, Proof, StandardHasher,
@@ -26,7 +26,7 @@ use crate::{
             proof::{OperationProof, RangeProof},
             root, FixedConfig as Config,
         },
-        store::{Batchable, CleanStore, DirtyStore, LogStore},
+        store::{CleanStore, DirtyStore, LogStore},
         Error,
     },
     translator::Translator,

@@ -112,7 +112,6 @@ use tracing::{debug, warn};
 mod batch;
 #[cfg(test)]
 pub use batch::tests as batch_tests;
-pub use batch::{Batch, Batchable, Getter};
 
 /// Configuration for initializing a [Store] database.
 #[derive(Clone)]
@@ -644,7 +643,7 @@ where
     }
 }
 
-impl<E, K, V, T> Batchable for Store<E, K, V, T>
+impl<E, K, V, T> kv::Batchable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,

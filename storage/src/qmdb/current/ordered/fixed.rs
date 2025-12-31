@@ -9,7 +9,7 @@
 
 use crate::{
     bitmap::{CleanBitMap, DirtyBitMap},
-    kv,
+    kv::{self, Batchable},
     mmr::{
         grafting::Storage as GraftingStorage,
         mem::{Clean, Dirty, State},
@@ -26,7 +26,7 @@ use crate::{
             proof::{OperationProof, RangeProof},
             root, FixedConfig as Config,
         },
-        store::{Batchable, CleanStore, DirtyStore, LogStore},
+        store::{CleanStore, DirtyStore, LogStore},
         Error,
     },
     translator::Translator,

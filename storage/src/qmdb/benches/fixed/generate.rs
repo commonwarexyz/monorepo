@@ -12,11 +12,8 @@ use commonware_runtime::{
     tokio::{Config, Context},
 };
 use commonware_storage::{
-    qmdb::{
-        any::AnyExt,
-        store::{Batchable, LogStorePrunable},
-        Error,
-    },
+    kv::Batchable,
+    qmdb::{any::AnyExt, store::LogStorePrunable, Error},
     Persistable,
 };
 use criterion::{criterion_group, Criterion};

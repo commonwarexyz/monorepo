@@ -1,5 +1,7 @@
 //! Traits for interacting with a key/value store.
 
+mod batch;
+pub use batch::{Batch, Batchable};
 use std::future::Future;
 
 /// A readable key-value store.
