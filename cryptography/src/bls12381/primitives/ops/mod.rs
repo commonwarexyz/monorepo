@@ -566,9 +566,9 @@ mod tests {
             };
             let hm = hash_message::<MinPk>(MinPk::MESSAGE, &message);
             if expected {
-                valid_publics.push(public_key.clone());
-                valid_hms.push(hm.clone());
-                valid_signatures.push(signature.clone());
+                valid_publics.push(public_key);
+                valid_hms.push(hm);
+                valid_signatures.push(signature);
             }
             all_publics.push(public_key);
             all_hms.push(hm);
@@ -583,10 +583,13 @@ mod tests {
         )
         .expect("batch verify of valid vectors should succeed");
 
-        assert!(
-            MinPk::batch_verify(&mut rand::thread_rng(), &all_publics, &all_hms, &all_signatures)
-                .is_err()
-        );
+        assert!(MinPk::batch_verify(
+            &mut rand::thread_rng(),
+            &all_publics,
+            &all_hms,
+            &all_signatures
+        )
+        .is_err());
     }
 
     // sign_case_8cd3d4d0d9a5b265

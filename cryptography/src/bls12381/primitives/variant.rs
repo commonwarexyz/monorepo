@@ -422,13 +422,13 @@ mod tests {
         let msg2: &[u8] = b"message 2";
         let msg3: &[u8] = b"message 3";
 
-        let sig1 = ops::sign_message::<V>(&private1, b"", msg1);
-        let sig2 = ops::sign_message::<V>(&private2, b"", msg2);
-        let sig3 = ops::sign_message::<V>(&private3, b"", msg3);
+        let sig1 = ops::sign_message::<V>(&private1, b"test", msg1);
+        let sig2 = ops::sign_message::<V>(&private2, b"test", msg2);
+        let sig3 = ops::sign_message::<V>(&private3, b"test", msg3);
 
-        let hm1 = ops::hash_message_namespace::<V>(V::MESSAGE, b"", msg1);
-        let hm2 = ops::hash_message_namespace::<V>(V::MESSAGE, b"", msg2);
-        let hm3 = ops::hash_message_namespace::<V>(V::MESSAGE, b"", msg3);
+        let hm1 = ops::hash_message_namespace::<V>(V::MESSAGE, b"test", msg1);
+        let hm2 = ops::hash_message_namespace::<V>(V::MESSAGE, b"test", msg2);
+        let hm3 = ops::hash_message_namespace::<V>(V::MESSAGE, b"test", msg3);
 
         V::batch_verify(
             &mut rng,
@@ -453,11 +453,11 @@ mod tests {
         let msg1: &[u8] = b"message 1";
         let msg2: &[u8] = b"message 2";
 
-        let sig1 = ops::sign_message::<V>(&private1, b"", msg1);
-        let sig2 = ops::sign_message::<V>(&private2, b"", msg2);
+        let sig1 = ops::sign_message::<V>(&private1, b"test", msg1);
+        let sig2 = ops::sign_message::<V>(&private2, b"test", msg2);
 
-        let hm1 = ops::hash_message_namespace::<V>(V::MESSAGE, b"", msg1);
-        let hm2 = ops::hash_message_namespace::<V>(V::MESSAGE, b"", msg2);
+        let hm1 = ops::hash_message_namespace::<V>(V::MESSAGE, b"test", msg1);
+        let hm2 = ops::hash_message_namespace::<V>(V::MESSAGE, b"test", msg2);
 
         // Forge signatures by redistributing: sig1' = sig1 - delta, sig2' = sig2 + delta
         let random_scalar = Scalar::random(&mut rng);

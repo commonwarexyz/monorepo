@@ -488,12 +488,12 @@ mod tests {
         batch_verify_messages::<_, V, _>(&mut test_rng(), &public, signer.index, &entries, 1)
             .expect("Verification with namespaced messages should succeed");
 
-        let messages_empty_ns: &[(&[u8], &[u8])] = &[
-            (&b""[..], b"msg1"),
-            (&b""[..], b"msg2"),
-            (&b""[..], b"msg3"),
+        let messages_alt_ns: &[(&[u8], &[u8])] = &[
+            (&b"alt"[..], b"msg1"),
+            (&b"alt"[..], b"msg2"),
+            (&b"alt"[..], b"msg3"),
         ];
-        let entries_empty_ns: Vec<_> = messages_empty_ns
+        let entries_alt_ns: Vec<_> = messages_alt_ns
             .iter()
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
             .collect();
@@ -501,10 +501,10 @@ mod tests {
             &mut test_rng(),
             &public,
             signer.index,
-            &entries_empty_ns,
+            &entries_alt_ns,
             1,
         )
-        .expect("Verification with empty namespace messages should succeed");
+        .expect("Verification with alternate namespace messages should succeed");
 
         let messages_mixed: &[(&[u8], &[u8])] = &[
             (&b"ns1"[..], b"msg1"),
