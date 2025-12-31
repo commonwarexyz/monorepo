@@ -123,8 +123,5 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let result = state.batch.verify(&mut rng);
-    assert_eq!(
-        result, state.expected_result,
-        "Batch verification failed"
-    );
+    assert_eq!(result, state.expected_result, "Batch verification failed");
 });
