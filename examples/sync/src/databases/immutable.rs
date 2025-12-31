@@ -13,6 +13,7 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
+use tracing::error;
 
 /// Database type alias for the clean (merkleized, durable) state.
 pub type Database<E> =
@@ -84,6 +85,11 @@ where
         self,
         operations: Vec<Self::Operation>,
     ) -> Result<Self, commonware_storage::qmdb::Error> {
+        if operations.last().is_none() || !operations.last().unwrap().is_commit() {
+            // Ignore bad inputs rather than return errors.
+            error!("operations must end with a commit");
+            return Ok(self);
+        }
         let mut db = self.into_mutable();
         let num_ops = operations.len();
 
