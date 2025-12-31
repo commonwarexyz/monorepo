@@ -440,7 +440,7 @@ mod tests {
         Hasher, Sha256,
     };
     use commonware_utils::{ordered::Quorum, test_rng};
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::rngs::StdRng;
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -458,7 +458,8 @@ mod tests {
         S: Scheme<Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let schemes = &fixture.schemes;
         let item = Item {
             index: 100,
@@ -478,7 +479,7 @@ mod tests {
         // Verify the restored ack
         assert_eq!(restored_ack.item, item);
         assert_eq!(restored_ack.epoch, Epoch::new(1));
-        assert!(restored_ack.verify(&mut test_rng(), &schemes[0], NAMESPACE));
+        assert!(restored_ack.verify(&mut rng, &schemes[0], NAMESPACE));
 
         // Test TipAck codec
         let tip_ack = TipAck {
@@ -512,7 +513,6 @@ mod tests {
             .collect();
 
         let certificate = Certificate::from_acks(&schemes[0], &acks).unwrap();
-        let mut rng = StdRng::seed_from_u64(0);
         assert!(certificate.verify(&mut rng, &schemes[0], NAMESPACE));
 
         let activity_certified = Activity::Certified(certificate.clone());

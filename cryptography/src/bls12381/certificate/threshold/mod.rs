@@ -759,9 +759,8 @@ mod tests {
 
         let certificate = schemes[0].assemble(attestations).unwrap();
 
-        let mut rng = StdRng::seed_from_u64(49);
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut rng,
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -775,6 +774,7 @@ mod tests {
     }
 
     fn test_verify_certificate_detects_corruption<V: Variant + Send + Sync>() {
+        let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(4, 50);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -791,7 +791,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -800,7 +800,7 @@ mod tests {
         // Corrupted certificate fails
         let corrupted = V::Signature::zero();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &corrupted
@@ -1064,7 +1064,7 @@ mod tests {
     }
 
     fn signer_shares_must_match_participant_indices<V: Variant + Send + Sync>() {
-        let mut rng = StdRng::seed_from_u64(64);
+        let mut rng = test_rng();
 
         // Generate identity keys (ed25519)
         let identity_keys: Vec<_> = (0..4)

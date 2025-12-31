@@ -757,6 +757,7 @@ mod tests {
     }
 
     fn test_verify_certificate_detects_corruption<V: Variant + Send + Sync>() {
+        let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 50);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -773,7 +774,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -783,7 +784,7 @@ mod tests {
         let mut corrupted = certificate;
         corrupted.signature = aggregate::Signature::zero();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &corrupted

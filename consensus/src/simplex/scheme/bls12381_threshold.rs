@@ -817,7 +817,7 @@ mod tests {
     fn sign_vote_roundtrip_for_each_context<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 7);
         let scheme = &schemes[0];
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = test_rng();
 
         let proposal = sample_proposal(Epoch::new(0), View::new(2), 1);
         let notarize_vote = scheme
@@ -929,6 +929,7 @@ mod tests {
     }
 
     fn verify_votes_filters_bad_signers<V: Variant>() {
+        let mut rng = test_rng();
         let (schemes, _) = setup_signers::<V>(5, 13);
         let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(5), 3);
@@ -949,7 +950,7 @@ mod tests {
             .collect();
 
         let verification = schemes[0].verify_attestations(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -961,7 +962,7 @@ mod tests {
 
         votes[0].signer = 999;
         let verification = schemes[0].verify_attestations(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1046,6 +1047,7 @@ mod tests {
     }
 
     fn verify_certificate_detects_corruption<V: Variant>() {
+        let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 23);
         let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(11), 6);
@@ -1068,7 +1070,7 @@ mod tests {
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         assert!(verifier.verify_certificate(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1079,7 +1081,7 @@ mod tests {
         let mut corrupted = certificate;
         corrupted.vote_signature = corrupted.seed_signature;
         assert!(!verifier.verify_certificate(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1463,6 +1465,7 @@ mod tests {
     }
 
     fn verify_certificate_detects_seed_corruption<V: Variant>() {
+        let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 59);
         let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(25), 13);
@@ -1485,7 +1488,7 @@ mod tests {
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             Subject::Nullify {
                 round: proposal.round,
@@ -1496,7 +1499,7 @@ mod tests {
         let mut corrupted = certificate;
         corrupted.seed_signature = corrupted.vote_signature;
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             Subject::Nullify {
                 round: proposal.round,
@@ -1512,6 +1515,7 @@ mod tests {
     }
 
     fn encrypt_decrypt<V: Variant>() {
+        let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 61);
         let quorum = quorum_from_slice(&schemes) as usize;
 
@@ -1522,10 +1526,10 @@ mod tests {
         let target = Round::new(Epoch::new(333), View::new(10));
 
         // Encrypt using the scheme
-        let ciphertext = schemes[0].encrypt(&mut test_rng(), NAMESPACE, target, *message);
+        let ciphertext = schemes[0].encrypt(&mut rng, NAMESPACE, target, *message);
 
         // Can also encrypt with the verifier scheme
-        let ciphertext_verifier = verifier.encrypt(&mut test_rng(), NAMESPACE, target, *message);
+        let ciphertext_verifier = verifier.encrypt(&mut rng, NAMESPACE, target, *message);
 
         // Generate notarization for the target round to get the seed
         let proposal = sample_proposal(target.epoch(), target.view(), 14);

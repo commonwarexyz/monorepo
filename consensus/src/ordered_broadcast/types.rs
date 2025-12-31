@@ -1365,7 +1365,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let chunk_namespace = chunk_namespace(NAMESPACE);
@@ -1416,7 +1417,6 @@ mod tests {
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk.clone(), epoch, certificate);
 
         // Verify lock
-        let mut rng = StdRng::seed_from_u64(0);
         assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Test activity with the lock
@@ -1471,7 +1471,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
@@ -1507,7 +1508,6 @@ mod tests {
         assert_eq!(decoded.epoch, lock.epoch);
 
         // Verify the signature in the decoded lock
-        let mut rng = StdRng::seed_from_u64(0);
         assert!(decoded.verify(&mut rng, NAMESPACE, &fixture.verifier));
     }
 
@@ -1525,7 +1525,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let mut scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
@@ -1538,7 +1539,6 @@ mod tests {
             sample_digest(1),
             None,
         );
-        let mut rng = StdRng::seed_from_u64(0);
         let provider = ConstantProvider::new(fixture.verifier.clone());
         let result = node.verify(&mut rng, NAMESPACE, &provider);
         assert!(result.is_ok());
@@ -1597,16 +1597,17 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
 
         let ack = Ack::sign(NAMESPACE, &fixture.schemes[0], chunk, epoch).expect("Should sign ack");
-        assert!(ack.verify(&mut test_rng(), NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Test that verification fails with wrong namespace
-        assert!(!ack.verify(&mut test_rng(), b"wrong", &fixture.verifier));
+        assert!(!ack.verify(&mut rng, b"wrong", &fixture.verifier));
     }
 
     #[test]
@@ -1623,7 +1624,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
@@ -1652,7 +1654,6 @@ mod tests {
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk, epoch, certificate);
 
         // Verify lock
-        let mut rng = StdRng::seed_from_u64(0);
         assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
     }
 
@@ -1670,7 +1671,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
@@ -1697,7 +1699,6 @@ mod tests {
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk, epoch, certificate);
 
         // Verify lock
-        let mut rng = StdRng::seed_from_u64(0);
         assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Test that verification fails with wrong namespace
@@ -1736,7 +1737,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
 
@@ -1752,7 +1754,6 @@ mod tests {
         let node = Node::<PublicKey, S, Sha256Digest>::new(chunk.clone(), signature, None);
 
         // Verification should succeed
-        let mut rng = StdRng::seed_from_u64(0);
         let provider = ConstantProvider::new(fixture.verifier);
         assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
 
@@ -1781,7 +1782,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
@@ -1822,7 +1824,6 @@ mod tests {
         );
 
         // Verification should succeed
-        let mut rng = StdRng::seed_from_u64(0);
         let provider = ConstantProvider::new(fixture.verifier.clone());
         assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
 
@@ -1876,7 +1877,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1892,7 +1894,7 @@ mod tests {
         .expect("Should sign ack");
 
         // Verification should succeed
-        assert!(ack.verify(&mut test_rng(), NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Create an ack with tampered signature by signing with a different scheme
         let ctx = AckSubject {
@@ -1908,7 +1910,7 @@ mod tests {
         let invalid_ack = Ack::<PublicKey, S, Sha256Digest>::new(chunk, epoch, tampered_vote);
 
         // Verification should fail because the signer index doesn't match the signature
-        assert!(!invalid_ack.verify(&mut test_rng(), NAMESPACE, &fixture.verifier));
+        assert!(!invalid_ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
     }
 
     #[test]
@@ -1925,6 +1927,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: Fn(&mut StdRng, u32) -> Fixture<S>,
     {
+        let mut rng = test_rng();
         let fixture = setup_seeded(4, 0, &f);
         let wrong_fixture = setup_seeded(4, 1, &f);
         // Create a chunk and ack
@@ -1938,10 +1941,10 @@ mod tests {
                 .expect("Should sign ack");
 
         // Verification should succeed with correct verifier
-        assert!(ack.verify(&mut test_rng(), NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Verification should fail with wrong verifier
-        assert!(!ack.verify(&mut test_rng(), NAMESPACE, &wrong_fixture.verifier));
+        assert!(!ack.verify(&mut rng, NAMESPACE, &wrong_fixture.verifier));
     }
 
     #[test]
@@ -1958,6 +1961,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: Fn(&mut StdRng, u32) -> Fixture<S>,
     {
+        let mut rng = test_rng();
         let fixture = setup_seeded(4, 0, &f);
         let wrong_fixture = setup_seeded(4, 1, &f);
         let public_key = sample_scheme(0).public_key();
@@ -1986,7 +1990,6 @@ mod tests {
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk.clone(), epoch, certificate);
 
         // Verification should succeed
-        let mut rng = StdRng::seed_from_u64(0);
         assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Generate certificate with the wrong keys
@@ -2062,7 +2065,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         // Try to create a node with height 0 and a parent
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
@@ -2116,7 +2120,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         // Try to create a non-genesis node without a parent
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 1, sample_digest(1)); // Height > 0
@@ -2147,7 +2152,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
 
         // Try to create a genesis node (height 0) with a parent - should panic in Node::new
         let public_key = sample_scheme(0).public_key();
@@ -2211,7 +2217,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
 
         // Try to create a non-genesis node (height > 0) without a parent - should panic on decode
         let public_key = sample_scheme(0).public_key();
