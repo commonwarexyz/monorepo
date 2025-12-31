@@ -999,6 +999,7 @@ where
 mod test {
     use super::*;
     use crate::{
+        kv::{Deletable as _, Updatable as _},
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
             store::{DirtyStore as _, LogStore as _},
