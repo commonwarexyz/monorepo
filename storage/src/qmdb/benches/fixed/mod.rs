@@ -7,7 +7,7 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
 use commonware_storage::{
-    kv::Deletable,
+    kv::{Batchable, Deletable},
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
@@ -18,7 +18,7 @@ use commonware_storage::{
             ordered::fixed::Db as OCurrent, unordered::fixed::Db as UCurrent,
             FixedConfig as CConfig,
         },
-        store::{Batchable, Config as SConfig, Store},
+        store::{Config as SConfig, Store},
         Error,
     },
     translator::EightCap,

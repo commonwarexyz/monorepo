@@ -3,13 +3,13 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
 use commonware_storage::{
-    kv::Deletable,
+    kv::{Batchable, Deletable},
     qmdb::{
         any::{
             ordered::variable::Db as OVariable, unordered::variable::Db as UVariable,
             VariableConfig as AConfig,
         },
-        store::{Batchable, Config as SConfig, LogStorePrunable, Store},
+        store::{Config as SConfig, LogStorePrunable, Store},
         Error,
     },
     translator::EightCap,

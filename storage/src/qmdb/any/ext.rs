@@ -6,10 +6,10 @@
 
 use super::{CleanAny, DirtyAny};
 use crate::{
-    kv,
+    kv::{self, Batchable},
     mmr::Location,
     qmdb::{
-        store::{Batchable, CleanStore, DirtyStore, LogStore, LogStorePrunable},
+        store::{CleanStore, DirtyStore, LogStore, LogStorePrunable},
         Error,
     },
     Persistable,
