@@ -8,6 +8,7 @@
 
 use crate::{
     bitmap::{CleanBitMap, DirtyBitMap},
+    kv,
     mmr::{
         mem::{Clean, Dirty, State},
         Location, Proof, StandardHasher,
@@ -508,7 +509,7 @@ impl<
         T: Translator,
         const N: usize,
         S: State<DigestOf<H>>,
-    > crate::store::Store for Db<E, K, V, H, T, N, S>
+    > kv::Gettable for Db<E, K, V, H, T, N, S>
 {
     type Key = K;
     type Value = V;
@@ -526,7 +527,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreMut for Db<E, K, V, H, T, N, Dirty>
+    > kv::Updatable for Db<E, K, V, H, T, N, Dirty>
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
@@ -540,7 +541,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreDeletable for Db<E, K, V, H, T, N, Dirty>
+    > kv::Deletable for Db<E, K, V, H, T, N, Dirty>
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
@@ -957,6 +958,7 @@ pub mod test {
                 &proof,
                 &root,
             ));
+
             // Old value will not verify against new proof.
             assert!(!CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
@@ -988,6 +990,7 @@ pub mod test {
                 &[proof_inactive.chunk],
                 &root,
             ));
+
             // But this proof should *not* verify as a key value proof, since verification will see
             // that the operation is inactive.
             assert!(!CleanCurrentTest::verify_key_value_proof(
@@ -1092,8 +1095,25 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "range_proofs";
             let mut hasher = StandardHasher::<Sha256>::new();
-            let db = open_db(context.clone(), partition).await.into_dirty();
-            let db = apply_random_ops(200, true, context.next_u64(), db)
+            let db = open_db(context.clone(), partition).await;
+            let root = db.root();
+
+            // Empty range proof should not crash or verify, since even an empty db has a single
+            // commit op.
+            let proof = RangeProof {
+                proof: Proof::default(),
+                partial_chunk_digest: None,
+            };
+            assert!(!CleanCurrentTest::verify_range_proof(
+                hasher.inner(),
+                &proof,
+                Location::new_unchecked(0),
+                &[],
+                &[],
+                &root,
+            ));
+
+            let db = apply_random_ops(200, true, context.next_u64(), db.into_dirty())
                 .await
                 .unwrap();
             let root = db.root();
@@ -1121,6 +1141,17 @@ pub mod test {
                     ),
                     "failed to verify range at start_loc {start_loc}",
                 );
+                // Proof should not verify if we include extra chunks.
+                let mut chunks_with_extra = chunks.clone();
+                chunks_with_extra.push(chunks[chunks.len() - 1]);
+                assert!(!CleanCurrentTest::verify_range_proof(
+                    hasher.inner(),
+                    &proof,
+                    loc,
+                    &ops,
+                    &chunks_with_extra,
+                    &root,
+                ));
             }
 
             db.destroy().await.unwrap();

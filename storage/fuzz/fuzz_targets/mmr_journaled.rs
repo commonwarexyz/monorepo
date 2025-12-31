@@ -431,6 +431,7 @@ fn fuzz(input: FuzzInput) {
 
                 MmrJournaledOperation::Reinit => {
                     // Init a new MMR
+                    drop(mmr);
                     let new_mmr = Mmr::init(
                         context.clone(),
                         &mut hasher,
@@ -438,6 +439,8 @@ fn fuzz(input: FuzzInput) {
                     )
                     .await
                     .unwrap();
+                    // Reset tracking variables to match recovered state
+                    leaves.clear();
                     historical_sizes.clear();
                     MmrState::Clean(new_mmr)
                 }
