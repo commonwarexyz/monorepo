@@ -154,6 +154,12 @@ where
 
 /// Verifies the aggregate signature over a single message from multiple public keys.
 ///
+/// # Precomputed Aggregate Public Key
+///
+/// Instead of requiring all public keys that participated in the aggregate signature (and generating
+/// the aggregate public key on-demand), this function accepts a precomputed aggregate public key to allow
+/// the caller to cache previous constructions.
+///
 /// # Warning
 ///
 /// This function assumes the caller has performed a group check and collected a proof-of-possession
@@ -331,8 +337,12 @@ mod tests {
         let wrong_pks = vec![public1, public2, public4];
         let wrong_aggregate_pk = aggregate::combine_public_keys::<V, _>(&wrong_pks);
         let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
-        let result =
-            verify_public_keys::<V>(&wrong_aggregate_pk, Some(namespace), message, &aggregate_sig);
+        let result = verify_public_keys::<V>(
+            &wrong_aggregate_pk,
+            Some(namespace),
+            message,
+            &aggregate_sig,
+        );
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
@@ -357,8 +367,12 @@ mod tests {
         let wrong_pks = vec![public1, public2];
         let wrong_aggregate_pk = aggregate::combine_public_keys::<V, _>(&wrong_pks);
         let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
-        let result =
-            verify_public_keys::<V>(&wrong_aggregate_pk, Some(namespace), message, &aggregate_sig);
+        let result = verify_public_keys::<V>(
+            &wrong_aggregate_pk,
+            Some(namespace),
+            message,
+            &aggregate_sig,
+        );
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
