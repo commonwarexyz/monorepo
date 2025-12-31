@@ -488,9 +488,9 @@ mod tests {
         let signer = &shares[0];
 
         let messages: &[(&[u8], &[u8])] = &[
-            (&b"ns"[..], b"msg1"),
-            (&b"ns"[..], b"msg2"),
-            (&b"ns"[..], b"msg3"),
+            (b"ns", b"msg1"),
+            (b"ns", b"msg2"),
+            (b"ns", b"msg3"),
         ];
         let entries: Vec<_> = messages
             .iter()
@@ -500,9 +500,9 @@ mod tests {
             .expect("Verification with namespaced messages should succeed");
 
         let messages_alt_ns: &[(&[u8], &[u8])] = &[
-            (&b"alt"[..], b"msg1"),
-            (&b"alt"[..], b"msg2"),
-            (&b"alt"[..], b"msg3"),
+            (b"alt", b"msg1"),
+            (b"alt", b"msg2"),
+            (b"alt", b"msg3"),
         ];
         let entries_alt_ns: Vec<_> = messages_alt_ns
             .iter()
@@ -512,9 +512,9 @@ mod tests {
             .expect("Verification with alternate namespace messages should succeed");
 
         let messages_mixed: &[(&[u8], &[u8])] = &[
-            (&b"ns1"[..], b"msg1"),
-            (&b"ns2"[..], b"msg2"),
-            (&b"ns3"[..], b"msg3"),
+            (b"ns1", b"msg1"),
+            (b"ns2", b"msg2"),
+            (b"ns3", b"msg3"),
         ];
         let entries_mixed: Vec<_> = messages_mixed
             .iter()
