@@ -130,16 +130,20 @@ enum FuzzOperation {
     // Proof of possession
     SignProofOfPossessionMinPk {
         private: Private,
+        namespace: Vec<u8>,
     },
     VerifyProofOfPossessionMinPk {
         public: G1,
+        namespace: Vec<u8>,
         signature: G2,
     },
     SignProofOfPossessionMinSig {
         private: Private,
+        namespace: Vec<u8>,
     },
     VerifyProofOfPossessionMinSig {
         public: G2,
+        namespace: Vec<u8>,
         signature: G1,
     },
 
@@ -293,16 +297,20 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             24 => Ok(FuzzOperation::SignProofOfPossessionMinPk {
                 private: arbitrary_scalar(u)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
             }),
             25 => Ok(FuzzOperation::VerifyProofOfPossessionMinPk {
                 public: arbitrary_g1(u)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
                 signature: arbitrary_g2(u)?,
             }),
             26 => Ok(FuzzOperation::SignProofOfPossessionMinSig {
                 private: arbitrary_scalar(u)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
             }),
             27 => Ok(FuzzOperation::VerifyProofOfPossessionMinSig {
                 public: arbitrary_g2(u)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
                 signature: arbitrary_g1(u)?,
             }),
             28 => Ok(FuzzOperation::SignMessage {
@@ -629,24 +637,32 @@ fn fuzz(op: FuzzOperation) {
             let _ = ops::verify::<MinSig>(&public, MinSig::MESSAGE, &message, &signature);
         }
 
-        FuzzOperation::SignProofOfPossessionMinPk { private } => {
-            let sig = ops::sign_proof_of_possession::<MinPk>(&private);
+        FuzzOperation::SignProofOfPossessionMinPk { private, namespace } => {
+            let sig = ops::sign_proof_of_possession::<MinPk>(&private, &namespace);
             let pub_key = ops::compute_public::<MinPk>(&private);
-            let _ = ops::verify_proof_of_possession::<MinPk>(&pub_key, &sig);
+            let _ = ops::verify_proof_of_possession::<MinPk>(&pub_key, &namespace, &sig);
         }
 
-        FuzzOperation::VerifyProofOfPossessionMinPk { public, signature } => {
-            let _ = ops::verify_proof_of_possession::<MinPk>(&public, &signature);
+        FuzzOperation::VerifyProofOfPossessionMinPk {
+            public,
+            namespace,
+            signature,
+        } => {
+            let _ = ops::verify_proof_of_possession::<MinPk>(&public, &namespace, &signature);
         }
 
-        FuzzOperation::SignProofOfPossessionMinSig { private } => {
-            let sig = ops::sign_proof_of_possession::<MinSig>(&private);
+        FuzzOperation::SignProofOfPossessionMinSig { private, namespace } => {
+            let sig = ops::sign_proof_of_possession::<MinSig>(&private, &namespace);
             let pub_key = ops::compute_public::<MinSig>(&private);
-            let _ = ops::verify_proof_of_possession::<MinSig>(&pub_key, &sig);
+            let _ = ops::verify_proof_of_possession::<MinSig>(&pub_key, &namespace, &sig);
         }
 
-        FuzzOperation::VerifyProofOfPossessionMinSig { public, signature } => {
-            let _ = ops::verify_proof_of_possession::<MinSig>(&public, &signature);
+        FuzzOperation::VerifyProofOfPossessionMinSig {
+            public,
+            namespace,
+            signature,
+        } => {
+            let _ = ops::verify_proof_of_possession::<MinSig>(&public, &namespace, &signature);
         }
 
         FuzzOperation::SignMessage {

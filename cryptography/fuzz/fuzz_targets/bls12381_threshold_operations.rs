@@ -23,17 +23,21 @@ enum FuzzOperation {
     SignProofOfPossessionMinPk {
         public: Sharing<MinPk>,
         share: Share,
+        namespace: Vec<u8>,
     },
     SignProofOfPossessionMinSig {
         public: Sharing<MinSig>,
         share: Share,
+        namespace: Vec<u8>,
     },
     VerifyProofOfPossessionMinPk {
         public: Sharing<MinPk>,
+        namespace: Vec<u8>,
         partial: PartialSignature<MinPk>,
     },
     VerifyProofOfPossessionMinSig {
         public: Sharing<MinSig>,
+        namespace: Vec<u8>,
         partial: PartialSignature<MinSig>,
     },
     BatchVerifyMessagesMinPk {
@@ -96,17 +100,21 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             0 => Ok(FuzzOperation::SignProofOfPossessionMinPk {
                 public: u.arbitrary()?,
                 share: arbitrary_share(u)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
             }),
             1 => Ok(FuzzOperation::SignProofOfPossessionMinSig {
                 public: u.arbitrary()?,
                 share: arbitrary_share(u)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
             }),
             2 => Ok(FuzzOperation::VerifyProofOfPossessionMinPk {
                 public: u.arbitrary()?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
                 partial: arbitrary_partial_sig_g2(u)?,
             }),
             3 => Ok(FuzzOperation::VerifyProofOfPossessionMinSig {
                 public: u.arbitrary()?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
                 partial: arbitrary_partial_sig_g1(u)?,
             }),
             4 => {
@@ -186,27 +194,45 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 
 fn fuzz(op: FuzzOperation) {
     match op {
-        FuzzOperation::SignProofOfPossessionMinPk { public, share } => {
+        FuzzOperation::SignProofOfPossessionMinPk {
+            public,
+            share,
+            namespace,
+        } => {
             if share.index <= public.required() {
-                let _ = threshold::sign_proof_of_possession::<MinPk>(&public, &share);
+                let _ = threshold::sign_proof_of_possession::<MinPk>(&public, &share, &namespace);
             }
         }
 
-        FuzzOperation::SignProofOfPossessionMinSig { public, share } => {
+        FuzzOperation::SignProofOfPossessionMinSig {
+            public,
+            share,
+            namespace,
+        } => {
             if share.index <= public.required() {
-                let _ = threshold::sign_proof_of_possession::<MinSig>(&public, &share);
+                let _ = threshold::sign_proof_of_possession::<MinSig>(&public, &share, &namespace);
             }
         }
 
-        FuzzOperation::VerifyProofOfPossessionMinPk { public, partial } => {
+        FuzzOperation::VerifyProofOfPossessionMinPk {
+            public,
+            namespace,
+            partial,
+        } => {
             if partial.index <= public.required() {
-                let _ = threshold::verify_proof_of_possession::<MinPk>(&public, &partial);
+                let _ =
+                    threshold::verify_proof_of_possession::<MinPk>(&public, &namespace, &partial);
             }
         }
 
-        FuzzOperation::VerifyProofOfPossessionMinSig { public, partial } => {
+        FuzzOperation::VerifyProofOfPossessionMinSig {
+            public,
+            namespace,
+            partial,
+        } => {
             if partial.index <= public.required() {
-                let _ = threshold::verify_proof_of_possession::<MinSig>(&public, &partial);
+                let _ =
+                    threshold::verify_proof_of_possession::<MinSig>(&public, &namespace, &partial);
             }
         }
 

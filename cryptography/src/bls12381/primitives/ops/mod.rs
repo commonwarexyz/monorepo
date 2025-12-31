@@ -130,20 +130,28 @@ pub fn verify_message<V: Variant>(
 // =============================================================================
 
 /// Generates a proof of possession for the private key.
-pub fn sign_proof_of_possession<V: Variant>(private: &group::Private) -> V::Signature {
+pub fn sign_proof_of_possession<V: Variant>(
+    private: &group::Private,
+    namespace: &[u8],
+) -> V::Signature {
     // Get public key
     let public = compute_public::<V>(private);
 
-    // Sign the public key
-    sign::<V>(private, V::PROOF_OF_POSSESSION, &public.encode())
+    // Sign the public key with namespace
+    hash_message_namespace::<V>(V::PROOF_OF_POSSESSION, namespace, &public.encode()) * private
 }
 
 /// Verifies a proof of possession for the provided public key.
 pub fn verify_proof_of_possession<V: Variant>(
     public: &V::Public,
+    namespace: &[u8],
     signature: &V::Signature,
 ) -> Result<(), Error> {
-    verify::<V>(public, V::PROOF_OF_POSSESSION, &public.encode(), signature)
+    // Create hashed message with namespace
+    let hm = hash_message_namespace::<V>(V::PROOF_OF_POSSESSION, namespace, &public.encode());
+
+    // Verify the signature
+    V::verify(public, &hm, signature)
 }
 
 #[cfg(test)]
@@ -202,9 +210,10 @@ mod tests {
 
     fn blst_verify_proof_of_possession<V: Variant>(
         public: &V::Public,
+        namespace: &[u8],
         signature: &V::Signature,
     ) -> Result<(), BLST_ERROR> {
-        let msg = public.encode();
+        let msg = union_unique(namespace, &public.encode());
         match V::MESSAGE {
             G1_MESSAGE => {
                 let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
@@ -228,10 +237,12 @@ mod tests {
 
     fn single_proof_of_possession<V: Variant>() {
         let (private, public) = keypair::<_, V>(&mut test_rng());
-        let pop = sign_proof_of_possession::<V>(&private);
+        let namespace = b"test";
+        let pop = sign_proof_of_possession::<V>(&private, namespace);
 
-        verify_proof_of_possession::<V>(&public, &pop).expect("PoP should be valid");
-        blst_verify_proof_of_possession::<V>(&public, &pop).expect("PoP should be valid");
+        verify_proof_of_possession::<V>(&public, namespace, &pop).expect("PoP should be valid");
+        blst_verify_proof_of_possession::<V>(&public, namespace, &pop)
+            .expect("PoP should be valid");
     }
 
     #[test]

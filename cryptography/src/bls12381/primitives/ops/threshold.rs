@@ -20,7 +20,7 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
-use commonware_utils::ordered::Map;
+use commonware_utils::{ordered::Map, union_unique};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use rayon::{prelude::*, ThreadPoolBuilder};
@@ -57,15 +57,19 @@ pub fn sign_message<V: Variant>(
 }
 
 /// Generates a proof of possession for the private key share.
+///
+/// This signs the *threshold* public key (not the share's individual public key)
+/// so that partial signatures can be recovered into a threshold signature
+/// verifiable with `ops::verify_proof_of_possession`.
 pub fn sign_proof_of_possession<V: Variant>(
     sharing: &Sharing<V>,
     private: &Share,
+    namespace: &[u8],
 ) -> PartialSignature<V> {
-    // Sign the public key
     let sig = super::sign::<V>(
         &private.private,
         V::PROOF_OF_POSSESSION,
-        &sharing.public().encode(),
+        &union_unique(namespace, &sharing.public().encode()),
     );
     PartialSignature {
         value: sig,
@@ -99,12 +103,13 @@ pub fn verify_message<V: Variant>(
 /// This function assumes a group check was already performed on `signature`.
 pub fn verify_proof_of_possession<V: Variant>(
     sharing: &Sharing<V>,
+    namespace: &[u8],
     partial: &PartialSignature<V>,
 ) -> Result<(), Error> {
     super::verify::<V>(
         &sharing.partial_public(partial.index)?,
         V::PROOF_OF_POSSESSION,
-        &sharing.public().encode(),
+        &union_unique(namespace, &sharing.public().encode()),
         &partial.value,
     )
 }
@@ -362,9 +367,10 @@ mod tests {
 
     fn blst_verify_proof_of_possession<V: Variant>(
         public: &V::Public,
+        namespace: &[u8],
         signature: &V::Signature,
     ) -> Result<(), BLST_ERROR> {
-        let msg = public.encode();
+        let msg = union_unique(namespace, &public.encode());
         match V::MESSAGE {
             G1_MESSAGE => {
                 let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
@@ -389,21 +395,23 @@ mod tests {
     fn threshold_proof_of_possession<V: Variant>() {
         let n = 5;
         let mut rng = StdRng::seed_from_u64(0);
+        let namespace = b"test";
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
         let partials: Vec<_> = shares
             .iter()
-            .map(|s| sign_proof_of_possession::<V>(&sharing, s))
+            .map(|s| sign_proof_of_possession::<V>(&sharing, s, namespace))
             .collect();
         for p in &partials {
-            verify_proof_of_possession::<V>(&sharing, p).expect("signature should be valid");
+            verify_proof_of_possession::<V>(&sharing, namespace, p)
+                .expect("signature should be valid");
         }
         let threshold_sig = recover::<V, _>(&sharing, &partials).unwrap();
         let threshold_pub = sharing.public();
 
-        ops::verify_proof_of_possession::<V>(threshold_pub, &threshold_sig)
+        ops::verify_proof_of_possession::<V>(threshold_pub, namespace, &threshold_sig)
             .expect("signature should be valid");
 
-        blst_verify_proof_of_possession::<V>(threshold_pub, &threshold_sig)
+        blst_verify_proof_of_possession::<V>(threshold_pub, namespace, &threshold_sig)
             .expect("signature should be valid");
     }
 
