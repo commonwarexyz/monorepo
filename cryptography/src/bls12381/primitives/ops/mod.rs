@@ -147,6 +147,7 @@ pub fn verify_proof_of_possession<V: Variant>(
 }
 
 #[cfg(test)]
+#[allow(clippy::type_complexity)]
 mod tests {
     use super::*;
     use crate::bls12381::primitives::{
@@ -375,14 +376,11 @@ mod tests {
         assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_err());
     }
 
-    type Public = <MinPk as Variant>::Public;
-    type Signature = <MinPk as Variant>::Signature;
-
     fn parse_sign_vector(
         private_key: &str,
         msg: &str,
         signature: &str,
-    ) -> (group::Private, Vec<u8>, Signature) {
+    ) -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
         (
             parse_private_key(private_key).unwrap(),
             commonware_utils::from_hex_formatted(msg).unwrap(),
@@ -395,14 +393,14 @@ mod tests {
         group::Private::decode(bytes.as_ref())
     }
 
-    fn parse_public_key(public_key: &str) -> Result<Public, CodecError> {
+    fn parse_public_key(public_key: &str) -> Result<<MinPk as Variant>::Public, CodecError> {
         let bytes = commonware_utils::from_hex_formatted(public_key).unwrap();
-        Public::decode(bytes.as_ref())
+        <MinPk as Variant>::Public::decode(bytes.as_ref())
     }
 
-    fn parse_signature(signature: &str) -> Result<Signature, CodecError> {
+    fn parse_signature(signature: &str) -> Result<<MinPk as Variant>::Signature, CodecError> {
         let bytes = commonware_utils::from_hex_formatted(signature).unwrap();
-        Signature::decode(bytes.as_ref())
+        <MinPk as Variant>::Signature::decode(bytes.as_ref())
     }
 
     fn parse_verify_vector(
@@ -410,9 +408,9 @@ mod tests {
         msg: &str,
         signature: &str,
     ) -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
     ) {
         (
             parse_public_key(public_key),
@@ -440,7 +438,11 @@ mod tests {
     #[case(vector_sign_8())]
     #[case(vector_sign_9())]
     fn test_eth_sign(
-        #[case] (private_key, message, expected): (group::Private, Vec<u8>, Signature),
+        #[case] (private_key, message, expected): (
+            group::Private,
+            Vec<u8>,
+            <MinPk as Variant>::Signature,
+        ),
     ) {
         let signature = sign::<MinPk>(&private_key, MinPk::MESSAGE, &message);
         assert_eq!(signature, expected);
@@ -479,9 +481,9 @@ mod tests {
     #[case(vector_verify_29())]
     fn test_eth_verify(
         #[case] (public_key, message, signature, expected): (
-            Result<Public, CodecError>,
+            Result<<MinPk as Variant>::Public, CodecError>,
             Vec<u8>,
-            Result<Signature, CodecError>,
+            Result<<MinPk as Variant>::Signature, CodecError>,
             bool,
         ),
     ) {
@@ -515,7 +517,7 @@ mod tests {
     }
 
     // sign_case_8cd3d4d0d9a5b265
-    fn vector_sign_1() -> (group::Private, Vec<u8>, Signature) {
+    fn vector_sign_1() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x263dbd792f5b1be47ed85f8938c0f29586af0d3ac7b977f21c278fe1462040e3",
             "0x5656565656565656565656565656565656565656565656565656565656565656",
@@ -524,7 +526,7 @@ mod tests {
     }
 
     // sign_case_11b8c7cad5238946
-    fn vector_sign_2() -> (group::Private, Vec<u8>, Signature) {
+    fn vector_sign_2() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x47b8192d77bf871b62e87859d653922725724a5c031afeabc60bcef5ff665138",
             "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -533,7 +535,7 @@ mod tests {
     }
 
     // sign_case_84d45c9c7cca6b92
-    fn vector_sign_3() -> (group::Private, Vec<u8>, Signature) {
+    fn vector_sign_3() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x328388aff0d4a5b7dc9205abd374e7e98f3cd9f3418edb4eafda5fb16473d216",
             "0xabababababababababababababababababababababababababababababababab",
@@ -542,7 +544,7 @@ mod tests {
     }
 
     // sign_case_142f678a8d05fcd1
-    fn vector_sign_4() -> (group::Private, Vec<u8>, Signature) {
+    fn vector_sign_4() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x47b8192d77bf871b62e87859d653922725724a5c031afeabc60bcef5ff665138",
             "0x5656565656565656565656565656565656565656565656565656565656565656",
@@ -551,7 +553,7 @@ mod tests {
     }
 
     // sign_case_37286e1a6d1f6eb3
-    fn vector_sign_5() -> (group::Private, Vec<u8>, Signature) {
+    fn vector_sign_5() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x47b8192d77bf871b62e87859d653922725724a5c031afeabc60bcef5ff665138",
             "0xabababababababababababababababababababababababababababababababab",
@@ -560,7 +562,7 @@ mod tests {
     }
 
     // sign_case_7055381f640f2c1d
-    fn vector_sign_6() -> (group::Private, Vec<u8>, Signature) {
+    fn vector_sign_6() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x328388aff0d4a5b7dc9205abd374e7e98f3cd9f3418edb4eafda5fb16473d216",
             "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -569,7 +571,7 @@ mod tests {
     }
 
     // sign_case_c82df61aa3ee60fb
-    fn vector_sign_7() -> (group::Private, Vec<u8>, Signature) {
+    fn vector_sign_7() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x263dbd792f5b1be47ed85f8938c0f29586af0d3ac7b977f21c278fe1462040e3",
             "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -578,7 +580,7 @@ mod tests {
     }
 
     // sign_case_d0e28d7e76eb6e9c
-    fn vector_sign_8() -> (group::Private, Vec<u8>, Signature) {
+    fn vector_sign_8() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x263dbd792f5b1be47ed85f8938c0f29586af0d3ac7b977f21c278fe1462040e3",
             "0x5656565656565656565656565656565656565656565656565656565656565656",
@@ -587,7 +589,7 @@ mod tests {
     }
 
     // sign_case_f2ae1097e7d0e18b
-    fn vector_sign_9() -> (group::Private, Vec<u8>, Signature) {
+    fn vector_sign_9() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x263dbd792f5b1be47ed85f8938c0f29586af0d3ac7b977f21c278fe1462040e3",
             "0xabababababababababababababababababababababababababababababababab",
@@ -597,9 +599,9 @@ mod tests {
 
     // verify_infinity_pubkey_and_infinity_signature
     fn vector_verify_1() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -612,9 +614,9 @@ mod tests {
 
     // verify_tampered_signature_case_2ea479adf8c40300
     fn vector_verify_2() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -627,9 +629,9 @@ mod tests {
 
     // verify_tampered_signature_case_2f09d443ab8a3ac2
     fn vector_verify_3() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -642,9 +644,9 @@ mod tests {
 
     // verify_tampered_signature_case_6b3b17f6962a490c
     fn vector_verify_4() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -657,9 +659,9 @@ mod tests {
 
     // verify_tampered_signature_case_6eeb7c52dfd9baf0
     fn vector_verify_5() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -672,9 +674,9 @@ mod tests {
 
     // verify_tampered_signature_case_8761a0b7e920c323
     fn vector_verify_6() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -687,9 +689,9 @@ mod tests {
 
     // verify_tampered_signature_case_195246ee3bd3b6ec
     fn vector_verify_7() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -702,9 +704,9 @@ mod tests {
 
     // verify_tampered_signature_case_3208262581c8fc09
     fn vector_verify_8() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -717,9 +719,9 @@ mod tests {
 
     // verify_tampered_signature_case_d34885d766d5f705
     fn vector_verify_9() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -732,9 +734,9 @@ mod tests {
 
     // verify_tampered_signature_case_e8a50c445c855360
     fn vector_verify_10() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -747,9 +749,9 @@ mod tests {
 
     // verify_valid_case_2ea479adf8c40300
     fn vector_verify_11() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -762,9 +764,9 @@ mod tests {
 
     // verify_valid_case_2f09d443ab8a3ac2
     fn vector_verify_12() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -777,9 +779,9 @@ mod tests {
 
     // verify_valid_case_6b3b17f6962a490c
     fn vector_verify_13() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -792,9 +794,9 @@ mod tests {
 
     // verify_valid_case_6eeb7c52dfd9baf0
     fn vector_verify_14() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -807,9 +809,9 @@ mod tests {
 
     // verify_valid_case_8761a0b7e920c323
     fn vector_verify_15() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -822,9 +824,9 @@ mod tests {
 
     // verify_valid_case_195246ee3bd3b6ec
     fn vector_verify_16() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -837,9 +839,9 @@ mod tests {
 
     // verify_valid_case_3208262581c8fc09
     fn vector_verify_17() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -852,9 +854,9 @@ mod tests {
 
     // verify_valid_case_d34885d766d5f705
     fn vector_verify_18() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -867,9 +869,9 @@ mod tests {
 
     // verify_valid_case_e8a50c445c855360
     fn vector_verify_19() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -882,9 +884,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_2ea479adf8c40300
     fn vector_verify_20() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -897,9 +899,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_2f09d443ab8a3ac2
     fn vector_verify_21() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -912,9 +914,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_6b3b17f6962a490c
     fn vector_verify_22() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -927,9 +929,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_6eeb7c52dfd9baf0
     fn vector_verify_23() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -942,9 +944,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_8761a0b7e920c323
     fn vector_verify_24() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -957,9 +959,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_195246ee3bd3b6ec
     fn vector_verify_25() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -972,9 +974,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_3208262581c8fc09
     fn vector_verify_26() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -987,9 +989,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_d34885d766d5f705
     fn vector_verify_27() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -1002,9 +1004,9 @@ mod tests {
 
     // verify_wrong_pubkey_case_e8a50c445c855360
     fn vector_verify_28() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
@@ -1017,9 +1019,9 @@ mod tests {
 
     // verifycase_one_privkey_47117849458281be
     fn vector_verify_29() -> (
-        Result<Public, CodecError>,
+        Result<<MinPk as Variant>::Public, CodecError>,
         Vec<u8>,
-        Result<Signature, CodecError>,
+        Result<<MinPk as Variant>::Signature, CodecError>,
         bool,
     ) {
         let v = parse_verify_vector(
