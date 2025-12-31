@@ -343,7 +343,11 @@ impl Display for Summary {
 impl Span for Summary {}
 impl Array for Summary {}
 
-impl crate::Digest for Summary {}
+impl crate::Digest for Summary {
+    const EMPTY: Self = Self {
+        hash: blake3::Hash::from_bytes([0u8; blake3::OUT_LEN]),
+    };
+}
 
 impl Random for Summary {
     fn random(mut rng: impl CryptoRngCore) -> Self {
