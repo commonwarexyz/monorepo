@@ -1071,11 +1071,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Persistable for Freezer<E
         Ok(())
     }
 
-    async fn close(self) -> Result<(), Self::Error> {
-        self.close().await?;
-        Ok(())
-    }
-
     async fn destroy(self) -> Result<(), Self::Error> {
         self.destroy().await?;
         Ok(())

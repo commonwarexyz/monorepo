@@ -359,9 +359,10 @@ mod test {
             assert_eq!(db.inactivity_floor_loc(), 3383);
             assert_eq!(db.snapshot.items(), 857);
 
-            // Close & reopen the db, making sure the re-opened db has exactly the same state.
+            // Drop & reopen the db, making sure it has exactly the same state.
             let root = db.root();
-            db.close().await.unwrap();
+            db.sync().await.unwrap();
+            drop(db);
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), 4241);
@@ -546,9 +547,9 @@ mod test {
             }
             db.commit(None).await.unwrap();
             let root = db.root();
-            db.close().await.unwrap();
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
+            drop(db);
             let db = open_db(context.clone()).await;
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
@@ -587,9 +588,10 @@ mod test {
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert!(db.get(&k).await.unwrap().is_none());
 
-            // Close & reopen the db, making sure the re-opened db has exactly the same state.
+            // Drop & reopen the db, making sure it has exactly the same state.
             let root = db.root();
-            db.close().await.unwrap();
+            db.sync().await.unwrap();
+            drop(db);
             let db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
             assert_eq!(db.get_metadata().await.unwrap(), None);

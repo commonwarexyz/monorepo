@@ -451,10 +451,6 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Persistable for Ordi
         self.sync().await
     }
 
-    async fn close(self) -> Result<(), Self::Error> {
-        self.close().await
-    }
-
     async fn destroy(self) -> Result<(), Self::Error> {
         self.destroy().await
     }

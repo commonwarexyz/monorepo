@@ -148,8 +148,9 @@ where
     journal.prune(30).await.unwrap();
     assert!(journal.oldest_retained_pos().is_none());
 
-    // Close and reopen
-    journal.close().await.unwrap();
+    // Drop and reopen
+    journal.sync().await.unwrap();
+    drop(journal);
     let journal = factory("oldest_after_prune".to_string()).await.unwrap();
     assert!(journal.oldest_retained_pos().is_none());
 
@@ -337,7 +338,8 @@ where
     let size_after_all = journal.size();
     assert_eq!(size_after, size_after_all);
 
-    journal.close().await.unwrap();
+    journal.sync().await.unwrap();
+    drop(journal);
 
     let journal = factory("prune_retains_size".to_string()).await.unwrap();
     let size_after_close = journal.size();
@@ -630,7 +632,7 @@ where
         let size = journal.size();
         assert_eq!(size, 15);
 
-        journal.close().await.unwrap();
+        journal.sync().await.unwrap();
     }
 
     // Re-open and verify state persists
@@ -689,7 +691,7 @@ where
         let size = journal.size();
         assert_eq!(size, 25);
 
-        journal.close().await.unwrap();
+        journal.sync().await.unwrap();
     }
 
     // Re-open and verify pruned state persists

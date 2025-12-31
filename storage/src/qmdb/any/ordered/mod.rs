@@ -819,10 +819,6 @@ where
         self.sync().await
     }
 
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
-    }
-
     async fn destroy(self) -> Result<(), Error> {
         self.destroy().await
     }
@@ -907,10 +903,6 @@ where
 
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
     }
 
     async fn destroy(self) -> Result<(), Error> {

@@ -344,10 +344,6 @@ where
         self.sync().await
     }
 
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
-    }
-
     async fn destroy(self) -> Result<(), Error> {
         self.destroy().await
     }
@@ -380,10 +376,6 @@ where
 
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -616,9 +608,10 @@ pub(super) mod test {
         assert_eq!(db.op_count(), Location::new_unchecked(1957));
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
 
-        // Close & reopen and ensure state matches.
+        // Drop & reopen and ensure state matches.
         let root = db.root();
-        db.close().await.unwrap();
+        db.sync().await.unwrap();
+        drop(db);
         let db = reopen_db(context.clone()).await;
         assert_eq!(root, db.root());
         assert_eq!(db.op_count(), Location::new_unchecked(1957));
@@ -727,6 +720,7 @@ pub(super) mod test {
         db.commit(None).await.unwrap();
         assert_eq!(db.op_count(), 14);
         let root = db.root();
+        drop(db);
         let db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 14);
         assert_eq!(db.root(), root);
@@ -961,7 +955,7 @@ pub(super) mod test {
         assert!(db.get(&k).await.unwrap().is_none());
 
         let root = db.root();
-        db.close().await.unwrap();
+        drop(db);
         let db = reopen_db(context.clone()).await;
         assert_eq!(root, db.root());
         assert_eq!(db.get_metadata().await.unwrap(), None);

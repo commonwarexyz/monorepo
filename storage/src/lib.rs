@@ -52,9 +52,6 @@ pub trait Persistable {
     /// This provides a stronger guarantee than [Self::commit] but may be slower.
     fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>>;
 
-    /// Close the structure, syncing all pending writes and releasing resources.
-    fn close(self) -> impl std::future::Future<Output = Result<(), Self::Error>>;
-
     /// Destroy the structure, removing all associated storage.
     ///
     /// This method consumes the structure and deletes all persisted data, leaving behind no storage

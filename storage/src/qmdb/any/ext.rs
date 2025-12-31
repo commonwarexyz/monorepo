@@ -35,16 +35,6 @@ impl<A: CleanAny> AnyExt<A> {
         }
     }
 
-    /// Close the database without destroying it. Uncommitted operations may be lost.
-    pub async fn close(mut self) -> Result<(), Error> {
-        // Merkleize before close
-        self.ensure_clean().await?;
-        match self.inner.take().expect("wrapper should never be empty") {
-            State::Clean(clean) => clean.close().await,
-            _ => unreachable!("ensure_clean guarantees Clean state"),
-        }
-    }
-
     /// Ensure we're in dirty state, transitioning if necessary.
     fn ensure_dirty(&mut self) {
         let state = self.inner.take().expect("wrapper should never be empty");
@@ -129,10 +119,6 @@ where
             State::Clean(clean) => clean.sync().await,
             _ => unreachable!("ensure_clean guarantees Clean state"),
         }
-    }
-
-    async fn close(self) -> Result<(), Self::Error> {
-        self.close().await
     }
 
     async fn destroy(mut self) -> Result<(), Self::Error> {
