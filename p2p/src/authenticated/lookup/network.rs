@@ -61,6 +61,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 allow_private_ips: cfg.allow_private_ips,
                 allow_dns: cfg.allow_dns,
+                bypass_ip_check: cfg.bypass_ip_check,
                 listener: listener_mailbox,
             },
         );
@@ -161,7 +162,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
                 allow_private_ips: self.cfg.allow_private_ips,
-                attempt_unregistered_handshakes: self.cfg.attempt_unregistered_handshakes,
+                bypass_ip_check: self.cfg.bypass_ip_check,
                 max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
                 allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
                 allowed_handshake_rate_per_subnet: self.cfg.allowed_handshake_rate_per_subnet,

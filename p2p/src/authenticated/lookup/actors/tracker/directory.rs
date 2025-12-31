@@ -28,6 +28,9 @@ pub struct Config {
     /// Whether DNS-based ingress addresses are allowed.
     pub allow_dns: bool,
 
+    /// Whether to skip IP verification for incoming connections (allows unknown IPs).
+    pub bypass_ip_check: bool,
+
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
 
@@ -46,6 +49,9 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
 
     /// Whether DNS-based ingress addresses are allowed.
     allow_dns: bool,
+
+    /// Whether to skip IP verification for incoming connections (allows unknown IPs).
+    bypass_ip_check: bool,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -83,6 +89,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             max_sets: cfg.max_sets,
             allow_private_ips: cfg.allow_private_ips,
             allow_dns: cfg.allow_dns,
+            bypass_ip_check: cfg.bypass_ip_check,
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
@@ -241,11 +248,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns true if this peer is acceptable (can accept an incoming connection from them).
     ///
-    /// Checks eligibility (peer set membership), egress IP match, and connection status.
+    /// Checks eligibility (peer set membership), egress IP match (if not bypass_ip_check), and connection status.
     pub fn acceptable(&self, peer: &C, source_ip: IpAddr) -> bool {
         self.peers
             .get(peer)
-            .is_some_and(|r| r.acceptable(source_ip))
+            .is_some_and(|record| record.acceptable(source_ip, self.bypass_ip_check))
     }
 
     /// Return egress IPs we should listen for (accept incoming connections from).
@@ -342,6 +349,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
+            bypass_ip_check: false,
             max_sets: 1,
             rate_limit: Quota::per_second(NZU32!(10)),
         };
@@ -403,6 +411,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
+            bypass_ip_check: false,
             max_sets: 3,
             rate_limit: Quota::per_second(NZU32!(10)),
         };
@@ -490,6 +499,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
+            bypass_ip_check: false,
             max_sets: 3,
             rate_limit: Quota::per_second(NZU32!(10)),
         };
@@ -535,6 +545,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
+            bypass_ip_check: false,
             max_sets: 3,
             rate_limit: Quota::per_second(NZU32!(10)),
         };
@@ -633,6 +644,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: false,
+            bypass_ip_check: false,
             max_sets: 3,
             rate_limit: Quota::per_second(NZU32!(10)),
         };
@@ -697,6 +709,7 @@ mod tests {
         let config = super::Config {
             allow_private_ips: false,
             allow_dns: true,
+            bypass_ip_check: false,
             max_sets: 3,
             rate_limit: Quota::per_second(NZU32!(10)),
         };
