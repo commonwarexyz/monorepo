@@ -42,7 +42,7 @@ impl Bench {
             (None, None)
         };
         let players = dealers.clone();
-        let info = Info::new(&[], 0, output, Default::default(), dealers, players).unwrap();
+        let info = Info::new(b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_BENCH", 0, output, Default::default(), dealers, players).unwrap();
 
         // Create player state for every participant
         let mut player_states = private_keys

@@ -384,7 +384,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
             .take(len)
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(private_key.sign(&[], &message))
+        Ok(private_key.sign(b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_TEST", &message))
     }
 }
 

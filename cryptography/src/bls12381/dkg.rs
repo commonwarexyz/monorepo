@@ -1894,7 +1894,7 @@ mod test_plan {
 
                 // Create round info
                 let info = Info::new(
-                    &[],
+                    b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
                     i_round as u64,
                     previous_output.clone(),
                     Default::default(),
@@ -2529,7 +2529,7 @@ mod test {
         let sk = ed25519::PrivateKey::from_seed(0);
         let pk = sk.public_key();
         let info = Info::<MinPk, _>::new(
-            &[],
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
             0,
             None,
             Default::default(),
