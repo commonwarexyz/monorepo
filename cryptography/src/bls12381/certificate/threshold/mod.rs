@@ -351,7 +351,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         .is_ok()
     }
 
-    pub const fn is_attributable(&self) -> bool {
+    pub const fn is_attributable() -> bool {
         false
     }
 
@@ -540,8 +540,8 @@ mod macros {
                     self.generic.verify_certificates::<Self, _, D, _>(rng, namespace, certificates)
                 }
 
-                fn is_attributable(&self) -> bool {
-                    self.generic.is_attributable()
+                fn is_attributable() -> bool {
+                    $crate::bls12381::certificate::threshold::Generic::<P, V>::is_attributable()
                 }
 
                 fn certificate_codec_config(
@@ -981,11 +981,8 @@ mod tests {
     }
 
     fn test_is_not_attributable<V: Variant + Send + Sync>() {
-        let (schemes, verifier, _) = setup_signers::<V>(4, 61);
-
         // Threshold signatures are non-attributable
-        assert!(!schemes[0].is_attributable());
-        assert!(!verifier.is_attributable());
+        assert!(!Scheme::<ed25519::PublicKey, V>::is_attributable());
     }
 
     #[test]

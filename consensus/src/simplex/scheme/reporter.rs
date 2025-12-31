@@ -88,7 +88,7 @@ impl<
         }
 
         // Filter based on scheme attributability
-        if !self.scheme.is_attributable() {
+        if !S::is_attributable() {
             match activity {
                 Activity::Notarize(_)
                 | Activity::Nullify(_)
@@ -125,6 +125,7 @@ mod tests {
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk,
         certificate::{self, mocks::Fixture, Scheme as _},
+        ed25519::PublicKey as Ed25519PublicKey,
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
@@ -179,7 +180,10 @@ mod tests {
             schemes, verifier, ..
         } = ed25519::fixture(&mut rng, 4);
 
-        assert!(verifier.is_attributable(), "Ed25519 must be attributable");
+        assert!(
+            ed25519::Scheme::is_attributable(),
+            "Ed25519 must be attributable"
+        );
 
         let mock = MockReporter::new();
         let mut reporter =
@@ -215,7 +219,10 @@ mod tests {
             schemes, verifier, ..
         } = ed25519::fixture(&mut rng, 4);
 
-        assert!(verifier.is_attributable(), "Ed25519 must be attributable");
+        assert!(
+            ed25519::Scheme::is_attributable(),
+            "Ed25519 must be attributable"
+        );
 
         let mock = MockReporter::new();
         let mut reporter = AttributableReporter::new(
@@ -259,7 +266,7 @@ mod tests {
         } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 4);
 
         assert!(
-            !verifier.is_attributable(),
+            !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
             "BLS threshold must be non-attributable"
         );
 
@@ -310,7 +317,7 @@ mod tests {
         } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 4);
 
         assert!(
-            !verifier.is_attributable(),
+            !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
             "BLS threshold must be non-attributable"
         );
 
@@ -349,7 +356,10 @@ mod tests {
             schemes, verifier, ..
         } = ed25519::fixture(&mut rng, 4);
 
-        assert!(verifier.is_attributable(), "Ed25519 must be attributable");
+        assert!(
+            ed25519::Scheme::is_attributable(),
+            "Ed25519 must be attributable"
+        );
 
         let mock = MockReporter::new();
         let mut reporter =
