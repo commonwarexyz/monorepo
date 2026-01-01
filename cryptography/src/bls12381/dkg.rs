@@ -1894,7 +1894,7 @@ mod test_plan {
 
                 // Create round info
                 let info = Info::new(
-                    &[],
+                    b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
                     i_round as u64,
                     previous_output.clone(),
                     Default::default(),
@@ -2205,7 +2205,7 @@ mod test_plan {
 
                 // Generate and verify threshold signature
                 let test_message = format!("test message round {i_round}").into_bytes();
-                let namespace = Some(&b"test"[..]);
+                let namespace = b"test";
 
                 let mut partial_sigs = Vec::new();
                 for &i_player in &round.players {
@@ -2529,7 +2529,7 @@ mod test {
         let sk = ed25519::PrivateKey::from_seed(0);
         let pk = sk.public_key();
         let info = Info::<MinPk, _>::new(
-            &[],
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
             0,
             None,
             Default::default(),

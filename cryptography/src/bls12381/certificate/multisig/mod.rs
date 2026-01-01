@@ -91,8 +91,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         let (index, private_key) = self.signer.as_ref()?;
 
         let (namespace, message) = subject.namespace_and_message(namespace);
-        let signature =
-            ops::sign_message::<V>(private_key, Some(namespace.as_ref()), message.as_ref());
+        let signature = ops::sign_message::<V>(private_key, namespace.as_ref(), message.as_ref());
 
         Some(Attestation {
             signer: *index,
@@ -118,7 +117,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         let (namespace, message) = subject.namespace_and_message(namespace);
         ops::verify_message::<V>(
             public_key,
-            Some(namespace.as_ref()),
+            namespace.as_ref(),
             message.as_ref(),
             &attestation.signature,
         )
@@ -159,12 +158,8 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         // Verify attestations and return any invalid ones.
         let (namespace, message) = subject.namespace_and_message(namespace);
-        let invalid_indices = batch::verify_public_keys::<_, V>(
-            rng,
-            Some(namespace.as_ref()),
-            message.as_ref(),
-            &entries,
-        );
+        let invalid_indices =
+            batch::verify_public_keys::<_, V>(rng, namespace.as_ref(), message.as_ref(), &entries);
 
         // Mark invalid attestations.
         for idx in invalid_indices {
@@ -242,9 +237,10 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         // Verify the aggregate signature.
         let (namespace, message) = subject.namespace_and_message(namespace);
-        aggregate::verify_public_keys::<V, _>(
-            publics.iter(),
-            Some(namespace.as_ref()),
+        let agg_public = aggregate::combine_public_keys::<V, _>(&publics);
+        aggregate::verify_public_keys::<V>(
+            &agg_public,
+            namespace.as_ref(),
             message.as_ref(),
             &certificate.signature,
         )
@@ -761,6 +757,7 @@ mod tests {
     }
 
     fn test_verify_certificate_detects_corruption<V: Variant + Send + Sync>() {
+        let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 50);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -777,7 +774,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -787,7 +784,7 @@ mod tests {
         let mut corrupted = certificate;
         corrupted.signature = aggregate::Signature::zero();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &corrupted

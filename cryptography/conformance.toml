@@ -76,7 +76,7 @@ hash = "5ea2cd9db2e4a992cea58f8b05ab8d668e9f46d8f2bb93d29c4cb9889cef8702"
 
 ["commonware_cryptography::bls12381::scheme::tests::conformance::CodecConformance<Signature>"]
 n_cases = 65536
-hash = "47795d1da003840d57a425277356731bb3bebe5ac11c08ab7cb204f5e52b2d62"
+hash = "dcc604b71699aa675d3f3a033a6975b8fb9e1dde6809ba5c37d516cf13dce75d"
 
 ["commonware_cryptography::bls12381::tle::tests::conformance::CodecConformance<Ciphertext<MinPk>>"]
 n_cases = 65536

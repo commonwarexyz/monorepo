@@ -251,7 +251,7 @@ mod tests {
 
     fn test_sign_and_verify<C: PrivateKey>() {
         let private_key = C::from_seed(0);
-        let namespace = &b"test_namespace"[..];
+        let namespace = b"test_namespace";
         let message = b"test_message";
         let signature = private_key.sign(namespace, message);
         let public_key = private_key.public_key();
@@ -260,7 +260,7 @@ mod tests {
 
     fn test_sign_and_verify_wrong_message<C: PrivateKey>() {
         let private_key = C::from_seed(0);
-        let namespace = &b"test_namespace"[..];
+        let namespace = b"test_namespace";
         let message = b"test_message";
         let wrong_message = b"wrong_message";
         let signature = private_key.sign(namespace, message);
@@ -270,8 +270,8 @@ mod tests {
 
     fn test_sign_and_verify_wrong_namespace<C: PrivateKey>() {
         let private_key = C::from_seed(0);
-        let namespace = &b"test_namespace"[..];
-        let wrong_namespace = &b"wrong_namespace"[..];
+        let namespace = b"test_namespace";
+        let wrong_namespace = b"wrong_namespace";
         let message = b"test_message";
         let signature = private_key.sign(namespace, message);
         let public_key = private_key.public_key();
@@ -280,7 +280,7 @@ mod tests {
 
     fn test_empty_namespace<C: PrivateKey>() {
         let private_key = C::from_seed(0);
-        let empty_namespace = &b""[..];
+        let empty_namespace = b"";
         let message = b"test_message";
         let signature = private_key.sign(empty_namespace, message);
         let public_key = private_key.public_key();
@@ -290,7 +290,7 @@ mod tests {
     fn test_signature_determinism<C: PrivateKey>() {
         let private_key_1 = C::from_seed(0);
         let private_key_2 = C::from_seed(0);
-        let namespace = &b"test_namespace"[..];
+        let namespace = b"test_namespace";
         let message = b"test_message";
         let signature_1 = private_key_1.sign(namespace, message);
         let signature_2 = private_key_2.sign(namespace, message);
@@ -301,7 +301,7 @@ mod tests {
     fn test_invalid_signature_publickey_pair<C: PrivateKey>() {
         let private_key = C::from_seed(0);
         let private_key_2 = C::from_seed(1);
-        let namespace = &b"test_namespace"[..];
+        let namespace = b"test_namespace";
         let message = b"test_message";
         let signature = private_key.sign(namespace, message);
         let public_key = private_key_2.public_key();

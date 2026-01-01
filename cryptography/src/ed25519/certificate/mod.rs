@@ -833,6 +833,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_detects_corruption() {
+        let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(4, 50);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -849,7 +850,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -859,7 +860,7 @@ mod tests {
         let mut corrupted = certificate;
         corrupted.signatures[0] = corrupted.signatures[1].clone();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &corrupted
@@ -1169,6 +1170,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_invalid_certificate_signers_size() {
+        let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(4, 64);
         let participants_len = schemes.len();
 
@@ -1185,7 +1187,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,
@@ -1197,7 +1199,7 @@ mod tests {
 
         // Certificate verification should fail due to size mismatch
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,

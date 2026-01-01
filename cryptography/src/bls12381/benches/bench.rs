@@ -1,14 +1,14 @@
 use criterion::criterion_main;
 
-mod aggregate_public_keys;
-mod aggregate_signatures;
 mod aggregate_verify_messages;
 mod aggregate_verify_public_keys;
 mod batch_verify_messages;
+mod combine_public_keys;
+mod combine_signatures;
 mod dkg;
 mod evaluate_point;
-mod scheme_verify_messages;
-mod scheme_verify_public_keys;
+mod scheme_batch_verify_multiple_messages;
+mod scheme_batch_verify_multiple_public_keys;
 mod signature_generation;
 mod signature_verification;
 mod threshold_batch_verify_public_keys;
@@ -20,15 +20,15 @@ mod tle_encrypt;
 criterion_main!(
     dkg::benches,
     threshold_recover::benches,
-    aggregate_public_keys::benches,
-    aggregate_signatures::benches,
+    combine_public_keys::benches,
+    combine_signatures::benches,
     aggregate_verify_messages::benches,
     signature_generation::benches,
     signature_verification::benches,
     batch_verify_messages::benches,
     aggregate_verify_public_keys::benches,
-    scheme_verify_messages::benches,
-    scheme_verify_public_keys::benches,
+    scheme_batch_verify_multiple_messages::benches,
+    scheme_batch_verify_multiple_public_keys::benches,
     evaluate_point::benches,
     threshold_batch_verify_public_keys::benches,
     threshold_batch_verify_public_keys_precomputed::benches,

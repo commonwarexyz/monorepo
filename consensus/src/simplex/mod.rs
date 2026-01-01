@@ -304,10 +304,10 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{max_faults, quorum, NZUsize};
+    use commonware_utils::{max_faults, quorum, test_rng, NZUsize};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
-    use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
+    use rand::{rngs::StdRng, Rng as _};
     use std::{
         collections::{BTreeMap, HashMap},
         num::{NonZeroU32, NonZeroUsize},
@@ -870,7 +870,7 @@ mod tests {
         let mut prev_checkpoint = None;
 
         // Create validator keys
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = test_rng();
         let Fixture {
             participants,
             schemes,

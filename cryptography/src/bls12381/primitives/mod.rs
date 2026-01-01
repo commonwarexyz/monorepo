@@ -26,7 +26,7 @@
 //! let (sharing, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, Mode::default(), n);
 //!
 //! // Generate partial signatures from shares
-//! let namespace = Some(&b"demo"[..]);
+//! let namespace = b"demo";
 //! let message = b"hello world";
 //! let partials: Vec<_> = shares.iter().map(|s| threshold::sign_message::<MinSig>(s, namespace, message)).collect();
 //!

@@ -14,22 +14,18 @@ fn benchmark_aggregate_verify_public_keys(c: &mut Criterion) {
                     let mut signatures = Vec::with_capacity(n);
                     for _ in 0..n {
                         let (private, public) = ops::keypair::<_, MinSig>(&mut thread_rng());
-                        let signature =
-                            ops::sign_message::<MinSig>(&private, Some(namespace), &msg);
+                        let signature = ops::sign_message::<MinSig>(&private, namespace, &msg);
                         public_keys.push(public);
                         signatures.push(signature);
                     }
                     (
-                        public_keys,
+                        ops::aggregate::combine_public_keys::<MinSig, _>(&public_keys),
                         ops::aggregate::combine_signatures::<MinSig, _>(&signatures),
                     )
                 },
-                |(public_keys, signature)| {
-                    ops::aggregate::verify_public_keys::<MinSig, _>(
-                        &public_keys,
-                        Some(namespace),
-                        &msg,
-                        &signature,
+                |(public, signature)| {
+                    ops::aggregate::verify_public_keys::<MinSig>(
+                        &public, namespace, &msg, &signature,
                     )
                     .unwrap();
                 },

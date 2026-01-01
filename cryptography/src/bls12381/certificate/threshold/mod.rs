@@ -180,7 +180,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         let (namespace, message) = subject.namespace_and_message(namespace);
         let signature =
-            threshold::sign_message::<V>(share, Some(namespace.as_ref()), message.as_ref()).value;
+            threshold::sign_message::<V>(share, namespace.as_ref(), message.as_ref()).value;
 
         Some(Attestation {
             signer: share.index,
@@ -206,7 +206,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         let (namespace, message) = subject.namespace_and_message(namespace);
         ops::verify_message::<V>(
             &evaluated,
-            Some(namespace.as_ref()),
+            namespace.as_ref(),
             message.as_ref(),
             &attestation.signature,
         )
@@ -241,7 +241,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         if let Err(errs) = threshold::batch_verify_public_keys::<_, V, _>(
             rng,
             polynomial,
-            Some(namespace.as_ref()),
+            namespace.as_ref(),
             message.as_ref(),
             partials.iter(),
         ) {
@@ -299,13 +299,8 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
     {
         let identity = self.identity();
         let (namespace, message) = subject.namespace_and_message(namespace);
-        ops::verify_message::<V>(
-            identity,
-            Some(namespace.as_ref()),
-            message.as_ref(),
-            certificate,
-        )
-        .is_ok()
+        ops::verify_message::<V>(identity, namespace.as_ref(), message.as_ref(), certificate)
+            .is_ok()
     }
 
     /// Verifies multiple certificates in a batch.
@@ -327,7 +322,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         for (subject, certificate) in certificates {
             let (ns, message) = subject.namespace_and_message(namespace);
-            entries.push((Some(ns.to_vec()), message.to_vec(), *certificate));
+            entries.push((ns.to_vec(), message.to_vec(), *certificate));
         }
 
         if entries.is_empty() {
@@ -336,7 +331,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
 
         let entries_refs: Vec<_> = entries
             .iter()
-            .map(|(ns, msg, sig)| (ns.as_deref(), msg.as_ref(), *sig))
+            .map(|(ns, msg, sig)| (ns.as_ref(), msg.as_ref(), *sig))
             .collect();
 
         batch::verify_messages::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
@@ -764,9 +759,8 @@ mod tests {
 
         let certificate = schemes[0].assemble(attestations).unwrap();
 
-        let mut rng = StdRng::seed_from_u64(49);
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut rng,
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -780,6 +774,7 @@ mod tests {
     }
 
     fn test_verify_certificate_detects_corruption<V: Variant + Send + Sync>() {
+        let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(4, 50);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -796,7 +791,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -805,7 +800,7 @@ mod tests {
         // Corrupted certificate fails
         let corrupted = V::Signature::zero();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &corrupted
@@ -1069,7 +1064,7 @@ mod tests {
     }
 
     fn signer_shares_must_match_participant_indices<V: Variant + Send + Sync>() {
-        let mut rng = StdRng::seed_from_u64(64);
+        let mut rng = test_rng();
 
         // Generate identity keys (ed25519)
         let identity_keys: Vec<_> = (0..4)
@@ -1189,7 +1184,7 @@ mod tests {
         // Verify the partial signature matches what we'd get from direct signing
         let share = scheme.share().expect("expected signer");
 
-        let expected = sign_message::<V>(share, Some(NAMESPACE), MESSAGE);
+        let expected = sign_message::<V>(share, NAMESPACE, MESSAGE);
 
         assert_eq!(signature.signer, share.index);
         assert_eq!(signature.signature, expected.value);
