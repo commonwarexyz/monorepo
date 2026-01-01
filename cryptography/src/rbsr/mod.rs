@@ -645,16 +645,16 @@ impl<'a, S: Storage> Reconciler<'a, S> {
                     }
 
                     // Response depends on role:
-                    // - Initiator receiving IdList: this is the response to our request, reply with Skip
-                    // - Responder receiving IdList: we need to send our own IdList so they can compare
+                    // - Initiator receiving IdList: send our IdList so responder can compare
+                    // - Responder receiving IdList: this completes the exchange, reply with Skip
                     if self.is_initiator {
-                        response_ranges
-                            .push(Range::new(range.upper_bound.clone(), RangeMode::Skip));
-                    } else {
                         response_ranges.push(Range::new(
                             range.upper_bound.clone(),
                             RangeMode::IdList(local_ids),
                         ));
+                    } else {
+                        response_ranges
+                            .push(Range::new(range.upper_bound.clone(), RangeMode::Skip));
                     }
                 }
             }
@@ -885,16 +885,22 @@ mod tests {
         let mut reconciler_b = Reconciler::new(&storage_b, 4);
         let msg2 = reconciler_b.reconcile(&msg1).unwrap();
 
-        // Continue reconciliation until complete
-        let _msg3 = reconciler_a.reconcile(&msg2).unwrap();
+        // A receives B's IdList, compares, sends its own IdList
+        let msg3 = reconciler_a.reconcile(&msg2).unwrap();
 
-        // A should know B has [0x03] and needs [0x02]
-        let have_ids = reconciler_a.have_ids();
-        let need_ids = reconciler_a.need_ids();
+        // B receives A's IdList, compares, sends Skip (completing the exchange)
+        let msg4 = reconciler_b.reconcile(&msg3).unwrap();
+        assert!(msg4.is_complete());
 
-        assert!(
-            have_ids.contains(&Digest([0x03; 32])) || need_ids.contains(&Digest([0x02; 32]))
-        );
+        // A should know B has [0x03] (A needs to fetch)
+        assert!(reconciler_a.have_ids().contains(&Digest([0x03; 32])));
+        // A should know it has [0x02] that B needs
+        assert!(reconciler_a.need_ids().contains(&Digest([0x02; 32])));
+
+        // B should know A has [0x02] (B needs to fetch)
+        assert!(reconciler_b.have_ids().contains(&Digest([0x02; 32])));
+        // B should know it has [0x03] that A needs
+        assert!(reconciler_b.need_ids().contains(&Digest([0x03; 32])));
     }
 
     #[test]
@@ -1036,6 +1042,184 @@ mod tests {
 
         let not_inf = Bound::new(1000, Digest([0x01; 32]));
         assert!(!not_inf.is_infinity());
+    }
+
+    #[test]
+    fn test_bound_codec() {
+        // Test normal bound
+        let bound = Bound::new(12345, Digest([0xAB; 32]));
+        let mut buf = Vec::new();
+        bound.write(&mut buf);
+        let decoded = Bound::read(&mut &buf[..]).unwrap();
+        assert_eq!(bound, decoded);
+
+        // Test infinity bound
+        let inf = Bound::infinity();
+        buf.clear();
+        inf.write(&mut buf);
+        let decoded = Bound::read(&mut &buf[..]).unwrap();
+        assert_eq!(inf, decoded);
+
+        // Test zero bound
+        let zero = Bound::zero();
+        buf.clear();
+        zero.write(&mut buf);
+        let decoded = Bound::read(&mut &buf[..]).unwrap();
+        assert_eq!(zero, decoded);
+    }
+
+    #[test]
+    fn test_empty_fingerprint() {
+        let storage = VecStorage::new();
+        let fp = storage.fingerprint(0, 0);
+
+        // Empty range should produce consistent fingerprint
+        let fp2 = storage.fingerprint(0, 0);
+        assert_eq!(fp, fp2);
+    }
+
+    #[test]
+    fn test_vec_storage_remove() {
+        let mut storage = VecStorage::new();
+        storage.insert(Item::from_bytes(1000, [0x01; 32]));
+        storage.insert(Item::from_bytes(1001, [0x02; 32]));
+        assert_eq!(storage.len(), 2);
+
+        // Remove existing item
+        let removed = storage.remove(&Item::from_bytes(1000, [0x01; 32]));
+        assert!(removed);
+        assert_eq!(storage.len(), 1);
+
+        // Remove non-existent item
+        let removed = storage.remove(&Item::from_bytes(1000, [0x01; 32]));
+        assert!(!removed);
+        assert_eq!(storage.len(), 1);
+    }
+
+    #[test]
+    fn test_vec_storage_contains_id() {
+        let mut storage = VecStorage::new();
+        storage.insert(Item::from_bytes(1000, [0x01; 32]));
+
+        assert!(storage.contains_id(&Digest([0x01; 32])));
+        assert!(!storage.contains_id(&Digest([0x02; 32])));
+    }
+
+    #[test]
+    fn test_message_version_mismatch() {
+        // Create a message with wrong version
+        let mut buf = Vec::new();
+        2u8.write(&mut buf); // Wrong version
+        1u32.write(&mut buf); // 1 range
+        Bound::infinity().write(&mut buf);
+        RangeMode::Skip.write(&mut buf);
+
+        let result = Message::read(&mut &buf[..]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reconciler_version_check() {
+        let storage = VecStorage::new();
+        let mut reconciler = Reconciler::new(&storage, 4);
+
+        // Create message with wrong version
+        let bad_msg = Message {
+            version: 99,
+            ranges: vec![Range::skip_to_infinity()],
+        };
+
+        let result = reconciler.reconcile(&bad_msg);
+        assert!(matches!(result, Err(Error::UnsupportedVersion(99))));
+    }
+
+    #[test]
+    fn test_large_set_exact_differences() {
+        // Test that all differences are found correctly
+        let mut storage_a = VecStorage::new();
+        let mut storage_b = VecStorage::new();
+
+        // Add 10 shared items (small enough to trigger IdList directly)
+        for i in 0u64..10 {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&i.to_le_bytes());
+            storage_a.insert(Item::from_bytes(i * 10, id));
+            storage_b.insert(Item::from_bytes(i * 10, id));
+        }
+
+        // Add 3 unique items to A
+        let mut a_unique = Vec::new();
+        for i in 10u64..13 {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&i.to_le_bytes());
+            storage_a.insert(Item::from_bytes(i * 10, id));
+            a_unique.push(Digest(id));
+        }
+
+        // Add 3 unique items to B
+        let mut b_unique = Vec::new();
+        for i in 13u64..16 {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&i.to_le_bytes());
+            storage_b.insert(Item::from_bytes(i * 10, id));
+            b_unique.push(Digest(id));
+        }
+
+        let mut reconciler_a = Reconciler::new(&storage_a, 16);
+        let mut reconciler_b = Reconciler::new(&storage_b, 16);
+
+        let mut msg = reconciler_a.initiate();
+
+        // Run reconciliation to completion (should be quick with small sets)
+        for round in 0..10 {
+            msg = reconciler_b.reconcile(&msg).unwrap();
+            if msg.is_complete() {
+                break;
+            }
+            msg = reconciler_a.reconcile(&msg).unwrap();
+            if msg.is_complete() {
+                // Final round for B
+                let _ = reconciler_b.reconcile(&msg).unwrap();
+                break;
+            }
+            assert!(round < 9, "reconciliation did not converge");
+        }
+
+        // Verify A found all B's unique items
+        for id in &b_unique {
+            assert!(
+                reconciler_a.have_ids().contains(id),
+                "A should know B has {:?}",
+                id
+            );
+        }
+
+        // Verify A knows what B needs
+        for id in &a_unique {
+            assert!(
+                reconciler_a.need_ids().contains(id),
+                "A should know B needs {:?}",
+                id
+            );
+        }
+
+        // Verify B found all A's unique items
+        for id in &a_unique {
+            assert!(
+                reconciler_b.have_ids().contains(id),
+                "B should know A has {:?}",
+                id
+            );
+        }
+
+        // Verify B knows what A needs
+        for id in &b_unique {
+            assert!(
+                reconciler_b.need_ids().contains(id),
+                "B should know A needs {:?}",
+                id
+            );
+        }
     }
 
     #[cfg(feature = "arbitrary")]
