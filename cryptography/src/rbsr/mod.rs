@@ -28,14 +28,14 @@
 //!
 //! // Create storage for participant A
 //! let mut storage_a = VecStorage::new();
-//! storage_a.insert(Item::new(1000, [0x01; 32]));
-//! storage_a.insert(Item::new(1001, [0x02; 32]));
-//! storage_a.insert(Item::new(1002, [0x03; 32]));
+//! storage_a.insert(Item::from_bytes(1000, [0x01; 32]));
+//! storage_a.insert(Item::from_bytes(1001, [0x02; 32]));
+//! storage_a.insert(Item::from_bytes(1002, [0x03; 32]));
 //!
 //! // Create storage for participant B (missing one item)
 //! let mut storage_b = VecStorage::new();
-//! storage_b.insert(Item::new(1000, [0x01; 32]));
-//! storage_b.insert(Item::new(1002, [0x03; 32]));
+//! storage_b.insert(Item::from_bytes(1000, [0x01; 32]));
+//! storage_b.insert(Item::from_bytes(1002, [0x03; 32]));
 //!
 //! // Participant A initiates reconciliation
 //! let mut reconciler_a = Reconciler::new(&storage_a, 16);
@@ -59,15 +59,15 @@
 //! - <https://github.com/hoytech/negentropy>: Negentropy reference implementation
 //! - <https://arxiv.org/abs/2212.13567>: Range-Based Set Reconciliation paper
 
-use crate::sha256::{Digest as Sha256Digest, Sha256};
+use crate::sha256::{Digest, Sha256};
 use crate::Hasher as _;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
-/// Size of an item ID in bytes (32-byte hash).
-pub const ID_SIZE: usize = 32;
+/// Size of an item ID in bytes (32-byte digest).
+pub const ID_SIZE: usize = Digest::SIZE;
 
 /// Size of a fingerprint in bytes (first 16 bytes of SHA-256).
 pub const FINGERPRINT_SIZE: usize = 16;
@@ -87,20 +87,28 @@ pub struct Item {
     /// Timestamp for ordering (can be any unit: seconds, microseconds, etc.)
     pub timestamp: u64,
     /// Unique identifier, typically a cryptographic hash of the item content
-    pub id: [u8; ID_SIZE],
+    pub id: Digest,
 }
 
 impl Item {
     /// Create a new item with the given timestamp and ID.
-    pub const fn new(timestamp: u64, id: [u8; ID_SIZE]) -> Self {
+    pub const fn new(timestamp: u64, id: Digest) -> Self {
         Self { timestamp, id }
+    }
+
+    /// Create a new item from a timestamp and raw bytes.
+    pub const fn from_bytes(timestamp: u64, id: [u8; ID_SIZE]) -> Self {
+        Self {
+            timestamp,
+            id: Digest(id),
+        }
     }
 }
 
 impl Ord for Item {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         match self.timestamp.cmp(&other.timestamp) {
-            core::cmp::Ordering::Equal => self.id.cmp(&other.id),
+            core::cmp::Ordering::Equal => self.id.as_ref().cmp(other.id.as_ref()),
             ord => ord,
         }
     }
@@ -115,7 +123,7 @@ impl PartialOrd for Item {
 impl Write for Item {
     fn write(&self, buf: &mut impl BufMut) {
         self.timestamp.write(buf);
-        buf.put_slice(&self.id);
+        self.id.write(buf);
     }
 }
 
@@ -124,11 +132,7 @@ impl Read for Item {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let timestamp = u64::read(buf)?;
-        if buf.remaining() < ID_SIZE {
-            return Err(CodecError::EndOfBuffer);
-        }
-        let mut id = [0u8; ID_SIZE];
-        buf.copy_to_slice(&mut id);
+        let id = Digest::read(buf)?;
         Ok(Self { timestamp, id })
     }
 }
@@ -152,10 +156,10 @@ pub struct Bound {
 
 impl Bound {
     /// Create a new bound with the given timestamp and full ID.
-    pub fn new(timestamp: u64, id: [u8; ID_SIZE]) -> Self {
+    pub fn new(timestamp: u64, id: Digest) -> Self {
         Self {
             timestamp,
-            id_prefix: id.to_vec(),
+            id_prefix: id.as_ref().to_vec(),
         }
     }
 
@@ -187,7 +191,7 @@ impl Bound {
             core::cmp::Ordering::Equal => {
                 // Compare ID prefix against item ID
                 let prefix_len = self.id_prefix.len().min(ID_SIZE);
-                self.id_prefix[..prefix_len].cmp(&item.id[..prefix_len])
+                self.id_prefix[..prefix_len].cmp(&item.id.as_ref()[..prefix_len])
             }
             ord => ord,
         }
@@ -310,10 +314,10 @@ impl FingerprintAccumulator {
     }
 
     /// Add an item's ID to the accumulator.
-    pub fn add(&mut self, id: &[u8; ID_SIZE]) {
+    pub fn add(&mut self, id: &Digest) {
         // Add id to sum mod 2^256 (little-endian addition)
         let mut carry: u16 = 0;
-        for (sum_byte, id_byte) in self.sum.iter_mut().zip(id.iter()) {
+        for (sum_byte, id_byte) in self.sum.iter_mut().zip(id.as_ref().iter()) {
             let sum = *sum_byte as u16 + *id_byte as u16 + carry;
             *sum_byte = sum as u8;
             carry = sum >> 8;
@@ -322,10 +326,10 @@ impl FingerprintAccumulator {
     }
 
     /// Subtract an item's ID from the accumulator.
-    pub fn subtract(&mut self, id: &[u8; ID_SIZE]) {
+    pub fn subtract(&mut self, id: &Digest) {
         // Subtract id from sum mod 2^256 (little-endian subtraction)
         let mut borrow: i16 = 0;
-        for (sum_byte, id_byte) in self.sum.iter_mut().zip(id.iter()) {
+        for (sum_byte, id_byte) in self.sum.iter_mut().zip(id.as_ref().iter()) {
             let diff = *sum_byte as i16 - *id_byte as i16 - borrow;
             if diff < 0 {
                 *sum_byte = (diff + 256) as u8;
@@ -369,7 +373,7 @@ impl FingerprintAccumulator {
         let mut hasher = Sha256::new();
         hasher.update(&self.sum);
         hasher.update(&self.count.to_le_bytes());
-        let digest: Sha256Digest = hasher.finalize();
+        let digest = hasher.finalize();
 
         // Take first 16 bytes
         let mut bytes = [0u8; FINGERPRINT_SIZE];
@@ -398,7 +402,7 @@ pub enum RangeMode {
     /// Fingerprint for comparison.
     Fingerprint(Fingerprint),
     /// List of item IDs in this range.
-    IdList(Vec<[u8; ID_SIZE]>),
+    IdList(Vec<Digest>),
 }
 
 impl RangeMode {
@@ -421,7 +425,7 @@ impl Write for RangeMode {
                 Self::MODE_ID_LIST.write(buf);
                 (ids.len() as u32).write(buf);
                 for id in ids {
-                    buf.put_slice(id);
+                    id.write(buf);
                 }
             }
         }
@@ -441,14 +445,9 @@ impl Read for RangeMode {
             }
             Self::MODE_ID_LIST => {
                 let count = u32::read(buf)? as usize;
-                if buf.remaining() < count * ID_SIZE {
-                    return Err(CodecError::EndOfBuffer);
-                }
                 let mut ids = Vec::with_capacity(count);
                 for _ in 0..count {
-                    let mut id = [0u8; ID_SIZE];
-                    buf.copy_to_slice(&mut id);
-                    ids.push(id);
+                    ids.push(Digest::read(buf)?);
                 }
                 Ok(Self::IdList(ids))
             }
@@ -607,7 +606,7 @@ pub trait Storage {
     }
 
     /// Get IDs of items in range [start_idx, end_idx).
-    fn ids_in_range(&self, start_idx: usize, end_idx: usize) -> Vec<[u8; ID_SIZE]> {
+    fn ids_in_range(&self, start_idx: usize, end_idx: usize) -> Vec<Digest> {
         let mut ids = Vec::with_capacity(end_idx.saturating_sub(start_idx));
         for i in start_idx..end_idx {
             if let Some(item) = self.get(i) {
@@ -658,7 +657,7 @@ impl VecStorage {
     }
 
     /// Check if storage contains an item with the given ID.
-    pub fn contains_id(&self, id: &[u8; ID_SIZE]) -> bool {
+    pub fn contains_id(&self, id: &Digest) -> bool {
         self.items.iter().any(|item| &item.id == id)
     }
 
@@ -695,9 +694,9 @@ pub struct Reconciler<'a, S: Storage> {
     storage: &'a S,
     branching_factor: usize,
     /// IDs that the remote has but we don't
-    have_ids: Vec<[u8; ID_SIZE]>,
+    have_ids: Vec<Digest>,
     /// IDs that we have but the remote doesn't
-    need_ids: Vec<[u8; ID_SIZE]>,
+    need_ids: Vec<Digest>,
     /// Whether reconciliation is complete
     complete: bool,
     /// Whether we are the initiator (affects how we respond to IdList)
@@ -856,12 +855,12 @@ impl<'a, S: Storage> Reconciler<'a, S> {
     }
 
     /// Get IDs that the remote has but we don't (items we need to fetch).
-    pub fn have_ids(&self) -> &[[u8; ID_SIZE]] {
+    pub fn have_ids(&self) -> &[Digest] {
         &self.have_ids
     }
 
     /// Get IDs that we have but the remote doesn't (items to send to remote).
-    pub fn need_ids(&self) -> &[[u8; ID_SIZE]] {
+    pub fn need_ids(&self) -> &[Digest] {
         &self.need_ids
     }
 
@@ -883,9 +882,9 @@ mod tests {
 
     #[test]
     fn test_item_ordering() {
-        let a = Item::new(1000, [0x01; 32]);
-        let b = Item::new(1000, [0x02; 32]);
-        let c = Item::new(1001, [0x01; 32]);
+        let a = Item::from_bytes(1000, [0x01; 32]);
+        let b = Item::from_bytes(1000, [0x02; 32]);
+        let c = Item::from_bytes(1001, [0x01; 32]);
 
         assert!(a < b); // Same timestamp, compare by ID
         assert!(b < c); // Different timestamp
@@ -894,7 +893,7 @@ mod tests {
 
     #[test]
     fn test_item_codec() {
-        let item = Item::new(12345, [0xAB; 32]);
+        let item = Item::from_bytes(12345, [0xAB; 32]);
         let mut buf = Vec::new();
         item.write(&mut buf);
 
@@ -904,10 +903,10 @@ mod tests {
 
     #[test]
     fn test_bound_comparison() {
-        let bound = Bound::new(1000, [0x50; 32]);
-        let item_below = Item::new(999, [0xFF; 32]);
-        let item_at = Item::new(1000, [0x50; 32]);
-        let item_above = Item::new(1000, [0x51; 32]);
+        let bound = Bound::new(1000, Digest([0x50; 32]));
+        let item_below = Item::from_bytes(999, [0xFF; 32]);
+        let item_at = Item::from_bytes(1000, [0x50; 32]);
+        let item_above = Item::from_bytes(1000, [0x51; 32]);
 
         assert!(bound.item_below(&item_below));
         assert!(!bound.item_below(&item_at));
@@ -917,12 +916,12 @@ mod tests {
     #[test]
     fn test_fingerprint_accumulator() {
         let mut acc1 = FingerprintAccumulator::new();
-        acc1.add(&[0x01; 32]);
-        acc1.add(&[0x02; 32]);
+        acc1.add(&Digest([0x01; 32]));
+        acc1.add(&Digest([0x02; 32]));
 
         let mut acc2 = FingerprintAccumulator::new();
-        acc2.add(&[0x02; 32]);
-        acc2.add(&[0x01; 32]);
+        acc2.add(&Digest([0x02; 32]));
+        acc2.add(&Digest([0x01; 32]));
 
         // Order shouldn't matter (addition is commutative)
         assert_eq!(acc1.finalize(), acc2.finalize());
@@ -931,14 +930,14 @@ mod tests {
     #[test]
     fn test_fingerprint_subtract() {
         let mut acc = FingerprintAccumulator::new();
-        acc.add(&[0x01; 32]);
-        acc.add(&[0x02; 32]);
-        acc.add(&[0x03; 32]);
-        acc.subtract(&[0x02; 32]);
+        acc.add(&Digest([0x01; 32]));
+        acc.add(&Digest([0x02; 32]));
+        acc.add(&Digest([0x03; 32]));
+        acc.subtract(&Digest([0x02; 32]));
 
         let mut acc2 = FingerprintAccumulator::new();
-        acc2.add(&[0x01; 32]);
-        acc2.add(&[0x03; 32]);
+        acc2.add(&Digest([0x01; 32]));
+        acc2.add(&Digest([0x03; 32]));
 
         assert_eq!(acc.finalize(), acc2.finalize());
     }
@@ -946,16 +945,16 @@ mod tests {
     #[test]
     fn test_fingerprint_combine() {
         let mut acc1 = FingerprintAccumulator::new();
-        acc1.add(&[0x01; 32]);
+        acc1.add(&Digest([0x01; 32]));
 
         let mut acc2 = FingerprintAccumulator::new();
-        acc2.add(&[0x02; 32]);
+        acc2.add(&Digest([0x02; 32]));
 
         acc1.combine(&acc2);
 
         let mut expected = FingerprintAccumulator::new();
-        expected.add(&[0x01; 32]);
-        expected.add(&[0x02; 32]);
+        expected.add(&Digest([0x01; 32]));
+        expected.add(&Digest([0x02; 32]));
 
         assert_eq!(acc1.finalize(), expected.finalize());
     }
@@ -963,9 +962,9 @@ mod tests {
     #[test]
     fn test_vec_storage_insert() {
         let mut storage = VecStorage::new();
-        storage.insert(Item::new(1002, [0x03; 32]));
-        storage.insert(Item::new(1000, [0x01; 32]));
-        storage.insert(Item::new(1001, [0x02; 32]));
+        storage.insert(Item::from_bytes(1002, [0x03; 32]));
+        storage.insert(Item::from_bytes(1000, [0x01; 32]));
+        storage.insert(Item::from_bytes(1001, [0x02; 32]));
 
         // Should be sorted
         assert_eq!(storage.get(0).unwrap().timestamp, 1000);
@@ -976,8 +975,8 @@ mod tests {
     #[test]
     fn test_vec_storage_no_duplicates() {
         let mut storage = VecStorage::new();
-        storage.insert(Item::new(1000, [0x01; 32]));
-        storage.insert(Item::new(1000, [0x01; 32])); // Duplicate
+        storage.insert(Item::from_bytes(1000, [0x01; 32]));
+        storage.insert(Item::from_bytes(1000, [0x01; 32])); // Duplicate
 
         assert_eq!(storage.len(), 1);
     }
@@ -985,11 +984,11 @@ mod tests {
     #[test]
     fn test_vec_storage_lower_bound() {
         let mut storage = VecStorage::new();
-        storage.insert(Item::new(1000, [0x01; 32]));
-        storage.insert(Item::new(1001, [0x02; 32]));
-        storage.insert(Item::new(1002, [0x03; 32]));
+        storage.insert(Item::from_bytes(1000, [0x01; 32]));
+        storage.insert(Item::from_bytes(1001, [0x02; 32]));
+        storage.insert(Item::from_bytes(1002, [0x03; 32]));
 
-        let bound = Bound::new(1001, [0x02; 32]);
+        let bound = Bound::new(1001, Digest([0x02; 32]));
         let idx = storage.lower_bound(&bound);
         assert_eq!(idx, 1);
     }
@@ -998,12 +997,12 @@ mod tests {
     fn test_identical_sets_reconciliation() {
         // Two identical sets should complete in one round
         let mut storage_a = VecStorage::new();
-        storage_a.insert(Item::new(1000, [0x01; 32]));
-        storage_a.insert(Item::new(1001, [0x02; 32]));
+        storage_a.insert(Item::from_bytes(1000, [0x01; 32]));
+        storage_a.insert(Item::from_bytes(1001, [0x02; 32]));
 
         let mut storage_b = VecStorage::new();
-        storage_b.insert(Item::new(1000, [0x01; 32]));
-        storage_b.insert(Item::new(1001, [0x02; 32]));
+        storage_b.insert(Item::from_bytes(1000, [0x01; 32]));
+        storage_b.insert(Item::from_bytes(1001, [0x02; 32]));
 
         let mut reconciler_a = Reconciler::new(&storage_a, 4);
         let msg1 = reconciler_a.initiate();
@@ -1025,12 +1024,12 @@ mod tests {
     fn test_different_sets_reconciliation() {
         // A has item that B doesn't, B has item that A doesn't
         let mut storage_a = VecStorage::new();
-        storage_a.insert(Item::new(1000, [0x01; 32]));
-        storage_a.insert(Item::new(1001, [0x02; 32])); // Only A has this
+        storage_a.insert(Item::from_bytes(1000, [0x01; 32]));
+        storage_a.insert(Item::from_bytes(1001, [0x02; 32])); // Only A has this
 
         let mut storage_b = VecStorage::new();
-        storage_b.insert(Item::new(1000, [0x01; 32]));
-        storage_b.insert(Item::new(1002, [0x03; 32])); // Only B has this
+        storage_b.insert(Item::from_bytes(1000, [0x01; 32]));
+        storage_b.insert(Item::from_bytes(1002, [0x03; 32])); // Only B has this
 
         let mut reconciler_a = Reconciler::new(&storage_a, 4);
         let msg1 = reconciler_a.initiate();
@@ -1045,14 +1044,16 @@ mod tests {
         let have_ids = reconciler_a.have_ids();
         let need_ids = reconciler_a.need_ids();
 
-        assert!(have_ids.contains(&[0x03; 32]) || need_ids.contains(&[0x02; 32]));
+        assert!(
+            have_ids.contains(&Digest([0x03; 32])) || need_ids.contains(&Digest([0x02; 32]))
+        );
     }
 
     #[test]
     fn test_empty_set_reconciliation() {
         let storage_a = VecStorage::new();
         let mut storage_b = VecStorage::new();
-        storage_b.insert(Item::new(1000, [0x01; 32]));
+        storage_b.insert(Item::from_bytes(1000, [0x01; 32]));
 
         let mut reconciler_a = Reconciler::new(&storage_a, 4);
         let msg1 = reconciler_a.initiate();
@@ -1070,7 +1071,7 @@ mod tests {
     fn test_message_codec() {
         let msg = Message::new(vec![
             Range::new(
-                Bound::new(1000, [0x50; 32]),
+                Bound::new(1000, Digest([0x50; 32])),
                 RangeMode::Fingerprint(Fingerprint::from_bytes([0xAB; 16])),
             ),
             Range::new(Bound::infinity(), RangeMode::Skip),
@@ -1100,7 +1101,7 @@ mod tests {
         assert_eq!(fp, decoded);
 
         // Test IdList
-        let ids = RangeMode::IdList(vec![[0x01; 32], [0x02; 32]]);
+        let ids = RangeMode::IdList(vec![Digest([0x01; 32]), Digest([0x02; 32])]);
         buf.clear();
         ids.write(&mut buf);
         let decoded = RangeMode::read(&mut &buf[..]).unwrap();
@@ -1117,22 +1118,22 @@ mod tests {
         for i in 0u64..100 {
             let mut id = [0u8; 32];
             id[..8].copy_from_slice(&i.to_le_bytes());
-            storage_a.insert(Item::new(i * 10, id));
-            storage_b.insert(Item::new(i * 10, id));
+            storage_a.insert(Item::from_bytes(i * 10, id));
+            storage_b.insert(Item::from_bytes(i * 10, id));
         }
 
         // Add unique items to A
         for i in 100u64..110 {
             let mut id = [0u8; 32];
             id[..8].copy_from_slice(&i.to_le_bytes());
-            storage_a.insert(Item::new(i * 10, id));
+            storage_a.insert(Item::from_bytes(i * 10, id));
         }
 
         // Add unique items to B
         for i in 110u64..120 {
             let mut id = [0u8; 32];
             id[..8].copy_from_slice(&i.to_le_bytes());
-            storage_b.insert(Item::new(i * 10, id));
+            storage_b.insert(Item::from_bytes(i * 10, id));
         }
 
         let mut reconciler_a = Reconciler::new(&storage_a, 16);
@@ -1171,8 +1172,8 @@ mod tests {
     #[test]
     fn test_fingerprint_determinism() {
         let mut storage = VecStorage::new();
-        storage.insert(Item::new(1000, [0x01; 32]));
-        storage.insert(Item::new(1001, [0x02; 32]));
+        storage.insert(Item::from_bytes(1000, [0x01; 32]));
+        storage.insert(Item::from_bytes(1001, [0x02; 32]));
 
         let fp1 = storage.fingerprint(0, 2);
         let fp2 = storage.fingerprint(0, 2);
@@ -1185,7 +1186,7 @@ mod tests {
         let inf = Bound::infinity();
         assert!(inf.is_infinity());
 
-        let not_inf = Bound::new(1000, [0x01; 32]);
+        let not_inf = Bound::new(1000, Digest([0x01; 32]));
         assert!(!not_inf.is_infinity());
     }
 
