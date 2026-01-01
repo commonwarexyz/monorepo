@@ -39,10 +39,6 @@ fn prepare_evaluations<'a, V: Variant>(
     Ok(out)
 }
 
-// =============================================================================
-// PARTIAL SIGNING AND VERIFICATION
-// =============================================================================
-
 /// Signs the provided message with the key share.
 pub fn sign_message<V: Variant>(
     private: &Share,
@@ -113,10 +109,6 @@ pub fn verify_proof_of_possession<V: Variant>(
         &partial.value,
     )
 }
-
-// =============================================================================
-// BATCH VERIFICATION OF PARTIAL SIGNATURES
-// =============================================================================
 
 /// Verifies multiple partial signatures over multiple messages from a single signer.
 ///
@@ -233,10 +225,6 @@ where
         Err(invalid)
     }
 }
-
-// =============================================================================
-// THRESHOLD SIGNATURE RECOVERY
-// =============================================================================
 
 /// Recovers a signature from at least `threshold` partial signatures.
 ///

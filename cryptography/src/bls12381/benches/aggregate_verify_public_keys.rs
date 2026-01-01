@@ -19,11 +19,12 @@ fn benchmark_aggregate_verify_public_keys(c: &mut Criterion) {
                         signatures.push(signature);
                     }
                     (
-                        ops::aggregate::combine_public_keys::<MinSig, _>(&public_keys),
+                        public_keys,
                         ops::aggregate::combine_signatures::<MinSig, _>(&signatures),
                     )
                 },
-                |(public, signature)| {
+                |(public_keys, signature)| {
+                    let public = ops::aggregate::combine_public_keys::<MinSig, _>(&public_keys);
                     ops::aggregate::verify_public_keys::<MinSig>(
                         &public, namespace, &msg, &signature,
                     )

@@ -5,9 +5,8 @@
 //!
 //! # Security Considerations
 //!
-//! Some functions in this module are vulnerable to signature malleability attacks
-//! when used incorrectly. See the documentation for each function for details.
-//! Use [`batch`](super::batch) instead when you need to ensure each individual signature is valid.
+//! Aggregate operations ensure the aggregate is valid, but not that the individual elements are valid.
+//! Use [`batch`](super::batch) when you need to ensure each individual signature is valid.
 
 use super::{
     super::{variant::Variant, Error},

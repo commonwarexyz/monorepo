@@ -4,7 +4,7 @@
 //!
 //! - Core primitives (keypair generation, signing, verification, proof of possession)
 //! - [`aggregate`]: Aggregation of public keys and signatures
-//! - [`batch`]: Batch verification ensuring each individual signature is valid
+//! - [`batch`]: Batch verification of multiple signatures
 //! - [`threshold`]: Threshold signature operations
 //!
 //! # Domain Separation Tag (DST)
@@ -16,10 +16,7 @@
 //! # Batch vs Aggregate Verification
 //!
 //! Use [`batch`] when you need to ensure each individual signature is valid. Use [`aggregate`]
-//! when you only need to verify that the aggregate is valid (more efficient, but an attacker
-//! could forge invalid signatures that cancel out when aggregated). Batch verification uses
-//! random scalar weights to ensure that it returns the same result as checking each signature
-//! individually.
+//! when you only need to verify that the aggregate is valid (more efficient).
 
 pub mod aggregate;
 pub mod batch;
@@ -111,13 +108,6 @@ pub fn verify_message<V: Variant>(
         signature,
     )
 }
-
-// =============================================================================
-// PROOF OF POSSESSION
-// Proof of Possession is used to prove that a party controls the private key
-// corresponding to a public key. This prevents rogue key attacks in aggregate
-// signature schemes.
-// =============================================================================
 
 /// Generates a proof of possession for the private key.
 pub fn sign_proof_of_possession<V: Variant>(
