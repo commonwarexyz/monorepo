@@ -519,11 +519,11 @@ mod tests {
     use super::*;
     use crate::{
         bls12381::primitives::{
-            group::Private,
+            group::{Private, Scalar},
             ops::compute_public,
             variant::{MinPk, MinSig, Variant},
         },
-        certificate::Scheme as _,
+        certificate::{Attestation, Scheme as _},
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
         impl_certificate_bls12381_multisig,
         sha256::Digest as Sha256Digest,
@@ -531,7 +531,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
-    use commonware_math::algebra::Random;
+    use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_utils::{ordered::BiMap, quorum, test_rng, TryCollect};
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -1113,6 +1113,59 @@ mod tests {
     fn test_verify_certificate_rejects_unknown_signer_variants() {
         test_verify_certificate_rejects_unknown_signer::<MinPk>();
         test_verify_certificate_rejects_unknown_signer::<MinSig>();
+    }
+
+    fn test_verify_attestations_rejects_malleability<V: Variant + Send + Sync>() {
+        let mut rng = StdRng::seed_from_u64(12345);
+        let (schemes, _) = setup_signers::<V>(4, 63);
+
+        let attestation1 = schemes[0]
+            .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+            .unwrap();
+        let attestation2 = schemes[1]
+            .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+            .unwrap();
+
+        let verification = schemes[0].verify_attestations::<_, Sha256Digest, _>(
+            &mut rng,
+            NAMESPACE,
+            TestSubject { message: MESSAGE },
+            vec![attestation1.clone(), attestation2.clone()],
+        );
+        assert!(verification.invalid.is_empty());
+        assert_eq!(verification.verified.len(), 2);
+
+        let random_scalar = Scalar::random(&mut rng);
+        let delta = V::Signature::generator() * &random_scalar;
+        let forged_attestation1: Attestation<Scheme<ed25519::PublicKey, V>> = Attestation {
+            signer: attestation1.signer,
+            signature: attestation1.signature - &delta,
+        };
+        let forged_attestation2: Attestation<Scheme<ed25519::PublicKey, V>> = Attestation {
+            signer: attestation2.signer,
+            signature: attestation2.signature + &delta,
+        };
+
+        let forged_sum = forged_attestation1.signature + &forged_attestation2.signature;
+        let valid_sum = attestation1.signature + &attestation2.signature;
+        assert_eq!(forged_sum, valid_sum, "signature sums should be equal");
+
+        let verification = schemes[0].verify_attestations::<_, Sha256Digest, _>(
+            &mut rng,
+            NAMESPACE,
+            TestSubject { message: MESSAGE },
+            vec![forged_attestation1, forged_attestation2],
+        );
+        assert!(
+            !verification.invalid.is_empty(),
+            "forged attestations should be detected"
+        );
+    }
+
+    #[test]
+    fn test_verify_attestations_rejects_malleability_variants() {
+        test_verify_attestations_rejects_malleability::<MinPk>();
+        test_verify_attestations_rejects_malleability::<MinSig>();
     }
 
     #[cfg(feature = "arbitrary")]
