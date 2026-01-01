@@ -88,8 +88,8 @@
 //!     assert_eq!(current_end, Some(0));
 //!     assert_eq!(next_start, Some(5));
 //!
-//!     // Close the store
-//!     store.close().await.unwrap();
+//!     // Sync the store
+//!     store.sync().await.unwrap();
 //! });
 //! ```
 
@@ -425,8 +425,6 @@ mod tests {
             // Find missing items across blob boundary (10000 is the boundary)
             let items = store.missing_items(9998, 5);
             assert_eq!(items, vec![9998, 10000]);
-
-            store.close().await.expect("Failed to close store");
         });
     }
 
@@ -461,7 +459,7 @@ mod tests {
                         .expect("Failed to put data");
                 }
 
-                store.close().await.expect("Failed to close store");
+                store.sync().await.expect("Failed to sync store");
             }
 
             // Reopen and verify data persisted
@@ -515,7 +513,7 @@ mod tests {
                     .put(0, FixedBytes::new([42u8; 32]))
                     .await
                     .expect("Failed to put data");
-                store.close().await.expect("Failed to close store");
+                store.sync().await.expect("Failed to sync store");
             }
 
             // Corrupt the data
@@ -642,7 +640,7 @@ mod tests {
                     .put(1, FixedBytes::new([43u8; 32]))
                     .await
                     .expect("Failed to put data");
-                store.close().await.expect("Failed to close store");
+                store.sync().await.expect("Failed to sync store");
             }
 
             // Corrupt by writing partial record (only value, no CRC)
@@ -709,7 +707,7 @@ mod tests {
                     .put(1, FixedBytes::new([43u8; 32]))
                     .await
                     .expect("Failed to put data");
-                store.close().await.expect("Failed to close store");
+                store.sync().await.expect("Failed to sync store");
             }
 
             // Corrupt the value portion of a record
@@ -767,7 +765,7 @@ mod tests {
                 store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
                 store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
                 store.put(15, FixedBytes::new([15u8; 32])).await.unwrap();
-                store.close().await.expect("Failed to close store");
+                store.sync().await.expect("Failed to sync store");
             }
 
             // Corrupt CRCs in different blobs
@@ -840,7 +838,7 @@ mod tests {
                     .put(1, FixedBytes::new([43u8; 32]))
                     .await
                     .expect("Failed to put data");
-                store.close().await.expect("Failed to close store");
+                store.sync().await.expect("Failed to sync store");
             }
 
             // Add extra bytes at the end of blob
@@ -999,8 +997,9 @@ mod tests {
                 let _ = store.next_gap(i * 100);
             }
 
-            // Close the store
-            store.close().await.expect("Failed to close store");
+            // Sync and drop the store
+            store.sync().await.expect("Failed to sync store");
+            drop(store);
 
             // Reopen the store
             let mut store = Ordinal::<_, FixedBytes<128>>::init(context.clone(), cfg)
@@ -1264,7 +1263,7 @@ mod tests {
                 store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
                 store.put(100, FixedBytes::new([100u8; 32])).await.unwrap();
                 store.put(200, FixedBytes::new([200u8; 32])).await.unwrap();
-                store.close().await.unwrap();
+                store.sync().await.unwrap();
             }
 
             // Reopen and prune
@@ -1286,7 +1285,7 @@ mod tests {
                 assert!(store.has(100));
                 assert!(store.has(200));
 
-                store.close().await.unwrap();
+                store.sync().await.unwrap();
             }
 
             // Reopen again and verify pruning persisted
@@ -1559,7 +1558,7 @@ mod tests {
                 // Section 2 (indices 20-29)
                 store.put(25, FixedBytes::new([25u8; 32])).await.unwrap();
 
-                store.close().await.unwrap();
+                store.sync().await.unwrap();
             }
 
             // Reinitialize with bits = None (should behave like regular init)
@@ -1620,7 +1619,7 @@ mod tests {
                 store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
                 store.put(20, FixedBytes::new([20u8; 32])).await.unwrap();
 
-                store.close().await.unwrap();
+                store.sync().await.unwrap();
             }
 
             // Reinitialize with empty HashMap - should skip all sections
@@ -1675,7 +1674,7 @@ mod tests {
                     store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
                 }
 
-                store.close().await.unwrap();
+                store.sync().await.unwrap();
             }
 
             // Reinitialize with bits for only section 1
@@ -1761,7 +1760,7 @@ mod tests {
                     store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
                 }
 
-                store.close().await.unwrap();
+                store.sync().await.unwrap();
             }
 
             // Reinitialize with None option for section 1 (expects all records)
@@ -1816,7 +1815,7 @@ mod tests {
                 store.put(8, FixedBytes::new([8u8; 32])).await.unwrap();
                 store.put(9, FixedBytes::new([9u8; 32])).await.unwrap();
 
-                store.close().await.unwrap();
+                store.sync().await.unwrap();
             }
 
             // Reinitialize with None option for section 1 (expects all records)
@@ -1870,7 +1869,7 @@ mod tests {
                     store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
                 }
 
-                store.close().await.unwrap();
+                store.sync().await.unwrap();
             }
 
             // Reinitialize with mixed bits configuration
@@ -1947,7 +1946,7 @@ mod tests {
                     store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
                 }
 
-                store.close().await.unwrap();
+                store.sync().await.unwrap();
             }
 
             // Corrupt record at index 2
@@ -2039,7 +2038,7 @@ mod tests {
                 store.put(2, DummyValue { value: 0 }).await.unwrap(); // will fail parsing
                 store.put(4, DummyValue { value: 4 }).await.unwrap();
 
-                store.close().await.unwrap();
+                store.sync().await.unwrap();
             }
 
             // Reinitialize - should skip the unparseable record but continue processing

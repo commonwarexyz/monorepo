@@ -1006,8 +1006,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Sync any pending updates before closing
         let checkpoint = self.sync().await?;
 
-        self.journal.close().await?;
-        self.table.sync().await?;
         Ok(checkpoint)
     }
 

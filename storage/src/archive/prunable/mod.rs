@@ -134,8 +134,8 @@
 //!     // Put a key
 //!     archive.put(1, Sha256::hash(b"data"), 10).await.unwrap();
 //!
-//!     // Close the archive (also closes the journal)
-//!     archive.close().await.unwrap();
+//!     // Sync the archive
+//!     archive.sync().await.unwrap();
 //! });
 //! ```
 
@@ -236,8 +236,9 @@ mod tests {
                 .await
                 .expect("Failed to put data");
 
-            // Close the archive
-            archive.close().await.expect("Failed to close archive");
+            // Sync and drop the archive
+            archive.sync().await.expect("Failed to sync archive");
+            drop(archive);
 
             // Initialize the archive again without compression
             let cfg = Config {
@@ -288,8 +289,9 @@ mod tests {
                 .await
                 .expect("Failed to put data");
 
-            // Close the archive
-            archive.close().await.expect("Failed to close archive");
+            // Sync and drop the archive
+            archive.sync().await.expect("Failed to sync archive");
+            drop(archive);
 
             // Corrupt the value
             let section = (index / DEFAULT_ITEMS_PER_SECTION) * DEFAULT_ITEMS_PER_SECTION;
@@ -592,8 +594,9 @@ mod tests {
             assert!(buffer.contains(&tracked));
             assert!(buffer.contains("pruned_total 0"));
 
-            // Close the archive
-            archive.close().await.expect("Failed to close archive");
+            // Sync and drop the archive
+            archive.sync().await.expect("Failed to sync archive");
+            drop(archive);
 
             // Reinitialize the archive
             let cfg = Config {

@@ -298,13 +298,6 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         self.sync().await
     }
 
-    /// Close the [Cache].
-    ///
-    /// Any pending writes will be synced prior to closing.
-    pub async fn close(self) -> Result<(), Error> {
-        self.journal.close().await.map_err(Error::Journal)
-    }
-
     /// Remove all persistent data created by this [Cache].
     pub async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await.map_err(Error::Journal)
