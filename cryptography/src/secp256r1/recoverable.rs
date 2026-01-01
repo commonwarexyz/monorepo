@@ -240,7 +240,7 @@ impl Display for Signature {
 
 /// Secp256r1 Recoverable Batch Verifier.
 ///
-/// Accumulates signature verification items and verifies them when [`BatchVerifier::verify`]
+/// Accumulates signature verification items and verifies them when [`crate::BatchVerifier::verify`]
 /// is called.
 ///
 /// # Batch Verification Algorithm
