@@ -517,6 +517,7 @@ mod tests {
     use commonware_math::algebra::{Additive, Random, Ring};
     use core::cmp::Ordering;
     use rand::rngs::OsRng;
+    #[cfg(unix)]
     use std::{panic, sync::Arc, thread};
 
     #[test]
