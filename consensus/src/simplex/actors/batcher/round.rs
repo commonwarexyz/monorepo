@@ -301,7 +301,7 @@ impl<
         Some(proposal)
     }
 
-    pub const fn ready_notarizes(&self) -> bool {
+    pub fn ready_notarizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_notarization() {
             return false;
@@ -317,7 +317,7 @@ impl<
         self.verifier.verify_notarizes(rng, namespace)
     }
 
-    pub const fn ready_nullifies(&self) -> bool {
+    pub fn ready_nullifies(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_nullification() {
             return false;
@@ -333,7 +333,7 @@ impl<
         self.verifier.verify_nullifies(rng, namespace)
     }
 
-    pub const fn ready_finalizes(&self) -> bool {
+    pub fn ready_finalizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_finalization() {
             return false;
