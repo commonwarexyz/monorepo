@@ -721,6 +721,7 @@ mod tests {
         bls12381::{
             dkg::{self, deal_anonymous},
             primitives::{
+                group::Scalar,
                 ops::threshold,
                 variant::{MinPk, MinSig, Variant},
             },
@@ -731,6 +732,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
+    use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_utils::{quorum_from_slice, test_rng, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -1554,6 +1556,313 @@ mod tests {
     fn test_encrypt_decrypt() {
         encrypt_decrypt::<MinPk>();
         encrypt_decrypt::<MinSig>();
+    }
+
+    fn verify_attestation_rejects_malleability<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(12345);
+        let (schemes, _) = setup_signers::<V>(4, 67);
+        let proposal = sample_proposal(Epoch::new(0), View::new(27), 14);
+
+        let attestation = schemes[0]
+            .sign(
+                NAMESPACE,
+                Subject::Notarize {
+                    proposal: &proposal,
+                },
+            )
+            .unwrap();
+
+        assert!(schemes[0].verify_attestation::<_, Sha256Digest>(
+            &mut rng,
+            NAMESPACE,
+            Subject::Notarize {
+                proposal: &proposal,
+            },
+            &attestation
+        ));
+
+        let random_scalar = Scalar::random(&mut rng);
+        let delta = V::Signature::generator() * &random_scalar;
+        let forged_attestation: Attestation<Scheme<V>> = Attestation {
+            signer: attestation.signer,
+            signature: Signature {
+                vote_signature: attestation.signature.vote_signature - &delta,
+                seed_signature: attestation.signature.seed_signature + &delta,
+            },
+        };
+
+        let forged_sum = forged_attestation.signature.vote_signature
+            + &forged_attestation.signature.seed_signature;
+        let valid_sum =
+            attestation.signature.vote_signature + &attestation.signature.seed_signature;
+        assert_eq!(forged_sum, valid_sum, "signature sums should be equal");
+
+        assert!(
+            !schemes[0].verify_attestation::<_, Sha256Digest>(
+                &mut rng,
+                NAMESPACE,
+                Subject::Notarize {
+                    proposal: &proposal,
+                },
+                &forged_attestation
+            ),
+            "forged attestation should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_verify_attestation_rejects_malleability() {
+        verify_attestation_rejects_malleability::<MinPk>();
+        verify_attestation_rejects_malleability::<MinSig>();
+    }
+
+    fn verify_attestations_rejects_malleability<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(54321);
+        let (schemes, _) = setup_signers::<V>(4, 71);
+        let proposal = sample_proposal(Epoch::new(0), View::new(29), 15);
+
+        let attestation1 = schemes[0]
+            .sign(
+                NAMESPACE,
+                Subject::Notarize {
+                    proposal: &proposal,
+                },
+            )
+            .unwrap();
+        let attestation2 = schemes[1]
+            .sign(
+                NAMESPACE,
+                Subject::Notarize {
+                    proposal: &proposal,
+                },
+            )
+            .unwrap();
+
+        let verification = schemes[0].verify_attestations(
+            &mut rng,
+            NAMESPACE,
+            Subject::Notarize {
+                proposal: &proposal,
+            },
+            vec![attestation1.clone(), attestation2.clone()],
+        );
+        assert!(verification.invalid.is_empty());
+        assert_eq!(verification.verified.len(), 2);
+
+        let random_scalar = Scalar::random(&mut rng);
+        let delta = V::Signature::generator() * &random_scalar;
+        let forged_attestation1: Attestation<Scheme<V>> = Attestation {
+            signer: attestation1.signer,
+            signature: Signature {
+                vote_signature: attestation1.signature.vote_signature - &delta,
+                seed_signature: attestation1.signature.seed_signature,
+            },
+        };
+        let forged_attestation2: Attestation<Scheme<V>> = Attestation {
+            signer: attestation2.signer,
+            signature: Signature {
+                vote_signature: attestation2.signature.vote_signature + &delta,
+                seed_signature: attestation2.signature.seed_signature,
+            },
+        };
+
+        let forged_vote_sum = forged_attestation1.signature.vote_signature
+            + &forged_attestation2.signature.vote_signature;
+        let valid_vote_sum =
+            attestation1.signature.vote_signature + &attestation2.signature.vote_signature;
+        assert_eq!(
+            forged_vote_sum, valid_vote_sum,
+            "vote signature sums should be equal"
+        );
+
+        let verification = schemes[0].verify_attestations(
+            &mut rng,
+            NAMESPACE,
+            Subject::Notarize {
+                proposal: &proposal,
+            },
+            vec![forged_attestation1, forged_attestation2],
+        );
+        assert!(
+            !verification.invalid.is_empty(),
+            "forged attestations should be detected"
+        );
+    }
+
+    #[test]
+    fn test_verify_attestations_rejects_malleability() {
+        verify_attestations_rejects_malleability::<MinPk>();
+        verify_attestations_rejects_malleability::<MinSig>();
+    }
+
+    fn verify_certificate_rejects_malleability<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(98765);
+        let (schemes, verifier) = setup_signers::<V>(4, 73);
+        let quorum = quorum_from_slice(&schemes) as usize;
+        let proposal = sample_proposal(Epoch::new(0), View::new(31), 16);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme
+                    .sign(
+                        NAMESPACE,
+                        Subject::Notarize {
+                            proposal: &proposal,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        let certificate = schemes[0].assemble(votes).expect("assemble certificate");
+
+        assert!(verifier.verify_certificate(
+            &mut rng,
+            NAMESPACE,
+            Subject::Notarize {
+                proposal: &proposal,
+            },
+            &certificate,
+        ));
+
+        let random_scalar = Scalar::random(&mut rng);
+        let delta = V::Signature::generator() * &random_scalar;
+        let forged_certificate = Signature {
+            vote_signature: certificate.vote_signature - &delta,
+            seed_signature: certificate.seed_signature + &delta,
+        };
+
+        let forged_sum = forged_certificate.vote_signature + &forged_certificate.seed_signature;
+        let valid_sum = certificate.vote_signature + &certificate.seed_signature;
+        assert_eq!(forged_sum, valid_sum, "signature sums should be equal");
+
+        assert!(
+            !verifier.verify_certificate(
+                &mut rng,
+                NAMESPACE,
+                Subject::Notarize {
+                    proposal: &proposal,
+                },
+                &forged_certificate,
+            ),
+            "forged certificate should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_malleability() {
+        verify_certificate_rejects_malleability::<MinPk>();
+        verify_certificate_rejects_malleability::<MinSig>();
+    }
+
+    fn verify_certificates_rejects_malleability<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(13579);
+        let (schemes, verifier) = setup_signers::<V>(4, 79);
+        let quorum = quorum_from_slice(&schemes) as usize;
+        let proposal1 = sample_proposal(Epoch::new(0), View::new(33), 17);
+        let proposal2 = sample_proposal(Epoch::new(0), View::new(34), 18);
+
+        let votes1: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme
+                    .sign(
+                        NAMESPACE,
+                        Subject::Notarize {
+                            proposal: &proposal1,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let votes2: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme
+                    .sign(
+                        NAMESPACE,
+                        Subject::Notarize {
+                            proposal: &proposal2,
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        let certificate1 = schemes[0].assemble(votes1).expect("assemble certificate1");
+        let certificate2 = schemes[0].assemble(votes2).expect("assemble certificate2");
+
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            NAMESPACE,
+            [
+                (
+                    Subject::Notarize {
+                        proposal: &proposal1,
+                    },
+                    &certificate1
+                ),
+                (
+                    Subject::Notarize {
+                        proposal: &proposal2,
+                    },
+                    &certificate2
+                ),
+            ]
+            .into_iter(),
+        ));
+
+        let random_scalar = Scalar::random(&mut rng);
+        let delta = V::Signature::generator() * &random_scalar;
+        let forged_certificate1 = Signature {
+            vote_signature: certificate1.vote_signature - &delta,
+            seed_signature: certificate1.seed_signature,
+        };
+        let forged_certificate2 = Signature {
+            vote_signature: certificate2.vote_signature + &delta,
+            seed_signature: certificate2.seed_signature,
+        };
+
+        let forged_vote_sum =
+            forged_certificate1.vote_signature + &forged_certificate2.vote_signature;
+        let valid_vote_sum = certificate1.vote_signature + &certificate2.vote_signature;
+        assert_eq!(
+            forged_vote_sum, valid_vote_sum,
+            "vote signature sums should be equal"
+        );
+
+        assert!(
+            !verifier.verify_certificates::<_, Sha256Digest, _>(
+                &mut rng,
+                NAMESPACE,
+                [
+                    (
+                        Subject::Notarize {
+                            proposal: &proposal1,
+                        },
+                        &forged_certificate1
+                    ),
+                    (
+                        Subject::Notarize {
+                            proposal: &proposal2,
+                        },
+                        &forged_certificate2
+                    ),
+                ]
+                .into_iter(),
+            ),
+            "forged certificates should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_verify_certificates_rejects_malleability() {
+        verify_certificates_rejects_malleability::<MinPk>();
+        verify_certificates_rejects_malleability::<MinSig>();
     }
 
     #[cfg(feature = "arbitrary")]
