@@ -1,5 +1,3 @@
-#[cfg(test)]
-use super::ingress::Acceptable;
 use super::{
     directory::{self, Directory},
     ingress::{Message, Oracle},
@@ -281,7 +279,10 @@ mod tests {
     use crate::{
         authenticated::{
             discovery::{
-                actors::{peer, tracker},
+                actors::{
+                    peer,
+                    tracker::{self, Acceptable},
+                },
                 config::Bootstrapper,
                 types,
             },
