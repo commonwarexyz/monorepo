@@ -28,7 +28,7 @@ use core::{
     fmt::{Debug, Display, Formatter},
 };
 use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeLess};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Constant-time lexicographic comparison for equal-length byte slices.
 ///
@@ -61,7 +61,6 @@ fn ct_cmp_bytes(a: &[u8], b: &[u8]) -> Ordering {
 /// `ptr` must point to valid, writable memory of at least `size_of::<T>()` bytes.
 #[inline]
 unsafe fn zeroize_ptr<T>(ptr: *mut T) {
-    use zeroize::Zeroize;
     let slice = core::slice::from_raw_parts_mut(ptr as *mut u8, core::mem::size_of::<T>());
     slice.zeroize();
 }
@@ -514,6 +513,11 @@ impl Ord for Secret<Scalar> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bls12381::primitives::group::Scalar;
+    use commonware_math::algebra::{Additive, Random, Ring};
+    use core::cmp::Ordering;
+    use rand::rngs::OsRng;
+    use std::{panic, sync::Arc, thread};
 
     #[test]
     fn test_debug_redacted() {
@@ -557,8 +561,6 @@ mod tests {
 
     #[test]
     fn test_ordering() {
-        use core::cmp::Ordering;
-
         // Test the specific bug case: [2, 1] vs [1, 2]
         let a = Secret::new([2u8, 1]);
         let b = Secret::new([1u8, 2]);
@@ -598,10 +600,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_with_bls_scalar() {
-        use crate::bls12381::primitives::group::Scalar;
-        use commonware_math::algebra::Random;
-        use rand::rngs::OsRng;
-
         let scalar = Scalar::random(&mut OsRng);
         let secret = Secret::new(scalar);
 
@@ -613,8 +611,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_expose_reprotects_on_panic() {
-        use std::panic;
-
         let secret = Secret::new([42u8; 32]);
 
         // Panic inside expose - memory should still be re-protected
@@ -649,10 +645,6 @@ mod tests {
 
     #[test]
     fn test_scalar_equality() {
-        use crate::bls12381::primitives::group::Scalar;
-        use commonware_math::algebra::Random;
-        use rand::rngs::OsRng;
-
         let scalar1 = Scalar::random(&mut OsRng);
         let scalar2 = scalar1.clone();
         let scalar3 = Scalar::random(&mut OsRng);
@@ -669,9 +661,6 @@ mod tests {
 
     #[test]
     fn test_scalar_ordering() {
-        use crate::bls12381::primitives::group::Scalar;
-        use commonware_math::algebra::{Additive, Ring};
-
         let zero = Scalar::zero();
         let one = Scalar::one();
 
@@ -689,8 +678,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_concurrent_expose() {
-        use std::{sync::Arc, thread};
-
         let secret = Arc::new(Secret::new([42u8; 32]));
         let mut handles = vec![];
 
