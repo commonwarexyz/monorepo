@@ -8,13 +8,17 @@ use rand::{CryptoRng, Rng};
 /// `Verifier` is a utility for tracking and verifying consensus messages.
 ///
 /// For schemes where [`Scheme::is_batchable()`](commonware_cryptography::certificate::Scheme::is_batchable)
-/// returns `true` (such as ed25519 and BLS12-381), this struct collects messages and defers verification
-/// until enough messages exist to potentially reach a quorum, enabling efficient batch verification. For
-/// schemes where `is_batchable()` returns `false` (such as SECP256R1), signatures are verified eagerly as
-/// they arrive since there is no batching benefit.
+/// returns `true` (such as [ed25519], [bls12381_multisig] and [bls12381_threshold]), this struct collects
+/// messages and defers verification until enough messages exist to potentially reach a quorum, enabling
+/// efficient batch verification. For schemes where `is_batchable()` returns `false` (such as `secp256r1`),
+/// signatures are verified eagerly as they arrive since there is no batching benefit.
 ///
 /// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
+///
+/// [ed25519]: crate::simplex::scheme::ed25519
+/// [bls12381_multisig]: crate::simplex::scheme::bls12381_multisig
+/// [bls12381_threshold]: crate::simplex::scheme::bls12381_threshold
 pub struct Verifier<S: Scheme<D>, D: Digest> {
     /// Signing scheme used to verify votes and assemble certificates.
     scheme: S,
