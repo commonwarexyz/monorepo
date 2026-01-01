@@ -2,7 +2,9 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use std::borrow::Cow;
     } else {
+        extern crate alloc;
         use alloc::borrow::Cow;
+        use alloc::vec::Vec;
     }
 }
 use super::common::{
@@ -18,7 +20,18 @@ use core::{
     ops::Deref,
 };
 use ecdsa::RecoveryId;
-use p256::{ecdsa::VerifyingKey, elliptic_curve::scalar::IsHigh};
+use p256::{
+    ecdsa::VerifyingKey,
+    elliptic_curve::{
+        ops::{MulByGenerator, Reduce},
+        scalar::IsHigh,
+        sec1::FromEncodedPoint,
+        Field,
+    },
+    AffinePoint, EncodedPoint, ProjectivePoint, Scalar, U256,
+};
+use rand_core::CryptoRngCore;
+use sha2::{Digest as Sha2Digest, Sha256};
 
 const BASE_SIGNATURE_LENGTH: usize = 64; // R || S
 const SIGNATURE_LENGTH: usize = 1 + BASE_SIGNATURE_LENGTH; // RecoveryId || R || S
@@ -221,6 +234,155 @@ impl Debug for Signature {
 impl Display for Signature {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
+    }
+}
+
+/// Secp256r1 Recoverable Batch Verifier.
+///
+/// Accumulates signature verification items and verifies them when [`BatchVerifier::verify`]
+/// is called.
+///
+/// # Batch Verification Algorithm
+///
+/// This implementation uses algebraic batch verification with random coefficients to prevent
+/// attacks where invalid signatures combine to appear valid when verified together.
+///
+/// For each signature (r, s) on message m with public key P:
+/// 1. Hash the message: e = SHA256(m)
+/// 2. Compute w = s^-1 mod n
+/// 3. Compute u1 = e * w mod n, u2 = r * w mod n
+/// 4. Recover the signature point R from (r, recovery_id)
+/// 5. Generate a random coefficient z for this item
+///
+/// The batch verification checks:
+/// sum(z_i * u1_i) * G + sum(z_i * u2_i * P_i) - sum(z_i * R_i) = O (identity point)
+pub struct Batch {
+    items: Vec<(PublicKey, Signature, Vec<u8>)>,
+}
+
+impl Batch {
+    #[inline(always)]
+    fn add_inner(
+        &mut self,
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> bool {
+        let payload = namespace.map_or(message.to_vec(), |namespace| {
+            union_unique(namespace, message)
+        });
+        self.items
+            .push((public_key.clone(), signature.clone(), payload));
+        true
+    }
+}
+
+impl crate::BatchVerifier<PublicKey> for Batch {
+    fn new() -> Self {
+        Self { items: Vec::new() }
+    }
+
+    fn add(
+        &mut self,
+        namespace: &[u8],
+        message: &[u8],
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> bool {
+        self.add_inner(Some(namespace), message, public_key, signature)
+    }
+
+    fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool {
+        if self.items.is_empty() {
+            return true;
+        }
+
+        // For batch verification, we check:
+        // sum(z_i * u1_i) * G + sum(z_i * u2_i * P_i) - sum(z_i * R_i) = O
+        //
+        // This is equivalent to:
+        // sum(z_i * u1_i) * G + sum(z_i * u2_i * P_i) = sum(z_i * R_i)
+
+        let mut agg_u1 = Scalar::ZERO;
+        let mut agg_point = ProjectivePoint::IDENTITY;
+
+        for (public_key, signature, payload) in self.items {
+            // Generate random coefficient
+            let z = Scalar::random(&mut *rng);
+
+            // Hash the message to get e
+            let e_bytes: [u8; 32] = Sha256::digest(&payload).into();
+            let e = <Scalar as Reduce<U256>>::reduce_bytes(&e_bytes.into());
+
+            // Get r and s from signature (r() returns NonZeroScalar which derefs to Scalar)
+            let r_scalar: Scalar = *signature.signature.r();
+            let s: Scalar = *signature.signature.s();
+
+            // Compute w = s^-1
+            let w = s.invert();
+            if w.is_none().into() {
+                return false;
+            }
+            let w = w.unwrap();
+
+            // Compute u1 = e * w, u2 = r * w
+            let u1 = e * w;
+            let u2 = r_scalar * w;
+
+            // Recover R from signature using the raw signature bytes
+            let r_point = match recover_r_point(&signature.raw, signature.recovery_id) {
+                Some(p) => p,
+                None => return false,
+            };
+
+            // Accumulate: z * u1 for the generator term
+            agg_u1 += z * u1;
+
+            // Accumulate: z * u2 * P - z * R
+            let pk_point = public_key.0.key.as_affine();
+            agg_point += ProjectivePoint::from(*pk_point) * (z * u2);
+            agg_point -= r_point * z;
+        }
+
+        // Final check: agg_u1 * G + agg_point = O
+        // Equivalently: agg_u1 * G = -agg_point
+        let lhs = ProjectivePoint::mul_by_generator(&agg_u1);
+        let rhs = -agg_point;
+
+        lhs == rhs
+    }
+}
+
+/// Recover the signature point R from the raw signature bytes and recovery ID.
+fn recover_r_point(
+    raw: &[u8; SIGNATURE_LENGTH],
+    recovery_id: RecoveryId,
+) -> Option<ProjectivePoint> {
+    // Raw format: [recovery_id (1 byte), r (32 bytes), s (32 bytes)]
+    // Extract r from bytes 1..33
+    let r_bytes: &[u8; 32] = raw[1..33].try_into().ok()?;
+
+    // The x-coordinate might be r or r + n (if is_x_reduced)
+    // For P-256, this is extremely rare since n is close to p
+    if recovery_id.is_x_reduced() {
+        // r + n case - extremely rare for P-256
+        return None;
+    }
+
+    // Use SEC1 point decompression: compressed point is [02|03 || x]
+    // 02 = even y, 03 = odd y
+    let mut encoded = [0u8; 33];
+    encoded[0] = if recovery_id.is_y_odd() { 0x03 } else { 0x02 };
+    encoded[1..].copy_from_slice(r_bytes);
+
+    let encoded_point = EncodedPoint::from_bytes(encoded).ok()?;
+    let affine = AffinePoint::from_encoded_point(&encoded_point);
+
+    if affine.is_some().into() {
+        Some(ProjectivePoint::from(affine.unwrap()))
+    } else {
+        None
     }
 }
 
@@ -687,6 +849,83 @@ mod tests {
             }
         };
         assert!(expected);
+    }
+
+    #[test]
+    fn batch_verify_valid() {
+        use crate::BatchVerifier;
+        use commonware_math::algebra::Random;
+
+        let signer1 = PrivateKey::random(&mut rand::thread_rng());
+        let signer2 = PrivateKey::random(&mut rand::thread_rng());
+
+        let msg1 = b"message one";
+        let msg2 = b"message two";
+
+        let sig1 = signer1.sign(NAMESPACE, msg1);
+        let sig2 = signer2.sign(NAMESPACE, msg2);
+
+        let mut batch = Batch::new();
+        assert!(batch.add(NAMESPACE, msg1, &signer1.public_key(), &sig1));
+        assert!(batch.add(NAMESPACE, msg2, &signer2.public_key(), &sig2));
+        assert!(batch.verify(&mut rand::thread_rng()));
+    }
+
+    #[test]
+    fn batch_verify_invalid() {
+        use crate::BatchVerifier;
+        use commonware_math::algebra::Random;
+
+        let signer1 = PrivateKey::random(&mut rand::thread_rng());
+        let signer2 = PrivateKey::random(&mut rand::thread_rng());
+
+        let msg1 = b"message one";
+        let msg2 = b"message two";
+
+        let sig1 = signer1.sign(NAMESPACE, msg1);
+        let _sig2 = signer2.sign(NAMESPACE, msg2);
+
+        // Use wrong signature for second message
+        let mut batch = Batch::new();
+        assert!(batch.add(NAMESPACE, msg1, &signer1.public_key(), &sig1));
+        assert!(batch.add(NAMESPACE, msg2, &signer2.public_key(), &sig1)); // wrong sig
+        assert!(!batch.verify(&mut rand::thread_rng()));
+    }
+
+    #[test]
+    fn batch_verify_empty() {
+        use crate::BatchVerifier;
+
+        let batch = Batch::new();
+        assert!(batch.verify(&mut rand::thread_rng()));
+    }
+
+    #[test]
+    fn batch_verify_single() {
+        use crate::BatchVerifier;
+        use commonware_math::algebra::Random;
+
+        let signer = PrivateKey::random(&mut rand::thread_rng());
+        let msg = b"single message";
+        let sig = signer.sign(NAMESPACE, msg);
+
+        let mut batch = Batch::new();
+        assert!(batch.add(NAMESPACE, msg, &signer.public_key(), &sig));
+        assert!(batch.verify(&mut rand::thread_rng()));
+    }
+
+    #[test]
+    fn batch_verify_wrong_namespace() {
+        use crate::BatchVerifier;
+        use commonware_math::algebra::Random;
+
+        let signer = PrivateKey::random(&mut rand::thread_rng());
+        let msg = b"message";
+        let sig = signer.sign(NAMESPACE, msg);
+
+        let mut batch = Batch::new();
+        assert!(batch.add(b"wrong-namespace", msg, &signer.public_key(), &sig));
+        assert!(!batch.verify(&mut rand::thread_rng()));
     }
 
     #[cfg(feature = "arbitrary")]
