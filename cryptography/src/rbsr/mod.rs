@@ -60,6 +60,7 @@
 //! - <https://arxiv.org/abs/2212.13567>: Range-Based Set Reconciliation paper
 
 use crate::blake3::Blake3;
+use crate::lthash::LtHash;
 use crate::sha256::Digest;
 use crate::Hasher as _;
 use bytes::{Buf, BufMut};
@@ -235,9 +236,9 @@ impl Read for Bound {
 
 /// A fingerprint computed over a range of items.
 ///
-/// Fingerprints are computed using an incremental hash: the sum of all item IDs
-/// (as 256-bit integers mod 2^256), concatenated with the item count, then
-/// hashed with Blake3 and truncated to 16 bytes.
+/// Fingerprints are computed using [LtHash], a lattice-based homomorphic hash
+/// providing ~200 bits of security. The LtHash checksum is combined with the
+/// item count, hashed with Blake3, and truncated to 16 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Fingerprint {
     bytes: [u8; FINGERPRINT_SIZE],
@@ -295,13 +296,17 @@ impl arbitrary::Arbitrary<'_> for Fingerprint {
 
 /// Accumulator for computing fingerprints incrementally.
 ///
-/// Uses addition mod 2^256 of item IDs, which is more collision-resistant
-/// than XOR (which can be broken in seconds).
+/// Uses [LtHash] for ~200 bits of security against collision attacks. LtHash is a
+/// lattice-based homomorphic hash that is significantly more secure than simple
+/// addition mod 2^256 (which can be broken in ~28 hours with sufficient resources).
+///
+/// The count is tracked separately and included in the final fingerprint to prevent
+/// certain attack classes where an attacker can only write to one side of a sync.
 #[derive(Debug, Clone)]
 pub struct FingerprintAccumulator {
-    /// Running sum as 256-bit integer (little-endian)
-    sum: [u8; 32],
-    /// Number of items accumulated
+    /// LtHash state for homomorphic accumulation
+    lthash: LtHash,
+    /// Number of items accumulated (included in fingerprint for extra security)
     count: u64,
 }
 
@@ -309,48 +314,26 @@ impl FingerprintAccumulator {
     /// Create a new empty accumulator.
     pub const fn new() -> Self {
         Self {
-            sum: [0u8; 32],
+            lthash: LtHash::new(),
             count: 0,
         }
     }
 
     /// Add an item's ID to the accumulator.
     pub fn add(&mut self, id: &Digest) {
-        // Add id to sum mod 2^256 (little-endian addition)
-        let mut carry: u16 = 0;
-        for (sum_byte, id_byte) in self.sum.iter_mut().zip(id.as_ref().iter()) {
-            let sum = *sum_byte as u16 + *id_byte as u16 + carry;
-            *sum_byte = sum as u8;
-            carry = sum >> 8;
-        }
+        self.lthash.add(id.as_ref());
         self.count += 1;
     }
 
     /// Subtract an item's ID from the accumulator.
     pub fn subtract(&mut self, id: &Digest) {
-        // Subtract id from sum mod 2^256 (little-endian subtraction)
-        let mut borrow: i16 = 0;
-        for (sum_byte, id_byte) in self.sum.iter_mut().zip(id.as_ref().iter()) {
-            let diff = *sum_byte as i16 - *id_byte as i16 - borrow;
-            if diff < 0 {
-                *sum_byte = (diff + 256) as u8;
-                borrow = 1;
-            } else {
-                *sum_byte = diff as u8;
-                borrow = 0;
-            }
-        }
+        self.lthash.subtract(id.as_ref());
         self.count = self.count.saturating_sub(1);
     }
 
     /// Combine another accumulator into this one.
     pub fn combine(&mut self, other: &Self) {
-        let mut carry: u16 = 0;
-        for i in 0..32 {
-            let sum = self.sum[i] as u16 + other.sum[i] as u16 + carry;
-            self.sum[i] = sum as u8;
-            carry = sum >> 8;
-        }
+        self.lthash.combine(&other.lthash);
         self.count += other.count;
     }
 
@@ -366,15 +349,17 @@ impl FingerprintAccumulator {
 
     /// Finalize the accumulator into a fingerprint.
     ///
-    /// Uses Blake3 for finalization (faster than SHA-256 while maintaining security).
+    /// Combines the LtHash checksum with the count for additional security,
+    /// then truncates to 16 bytes.
     pub fn finalize(&self) -> Fingerprint {
         if self.count == 0 {
             return Fingerprint::new();
         }
 
-        // Hash: sum || count using Blake3
+        // Get 32-byte LtHash checksum and combine with count
+        let checksum = self.lthash.checksum();
         let mut hasher = Blake3::new();
-        hasher.update(&self.sum);
+        hasher.update(checksum.as_ref());
         hasher.update(&self.count.to_le_bytes());
         let digest = hasher.finalize();
 
@@ -386,7 +371,7 @@ impl FingerprintAccumulator {
 
     /// Reset the accumulator to empty state.
     pub const fn reset(&mut self) {
-        self.sum = [0u8; 32];
+        self.lthash.reset();
         self.count = 0;
     }
 }
