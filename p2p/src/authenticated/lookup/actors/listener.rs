@@ -129,10 +129,11 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
             |peer| {
                 let fut = tracker.acceptable(peer, source_ip);
                 async move {
-                    if fut.await {
+                    let status = fut.await;
+                    if status == tracker::Acceptable::Yes {
                         Ok(())
                     } else {
-                        Err(())
+                        Err(status)
                     }
                 }
             },
@@ -143,8 +144,15 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
         .await
         {
             Ok(connection) => connection,
-            Err(StreamError::PeerRejected(())) => {
-                debug!(?address, "peer not acceptable (unknown or not in peer set)");
+            Err(StreamError::PeerRejected(reason)) => {
+                match reason {
+                    tracker::Acceptable::Blocked => {
+                        debug!(?address, "peer is blocked");
+                    }
+                    tracker::Acceptable::Unknown | tracker::Acceptable::Yes => {
+                        debug!(?address, "peer not acceptable (unknown or not in peer set)");
+                    }
+                }
                 return;
             }
             Err(err) => {
@@ -368,7 +376,7 @@ mod tests {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
+                            let _ = responder.send(tracker::Acceptable::Yes);
                         }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
@@ -529,7 +537,7 @@ mod tests {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
+                            let _ = responder.send(tracker::Acceptable::Yes);
                         }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
@@ -610,7 +618,7 @@ mod tests {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
+                            let _ = responder.send(tracker::Acceptable::Yes);
                         }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
@@ -702,7 +710,7 @@ mod tests {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
+                            let _ = responder.send(tracker::Acceptable::Yes);
                         }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);

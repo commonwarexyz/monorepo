@@ -106,9 +106,9 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
         let (peer, send, recv) = match listen(
             context,
             |peer| {
-                let mut tracker = tracker.clone();
+                let fut = tracker.acceptable(peer);
                 async move {
-                    let status = tracker.acceptable(peer).await;
+                    let status = fut.await;
                     if status == tracker::Acceptable::Yes {
                         Ok(())
                     } else {

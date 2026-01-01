@@ -13,6 +13,17 @@ use commonware_utils::ordered::{Map, Set};
 use futures::channel::{mpsc, oneshot};
 use std::net::IpAddr;
 
+/// Result of checking if a peer is acceptable for connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acceptable {
+    /// Peer is acceptable for connection.
+    Yes,
+    /// Peer is blocked.
+    Blocked,
+    /// Peer is unknown (not in any peer set or IP mismatch).
+    Unknown,
+}
+
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
 pub enum Message<C: PublicKey> {
@@ -79,8 +90,8 @@ pub enum Message<C: PublicKey> {
         /// The IP address the peer connected from.
         source_ip: IpAddr,
 
-        /// The sender to respond with whether the peer is acceptable.
-        responder: oneshot::Sender<bool>,
+        /// The sender to respond with the acceptance status.
+        responder: oneshot::Sender<Acceptable>,
     },
 
     /// Request a reservation for a particular peer.
@@ -129,7 +140,11 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     }
 
     /// Send an `Acceptable` message to the tracker.
-    pub async fn acceptable(&mut self, public_key: C, source_ip: IpAddr) -> bool {
+    pub fn acceptable(
+        &mut self,
+        public_key: C,
+        source_ip: IpAddr,
+    ) -> impl std::future::Future<Output = Acceptable> {
         let (tx, rx) = oneshot::channel();
         self.send(Message::Acceptable {
             public_key,
@@ -137,7 +152,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
             responder: tx,
         })
         .unwrap();
-        rx.await.unwrap()
+        async move { rx.await.unwrap() }
     }
 
     /// Send a `Listen` message to the tracker.

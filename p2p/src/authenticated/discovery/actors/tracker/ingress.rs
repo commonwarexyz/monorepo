@@ -196,14 +196,14 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     }
 
     /// Send an `Acceptable` message to the tracker.
-    pub async fn acceptable(&mut self, public_key: C) -> Acceptable {
+    pub fn acceptable(&mut self, public_key: C) -> impl std::future::Future<Output = Acceptable> {
         let (tx, rx) = oneshot::channel();
         self.send(Message::Acceptable {
             public_key,
             responder: tx,
         })
         .unwrap();
-        rx.await.unwrap()
+        async move { rx.await.unwrap() }
     }
 
     /// Send a `Listen` message to the tracker.

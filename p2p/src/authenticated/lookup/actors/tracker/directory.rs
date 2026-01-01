@@ -1,4 +1,4 @@
-use super::{metrics::Metrics, record::Record, Metadata, Reservation};
+use super::{ingress::Acceptable, metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::{
     authenticated::lookup::{actors::tracker::ingress::Releaser, metrics},
     types::Address,
@@ -268,14 +268,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         result
     }
 
-    /// Returns true if this peer is acceptable (can accept an incoming connection from them).
+    /// Returns the acceptance status for a peer.
     ///
     /// Checks eligibility (peer set membership), egress IP match (if not bypass_ip_check), and connection status.
-    pub fn acceptable(&self, peer: &C, source_ip: IpAddr) -> bool {
+    pub fn acceptable(&self, peer: &C, source_ip: IpAddr) -> Acceptable {
         let now = self.context.current();
-        self.peers
-            .get(peer)
-            .is_some_and(|r| r.acceptable(now, source_ip, self.bypass_ip_check))
+        let Some(record) = self.peers.get(peer) else {
+            return Acceptable::Unknown;
+        };
+        record.acceptable(now, source_ip, self.bypass_ip_check)
     }
 
     /// Return egress IPs we should listen for (accept incoming connections from).
