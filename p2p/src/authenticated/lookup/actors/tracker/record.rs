@@ -86,15 +86,24 @@ impl Record {
 
     /// Attempt to mark the peer as blocked until the given time.
     ///
-    /// Returns `true` if the peer was newly blocked.
+    /// If the peer is already blocked, extends the block to the later of the two times.
+    /// Returns `true` if the peer was newly blocked (not already blocked).
     /// Returns `false` if the peer was already blocked or is the local node (unblockable).
     pub fn block(&mut self, blocked_until: SystemTime) -> bool {
-        if matches!(self.address, Address::Blocked(_) | Address::Myself) {
-            return false;
+        match &self.address {
+            Address::Myself => false,
+            Address::Blocked(existing_until) => {
+                if blocked_until > *existing_until {
+                    self.address = Address::Blocked(blocked_until);
+                }
+                false
+            }
+            Address::Known(_) => {
+                self.address = Address::Blocked(blocked_until);
+                self.persistent = false;
+                true
+            }
         }
-        self.address = Address::Blocked(blocked_until);
-        self.persistent = false;
-        true
     }
 
     /// Increase the count of peer sets this peer is part of.

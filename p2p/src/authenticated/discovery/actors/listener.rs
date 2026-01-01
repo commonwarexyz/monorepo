@@ -5,7 +5,6 @@ use crate::authenticated::{
     mailbox::UnboundedMailbox,
     Mailbox,
 };
-use commonware_codec::ReadExt;
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -108,7 +107,14 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
             context,
             |peer| {
                 let mut tracker = tracker.clone();
-                async move { tracker.acceptable(peer).await == tracker::Acceptable::Yes }
+                async move {
+                    let status = tracker.acceptable(peer).await;
+                    if status == tracker::Acceptable::Yes {
+                        Ok(())
+                    } else {
+                        Err(status)
+                    }
+                }
             },
             stream_cfg,
             stream,
@@ -117,19 +123,14 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
         .await
         {
             Ok(x) => x,
-            Err(StreamError::PeerRejected(bytes)) => {
-                // Decode the peer public key and query for rejection reason
-                if let Ok(peer) = C::PublicKey::read(&mut bytes.as_slice()) {
-                    match tracker.acceptable(peer).await {
-                        tracker::Acceptable::Blocked => {
-                            debug!(?address, "peer is blocked");
-                        }
-                        tracker::Acceptable::Unknown | tracker::Acceptable::Yes => {
-                            debug!(?address, "peer not acceptable (unknown or not in peer set)");
-                        }
+            Err(StreamError::PeerRejected(reason)) => {
+                match reason {
+                    tracker::Acceptable::Blocked => {
+                        debug!(?address, "peer is blocked");
                     }
-                } else {
-                    debug!(?address, "peer rejected (unable to decode peer key)");
+                    tracker::Acceptable::Unknown | tracker::Acceptable::Yes => {
+                        debug!(?address, "peer not acceptable (unknown or not in peer set)");
+                    }
                 }
                 return;
             }

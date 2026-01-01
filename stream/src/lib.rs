@@ -75,7 +75,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_runtime::{Clock, Error as RuntimeError, Sink, Stream};
-use commonware_utils::{hex, SystemTimeExt};
+use commonware_utils::SystemTimeExt;
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
@@ -86,14 +86,17 @@ const CIPHERTEXT_OVERHEAD: u32 = {
 };
 
 /// Errors that can occur when interacting with a stream.
+///
+/// The `R` type parameter represents the rejection reason when a peer is rejected
+/// by the bouncer during the handshake. Use `()` if no rejection information is needed.
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum Error<R = ()> {
     #[error("handshake error: {0}")]
     HandshakeError(HandshakeError),
     #[error("unable to decode: {0}")]
     UnableToDecode(CodecError),
-    #[error("peer rejected: {}", hex(_0))]
-    PeerRejected(Vec<u8>),
+    #[error("peer rejected")]
+    PeerRejected(R),
     #[error("recv failed")]
     RecvFailed(RuntimeError),
     #[error("recv too large: {0} bytes")]
@@ -112,15 +115,37 @@ pub enum Error {
     HandshakeTimeout,
 }
 
-impl From<CodecError> for Error {
+impl<R> From<CodecError> for Error<R> {
     fn from(value: CodecError) -> Self {
         Self::UnableToDecode(value)
     }
 }
 
-impl From<HandshakeError> for Error {
+impl<R> From<HandshakeError> for Error<R> {
     fn from(value: HandshakeError) -> Self {
         Self::HandshakeError(value)
+    }
+}
+
+impl<R> Error<R> {
+    /// Convert an error from the default `Error<()>` to a specific `Error<R>`.
+    ///
+    /// This is useful when helper functions return `Error<()>` but the caller
+    /// needs `Error<R>`. Panics if called on `PeerRejected`.
+    fn from_unit(value: Error<()>) -> Self {
+        match value {
+            Error::HandshakeError(e) => Self::HandshakeError(e),
+            Error::UnableToDecode(e) => Self::UnableToDecode(e),
+            Error::PeerRejected(()) => unreachable!("PeerRejected(()) should not be converted"),
+            Error::RecvFailed(e) => Self::RecvFailed(e),
+            Error::RecvTooLarge(s) => Self::RecvTooLarge(s),
+            Error::InvalidVarint => Self::InvalidVarint,
+            Error::SendFailed(e) => Self::SendFailed(e),
+            Error::SendZeroSize => Self::SendZeroSize,
+            Error::SendTooLarge(s) => Self::SendTooLarge(s),
+            Error::StreamClosed => Self::StreamClosed,
+            Error::HandshakeTimeout => Self::HandshakeTimeout,
+        }
     }
 }
 
@@ -227,29 +252,38 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
 
 /// Accepts an authenticated connection from a peer as the listener.
 /// Returns the peer's identity, sender, and receiver for encrypted communication.
+///
+/// The `bouncer` function is called with the peer's public key to decide whether to accept
+/// the connection. It should return `Ok(())` to accept or `Err(rejection_reason)` to reject.
+/// The rejection reason is included in the returned `Error::PeerRejected` variant.
 pub async fn listen<
-    R: CryptoRngCore + Clock,
+    Ctx: CryptoRngCore + Clock,
     S: Signer,
     I: Stream,
     O: Sink,
-    Fut: Future<Output = bool>,
+    R,
+    Fut: Future<Output = Result<(), R>>,
     F: FnOnce(S::PublicKey) -> Fut,
 >(
-    mut ctx: R,
+    mut ctx: Ctx,
     bouncer: F,
     config: Config<S>,
     mut stream: I,
     mut sink: O,
-) -> Result<(S::PublicKey, Sender<O>, Receiver<I>), Error> {
+) -> Result<(S::PublicKey, Sender<O>, Receiver<I>), Error<R>> {
     let timeout = ctx.sleep(config.handshake_timeout);
     let inner_routine = async move {
-        let peer_bytes = recv_frame(&mut stream, config.max_message_size).await?;
+        let peer_bytes = recv_frame(&mut stream, config.max_message_size)
+            .await
+            .map_err(Error::from_unit)?;
         let peer = S::PublicKey::decode(peer_bytes)?;
-        if !bouncer(peer.clone()).await {
-            return Err(Error::PeerRejected(peer.encode().to_vec()));
+        if let Err(rejection_reason) = bouncer(peer.clone()).await {
+            return Err(Error::PeerRejected(rejection_reason));
         }
 
-        let msg1_bytes = recv_frame(&mut stream, config.max_message_size).await?;
+        let msg1_bytes = recv_frame(&mut stream, config.max_message_size)
+            .await
+            .map_err(Error::from_unit)?;
         let msg1 = Syn::<S::Signature>::decode(msg1_bytes)?;
 
         let (current_time, ok_timestamps) = config.time_information(&ctx);
@@ -264,9 +298,13 @@ pub async fn listen<
             ),
             msg1,
         )?;
-        send_frame(&mut sink, &syn_ack.encode(), config.max_message_size).await?;
+        send_frame(&mut sink, &syn_ack.encode(), config.max_message_size)
+            .await
+            .map_err(Error::from_unit)?;
 
-        let ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
+        let ack_bytes = recv_frame(&mut stream, config.max_message_size)
+            .await
+            .map_err(Error::from_unit)?;
         let ack = Ack::decode(ack_bytes)?;
 
         let (send, recv) = listen_end(state, ack)?;
@@ -372,7 +410,7 @@ mod test {
             let listener_handle = context.clone().spawn(move |context| async move {
                 listen(
                     context,
-                    |_| async { true },
+                    |_| async { Ok::<(), ()>(()) },
                     listener_config,
                     listener_stream,
                     listener_sink,

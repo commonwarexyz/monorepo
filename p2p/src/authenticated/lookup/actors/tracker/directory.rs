@@ -220,7 +220,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Attempt to block a peer, updating the metrics accordingly.
     pub fn block(&mut self, peer: &C) {
-        let blocked_until = self.context.current() + self.block_duration;
+        let now = self.context.current();
+        let blocked_until = now
+            .checked_add(self.block_duration)
+            .unwrap_or(now + Duration::from_secs(365 * 24 * 60 * 60 * 100)); // ~100 years
         if self
             .peers
             .get_mut(peer)

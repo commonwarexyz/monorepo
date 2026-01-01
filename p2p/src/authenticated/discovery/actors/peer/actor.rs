@@ -427,7 +427,7 @@ mod tests {
                 move |ctx| async move {
                     commonware_stream::listen(
                         ctx,
-                        |_| async { true },
+                        |_| async { Ok::<(), ()>(()) },
                         remote_config,
                         remote_stream,
                         remote_sink,
@@ -526,7 +526,7 @@ mod tests {
                 move |ctx| async move {
                     commonware_stream::listen(
                         ctx,
-                        |_| async { true },
+                        |_| async { Ok::<(), ()>(()) },
                         remote_config,
                         remote_stream,
                         remote_sink,
@@ -631,7 +631,7 @@ mod tests {
                 move |ctx| async move {
                     commonware_stream::listen(
                         ctx,
-                        |_| async { true },
+                        |_| async { Ok::<(), ()>(()) },
                         remote_config,
                         remote_stream,
                         remote_sink,

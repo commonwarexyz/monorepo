@@ -39,7 +39,7 @@ fn fuzz(data: &[u8]) {
         let listener_handle = context.clone().spawn(move |context| async move {
             listen(
                 context,
-                |_| async { true },
+                |_| async { Ok::<(), ()>(()) },
                 listener_config,
                 listener_stream,
                 listener_sink,

@@ -11,7 +11,7 @@ use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
     SinkOf, Spawner, StreamOf,
 };
-use commonware_stream::{listen, Config as StreamConfig};
+use commonware_stream::{listen, Config as StreamConfig, Error as StreamError};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::counter::Counter;
@@ -126,7 +126,16 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
         let source_ip = address.ip();
         let (peer, send, recv) = match listen(
             context,
-            |peer| tracker.acceptable(peer, source_ip),
+            |peer| {
+                let fut = tracker.acceptable(peer, source_ip);
+                async move {
+                    if fut.await {
+                        Ok(())
+                    } else {
+                        Err(())
+                    }
+                }
+            },
             stream_cfg,
             stream,
             sink,
@@ -134,8 +143,12 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
         .await
         {
             Ok(connection) => connection,
+            Err(StreamError::PeerRejected(())) => {
+                debug!(?address, "peer not acceptable (unknown or not in peer set)");
+                return;
+            }
             Err(err) => {
-                debug!(?err, ?address, "failed to upgrade connection");
+                debug!(?err, "failed to complete handshake");
                 return;
             }
         };

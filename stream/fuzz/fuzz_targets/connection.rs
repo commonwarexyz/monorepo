@@ -114,7 +114,7 @@ fn fuzz(input: FuzzInput) {
             move |context| async move {
                 listen(
                     context,
-                    |_| async { true },
+                    |_| async { Ok::<(), ()>(()) },
                     listener_config,
                     listener_stream,
                     listener_sink,

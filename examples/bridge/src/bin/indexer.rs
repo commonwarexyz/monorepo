@@ -241,8 +241,14 @@ fn main() {
             let (peer, mut sender, mut receiver) = match listen(
                 context.with_label("listener"),
                 |peer| {
-                    let out = validators.position(&peer).is_some();
-                    async move { out }
+                    let valid = validators.position(&peer).is_some();
+                    async move {
+                        if valid {
+                            Ok(())
+                        } else {
+                            Err(())
+                        }
+                    }
                 },
                 config.clone(),
                 stream,
