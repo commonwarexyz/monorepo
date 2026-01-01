@@ -59,7 +59,8 @@
 //! - <https://github.com/hoytech/negentropy>: Negentropy reference implementation
 //! - <https://arxiv.org/abs/2212.13567>: Range-Based Set Reconciliation paper
 
-use crate::sha256::{Digest, Sha256};
+use crate::blake3::Blake3;
+use crate::sha256::Digest;
 use crate::Hasher as _;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
@@ -236,7 +237,7 @@ impl Read for Bound {
 ///
 /// Fingerprints are computed using an incremental hash: the sum of all item IDs
 /// (as 256-bit integers mod 2^256), concatenated with the item count, then
-/// hashed with SHA-256 and truncated to 16 bytes.
+/// hashed with Blake3 and truncated to 16 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Fingerprint {
     bytes: [u8; FINGERPRINT_SIZE],
@@ -364,13 +365,15 @@ impl FingerprintAccumulator {
     }
 
     /// Finalize the accumulator into a fingerprint.
+    ///
+    /// Uses Blake3 for finalization (faster than SHA-256 while maintaining security).
     pub fn finalize(&self) -> Fingerprint {
         if self.count == 0 {
             return Fingerprint::new();
         }
 
-        // Hash: sum || count
-        let mut hasher = Sha256::new();
+        // Hash: sum || count using Blake3
+        let mut hasher = Blake3::new();
         hasher.update(&self.sum);
         hasher.update(&self.count.to_le_bytes());
         let digest = hasher.finalize();
