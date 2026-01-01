@@ -104,11 +104,6 @@ pub trait Archive {
     /// Sync all pending writes.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
 
-    /// Close [Archive] (and underlying storage).
-    ///
-    /// Any pending writes are synced prior to closing.
-    fn close(self) -> impl Future<Output = Result<(), Error>>;
-
     /// Remove all persistent data created by this [Archive].
     fn destroy(self) -> impl Future<Output = Result<(), Error>>;
 }
@@ -230,9 +225,6 @@ mod tests {
 
         // Force a sync
         archive.sync().await.expect("Failed to sync data");
-
-        // Close the archive
-        archive.close().await.expect("Failed to close archive");
     }
 
     #[test_traced]
@@ -303,8 +295,6 @@ mod tests {
             .expect("Failed to get data")
             .expect("Data not found");
         assert_eq!(retrieved, data1);
-
-        archive.close().await.expect("Failed to close archive");
     }
 
     #[test_traced]
@@ -359,8 +349,6 @@ mod tests {
             .await
             .expect("Failed to get data");
         assert!(retrieved.is_none());
-
-        archive.close().await.expect("Failed to close archive");
     }
 
     #[test_traced]
@@ -423,8 +411,8 @@ mod tests {
                     .expect("Failed to put data");
             }
 
-            // Close the archive
-            archive.close().await.expect("Failed to close archive");
+            // Sync and drop the archive
+            archive.sync().await.expect("Failed to sync archive");
         }
 
         // Reopen and verify data
@@ -453,8 +441,6 @@ mod tests {
                     .expect("Data not found");
                 assert_eq!(retrieved, *expected_data);
             }
-
-            archive.close().await.expect("Failed to close archive");
         }
     }
 
@@ -523,7 +509,7 @@ mod tests {
                     .expect("Failed to put data");
             }
 
-            archive.close().await.expect("Failed to close archive");
+            archive.sync().await.expect("Failed to sync archive");
         }
 
         {
@@ -574,8 +560,6 @@ mod tests {
             let (current_end, start_next) = archive.next_gap(last_index);
             assert!(current_end.is_some());
             assert!(start_next.is_none());
-
-            archive.close().await.expect("Failed to close archive");
         }
     }
 
@@ -660,8 +644,6 @@ mod tests {
                     .expect("Data not found");
                 assert_eq!(&retrieved, data);
             }
-
-            archive.close().await.expect("Failed to close archive");
         }
 
         // Reinitialize and verify
@@ -683,8 +665,6 @@ mod tests {
                     .expect("Data not found");
                 assert_eq!(&retrieved, data);
             }
-
-            archive.close().await.expect("Failed to close archive");
         }
     }
 

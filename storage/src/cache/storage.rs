@@ -1,6 +1,7 @@
 use super::{Config, Error};
 use crate::{
     journal::segmented::variable::{Config as JConfig, Journal},
+    kv,
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};
@@ -297,20 +298,13 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         self.sync().await
     }
 
-    /// Close the [Cache].
-    ///
-    /// Any pending writes will be synced prior to closing.
-    pub async fn close(self) -> Result<(), Error> {
-        self.journal.close().await.map_err(Error::Journal)
-    }
-
     /// Remove all persistent data created by this [Cache].
     pub async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await.map_err(Error::Journal)
     }
 }
 
-impl<E: Storage + Metrics, V: Codec> crate::store::Store for Cache<E, V> {
+impl<E: Storage + Metrics, V: Codec> kv::Gettable for Cache<E, V> {
     type Key = u64;
     type Value = V;
     type Error = Error;

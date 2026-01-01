@@ -30,9 +30,9 @@ pub struct Config<C: Signer> {
     /// is selected from the results (shuffled for each dial attempt).
     pub allow_dns: bool,
 
-    /// Whether or not to attempt handshakes on incoming connections
-    /// from unregistered IP addresses.
-    pub attempt_unregistered_handshakes: bool,
+    /// Whether or not to skip IP verification for incoming connections
+    /// (allows known peers to connect from unknown IPs).
+    pub bypass_ip_check: bool,
 
     /// Maximum size allowed for messages over any connection.
     ///
@@ -119,7 +119,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: false,
             allow_dns: true,
-            attempt_unregistered_handshakes: false,
+            bypass_ip_check: false,
             max_message_size,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
@@ -151,7 +151,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: true,
             allow_dns: true,
-            attempt_unregistered_handshakes: false,
+            bypass_ip_check: false,
             max_message_size,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
@@ -178,7 +178,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: true,
             allow_dns: true,
-            attempt_unregistered_handshakes: false,
+            bypass_ip_check: false,
             max_message_size,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),

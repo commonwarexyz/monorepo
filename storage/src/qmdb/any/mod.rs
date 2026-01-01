@@ -60,9 +60,6 @@ pub trait CleanAny:
     /// Prune historical operations prior to `prune_loc`.
     fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
 
-    /// Close the db. Uncommitted operations will be lost or rolled back on restart.
-    fn close(self) -> impl Future<Output = Result<(), Error>>;
-
     /// Destroy the db, removing all data from disk.
     fn destroy(self) -> impl Future<Output = Result<(), Error>>;
 }

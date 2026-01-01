@@ -35,7 +35,7 @@ pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
     pub allow_private_ips: bool,
-    pub attempt_unregistered_handshakes: bool,
+    pub bypass_ip_check: bool,
     pub max_concurrent_handshakes: NonZeroU32,
     pub allowed_handshake_rate_per_ip: Quota,
     pub allowed_handshake_rate_per_subnet: Quota,
@@ -47,7 +47,7 @@ pub struct Actor<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Si
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
     allow_private_ips: bool,
-    attempt_unregistered_handshakes: bool,
+    bypass_ip_check: bool,
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
@@ -98,7 +98,7 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
             allow_private_ips: cfg.allow_private_ips,
-            attempt_unregistered_handshakes: cfg.attempt_unregistered_handshakes,
+            bypass_ip_check: cfg.bypass_ip_check,
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
             allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
             allowed_handshake_rate_per_subnet: cfg.allowed_handshake_rate_per_subnet,
@@ -228,7 +228,7 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                 }
 
                 // Check whether the IP is registered
-                if !self.attempt_unregistered_handshakes && !self.registered_ips.contains(&ip) {
+                if !self.bypass_ip_check && !self.registered_ips.contains(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting unknown address");
                     continue;
@@ -279,7 +279,8 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
-                            context.into_present(), address, stream_cfg, sink, stream, tracker, supervisor,
+                            context.into_present(), address, stream_cfg, sink, stream,
+                            tracker, supervisor,
                         )
                         .await;
 
@@ -332,7 +333,7 @@ mod tests {
                     stream_cfg,
                     allow_private_ips: true,
                     max_concurrent_handshakes: NZU32!(8),
-                    attempt_unregistered_handshakes: false,
+                    bypass_ip_check: false,
                     allowed_handshake_rate_per_ip,
                     allowed_handshake_rate_per_subnet,
                 },
@@ -502,7 +503,7 @@ mod tests {
                     address,
                     stream_cfg,
                     allow_private_ips: true,
-                    attempt_unregistered_handshakes: false,
+                    bypass_ip_check: false,
                     max_concurrent_handshakes: NZU32!(8),
                     allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
                     allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),
@@ -583,7 +584,7 @@ mod tests {
                     address,
                     stream_cfg,
                     allow_private_ips: true,
-                    attempt_unregistered_handshakes: true,
+                    bypass_ip_check: true,
                     max_concurrent_handshakes: NZU32!(8),
                     allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
                     allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),
@@ -664,7 +665,7 @@ mod tests {
                     address,
                     stream_cfg,
                     allow_private_ips: false,
-                    attempt_unregistered_handshakes: true,
+                    bypass_ip_check: true,
                     max_concurrent_handshakes: NZU32!(8),
                     allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
                     allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),

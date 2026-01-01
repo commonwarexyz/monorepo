@@ -39,5 +39,6 @@ pub struct Config<C: Signer> {
     pub allow_private_ips: bool,
     pub allow_dns: bool,
     pub block_duration: Duration,
+    pub bypass_ip_check: bool,
     pub listener: Mailbox<ListenerFilter>,
 }
