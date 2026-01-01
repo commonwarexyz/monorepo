@@ -819,7 +819,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Not listenable because self
-            assert_eq!(mailbox.acceptable(peer_pk).await, Acceptable::Unknown);
+            assert_eq!(mailbox.acceptable(peer_pk).await, Acceptable::Rejected);
             // Listenable because registered
             assert_eq!(mailbox.acceptable(peer_pk2).await, Acceptable::Yes);
             // Not listenable because not registered
@@ -855,7 +855,7 @@ mod tests {
 
             assert_eq!(
                 mailbox.acceptable(peer_pk.clone()).await,
-                Acceptable::Unknown
+                Acceptable::Rejected
             );
 
             let failed_reservation = mailbox.listen(peer_pk.clone()).await;

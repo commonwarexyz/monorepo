@@ -208,13 +208,21 @@ impl Record {
         source_ip: IpAddr,
         bypass_ip_check: bool,
     ) -> Acceptable {
+        // Check if ourselves
+        if matches!(self.address, Address::Myself) {
+            return Acceptable::Rejected;
+        }
         // Check if blocked (not expired)
         if self.blocked(now) {
             return Acceptable::Blocked;
         }
-        // Check eligibility (peer set membership, not ourselves) and connection status
-        if !self.eligible(now) || self.status != Status::Inert {
+        // Check if in a peer set
+        if self.sets == 0 && !self.persistent {
             return Acceptable::Unknown;
+        }
+        // Check if already connected or reserved
+        if self.status != Status::Inert {
+            return Acceptable::Rejected;
         }
         // Check IP match
         if bypass_ip_check {
@@ -222,7 +230,7 @@ impl Record {
         }
         match &self.address {
             Address::Known(addr) if addr.egress_ip() == source_ip => Acceptable::Yes,
-            _ => Acceptable::Unknown,
+            _ => Acceptable::Rejected, // Known peer but wrong IP
         }
     }
 
@@ -529,7 +537,7 @@ mod tests {
         // Correct everything but wrong IP - not acceptable
         assert_eq!(
             record.acceptable(now(), wrong_ip, false),
-            Acceptable::Unknown,
+            Acceptable::Rejected,
             "Not acceptable when IP doesn't match"
         );
 
@@ -547,7 +555,7 @@ mod tests {
         record_reserved.reserve(now());
         assert_eq!(
             record_reserved.acceptable(now(), egress_ip, false),
-            Acceptable::Unknown,
+            Acceptable::Rejected,
             "Not acceptable when reserved"
         );
 
@@ -558,7 +566,7 @@ mod tests {
         record_connected.connect();
         assert_eq!(
             record_connected.acceptable(now(), egress_ip, false),
-            Acceptable::Unknown,
+            Acceptable::Rejected,
             "Not acceptable when connected"
         );
 
@@ -612,7 +620,7 @@ mod tests {
         record_reserved.reserve(now());
         assert_eq!(
             record_reserved.acceptable(now(), egress_ip, true),
-            Acceptable::Unknown,
+            Acceptable::Rejected,
             "Not acceptable when reserved"
         );
 
@@ -623,7 +631,7 @@ mod tests {
         record_connected.connect();
         assert_eq!(
             record_connected.acceptable(now(), egress_ip, true),
-            Acceptable::Unknown,
+            Acceptable::Rejected,
             "Not acceptable when connected"
         );
 
@@ -631,7 +639,7 @@ mod tests {
         let record_myself = Record::myself();
         assert_eq!(
             record_myself.acceptable(now(), egress_ip, true),
-            Acceptable::Unknown,
+            Acceptable::Rejected,
             "Not acceptable when myself"
         );
     }

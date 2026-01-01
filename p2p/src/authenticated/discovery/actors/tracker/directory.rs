@@ -383,14 +383,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let Some(record) = self.peers.get(peer) else {
             return Acceptable::Unknown;
         };
-        if record.blocked(now) {
-            return Acceptable::Blocked;
-        }
-        if record.acceptable(now) {
-            Acceptable::Yes
-        } else {
-            Acceptable::Unknown
-        }
+        record.acceptable(now)
     }
 
     // --------- Helpers ----------

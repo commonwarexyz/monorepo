@@ -1,3 +1,4 @@
+use super::ingress::Acceptable;
 use crate::{authenticated::discovery::types::Info, Ingress};
 use commonware_cryptography::PublicKey;
 use std::time::SystemTime;
@@ -247,13 +248,29 @@ impl<C: PublicKey> Record<C> {
         ingress.is_valid(allow_private_ips, allow_dns)
     }
 
-    /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
+    /// Returns the acceptance status for this peer.
     ///
     /// A peer is acceptable if:
     /// - The peer is eligible (in a peer set, not blocked, not ourselves)
     /// - We are not already connected or reserved
-    pub fn acceptable(&self, now: SystemTime) -> bool {
-        self.eligible(now) && self.status == Status::Inert
+    pub fn acceptable(&self, now: SystemTime) -> Acceptable {
+        // Check if ourselves
+        if matches!(self.address, Address::Myself(_)) {
+            return Acceptable::Rejected;
+        }
+        // Check if blocked
+        if self.blocked(now) {
+            return Acceptable::Blocked;
+        }
+        // Check if in a peer set
+        if self.sets == 0 && !self.persistent {
+            return Acceptable::Unknown;
+        }
+        // Check if already connected or reserved
+        if self.status != Status::Inert {
+            return Acceptable::Rejected;
+        }
+        Acceptable::Yes
     }
 
     /// Return the ingress address of the peer, if known.

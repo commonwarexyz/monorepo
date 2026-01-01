@@ -20,8 +20,10 @@ pub enum Acceptable {
     Yes,
     /// Peer is blocked.
     Blocked,
-    /// Peer is unknown (not in any peer set or IP mismatch).
+    /// Peer is not in any peer set.
     Unknown,
+    /// Peer is known but rejected (already connected, reserved, ourselves, IP mismatch, etc.).
+    Rejected,
 }
 
 /// Messages that can be sent to the tracker actor.

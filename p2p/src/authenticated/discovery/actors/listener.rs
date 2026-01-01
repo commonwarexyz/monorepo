@@ -128,8 +128,11 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                     tracker::Acceptable::Blocked => {
                         debug!(?address, "peer is blocked");
                     }
-                    tracker::Acceptable::Unknown | tracker::Acceptable::Yes => {
-                        debug!(?address, "peer not acceptable (unknown or not in peer set)");
+                    tracker::Acceptable::Unknown => {
+                        debug!(?address, "peer unknown (not in peer set)");
+                    }
+                    tracker::Acceptable::Rejected | tracker::Acceptable::Yes => {
+                        debug!(?address, "peer rejected");
                     }
                 }
                 return;
