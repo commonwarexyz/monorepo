@@ -116,6 +116,7 @@ num-traits = "0.2.19"
 opentelemetry = "0.31.0"
 opentelemetry-otlp = "0.31.0"
 opentelemetry_sdk = "0.31.0"
+k256 = { version = "0.13.4", default-features = false }
 p256 = { version = "0.13.2", default-features = false }
 paste = "1.0.15"
 pin-project = "1.1.10"

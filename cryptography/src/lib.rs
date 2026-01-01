@@ -34,6 +34,7 @@ pub use bloomfilter::BloomFilter;
 pub mod handshake;
 pub mod lthash;
 pub use lthash::LtHash;
+pub mod schnorr;
 pub mod secp256r1;
 pub mod transcript;
 
@@ -490,6 +491,52 @@ mod tests {
     fn test_secp256r1_recoverable_len() {
         assert_eq!(secp256r1::recoverable::PublicKey::SIZE, 33);
         assert_eq!(secp256r1::recoverable::Signature::SIZE, 65);
+    }
+
+    #[test]
+    fn test_schnorr_validate() {
+        test_validate::<schnorr::PrivateKey>();
+    }
+
+    #[test]
+    fn test_schnorr_validate_invalid_public_key() {
+        test_validate_invalid_public_key::<schnorr::PrivateKey>();
+    }
+
+    #[test]
+    fn test_schnorr_sign_and_verify() {
+        test_sign_and_verify::<schnorr::PrivateKey>();
+    }
+
+    #[test]
+    fn test_schnorr_sign_and_verify_wrong_message() {
+        test_sign_and_verify_wrong_message::<schnorr::PrivateKey>();
+    }
+
+    #[test]
+    fn test_schnorr_sign_and_verify_wrong_namespace() {
+        test_sign_and_verify_wrong_namespace::<schnorr::PrivateKey>();
+    }
+
+    #[test]
+    fn test_schnorr_empty_namespace() {
+        test_empty_namespace::<schnorr::PrivateKey>();
+    }
+
+    #[test]
+    fn test_schnorr_signature_determinism() {
+        test_signature_determinism::<schnorr::PrivateKey>();
+    }
+
+    #[test]
+    fn test_schnorr_invalid_signature_publickey_pair() {
+        test_invalid_signature_publickey_pair::<schnorr::PrivateKey>();
+    }
+
+    #[test]
+    fn test_schnorr_len() {
+        assert_eq!(schnorr::PublicKey::SIZE, 32);
+        assert_eq!(schnorr::Signature::SIZE, 64);
     }
     fn test_hasher_multiple_runs<H: Hasher>() {
         // Generate initial hash
