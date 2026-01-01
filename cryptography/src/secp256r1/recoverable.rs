@@ -978,6 +978,98 @@ mod tests {
         );
     }
 
+    #[test]
+    fn batch_verify_rejects_cancelling_forgeries() {
+        // This test verifies that random coefficients prevent the "cancelling forgery"
+        // attack where an attacker creates two invalid signatures whose errors cancel
+        // out when summed, causing naive batch verification to pass.
+        //
+        // Attack: Modify R1 to R1+delta and R2 to R2-delta. Without random coefficients:
+        //   (... - R1 - delta) + (... - R2 + delta) = (... - R1) + (... - R2)
+        // The deltas cancel! With random coefficients z1, z2:
+        //   z1*(... - R1 - delta) + z2*(... - R2 + delta) includes delta*(z2 - z1) ≠ 0
+
+        use crate::BatchVerifier;
+        use commonware_math::algebra::Random;
+
+        let signer1 = PrivateKey::random(&mut rand::thread_rng());
+        let signer2 = PrivateKey::random(&mut rand::thread_rng());
+
+        let msg1 = b"message one";
+        let msg2 = b"message two";
+
+        let sig1 = signer1.sign(NAMESPACE, msg1);
+        let sig2 = signer2.sign(NAMESPACE, msg2);
+
+        // Verify both original signatures are valid individually
+        assert!(signer1.public_key().verify(NAMESPACE, msg1, &sig1));
+        assert!(signer2.public_key().verify(NAMESPACE, msg2, &sig2));
+
+        // Recover the R points from both signatures
+        let r1_point = recover_r_point(&sig1.raw, sig1.recovery_id)
+            .expect("valid signature should have recoverable R");
+        let r2_point = recover_r_point(&sig2.raw, sig2.recovery_id)
+            .expect("valid signature should have recoverable R");
+
+        // Create a random non-identity delta point
+        let delta_scalar = Scalar::random(&mut rand::thread_rng());
+        let delta = ProjectivePoint::mul_by_generator(&delta_scalar);
+
+        // Forge R points: R1' = R1 + delta, R2' = R2 - delta
+        let r1_forged = r1_point + delta;
+        let r2_forged = r2_point - delta;
+
+        // Helper to create forged signature from modified R point
+        fn forge_signature_with_r(
+            original: &Signature,
+            forged_r: ProjectivePoint,
+        ) -> Option<Signature> {
+            use p256::elliptic_curve::sec1::ToEncodedPoint;
+
+            let forged_affine = forged_r.to_affine();
+            // Get compressed encoding: [02|03 || x] where 02=even y, 03=odd y
+            let encoded = forged_affine.to_encoded_point(true);
+            let compressed_bytes = encoded.as_bytes();
+            let y_is_odd = compressed_bytes[0] == 0x03;
+            let x_bytes = &compressed_bytes[1..33];
+
+            let forged_recovery_id = RecoveryId::new(y_is_odd, false);
+
+            // Create new ECDSA signature with forged r value but original s
+            let forged_ecdsa = p256::ecdsa::Signature::from_scalars(
+                *p256::FieldBytes::from_slice(x_bytes),
+                original.signature.s().to_bytes(),
+            )
+            .ok()?;
+
+            Some(Signature::new(forged_ecdsa, forged_recovery_id))
+        }
+
+        let forged_sig1 = forge_signature_with_r(&sig1, r1_forged)
+            .expect("should create forged signature");
+        let forged_sig2 = forge_signature_with_r(&sig2, r2_forged)
+            .expect("should create forged signature");
+
+        // Both forged signatures should fail individual verification
+        assert!(
+            !signer1.public_key().verify(NAMESPACE, msg1, &forged_sig1),
+            "forged sig1 should fail individual verification"
+        );
+        assert!(
+            !signer2.public_key().verify(NAMESPACE, msg2, &forged_sig2),
+            "forged sig2 should fail individual verification"
+        );
+
+        // Batch verification must also reject the cancelling forgeries
+        let mut batch = Batch::new();
+        assert!(batch.add(NAMESPACE, msg1, &signer1.public_key(), &forged_sig1));
+        assert!(batch.add(NAMESPACE, msg2, &signer2.public_key(), &forged_sig2));
+        assert!(
+            !batch.verify(&mut rand::thread_rng()),
+            "batch verification must reject cancelling forgeries"
+        );
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
