@@ -127,9 +127,9 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     },
     /// A request to set the sync floor.
     ///
-    /// The sync floor is the latest block that the application has processed. Marshal
-    /// will not attempt to sync blocks below this height nor deliver blocks below
-    /// this height to the application.
+    /// The sync floor is an exclusive bound marking the latest block that the application
+    /// has processed. Marshal will attempt to start syncing and delivering blocks to the
+    /// application starting at `height + 1`.
     ///
     /// This sets the sync floor only if the provided height is higher than the
     /// previously recorded floor.
@@ -332,9 +332,9 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
 
     /// A request to set the sync floor (conditionally advances if higher).
     ///
-    /// The sync floor is the latest block that the application has processed. Marshal
-    /// will not attempt to sync blocks below this height nor deliver blocks below
-    /// this height to the application.
+    /// The sync floor is an exclusive bound marking the latest block that the application
+    /// has processed. Marshal will attempt to start syncing and delivering blocks to the
+    /// application starting at `height + 1`.
     ///
     /// The default sync floor is height 0.
     pub async fn set_floor(&mut self, height: u64) {
