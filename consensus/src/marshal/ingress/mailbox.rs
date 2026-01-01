@@ -125,12 +125,13 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// The verified block.
         block: B,
     },
-    /// Sets the sync starting point.
+    /// Sets the sync starting point (advances if higher than current).
     ///
     /// Marshal will sync and deliver blocks starting at `floor + 1`. Data at or
     /// below the floor is pruned.
     ///
-    /// Only updates if the provided height is higher than the current floor.
+    /// To prune data without affecting the sync starting point (say at some trailing depth
+    /// from tip), prune the finalized stores directly.
     ///
     /// The default floor is 0.
     SetFloor {
@@ -332,6 +333,9 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     ///
     /// Marshal will sync and deliver blocks starting at `floor + 1`. Data at or
     /// below the floor is pruned.
+    ///
+    /// To prune data without affecting the sync starting point (say at some trailing depth
+    /// from tip), prune the finalized stores directly.
     ///
     /// The default floor is 0.
     pub async fn set_floor(&mut self, height: u64) {
