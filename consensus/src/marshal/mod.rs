@@ -49,7 +49,7 @@
 //! Marshal will store all blocks after a configurable starting height (or, floor) onward.
 //! This allows for state sync from a specific height rather than from genesis. When
 //! updating the starting height, marshal will attempt to prune blocks in external storage
-//! that are no longer needed.
+//! that are no longer needed, if the backing [`store::Blocks`] supports pruning.
 //!
 //! _Setting a configurable starting height will prevent others from backfilling blocks below said height. This
 //! feature is only recommended for applications that support state sync (i.e., those that don't require full
