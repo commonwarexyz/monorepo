@@ -308,6 +308,10 @@ impl crate::BatchVerifier<PublicKey> for Batch {
         let mut agg_point = ProjectivePoint::IDENTITY;
 
         for (public_key, signature, payload) in self.items {
+            // Reject malleable signatures (high-s)
+            if signature.signature.s().is_high().into() {
+                return false;
+            }
             // Generate random coefficient
             let z = Scalar::random(&mut *rng);
 
@@ -926,6 +930,52 @@ mod tests {
         let mut batch = Batch::new();
         assert!(batch.add(b"wrong-namespace", msg, &signer.public_key(), &sig));
         assert!(!batch.verify(&mut rand::thread_rng()));
+    }
+
+    #[test]
+    fn batch_verify_rejects_malleable_signature() {
+        use crate::BatchVerifier;
+        use commonware_math::algebra::Random;
+        use p256::elliptic_curve::ops::Neg;
+
+        let signer = PrivateKey::random(&mut rand::thread_rng());
+        let msg = b"malleable test message";
+        let valid_sig = signer.sign(NAMESPACE, msg);
+
+        // Verify the original signature is valid
+        assert!(signer.public_key().verify(NAMESPACE, msg, &valid_sig));
+
+        // Create a malleable signature by negating s and flipping the recovery ID
+        // In ECDSA, (r, s) and (r, n-s) are both mathematically valid signatures
+        let s_negated = valid_sig.signature.s().neg();
+        let malleable_ecdsa_sig = p256::ecdsa::Signature::from_scalars(
+            *valid_sig.signature.r(),
+            s_negated,
+        )
+        .expect("valid signature components");
+
+        // The recovery ID must be flipped to point to -R
+        let malleable_recovery_id = RecoveryId::new(
+            !valid_sig.recovery_id.is_y_odd(),
+            valid_sig.recovery_id.is_x_reduced(),
+        );
+
+        // Construct the malleable signature (bypassing normal signing which normalizes s)
+        let malleable_sig = Signature::new(malleable_ecdsa_sig, malleable_recovery_id);
+
+        // Verify the malleable signature has high-s
+        assert!(
+            bool::from(malleable_sig.signature.s().is_high()),
+            "malleable signature should have high-s"
+        );
+
+        // Batch verification must reject the malleable signature
+        let mut batch = Batch::new();
+        assert!(batch.add(NAMESPACE, msg, &signer.public_key(), &malleable_sig));
+        assert!(
+            !batch.verify(&mut rand::thread_rng()),
+            "batch verification must reject malleable (high-s) signatures"
+        );
     }
 
     #[cfg(feature = "arbitrary")]
