@@ -600,7 +600,7 @@ mod tests {
         recover_multiple_test::<MinSig>();
     }
 
-    fn partial_aggregate_signature_correct<V: Variant>() {
+    fn recover_with_verification<V: Variant>() {
         let (n, _) = (5, 4);
         let mut rng = test_rng();
 
@@ -622,12 +622,12 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_aggregate_signature_correct() {
-        partial_aggregate_signature_correct::<MinPk>();
-        partial_aggregate_signature_correct::<MinSig>();
+    fn test_recover_with_verification() {
+        recover_with_verification::<MinPk>();
+        recover_with_verification::<MinSig>();
     }
 
-    fn partial_aggregate_signature_bad_namespace<V: Variant>() {
+    fn recover_bad_namespace<V: Variant>() {
         let n = 5;
         let mut rng = test_rng();
 
@@ -656,12 +656,12 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_aggregate_signature_bad_namespace() {
-        partial_aggregate_signature_bad_namespace::<MinPk>();
-        partial_aggregate_signature_bad_namespace::<MinSig>();
+    fn test_recover_bad_namespace() {
+        recover_bad_namespace::<MinPk>();
+        recover_bad_namespace::<MinSig>();
     }
 
-    fn partial_aggregate_signature_insufficient<V: Variant>() {
+    fn recover_insufficient<V: Variant>() {
         let (n, t) = (5, 4);
         let mut rng = test_rng();
 
@@ -687,12 +687,12 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_aggregate_signature_insufficient() {
-        partial_aggregate_signature_insufficient::<MinPk>();
-        partial_aggregate_signature_insufficient::<MinSig>();
+    fn test_recover_insufficient() {
+        recover_insufficient::<MinPk>();
+        recover_insufficient::<MinSig>();
     }
 
-    fn partial_aggregate_signature_bad_share<V: Variant>() {
+    fn recover_bad_share<V: Variant>() {
         let n = 5;
         let mut rng = test_rng();
 
@@ -719,9 +719,9 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "InvalidSignature")]
-    fn test_partial_aggregate_signature_bad_share() {
-        partial_aggregate_signature_bad_share::<MinPk>();
-        partial_aggregate_signature_bad_share::<MinSig>();
+    fn test_recover_bad_share() {
+        recover_bad_share::<MinPk>();
+        recover_bad_share::<MinSig>();
     }
 
     #[test]
