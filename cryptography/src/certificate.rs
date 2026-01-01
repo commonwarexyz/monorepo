@@ -263,6 +263,16 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// return `true`.
     fn is_attributable() -> bool;
 
+    /// Returns whether this scheme benefits from batch verification.
+    ///
+    /// Schemes that benefit from batch verification (like [`ed25519`], [`bls12381_multisig`]
+    /// and [`bls12381_threshold`]) should return `true`, allowing callers to optimize by
+    /// deferring verification until multiple signatures are available.
+    ///
+    /// Schemes that don't benefit from batch verification (like `secp256r1`) should
+    /// return `false`, indicating that eager per-signature verification is preferred.
+    fn is_batchable() -> bool;
+
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;
 

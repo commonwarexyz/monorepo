@@ -379,6 +379,12 @@ impl Generic {
         true
     }
 
+    pub const fn is_batchable() -> bool {
+        // Batch verification requires the `std` feature because it depends on
+        // `ed25519_consensus::batch::Verifier`.
+        cfg!(feature = "std")
+    }
+
     pub const fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
         self.participants.len()
     }
@@ -614,6 +620,10 @@ mod macros {
 
                 fn is_attributable() -> bool {
                     $crate::ed25519::certificate::Generic::is_attributable()
+                }
+
+                fn is_batchable() -> bool {
+                    $crate::ed25519::certificate::Generic::is_batchable()
                 }
 
                 fn certificate_codec_config(

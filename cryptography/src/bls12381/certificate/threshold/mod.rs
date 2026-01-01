@@ -355,6 +355,10 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         false
     }
 
+    pub const fn is_batchable() -> bool {
+        true
+    }
+
     pub const fn certificate_codec_config(&self) {}
 
     pub const fn certificate_codec_config_unbounded() {}
@@ -542,6 +546,10 @@ mod macros {
 
                 fn is_attributable() -> bool {
                     $crate::bls12381::certificate::threshold::Generic::<P, V>::is_attributable()
+                }
+
+                fn is_batchable() -> bool {
+                    $crate::bls12381::certificate::threshold::Generic::<P, V>::is_batchable()
                 }
 
                 fn certificate_codec_config(

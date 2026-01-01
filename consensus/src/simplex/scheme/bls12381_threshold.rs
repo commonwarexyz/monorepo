@@ -691,6 +691,10 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         false
     }
 
+    fn is_batchable() -> bool {
+        true
+    }
+
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {}
 
     fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {}
