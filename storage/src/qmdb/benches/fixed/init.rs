@@ -48,7 +48,6 @@ fn bench_fixed_init(c: &mut Criterion) {
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
                         }
                         Variant::AnyUnorderedFixed => {
                             let db = get_any_unordered_fixed(ctx.clone()).await;
@@ -56,7 +55,6 @@ fn bench_fixed_init(c: &mut Criterion) {
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
                         }
                         Variant::AnyOrderedFixed => {
                             let db = get_any_ordered_fixed(ctx.clone()).await;
@@ -64,7 +62,6 @@ fn bench_fixed_init(c: &mut Criterion) {
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
                         }
                         Variant::CurrentUnorderedFixed => {
                             let db = get_current_unordered_fixed(ctx.clone()).await;
@@ -73,7 +70,6 @@ fn bench_fixed_init(c: &mut Criterion) {
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
                         }
                         Variant::CurrentOrderedFixed => {
                             let db = get_current_ordered_fixed(ctx.clone()).await;
@@ -82,7 +78,6 @@ fn bench_fixed_init(c: &mut Criterion) {
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
                         }
                         Variant::AnyUnorderedVariable => {
                             let db = get_any_unordered_variable(ctx.clone()).await;
@@ -90,7 +85,6 @@ fn bench_fixed_init(c: &mut Criterion) {
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
                         }
                         Variant::AnyOrderedVariable => {
                             let db = get_any_ordered_variable(ctx.clone()).await;
@@ -98,7 +92,6 @@ fn bench_fixed_init(c: &mut Criterion) {
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
                         }
                     }
                 });
@@ -129,35 +122,30 @@ fn bench_fixed_init(c: &mut Criterion) {
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
                                     }
                                     Variant::AnyUnorderedFixed => {
                                         let db = UFixedDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
                                     }
                                     Variant::AnyOrderedFixed => {
                                         let db = OFixedDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
                                     }
                                     Variant::CurrentUnorderedFixed => {
                                         let db = UCurrentDb::init(ctx.clone(), current_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
                                     }
                                     Variant::CurrentOrderedFixed => {
                                         let db = OCurrentDb::init(ctx.clone(), current_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
                                     }
                                     Variant::AnyUnorderedVariable => {
                                         let db =
@@ -165,7 +153,6 @@ fn bench_fixed_init(c: &mut Criterion) {
                                                 .await
                                                 .unwrap();
                                         assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
                                     }
                                     Variant::AnyOrderedVariable => {
                                         let db =
@@ -173,7 +160,6 @@ fn bench_fixed_init(c: &mut Criterion) {
                                                 .await
                                                 .unwrap();
                                         assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
                                     }
                                 }
                             }

@@ -687,7 +687,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V
         .is_ok()
     }
 
-    fn is_attributable(&self) -> bool {
+    fn is_attributable() -> bool {
         false
     }
 

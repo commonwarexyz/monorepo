@@ -40,21 +40,18 @@ fn bench_variable_init(c: &mut Criterion) {
                             let mut db =
                                 gen_random_kv(db, elements, operations, COMMIT_FREQUENCY).await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
                         }
                         Variant::AnyUnordered => {
                             let db = get_any_unordered(ctx.clone()).await;
                             let mut db =
                                 gen_random_kv(db, elements, operations, COMMIT_FREQUENCY).await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
                         }
                         Variant::AnyOrdered => {
                             let db = get_any_ordered(ctx.clone()).await;
                             let mut db =
                                 gen_random_kv(db, elements, operations, COMMIT_FREQUENCY).await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
                         }
                     }
                 });
@@ -77,17 +74,14 @@ fn bench_variable_init(c: &mut Criterion) {
                                     Variant::Store => {
                                         let db = get_store(ctx.clone()).await;
                                         assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
                                     }
                                     Variant::AnyUnordered => {
                                         let db = get_any_unordered(ctx.clone()).await;
                                         assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
                                     }
                                     Variant::AnyOrdered => {
                                         let db = get_any_ordered(ctx.clone()).await;
                                         assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
                                     }
                                 }
                             }

@@ -4250,7 +4250,7 @@ mod tests {
                     let signers: usize = payloads.values().map(|signers| signers.len()).sum();
 
                     // For attributable schemes, we should see peer activities
-                    if schemes[0].is_attributable() {
+                    if S::is_attributable() {
                         assert!(signers > 1, "view {view}: {signers}");
                     } else {
                         // For non-attributable, we shouldn't see any peer activities
@@ -4264,7 +4264,7 @@ mod tests {
                     let signers: usize = payloads.values().map(|signers| signers.len()).sum();
 
                     // For attributable schemes, we should see peer activities
-                    if schemes[0].is_attributable() {
+                    if S::is_attributable() {
                         assert!(signers > 1);
                     } else {
                         // For non-attributable, we shouldn't see any peer activities

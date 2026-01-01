@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, MutableContiguous, PersistableContiguous},
+        contiguous::{fixed, variable, Contiguous, MutableContiguous},
         Error as JournalError,
     },
     mmr::{
@@ -15,6 +15,7 @@ use crate::{
         mem::{Clean, Dirty, State},
         Location, Position, Proof, StandardHasher,
     },
+    Persistable,
 };
 use commonware_codec::{Codec, CodecFixed, Encode};
 use commonware_cryptography::{DigestOf, Hasher};
@@ -109,12 +110,12 @@ where
 impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: PersistableContiguous<Item: Encode>,
+    C: MutableContiguous<Item: Encode> + Persistable<Error = JournalError>,
     H: Hasher,
     S: State<DigestOf<H>>,
 {
     /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR,
-    /// meaning recovery will be required on startup if we crash before `sync()` or `close()`.
+    /// meaning recovery will be required on startup if we crash before `sync()`.
     pub async fn commit(&mut self) -> Result<(), Error> {
         self.journal.commit().await.map_err(Error::Journal)
     }
@@ -320,18 +321,9 @@ where
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: PersistableContiguous<Item: Encode>,
+    C: MutableContiguous<Item: Encode> + Persistable<Error = JournalError>,
     H: Hasher,
 {
-    /// Close the authenticated journal, syncing all pending writes.
-    pub async fn close(self) -> Result<(), Error> {
-        try_join!(
-            self.journal.close().map_err(Error::Journal),
-            self.mmr.close().map_err(Error::Mmr),
-        )?;
-        Ok(())
-    }
-
     /// Destroy the authenticated journal, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         try_join!(
@@ -593,12 +585,14 @@ where
     }
 }
 
-impl<E, C, H> PersistableContiguous for Journal<E, C, H, Clean<H::Digest>>
+impl<E, C, H> Persistable for Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: PersistableContiguous<Item: Encode>,
+    C: MutableContiguous<Item: Encode> + Persistable<Error = JournalError>,
     H: Hasher,
 {
+    type Error = JournalError;
+
     async fn commit(&mut self) -> Result<(), JournalError> {
         self.commit().await.map_err(|e| match e {
             Error::Journal(inner) => inner,
@@ -608,13 +602,6 @@ where
 
     async fn sync(&mut self) -> Result<(), JournalError> {
         self.sync().await.map_err(|e| match e {
-            Error::Journal(inner) => inner,
-            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
-        })
-    }
-
-    async fn close(self) -> Result<(), JournalError> {
-        self.close().await.map_err(|e| match e {
             Error::Journal(inner) => inner,
             Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
         })
@@ -868,8 +855,9 @@ mod tests {
             let size_before = journal.size();
             assert_eq!(size_before, 20);
 
-            // Close and recreate to simulate restart (which calls align internally)
-            journal.close().await.unwrap();
+            // Drop and recreate to simulate restart (which calls align internally)
+            journal.sync().await.unwrap();
+            drop(journal);
             let journal = create_empty_journal(context, "mismatched").await;
 
             // Uncommitted operations should be gone
@@ -1243,9 +1231,9 @@ mod tests {
         });
     }
 
-    /// Verify that close() syncs pending operations.
+    /// Verify that sync() persists operations.
     #[test_traced("INFO")]
-    fn test_close_with_pending_operations() {
+    fn test_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut journal = create_empty_journal(context.clone(), "close_pending").await;
@@ -1267,9 +1255,10 @@ mod tests {
                 Location::new_unchecked(20),
                 "commit should be at location 20"
             );
-            journal.close().await.unwrap();
+            journal.sync().await.unwrap();
 
             // Reopen and verify the operations persisted
+            drop(journal);
             let journal = create_empty_journal(context, "close_pending").await;
             assert_eq!(journal.size(), 21);
 

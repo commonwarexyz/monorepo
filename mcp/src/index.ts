@@ -20,11 +20,15 @@ import { z } from "zod";
 import type { Env } from "./env.d.ts";
 import {
   buildFileTree,
+  buildSnippets,
+  formatSnippet,
+  formatWithLineNumbers,
   getLanguage,
   isValidPath,
   parseSitemap,
   parseWorkspaceMembers,
   parseCrateInfo,
+  selectTopSnippets,
   sortVersionsDesc,
   stripCratePrefix,
 } from "./utils.ts";
@@ -55,7 +59,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       "get_file",
       "Retrieve a file from the Commonware repository by its path. " +
         "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
-        "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
+        "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest. " +
+        "Optionally specify start_line and end_line to fetch a specific range (0-indexed, inclusive). " +
+        "Line numbers in output match those returned by search_code.",
       {
         path: z
           .string()
@@ -66,8 +72,20 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           .string()
           .optional()
           .describe("Version tag (e.g., 'v0.0.64'). Defaults to latest."),
+        start_line: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Start line number (0-indexed, inclusive). Defaults to beginning of file."),
+        end_line: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("End line number (0-indexed, inclusive). Defaults to end of file."),
       },
-      async ({ path, version }) => {
+      async ({ path, version, start_line, end_line }) => {
         // Basic path validation - no path traversal
         if (!isValidPath(path)) {
           return {
@@ -93,11 +111,21 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           };
         }
 
+        // Format with line numbers (and optionally filter to range)
+        const formatted = formatWithLineNumbers(content, start_line, end_line);
+
+        // Build header with line range info if specified
+        const totalLines = content.split("\n").length;
+        const rangeInfo =
+          start_line !== undefined || end_line !== undefined
+            ? ` [lines ${start_line ?? 0}-${end_line ?? totalLines - 1}]`
+            : "";
+
         return {
           content: [
             {
               type: "text",
-              text: `# ${path} (${ver})\n\n\`\`\`${getLanguage(path)}\n${content}\n\`\`\``,
+              text: `# ${path} (${ver})${rangeInfo}\n\n\`\`\`${getLanguage(path)}\n${formatted}\n\`\`\``,
             },
           ],
         };
@@ -196,7 +224,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           content: [
             {
               type: "text",
-              text: `# Search results for "${query}" (${ver})\n\nFound ${results.length} file(s):\n\n${output}\n\n---\nFiles are listed by path. Use \`list_crates\` to see crate name to path mappings.`,
+              text: `# Search results for "${query}" (${ver})\n\nFound ${results.length} file(s):\n\n${output}\n\n---\nFiles are listed by path. Use \`list_crates\` to see crate name to path mappings. Use \`get_file\` with \`start_line\` and \`end_line\` to fetch specific line ranges instead of entire files.`,
             },
           ],
         };
@@ -557,45 +585,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       const lines = row.content.split("\n");
 
       // Score each line by number of matching terms
-      const scoredLines: Array<{ lineNum: number; score: number }> = [];
-      for (let lineNum = 0; lineNum < lines.length; lineNum++) {
-        const lineLower = lines[lineNum].toLowerCase();
-        const score = snippetMatcher(lineLower);
-        if (score > 0) {
-          scoredLines.push({ lineNum, score });
-        }
-      }
+      const lineScores = lines.map((line) => snippetMatcher(line.toLowerCase()));
 
-      // Sort by score descending (lines with more matching terms first)
-      scoredLines.sort((a, b) => b.score - a.score);
+      // Build and select top non-overlapping snippets
+      const snippets = buildSnippets(lineScores);
+      const selected = selectTopSnippets(snippets, 5);
 
-      // Take top 5 non-overlapping snippets
-      const matches: string[] = [];
-      const coveredLines = new Set<number>();
-      for (const { lineNum } of scoredLines) {
-        if (matches.length >= 5) {
-          break;
-        }
-
-        // Skip if this line is already covered by a previous snippet
-        if (coveredLines.has(lineNum)) {
-          continue;
-        }
-
-        const start = Math.max(0, lineNum - 2);
-        const end = Math.min(lines.length, lineNum + 3);
-
-        // Mark all lines in this snippet as covered
-        for (let i = start; i < end; i++) {
-          coveredLines.add(i);
-        }
-
-        const snippet = lines
-          .slice(start, end)
-          .map((l, idx) => `${start + idx + 1}: ${l}`)
-          .join("\n");
-        matches.push(snippet);
-      }
+      // Format selected snippets
+      const matches = selected.map(({ start, end }) => formatSnippet(lines, start, end));
 
       // Always include file if FTS5 matched it
       output.push({ file: row.path, matches });
@@ -662,6 +659,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 }
 
 // Create MCP handler using McpAgent.serve() for proper session management
+// CORS is handled automatically by the WorkerTransport with permissive defaults
 const mcpHandler = McpAgent.serve("/", { binding: "MCP" });
 
 // Helper: Sync indexed versions with sitemap (index one version per run to avoid timeout)
@@ -748,23 +746,7 @@ async function reindexVersions(
 // Worker fetch handler
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-
-    // Health check endpoint
-    if (url.pathname === "/health") {
-      return new Response(
-        JSON.stringify({
-          name: "commonware-mcp",
-          version: pkg.version,
-          status: "ok",
-        }),
-        {
-          headers: { "Content-Type": "application/json" },
-        }
-      );
-    }
-
-    // Route to MCP agent
+    // Route all requests to MCP agent (handles CORS including OPTIONS preflight)
     return mcpHandler.fetch(request, env, ctx);
   },
 

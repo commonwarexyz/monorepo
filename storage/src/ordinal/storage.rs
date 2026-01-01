@@ -1,5 +1,5 @@
 use super::{Config, Error};
-use crate::{crc32, rmap::RMap, Crc32};
+use crate::{crc32, kv, rmap::RMap, Crc32, Persistable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
@@ -12,7 +12,6 @@ use prometheus_client::metrics::counter::Counter;
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     marker::PhantomData,
-    mem::take,
 };
 use tracing::{debug, warn};
 
@@ -395,15 +394,6 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Ok(())
     }
 
-    /// Sync all pending entries and [Blob]s.
-    pub async fn close(mut self) -> Result<(), Error> {
-        self.sync().await?;
-        for (_, blob) in take(&mut self.blobs) {
-            blob.sync().await?;
-        }
-        Ok(())
-    }
-
     /// Destroy [Ordinal] and remove all data.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
@@ -424,7 +414,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::Store for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Gettable for Ordinal<E, V> {
     type Key = u64;
     type Value = V;
     type Error = Error;
@@ -434,18 +424,20 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::Store 
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreMut
-    for Ordinal<E, V>
-{
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Updatable for Ordinal<E, V> {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StorePersistable
-    for Ordinal<E, V>
-{
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Persistable for Ordinal<E, V> {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Self::Error> {
+        self.sync().await
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
         self.sync().await
     }
 

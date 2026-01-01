@@ -1,187 +1,19 @@
-//! Support for batching changes to an underlying database.
-
-use crate::{
-    qmdb::Error,
-    store::{Store, StoreDeletable},
-};
-use commonware_codec::Codec;
-use commonware_utils::Array;
-use core::future::Future;
-use std::collections::BTreeMap;
-
-/// A trait for getting values from a keyed database.
-pub trait Getter<K, V> {
-    /// Get the value of `key` from the database.
-    fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
-}
-
-/// All databases implement the [Getter] trait.
-impl<D> Getter<D::Key, D::Value> for D
-where
-    D: Store<Error = Error>,
-    D::Key: Array,
-    D::Value: Codec + Clone,
-{
-    async fn get(&self, key: &D::Key) -> Result<Option<D::Value>, Error> {
-        Store::get(self, key).await
-    }
-}
-
-/// A batch of changes which may be written to an underlying database with [Batchable::write_batch].
-/// Writes and deletes to a batch are not applied to the database until the batch is written but
-/// will be reflected in reads from the batch.
-pub struct Batch<'a, K, V, D>
-where
-    K: Array,
-    V: Codec + Clone,
-    D: Getter<K, V>,
-{
-    /// The underlying database.
-    db: &'a D,
-    /// The diff of changes to the database.
-    ///
-    /// If the value is Some, the key is being created or updated.
-    /// If the value is None, the key is being deleted.
-    ///
-    /// We use a BTreeMap instead of HashMap to allow for a deterministic iteration order.
-    diff: BTreeMap<K, Option<V>>,
-}
-
-impl<'a, K, V, D> Batch<'a, K, V, D>
-where
-    K: Array,
-    V: Codec + Clone,
-    D: Getter<K, V>,
-{
-    /// Returns a new batch of changes that may be written to the database.
-    pub const fn new(db: &'a D) -> Self {
-        Self {
-            db,
-            diff: BTreeMap::new(),
-        }
-    }
-
-    /// Returns the value of `key` in the batch, or the value in the database if it is not present
-    /// in the batch.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        if let Some(value) = self.diff.get(key) {
-            return Ok(value.clone());
-        }
-
-        self.db.get(key).await
-    }
-
-    /// Creates a new key-value pair in the batch if it isn't present in the batch or database.
-    /// Returns true if the key was created, false if it already existed.
-    pub async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        if let Some(value_opt) = self.diff.get_mut(&key) {
-            match value_opt {
-                Some(_) => return Ok(false),
-                None => {
-                    *value_opt = Some(value);
-                    return Ok(true);
-                }
-            }
-        }
-
-        if self.db.get(&key).await?.is_some() {
-            return Ok(false);
-        }
-
-        self.diff.insert(key, Some(value));
-        Ok(true)
-    }
-
-    /// Updates the value of `key` to `value` in the batch.
-    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.diff.insert(key, Some(value));
-
-        Ok(())
-    }
-
-    /// Deletes `key` from the batch.
-    /// Returns true if the key was in the batch or database, false otherwise.
-    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
-        if let Some(entry) = self.diff.get_mut(&key) {
-            match entry {
-                Some(_) => {
-                    *entry = None;
-                    return Ok(true);
-                }
-                None => return Ok(false),
-            }
-        }
-
-        if self.db.get(&key).await?.is_some() {
-            self.diff.insert(key, None);
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    /// Deletes `key` from the batch without checking if it is present in the batch or database.
-    pub async fn delete_unchecked(&mut self, key: K) -> Result<(), Error> {
-        self.diff.insert(key, None);
-
-        Ok(())
-    }
-}
-
-impl<'a, K, V, D> IntoIterator for Batch<'a, K, V, D>
-where
-    K: Array,
-    V: Codec + Clone,
-    D: Getter<K, V>,
-{
-    type Item = (K, Option<V>);
-    type IntoIter = std::collections::btree_map::IntoIter<K, Option<V>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.diff.into_iter()
-    }
-}
-
-/// A database that supports making batched changes.
-pub trait Batchable: StoreDeletable<Key: Array, Value: Codec + Clone, Error = Error> {
-    /// Returns a new empty batch of changes.
-    fn start_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>
-    where
-        Self: Sized,
-    {
-        Batch {
-            db: self,
-            diff: BTreeMap::new(),
-        }
-    }
-
-    /// Writes a batch of changes to the database.
-    fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (Self::Key, Option<Self::Value>)>,
-    ) -> impl Future<Output = Result<(), Error>> {
-        async {
-            for (key, value) in iter {
-                if let Some(value) = value {
-                    self.update(key, value).await?;
-                } else {
-                    self.delete(key).await?;
-                }
-            }
-            Ok(())
-        }
-    }
-}
+//! Test utilities for batch operations on qmdb databases.
 
 #[cfg(test)]
 pub mod tests {
-    use super::*;
-    use crate::store::StorePersistable;
+    use crate::{
+        kv::{self, Batchable, Deletable as _, Gettable as _, Updatable as _},
+        qmdb::Error,
+        Persistable,
+    };
+    use commonware_codec::Codec;
     use commonware_cryptography::{blake3, sha256};
     use commonware_runtime::{
         deterministic::{self, Context},
         Runner as _,
     };
+    use commonware_utils::Array;
     use core::{fmt::Debug, future::Future};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::collections::HashSet;
@@ -200,7 +32,7 @@ pub mod tests {
     where
         F: FnMut(Context) -> Fut + Clone,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -231,7 +63,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -249,7 +81,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -271,7 +103,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -302,7 +134,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -331,7 +163,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -358,7 +190,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -390,10 +222,10 @@ pub mod tests {
         db.commit().await?;
         for i in 0..100 {
             if deleted.contains(&i) {
-                assert_eq!(Store::get(&db, &D::Key::from_seed(i)).await?, None);
+                assert_eq!(kv::Gettable::get(&db, &D::Key::from_seed(i)).await?, None);
             } else {
                 assert_eq!(
-                    Store::get(&db, &D::Key::from_seed(i)).await?,
+                    kv::Gettable::get(&db, &D::Key::from_seed(i)).await?,
                     Some(D::Value::from_seed(i))
                 );
             }
@@ -415,7 +247,7 @@ pub mod tests {
 
         for i in 0..100 {
             assert_eq!(
-                Store::get(&db, &D::Key::from_seed(i)).await?,
+                kv::Gettable::get(&db, &D::Key::from_seed(i)).await?,
                 Some(D::Value::from_seed(i))
             );
         }
@@ -431,7 +263,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -452,11 +284,11 @@ pub mod tests {
         db.write_batch(batch.into_iter()).await?;
 
         assert_eq!(
-            Store::get(&db, &created1).await?,
+            kv::Gettable::get(&db, &created1).await?,
             Some(D::Value::from_seed(3))
         );
         assert_eq!(
-            Store::get(&db, &created2).await?,
+            kv::Gettable::get(&db, &created2).await?,
             Some(D::Value::from_seed(2))
         );
 
@@ -464,8 +296,8 @@ pub mod tests {
         delete_batch.delete(created1.clone()).await?;
         delete_batch.delete(created2.clone()).await?;
         db.write_batch(delete_batch.into_iter()).await?;
-        assert_eq!(Store::get(&db, &created1).await?, None);
-        assert_eq!(Store::get(&db, &created2).await?, None);
+        assert_eq!(kv::Gettable::get(&db, &created1).await?, None);
+        assert_eq!(kv::Gettable::get(&db, &created2).await?, None);
 
         db.destroy().await?;
 
@@ -478,13 +310,13 @@ pub mod tests {
             .await?;
         db.write_batch(batch.into_iter()).await?;
         assert_eq!(
-            Store::get(&db, &created1).await?,
+            kv::Gettable::get(&db, &created1).await?,
             Some(D::Value::from_seed(1))
         );
         let mut delete_batch = db.start_batch();
         delete_batch.delete(created1.clone()).await?;
         db.write_batch(delete_batch.into_iter()).await?;
-        assert_eq!(Store::get(&db, &created1).await?, None);
+        assert_eq!(kv::Gettable::get(&db, &created1).await?, None);
 
         db.destroy().await?;
 
@@ -495,7 +327,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + StorePersistable,
+        D: Batchable + Persistable<Error = Error>,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -514,18 +346,18 @@ pub mod tests {
         db.write_batch(batch.into_iter()).await?;
 
         assert_eq!(
-            Store::get(&db, &existing).await?,
+            kv::Gettable::get(&db, &existing).await?,
             Some(D::Value::from_seed(8))
         );
         assert_eq!(
-            Store::get(&db, &created).await?,
+            kv::Gettable::get(&db, &created).await?,
             Some(D::Value::from_seed(9))
         );
 
         let mut delete_batch = db.start_batch();
         delete_batch.delete(existing.clone()).await?;
         db.write_batch(delete_batch.into_iter()).await?;
-        assert_eq!(Store::get(&db, &existing).await?, None);
+        assert_eq!(kv::Gettable::get(&db, &existing).await?, None);
 
         db.destroy().await?;
         Ok(())
