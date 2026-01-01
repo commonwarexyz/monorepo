@@ -353,7 +353,8 @@ where
         });
     }
 
-    /// Retains only the fetches with keys greater than the given key.
+    /// Retains only the fetches whose keys satisfy the predicate.
+    /// Applies to both active and pending fetches.
     pub fn retain(&mut self, predicate: impl Fn(&Key) -> bool) {
         // Collect IDs to remove based on key predicate
         let ids_to_remove: Vec<ID> = self
