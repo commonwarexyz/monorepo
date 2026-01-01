@@ -30,11 +30,14 @@ fn benchmark_aggregate_verify_messages(c: &mut Criterion) {
                             (public, messages, agg_sig)
                         },
                         |(public, messages, agg_sig)| {
-                            ops::aggregate::verify_messages::<MinSig, _>(
-                                &public,
+                            let combined_msg = ops::aggregate::combine_messages::<MinSig, _>(
                                 &messages,
-                                &agg_sig,
                                 concurrency,
+                            );
+                            ops::aggregate::verify_messages::<MinSig>(
+                                &public,
+                                &combined_msg,
+                                &agg_sig,
                             )
                             .unwrap();
                         },

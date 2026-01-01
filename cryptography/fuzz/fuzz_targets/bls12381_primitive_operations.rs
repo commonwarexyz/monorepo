@@ -475,9 +475,9 @@ fn fuzz(op: FuzzOperation) {
 
         FuzzOperation::HashMessage { message, use_minpk } => {
             if use_minpk {
-                let _: G2 = ops::hash_message::<MinPk>(MinPk::MESSAGE, &message);
+                let _: G2 = ops::hash::<MinPk>(MinPk::MESSAGE, &message);
             } else {
-                let _: G1 = ops::hash_message::<MinSig>(MinSig::MESSAGE, &message);
+                let _: G1 = ops::hash::<MinSig>(MinSig::MESSAGE, &message);
             }
         }
 
@@ -487,11 +487,9 @@ fn fuzz(op: FuzzOperation) {
             use_minpk,
         } => {
             if use_minpk {
-                let _: G2 =
-                    ops::hash_message_namespace::<MinPk>(MinPk::MESSAGE, &namespace, &message);
+                let _: G2 = ops::hash_with_namespace::<MinPk>(MinPk::MESSAGE, &namespace, &message);
             } else {
-                let _: G1 =
-                    ops::hash_message_namespace::<MinSig>(MinSig::MESSAGE, &namespace, &message);
+                let _: G1 = ops::hash_with_namespace::<MinSig>(MinSig::MESSAGE, &namespace, &message);
             }
         }
 

@@ -412,7 +412,7 @@ impl BatchVerifier<PublicKey> for Batch {
         signature: &Signature,
     ) -> bool {
         self.publics.push(public_key.key);
-        let hm = ops::hash_message_namespace::<MinPk>(MinPk::MESSAGE, namespace, message);
+        let hm = ops::hash_with_namespace::<MinPk>(MinPk::MESSAGE, namespace, message);
         self.hms.push(hm);
         self.signatures.push(signature.signature);
         true

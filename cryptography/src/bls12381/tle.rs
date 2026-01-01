@@ -82,7 +82,7 @@
 use crate::{
     bls12381::primitives::{
         group::{Scalar, DST, GT},
-        ops::hash_message_namespace,
+        ops::hash_with_namespace,
         variant::Variant,
     },
     sha256::Digest,
@@ -274,7 +274,7 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
 ) -> Ciphertext<V> {
     // Hash target to get Q_id in signature group using the variant's message DST
     let (namespace, target) = target;
-    let q_id = hash_message_namespace::<V>(V::MESSAGE, namespace, target);
+    let q_id = hash_with_namespace::<V>(V::MESSAGE, namespace, target);
 
     // Generate random sigma
     let mut sigma_array = [0u8; BLOCK_SIZE];

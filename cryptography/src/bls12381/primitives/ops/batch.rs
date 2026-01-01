@@ -12,7 +12,7 @@
 
 use super::{
     super::{group::Scalar, variant::Variant, Error},
-    hash_message_namespace,
+    hash_with_namespace,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
@@ -44,8 +44,7 @@ where
         return Vec::new();
     }
 
-    // Hash the message once
-    let hm = hash_message_namespace::<V>(V::MESSAGE, namespace, message);
+    let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
     // Generate random scalars once for all entries
     let scalars: Vec<Scalar> = (0..entries.len())
@@ -130,7 +129,7 @@ where
     // Hash all messages and collect signatures
     let hms: Vec<V::Signature> = entries
         .iter()
-        .map(|(namespace, msg, _)| hash_message_namespace::<V>(V::MESSAGE, namespace, msg))
+        .map(|(namespace, msg, _)| hash_with_namespace::<V>(V::MESSAGE, namespace, msg))
         .collect();
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
 
@@ -145,7 +144,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        super::{aggregate, hash_message_namespace, keypair, sign_message, verify_message},
+        super::{aggregate, hash_with_namespace, keypair, sign_message, verify_message},
         *,
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
@@ -241,8 +240,8 @@ mod tests {
         assert_eq!(forged_agg, valid_agg, "aggregates should be equal");
 
         // Naive aggregate verification accepts forged signatures
-        let hm1 = hash_message_namespace::<V>(V::MESSAGE, namespace, msg1);
-        let hm2 = hash_message_namespace::<V>(V::MESSAGE, namespace, msg2);
+        let hm1 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg1);
+        let hm2 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg2);
         let hm_sum = hm1 + &hm2;
         V::verify(&public, &hm_sum, forged_agg.inner())
             .expect("naive aggregate verification accepts forged aggregate");

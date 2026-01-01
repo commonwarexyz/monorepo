@@ -169,13 +169,9 @@ fn fuzz(op: FuzzOperation) {
                     .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
                     .collect();
 
+                let combined_msg = aggregate::combine_messages::<MinPk, _>(&messages_refs, concurrency);
                 let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
-                let _ = aggregate::verify_messages::<MinPk, _>(
-                    &public_key,
-                    &messages_refs,
-                    &agg_sig,
-                    concurrency,
-                );
+                let _ = aggregate::verify_messages::<MinPk>(&public_key, &combined_msg, &agg_sig);
             }
         }
 
@@ -191,13 +187,9 @@ fn fuzz(op: FuzzOperation) {
                     .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
                     .collect();
 
+                let combined_msg = aggregate::combine_messages::<MinSig, _>(&messages_refs, concurrency);
                 let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
-                let _ = aggregate::verify_messages::<MinSig, _>(
-                    &public_key,
-                    &messages_refs,
-                    &agg_sig,
-                    concurrency,
-                );
+                let _ = aggregate::verify_messages::<MinSig>(&public_key, &combined_msg, &agg_sig);
             }
         }
     }

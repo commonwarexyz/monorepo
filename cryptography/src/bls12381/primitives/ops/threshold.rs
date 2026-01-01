@@ -358,7 +358,7 @@ mod tests {
         dkg,
         primitives::{
             group::{Private, Scalar, G1_MESSAGE, G2_MESSAGE},
-            ops::{self, hash_message_namespace},
+            ops::{self, hash_with_namespace},
             variant::{MinPk, MinSig},
         },
     };
@@ -1043,7 +1043,7 @@ mod tests {
         let pk1 = sharing.partial_public(partial1.index).unwrap();
         let pk2 = sharing.partial_public(partial2.index).unwrap();
         let pk_sum = pk1 + &pk2;
-        let hm = hash_message_namespace::<V>(V::MESSAGE, namespace, msg);
+        let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, msg);
         V::verify(&pk_sum, &hm, &forged_sum)
             .expect("vulnerable naive verification accepts forged aggregate");
 
@@ -1116,8 +1116,8 @@ mod tests {
         );
 
         let pk = sharing.partial_public(signer.index).unwrap();
-        let hm1 = hash_message_namespace::<V>(V::MESSAGE, namespace, msg1);
-        let hm2 = hash_message_namespace::<V>(V::MESSAGE, namespace, msg2);
+        let hm1 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg1);
+        let hm2 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg2);
         let hm_sum = hm1 + &hm2;
         V::verify(&pk, &hm_sum, &forged_sum)
             .expect("vulnerable naive verification accepts forged aggregate");

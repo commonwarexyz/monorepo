@@ -426,9 +426,9 @@ mod tests {
         let sig2 = ops::sign_message::<V>(&private2, b"test", msg2);
         let sig3 = ops::sign_message::<V>(&private3, b"test", msg3);
 
-        let hm1 = ops::hash_message_namespace::<V>(V::MESSAGE, b"test", msg1);
-        let hm2 = ops::hash_message_namespace::<V>(V::MESSAGE, b"test", msg2);
-        let hm3 = ops::hash_message_namespace::<V>(V::MESSAGE, b"test", msg3);
+        let hm1 = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", msg1);
+        let hm2 = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", msg2);
+        let hm3 = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", msg3);
 
         V::batch_verify(
             &mut rng,
@@ -456,8 +456,8 @@ mod tests {
         let sig1 = ops::sign_message::<V>(&private1, b"test", msg1);
         let sig2 = ops::sign_message::<V>(&private2, b"test", msg2);
 
-        let hm1 = ops::hash_message_namespace::<V>(V::MESSAGE, b"test", msg1);
-        let hm2 = ops::hash_message_namespace::<V>(V::MESSAGE, b"test", msg2);
+        let hm1 = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", msg1);
+        let hm2 = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", msg2);
 
         // Forge signatures that cancel out: sig1' = sig1 - delta, sig2' = sig2 + delta
         let random_scalar = Scalar::random(&mut rng);

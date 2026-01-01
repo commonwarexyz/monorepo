@@ -52,23 +52,19 @@ pub fn keypair<R: rand_core::CryptoRngCore, V: Variant>(
 
 /// Hashes the provided message with the domain separation tag (DST) to
 /// the curve.
-pub fn hash_message<V: Variant>(dst: DST, message: &[u8]) -> V::Signature {
+pub fn hash<V: Variant>(dst: DST, message: &[u8]) -> V::Signature {
     V::Signature::hash_to_group(dst, message)
 }
 
 /// Hashes the provided message with the domain separation tag (DST) and namespace to
 /// the curve.
-pub fn hash_message_namespace<V: Variant>(
-    dst: DST,
-    namespace: &[u8],
-    message: &[u8],
-) -> V::Signature {
+pub fn hash_with_namespace<V: Variant>(dst: DST, namespace: &[u8], message: &[u8]) -> V::Signature {
     V::Signature::hash_to_group(dst, &union_unique(namespace, message))
 }
 
 /// Signs the provided message with the private key.
 pub fn sign<V: Variant>(private: &Scalar, dst: DST, message: &[u8]) -> V::Signature {
-    hash_message::<V>(dst, message) * private
+    hash::<V>(dst, message) * private
 }
 
 /// Verifies the signature with the provided public key.
@@ -78,10 +74,7 @@ pub fn verify<V: Variant>(
     message: &[u8],
     signature: &V::Signature,
 ) -> Result<(), Error> {
-    // Create hashed message `hm`
-    let hm = hash_message::<V>(dst, message);
-
-    // Verify the signature
+    let hm = hash::<V>(dst, message);
     V::verify(public, &hm, signature)
 }
 
@@ -134,8 +127,7 @@ pub fn sign_proof_of_possession<V: Variant>(
     // Get public key
     let public = compute_public::<V>(private);
 
-    // Sign the public key with namespace
-    hash_message_namespace::<V>(V::PROOF_OF_POSSESSION, namespace, &public.encode()) * private
+    hash_with_namespace::<V>(V::PROOF_OF_POSSESSION, namespace, &public.encode()) * private
 }
 
 /// Verifies a proof of possession for the provided public key.
@@ -144,10 +136,7 @@ pub fn verify_proof_of_possession<V: Variant>(
     namespace: &[u8],
     signature: &V::Signature,
 ) -> Result<(), Error> {
-    // Create hashed message with namespace
-    let hm = hash_message_namespace::<V>(V::PROOF_OF_POSSESSION, namespace, &public.encode());
-
-    // Verify the signature
+    let hm = hash_with_namespace::<V>(V::PROOF_OF_POSSESSION, namespace, &public.encode());
     V::verify(public, &hm, signature)
 }
 
@@ -332,7 +321,7 @@ mod tests {
             verify::<MinSig>(&public, DST, &message, &signature).unwrap();
 
             publics.push(public);
-            hms.push(hash_message::<MinSig>(DST, &message));
+            hms.push(hash::<MinSig>(DST, &message));
             signatures.push(signature);
 
             signature += &<MinSig as Variant>::Signature::generator();
@@ -371,7 +360,7 @@ mod tests {
             verify::<MinPk>(&public, DST, &message, &signature).unwrap();
 
             publics.push(public);
-            hms.push(hash_message::<MinPk>(DST, &message));
+            hms.push(hash::<MinPk>(DST, &message));
             signatures.push(signature);
 
             signature += &<MinPk as Variant>::Signature::generator();
@@ -514,7 +503,7 @@ mod tests {
                 verify::<MinPk>(&public_key, MinPk::MESSAGE, &message, &signature).is_ok();
 
             // Verify using batch verification
-            let hm = hash_message::<MinPk>(MinPk::MESSAGE, &message);
+            let hm = hash::<MinPk>(MinPk::MESSAGE, &message);
             let batch_result =
                 MinPk::batch_verify(&mut rand::thread_rng(), &[public_key], &[hm], &[signature])
                     .is_ok();
@@ -572,7 +561,7 @@ mod tests {
             let Ok(signature) = signature else {
                 continue;
             };
-            let hm = hash_message::<MinPk>(MinPk::MESSAGE, &message);
+            let hm = hash::<MinPk>(MinPk::MESSAGE, &message);
             if expected {
                 valid_publics.push(public_key);
                 valid_hms.push(hm);

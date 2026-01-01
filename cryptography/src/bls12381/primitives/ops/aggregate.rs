@@ -11,7 +11,7 @@
 
 use super::{
     super::{variant::Variant, Error},
-    hash_message_namespace,
+    hash_with_namespace,
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -111,6 +111,48 @@ where
     }
 }
 
+/// A combined message hash from multiple individual messages.
+///
+/// This type is returned by [`combine_messages`] and ensures that
+/// combined message hashes are not confused with individual message hashes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Message<V: Variant>(V::Signature);
+
+impl<V: Variant> Message<V> {
+    /// Returns the inner message hash value.
+    pub(crate) const fn inner(&self) -> &V::Signature {
+        &self.0
+    }
+}
+
+impl<V: Variant> Write for Message<V> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.0.write(writer);
+    }
+}
+
+impl<V: Variant> Read for Message<V> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self(V::Signature::read(reader)?))
+    }
+}
+
+impl<V: Variant> FixedSize for Message<V> {
+    const SIZE: usize = V::Signature::SIZE;
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for Message<V>
+where
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self(V::Signature::arbitrary(u)?))
+    }
+}
+
 /// Combines multiple public keys into an aggregate public key.
 ///
 /// # Warning
@@ -152,13 +194,67 @@ where
     Signature(s)
 }
 
+/// Combines multiple messages into a single message hash.
+///
+/// When `concurrency > 1` and the `std` feature is enabled, this function uses
+/// parallel processing via rayon.
+///
+/// # Warning
+///
+/// It is not safe to provide duplicate messages.
+pub fn combine_messages<'a, V, I>(
+    messages: I,
+    #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
+) -> Message<V>
+where
+    V: Variant,
+    I: IntoIterator<Item = &'a (&'a [u8], &'a [u8])> + Send + Sync,
+    I::IntoIter: Send + Sync,
+{
+    #[cfg(not(feature = "std"))]
+    {
+        let mut sum = V::Signature::zero();
+        for (namespace, msg) in messages {
+            sum += &hash_with_namespace::<V>(V::MESSAGE, namespace, msg);
+        }
+        Message(sum)
+    }
+
+    #[cfg(feature = "std")]
+    {
+        if concurrency == 1 {
+            let mut sum = V::Signature::zero();
+            for (namespace, msg) in messages {
+                sum += &hash_with_namespace::<V>(V::MESSAGE, namespace, msg);
+            }
+            Message(sum)
+        } else {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(concurrency)
+                .build()
+                .expect("unable to build thread pool");
+
+            Message(pool.install(move || {
+                messages
+                    .into_iter()
+                    .par_bridge()
+                    .map(|(namespace, msg)| hash_with_namespace::<V>(V::MESSAGE, namespace, msg))
+                    .reduce(V::Signature::zero, |mut sum, hm| {
+                        sum += &hm;
+                        sum
+                    })
+            }))
+        }
+    }
+}
+
 /// Verifies the aggregate signature over a single message from multiple public keys.
 ///
 /// # Precomputed Aggregate Public Key
 ///
 /// Instead of requiring all public keys that participated in the aggregate signature (and generating
 /// the aggregate public key on-demand), this function accepts a precomputed aggregate public key to allow
-/// the caller to cache previous constructions.
+/// the caller to cache previous constructions and/or perform parallel combination.
 ///
 /// # Warning
 ///
@@ -171,8 +267,7 @@ pub fn verify_public_keys<V: Variant>(
     message: &[u8],
     signature: &Signature<V>,
 ) -> Result<(), Error> {
-    // Compute the hash of the message
-    let hm = hash_message_namespace::<V>(V::MESSAGE, namespace, message);
+    let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
     // Verify the signature
     V::verify(public.inner(), &hm, signature.inner())
@@ -180,59 +275,21 @@ pub fn verify_public_keys<V: Variant>(
 
 /// Verifies the aggregate signature over multiple messages from a single public key.
 ///
+/// # Precomputed Combined Message
+///
+/// Instead of requiring all messages that participated in the aggregate signature (and generating
+/// the combined message on-demand), this function accepts a precomputed combined message to allow
+/// the caller to cache previous constructions and/or perform parallel combination.
+///
 /// # Warning
 ///
 /// This function assumes a group check was already performed on `public` and `signature`.
-/// It is not safe to provide duplicate messages.
-pub fn verify_messages<'a, V, I>(
+pub fn verify_messages<V: Variant>(
     public: &V::Public,
-    messages: I,
+    message: &Message<V>,
     signature: &Signature<V>,
-    #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
-) -> Result<(), Error>
-where
-    V: Variant,
-    I: IntoIterator<Item = &'a (&'a [u8], &'a [u8])> + Send + Sync,
-    I::IntoIter: Send + Sync,
-{
-    #[cfg(not(feature = "std"))]
-    let hm_sum = compute_hm_sum::<V, I>(messages);
-
-    #[cfg(feature = "std")]
-    let hm_sum = if concurrency == 1 {
-        compute_hm_sum::<V, I>(messages)
-    } else {
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(concurrency)
-            .build()
-            .expect("Unable to build thread pool");
-
-        pool.install(move || {
-            messages
-                .into_iter()
-                .par_bridge()
-                .map(|(namespace, msg)| hash_message_namespace::<V>(V::MESSAGE, namespace, msg))
-                .reduce(V::Signature::zero, |mut sum, hm| {
-                    sum += &hm;
-                    sum
-                })
-        })
-    };
-
-    V::verify(public, &hm_sum, signature.inner())
-}
-
-/// Computes the sum over the hash of each message.
-fn compute_hm_sum<'a, V, I>(messages: I) -> V::Signature
-where
-    V: Variant,
-    I: IntoIterator<Item = &'a (&'a [u8], &'a [u8])>,
-{
-    let mut hm_sum = V::Signature::zero();
-    for (namespace, msg) in messages {
-        hm_sum += &hash_message_namespace::<V>(V::MESSAGE, namespace, msg);
-    }
-    hm_sum
+) -> Result<(), Error> {
+    V::verify(public, message.inner(), signature.inner())
 }
 
 #[cfg(test)]
@@ -425,10 +482,12 @@ mod tests {
 
         let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
 
-        aggregate::verify_messages::<V, _>(&public, &messages, &aggregate_sig, 1)
+        let combined_msg = aggregate::combine_messages::<V, _>(&messages, 1);
+        aggregate::verify_messages::<V>(&public, &combined_msg, &aggregate_sig)
             .expect("Aggregated signature should be valid");
 
-        aggregate::verify_messages::<V, _>(&public, &messages, &aggregate_sig, 4)
+        let combined_msg_parallel = aggregate::combine_messages::<V, _>(&messages, 4);
+        aggregate::verify_messages::<V>(&public, &combined_msg_parallel, &aggregate_sig)
             .expect("Aggregated signature should be valid with parallelism");
 
         let payload_msgs: Vec<_> = messages
@@ -453,6 +512,7 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<PublicKey<MinSig>>,
+            CodecConformance<Message<MinSig>>,
             CodecConformance<Signature<MinSig>>,
         }
     }
