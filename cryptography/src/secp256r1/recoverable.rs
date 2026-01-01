@@ -412,11 +412,14 @@ impl arbitrary::Arbitrary<'_> for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{secp256r1::common::tests::*, Recoverable, Signer as _, Verifier as _};
+    use crate::{
+        secp256r1::common::tests::*, BatchVerifier, Recoverable, Signer as _, Verifier as _,
+    };
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_math::algebra::Random;
     use ecdsa::RecoveryId;
-    use p256::elliptic_curve::scalar::IsHigh;
+    use p256::elliptic_curve::{ops::Neg, scalar::IsHigh, sec1::ToEncodedPoint};
     use rstest::rstest;
 
     const NAMESPACE: &[u8] = b"test-namespace";
@@ -857,9 +860,6 @@ mod tests {
 
     #[test]
     fn batch_verify_valid() {
-        use crate::BatchVerifier;
-        use commonware_math::algebra::Random;
-
         let signer1 = PrivateKey::random(&mut rand::thread_rng());
         let signer2 = PrivateKey::random(&mut rand::thread_rng());
 
@@ -877,9 +877,6 @@ mod tests {
 
     #[test]
     fn batch_verify_invalid() {
-        use crate::BatchVerifier;
-        use commonware_math::algebra::Random;
-
         let signer1 = PrivateKey::random(&mut rand::thread_rng());
         let signer2 = PrivateKey::random(&mut rand::thread_rng());
 
@@ -898,17 +895,12 @@ mod tests {
 
     #[test]
     fn batch_verify_empty() {
-        use crate::BatchVerifier;
-
         let batch = Batch::new();
         assert!(batch.verify(&mut rand::thread_rng()));
     }
 
     #[test]
     fn batch_verify_single() {
-        use crate::BatchVerifier;
-        use commonware_math::algebra::Random;
-
         let signer = PrivateKey::random(&mut rand::thread_rng());
         let msg = b"single message";
         let sig = signer.sign(NAMESPACE, msg);
@@ -920,9 +912,6 @@ mod tests {
 
     #[test]
     fn batch_verify_wrong_namespace() {
-        use crate::BatchVerifier;
-        use commonware_math::algebra::Random;
-
         let signer = PrivateKey::random(&mut rand::thread_rng());
         let msg = b"message";
         let sig = signer.sign(NAMESPACE, msg);
@@ -934,10 +923,6 @@ mod tests {
 
     #[test]
     fn batch_verify_rejects_malleable_signature() {
-        use crate::BatchVerifier;
-        use commonware_math::algebra::Random;
-        use p256::elliptic_curve::ops::Neg;
-
         let signer = PrivateKey::random(&mut rand::thread_rng());
         let msg = b"malleable test message";
         let valid_sig = signer.sign(NAMESPACE, msg);
@@ -989,9 +974,6 @@ mod tests {
         // The deltas cancel! With random coefficients z1, z2:
         //   z1*(... - R1 - delta) + z2*(... - R2 + delta) includes delta*(z2 - z1) ≠ 0
 
-        use crate::BatchVerifier;
-        use commonware_math::algebra::Random;
-
         let signer1 = PrivateKey::random(&mut rand::thread_rng());
         let signer2 = PrivateKey::random(&mut rand::thread_rng());
 
@@ -1024,8 +1006,6 @@ mod tests {
             original: &Signature,
             forged_r: ProjectivePoint,
         ) -> Option<Signature> {
-            use p256::elliptic_curve::sec1::ToEncodedPoint;
-
             let forged_affine = forged_r.to_affine();
             // Get compressed encoding: [02|03 || x] where 02=even y, 03=odd y
             let encoded = forged_affine.to_encoded_point(true);
