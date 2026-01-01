@@ -29,9 +29,19 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 pub struct PublicKey<V: Variant>(V::Public);
 
 impl<V: Variant> PublicKey<V> {
+    /// Creates a zero aggregate public key.
+    pub fn zero() -> Self {
+        Self(V::Public::zero())
+    }
+
     /// Returns the inner public key value.
     pub(crate) const fn inner(&self) -> &V::Public {
         &self.0
+    }
+
+    /// Adds another public key to this one.
+    pub(crate) fn add(&mut self, other: &V::Public) {
+        self.0 += other;
     }
 }
 
@@ -71,15 +81,19 @@ where
 pub struct Signature<V: Variant>(V::Signature);
 
 impl<V: Variant> Signature<V> {
+    /// Creates a zero aggregate signature.
+    pub fn zero() -> Self {
+        Self(V::Signature::zero())
+    }
+
     /// Returns the inner signature value.
     pub(crate) const fn inner(&self) -> &V::Signature {
         &self.0
     }
 
-    /// Creates a zero aggregate signature.
-    #[cfg(test)]
-    pub(crate) fn zero() -> Self {
-        Self(V::Signature::zero())
+    /// Adds another signature to this one.
+    pub(crate) fn add(&mut self, other: &V::Signature) {
+        self.0 += other;
     }
 }
 
@@ -119,9 +133,24 @@ where
 pub struct Message<V: Variant>(V::Signature);
 
 impl<V: Variant> Message<V> {
+    /// Creates a zero combined message.
+    pub fn zero() -> Self {
+        Self(V::Signature::zero())
+    }
+
     /// Returns the inner message hash value.
     pub(crate) const fn inner(&self) -> &V::Signature {
         &self.0
+    }
+
+    /// Adds another hashed message to this one.
+    pub(crate) fn add(&mut self, other: &V::Signature) {
+        self.0 += other;
+    }
+
+    /// Combines another [Message] into this one.
+    pub(crate) fn combine(&mut self, other: &Self) {
+        self.0 += &other.0;
     }
 }
 
@@ -167,11 +196,11 @@ where
     I: IntoIterator<Item = &'a V::Public>,
     V::Public: 'a,
 {
-    let mut p = V::Public::zero();
+    let mut p = PublicKey::zero();
     for pk in public_keys {
-        p += pk;
+        p.add(pk);
     }
-    PublicKey(p)
+    p
 }
 
 /// Combines multiple signatures into an aggregate signature.
@@ -187,11 +216,11 @@ where
     I: IntoIterator<Item = &'a V::Signature>,
     V::Signature: 'a,
 {
-    let mut s = V::Signature::zero();
+    let mut s = Signature::zero();
     for sig in signatures {
-        s += sig;
+        s.add(sig);
     }
-    Signature(s)
+    s
 }
 
 /// Combines multiple messages into a single message hash.
@@ -213,37 +242,41 @@ where
 {
     #[cfg(not(feature = "std"))]
     {
-        let mut sum = V::Signature::zero();
+        let mut sum = Message::zero();
         for (namespace, msg) in messages {
-            sum += &hash_with_namespace::<V>(V::MESSAGE, namespace, msg);
+            sum.add(&hash_with_namespace::<V>(V::MESSAGE, namespace, msg));
         }
-        Message(sum)
+        sum
     }
 
     #[cfg(feature = "std")]
     {
         if concurrency == 1 {
-            let mut sum = V::Signature::zero();
+            let mut sum = Message::zero();
             for (namespace, msg) in messages {
-                sum += &hash_with_namespace::<V>(V::MESSAGE, namespace, msg);
+                sum.add(&hash_with_namespace::<V>(V::MESSAGE, namespace, msg));
             }
-            Message(sum)
+            sum
         } else {
             let pool = ThreadPoolBuilder::new()
                 .num_threads(concurrency)
                 .build()
                 .expect("unable to build thread pool");
 
-            Message(pool.install(move || {
+            pool.install(move || {
                 messages
                     .into_iter()
                     .par_bridge()
-                    .map(|(namespace, msg)| hash_with_namespace::<V>(V::MESSAGE, namespace, msg))
-                    .reduce(V::Signature::zero, |mut sum, hm| {
-                        sum += &hm;
+                    .fold(Message::zero, |mut sum, (namespace, msg)| {
+                        let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, msg);
+                        sum.add(&hm);
                         sum
                     })
-            }))
+                    .reduce(Message::zero, |mut a, b| {
+                        a.combine(&b);
+                        a
+                    })
+            })
         }
     }
 }
