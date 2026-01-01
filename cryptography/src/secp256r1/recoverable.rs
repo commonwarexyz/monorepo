@@ -361,9 +361,8 @@ impl crate::BatchVerifier<PublicKey> for Batch {
 
 /// P-256 curve order n.
 /// n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
-const CURVE_ORDER: U256 = U256::from_be_hex(
-    "FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551",
-);
+const CURVE_ORDER: U256 =
+    U256::from_be_hex("FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551");
 
 /// Recover the signature point R from the raw signature bytes and recovery ID.
 fn recover_r_point(
@@ -943,11 +942,9 @@ mod tests {
         // Create a malleable signature by negating s and flipping the recovery ID
         // In ECDSA, (r, s) and (r, n-s) are both mathematically valid signatures
         let s_negated = valid_sig.signature.s().neg();
-        let malleable_ecdsa_sig = p256::ecdsa::Signature::from_scalars(
-            *valid_sig.signature.r(),
-            s_negated,
-        )
-        .expect("valid signature components");
+        let malleable_ecdsa_sig =
+            p256::ecdsa::Signature::from_scalars(*valid_sig.signature.r(), s_negated)
+                .expect("valid signature components");
 
         // The recovery ID must be flipped to point to -R
         let malleable_recovery_id = RecoveryId::new(
@@ -1035,10 +1032,10 @@ mod tests {
             Some(Signature::new(forged_ecdsa, forged_recovery_id))
         }
 
-        let forged_sig1 = forge_signature_with_r(&sig1, r1_forged)
-            .expect("should create forged signature");
-        let forged_sig2 = forge_signature_with_r(&sig2, r2_forged)
-            .expect("should create forged signature");
+        let forged_sig1 =
+            forge_signature_with_r(&sig1, r1_forged).expect("should create forged signature");
+        let forged_sig2 =
+            forge_signature_with_r(&sig2, r2_forged).expect("should create forged signature");
 
         // Both forged signatures should fail individual verification
         assert!(
