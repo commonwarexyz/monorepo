@@ -59,10 +59,8 @@
 //! - <https://github.com/hoytech/negentropy>: Negentropy reference implementation
 //! - <https://arxiv.org/abs/2212.13567>: Range-Based Set Reconciliation paper
 
-use crate::blake3::Blake3;
+use crate::blake3::Digest;
 use crate::lthash::LtHash;
-use crate::sha256::Digest;
-use crate::Hasher as _;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 #[cfg(not(feature = "std"))]
@@ -70,9 +68,6 @@ use alloc::{vec, vec::Vec};
 
 /// Size of an item ID in bytes (32-byte digest).
 pub const ID_SIZE: usize = Digest::SIZE;
-
-/// Size of a fingerprint in bytes (first 16 bytes of SHA-256).
-pub const FINGERPRINT_SIZE: usize = 16;
 
 /// Maximum timestamp value, used as "infinity" bound.
 pub const MAX_TIMESTAMP: u64 = u64::MAX;
@@ -236,151 +231,16 @@ impl Read for Bound {
 
 /// A fingerprint computed over a range of items.
 ///
-/// Fingerprints are computed using [LtHash], a lattice-based homomorphic hash
-/// providing ~200 bits of security. The LtHash checksum is combined with the
-/// item count, hashed with Blake3, and truncated to 16 bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Fingerprint {
-    bytes: [u8; FINGERPRINT_SIZE],
-}
-
-impl Fingerprint {
-    /// Create a new empty fingerprint (all zeros).
-    pub const fn new() -> Self {
-        Self {
-            bytes: [0u8; FINGERPRINT_SIZE],
-        }
-    }
-
-    /// Create a fingerprint from raw bytes.
-    pub const fn from_bytes(bytes: [u8; FINGERPRINT_SIZE]) -> Self {
-        Self { bytes }
-    }
-
-    /// Get the raw bytes of the fingerprint.
-    pub const fn as_bytes(&self) -> &[u8; FINGERPRINT_SIZE] {
-        &self.bytes
-    }
-}
-
-impl Write for Fingerprint {
-    fn write(&self, buf: &mut impl BufMut) {
-        buf.put_slice(&self.bytes);
-    }
-}
-
-impl Read for Fingerprint {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        if buf.remaining() < FINGERPRINT_SIZE {
-            return Err(CodecError::EndOfBuffer);
-        }
-        let mut bytes = [0u8; FINGERPRINT_SIZE];
-        buf.copy_to_slice(&mut bytes);
-        Ok(Self { bytes })
-    }
-}
-
-impl FixedSize for Fingerprint {
-    const SIZE: usize = FINGERPRINT_SIZE;
-}
-
-#[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for Fingerprint {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let bytes: [u8; FINGERPRINT_SIZE] = u.arbitrary()?;
-        Ok(Self { bytes })
-    }
-}
+/// Fingerprints use the full 32-byte [LtHash] checksum, providing ~200 bits of
+/// security against collision attacks.
+pub type Fingerprint = Digest;
 
 /// Accumulator for computing fingerprints incrementally.
 ///
 /// Uses [LtHash] for ~200 bits of security against collision attacks. LtHash is a
 /// lattice-based homomorphic hash that is significantly more secure than simple
 /// addition mod 2^256 (which can be broken in ~28 hours with sufficient resources).
-///
-/// The count is tracked separately and included in the final fingerprint to prevent
-/// certain attack classes where an attacker can only write to one side of a sync.
-#[derive(Debug, Clone)]
-pub struct FingerprintAccumulator {
-    /// LtHash state for homomorphic accumulation
-    lthash: LtHash,
-    /// Number of items accumulated (included in fingerprint for extra security)
-    count: u64,
-}
-
-impl FingerprintAccumulator {
-    /// Create a new empty accumulator.
-    pub const fn new() -> Self {
-        Self {
-            lthash: LtHash::new(),
-            count: 0,
-        }
-    }
-
-    /// Add an item's ID to the accumulator.
-    pub fn add(&mut self, id: &Digest) {
-        self.lthash.add(id.as_ref());
-        self.count += 1;
-    }
-
-    /// Subtract an item's ID from the accumulator.
-    pub fn subtract(&mut self, id: &Digest) {
-        self.lthash.subtract(id.as_ref());
-        self.count = self.count.saturating_sub(1);
-    }
-
-    /// Combine another accumulator into this one.
-    pub fn combine(&mut self, other: &Self) {
-        self.lthash.combine(&other.lthash);
-        self.count += other.count;
-    }
-
-    /// Get the number of items in the accumulator.
-    pub const fn count(&self) -> u64 {
-        self.count
-    }
-
-    /// Check if the accumulator is empty.
-    pub const fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
-    /// Finalize the accumulator into a fingerprint.
-    ///
-    /// Combines the LtHash checksum with the count for additional security,
-    /// then truncates to 16 bytes.
-    pub fn finalize(&self) -> Fingerprint {
-        if self.count == 0 {
-            return Fingerprint::new();
-        }
-
-        // Get 32-byte LtHash checksum and combine with count
-        let checksum = self.lthash.checksum();
-        let mut hasher = Blake3::new();
-        hasher.update(checksum.as_ref());
-        hasher.update(&self.count.to_le_bytes());
-        let digest = hasher.finalize();
-
-        // Take first 16 bytes
-        let mut bytes = [0u8; FINGERPRINT_SIZE];
-        bytes.copy_from_slice(&digest.as_ref()[..FINGERPRINT_SIZE]);
-        Fingerprint { bytes }
-    }
-
-    /// Reset the accumulator to empty state.
-    pub const fn reset(&mut self) {
-        self.lthash.reset();
-        self.count = 0;
-    }
-}
-
-impl Default for FingerprintAccumulator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub type FingerprintAccumulator = LtHash;
 
 /// Mode of a range in a reconciliation message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -587,10 +447,10 @@ pub trait Storage {
         let mut acc = FingerprintAccumulator::new();
         for i in start_idx..end_idx {
             if let Some(item) = self.get(i) {
-                acc.add(&item.id);
+                acc.add(item.id.as_ref());
             }
         }
-        acc.finalize()
+        acc.checksum()
     }
 
     /// Get IDs of items in range [start_idx, end_idx).
@@ -904,47 +764,47 @@ mod tests {
     #[test]
     fn test_fingerprint_accumulator() {
         let mut acc1 = FingerprintAccumulator::new();
-        acc1.add(&Digest([0x01; 32]));
-        acc1.add(&Digest([0x02; 32]));
+        acc1.add(&[0x01; 32]);
+        acc1.add(&[0x02; 32]);
 
         let mut acc2 = FingerprintAccumulator::new();
-        acc2.add(&Digest([0x02; 32]));
-        acc2.add(&Digest([0x01; 32]));
+        acc2.add(&[0x02; 32]);
+        acc2.add(&[0x01; 32]);
 
         // Order shouldn't matter (addition is commutative)
-        assert_eq!(acc1.finalize(), acc2.finalize());
+        assert_eq!(acc1.checksum(), acc2.checksum());
     }
 
     #[test]
     fn test_fingerprint_subtract() {
         let mut acc = FingerprintAccumulator::new();
-        acc.add(&Digest([0x01; 32]));
-        acc.add(&Digest([0x02; 32]));
-        acc.add(&Digest([0x03; 32]));
-        acc.subtract(&Digest([0x02; 32]));
+        acc.add(&[0x01; 32]);
+        acc.add(&[0x02; 32]);
+        acc.add(&[0x03; 32]);
+        acc.subtract(&[0x02; 32]);
 
         let mut acc2 = FingerprintAccumulator::new();
-        acc2.add(&Digest([0x01; 32]));
-        acc2.add(&Digest([0x03; 32]));
+        acc2.add(&[0x01; 32]);
+        acc2.add(&[0x03; 32]);
 
-        assert_eq!(acc.finalize(), acc2.finalize());
+        assert_eq!(acc.checksum(), acc2.checksum());
     }
 
     #[test]
     fn test_fingerprint_combine() {
         let mut acc1 = FingerprintAccumulator::new();
-        acc1.add(&Digest([0x01; 32]));
+        acc1.add(&[0x01; 32]);
 
         let mut acc2 = FingerprintAccumulator::new();
-        acc2.add(&Digest([0x02; 32]));
+        acc2.add(&[0x02; 32]);
 
         acc1.combine(&acc2);
 
         let mut expected = FingerprintAccumulator::new();
-        expected.add(&Digest([0x01; 32]));
-        expected.add(&Digest([0x02; 32]));
+        expected.add(&[0x01; 32]);
+        expected.add(&[0x02; 32]);
 
-        assert_eq!(acc1.finalize(), expected.finalize());
+        assert_eq!(acc1.checksum(), expected.checksum());
     }
 
     #[test]
@@ -1060,7 +920,7 @@ mod tests {
         let msg = Message::new(vec![
             Range::new(
                 Bound::new(1000, Digest([0x50; 32])),
-                RangeMode::Fingerprint(Fingerprint::from_bytes([0xAB; 16])),
+                RangeMode::Fingerprint(Fingerprint::from([0xAB; 32])),
             ),
             Range::new(Bound::infinity(), RangeMode::Skip),
         ]);
@@ -1082,7 +942,7 @@ mod tests {
         assert_eq!(skip, decoded);
 
         // Test Fingerprint
-        let fp = RangeMode::Fingerprint(Fingerprint::from_bytes([0x12; 16]));
+        let fp = RangeMode::Fingerprint(Fingerprint::from([0x12; 32]));
         buf.clear();
         fp.write(&mut buf);
         let decoded = RangeMode::read(&mut &buf[..]).unwrap();
@@ -1185,7 +1045,6 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Item>,
-            CodecConformance<Fingerprint>,
         }
     }
 }
