@@ -34,6 +34,7 @@ pub use bloomfilter::BloomFilter;
 pub mod handshake;
 pub mod lthash;
 pub use lthash::LtHash;
+pub mod rbsr;
 pub mod secp256r1;
 pub mod transcript;
 
