@@ -12,9 +12,9 @@ fn benchmark_batch_verify_multiple_public_keys(c: &mut Criterion) {
         c.bench_function(&format!("{}/pks={}", module_path!(), n_signers), |b| {
             b.iter_batched(
                 || {
-                    let mut batch = secp256r1::standard::Batch::new();
+                    let mut batch = secp256r1::recoverable::Batch::new();
                     for _ in 0..n_signers {
-                        let signer = secp256r1::standard::PrivateKey::random(&mut thread_rng());
+                        let signer = secp256r1::recoverable::PrivateKey::random(&mut thread_rng());
                         let sig = signer.sign(namespace, &msg);
                         assert!(batch.add(namespace, &msg, &signer.public_key(), &sig));
                     }

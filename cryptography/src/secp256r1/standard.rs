@@ -2,9 +2,7 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use std::borrow::Cow;
     } else {
-        extern crate alloc;
         use alloc::borrow::Cow;
-        use alloc::vec::Vec;
     }
 }
 use super::common::{
@@ -23,7 +21,6 @@ use p256::{
     ecdsa::signature::{Signer, Verifier},
     elliptic_curve::scalar::IsHigh,
 };
-use rand_core::CryptoRngCore;
 
 const SIGNATURE_LENGTH: usize = 64; // R || S
 
@@ -178,82 +175,6 @@ impl Debug for Signature {
 impl Display for Signature {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
-    }
-}
-
-/// Secp256r1 Batch Verifier.
-///
-/// Accumulates signature verification items and verifies them when [`BatchVerifier::verify`]
-/// is called.
-///
-/// # Implementation Notes
-///
-/// Algebraic batch verification for ECDSA requires knowing the full signature point R
-/// (both x and y coordinates). Standard ECDSA signatures only contain r (the x-coordinate
-/// of R), so we cannot directly reconstruct R without computing `u1*G + u2*P` for each
-/// signature - which is the main cost of individual verification.
-///
-/// While the public key P is provided, it's not sufficient alone: we need R to verify
-/// that `u1*G + u2*P = R`. Without the recovery ID (which tells us R's y-coordinate),
-/// we must compute this expression for each signature anyway to determine R.
-///
-/// For true algebraic batch verification with random coefficients, use
-/// [`crate::secp256r1::recoverable::Batch`] which includes the recovery ID in signatures,
-/// allowing direct reconstruction of R without scalar multiplication.
-///
-/// The provided RNG parameter is unused in this implementation but required by the
-/// [`BatchVerifier`] trait for API consistency.
-pub struct Batch {
-    items: Vec<(PublicKey, Signature, Vec<u8>)>,
-}
-
-impl Batch {
-    #[inline(always)]
-    fn add_inner(
-        &mut self,
-        namespace: Option<&[u8]>,
-        message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) -> bool {
-        let payload = namespace.map_or(message.to_vec(), |namespace| {
-            union_unique(namespace, message)
-        });
-        self.items
-            .push((public_key.clone(), signature.clone(), payload));
-        true
-    }
-}
-
-impl crate::BatchVerifier<PublicKey> for Batch {
-    fn new() -> Self {
-        Self { items: Vec::new() }
-    }
-
-    fn add(
-        &mut self,
-        namespace: &[u8],
-        message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) -> bool {
-        self.add_inner(Some(namespace), message, public_key, signature)
-    }
-
-    fn verify<R: CryptoRngCore>(self, _rng: &mut R) -> bool {
-        // Standard ECDSA signatures lack recovery information, preventing algebraic
-        // batch verification. Each signature is verified individually.
-        for (public_key, signature, payload) in self.items {
-            if public_key
-                .0
-                .key
-                .verify(&payload, &signature.signature)
-                .is_err()
-            {
-                return false;
-            }
-        }
-        true
     }
 }
 
@@ -636,83 +557,6 @@ mod tests {
             }
         };
         assert!(expected);
-    }
-
-    #[test]
-    fn batch_verify_valid() {
-        use crate::BatchVerifier;
-        use commonware_math::algebra::Random;
-
-        let signer1 = PrivateKey::random(&mut rand::thread_rng());
-        let signer2 = PrivateKey::random(&mut rand::thread_rng());
-
-        let msg1 = b"message one";
-        let msg2 = b"message two";
-
-        let sig1 = signer1.sign(NAMESPACE, msg1);
-        let sig2 = signer2.sign(NAMESPACE, msg2);
-
-        let mut batch = Batch::new();
-        assert!(batch.add(NAMESPACE, msg1, &signer1.public_key(), &sig1));
-        assert!(batch.add(NAMESPACE, msg2, &signer2.public_key(), &sig2));
-        assert!(batch.verify(&mut rand::thread_rng()));
-    }
-
-    #[test]
-    fn batch_verify_invalid() {
-        use crate::BatchVerifier;
-        use commonware_math::algebra::Random;
-
-        let signer1 = PrivateKey::random(&mut rand::thread_rng());
-        let signer2 = PrivateKey::random(&mut rand::thread_rng());
-
-        let msg1 = b"message one";
-        let msg2 = b"message two";
-
-        let sig1 = signer1.sign(NAMESPACE, msg1);
-        let _sig2 = signer2.sign(NAMESPACE, msg2);
-
-        // Use wrong signature for second message
-        let mut batch = Batch::new();
-        assert!(batch.add(NAMESPACE, msg1, &signer1.public_key(), &sig1));
-        assert!(batch.add(NAMESPACE, msg2, &signer2.public_key(), &sig1)); // wrong sig
-        assert!(!batch.verify(&mut rand::thread_rng()));
-    }
-
-    #[test]
-    fn batch_verify_empty() {
-        use crate::BatchVerifier;
-
-        let batch = Batch::new();
-        assert!(batch.verify(&mut rand::thread_rng()));
-    }
-
-    #[test]
-    fn batch_verify_single() {
-        use crate::BatchVerifier;
-        use commonware_math::algebra::Random;
-
-        let signer = PrivateKey::random(&mut rand::thread_rng());
-        let msg = b"single message";
-        let sig = signer.sign(NAMESPACE, msg);
-
-        let mut batch = Batch::new();
-        assert!(batch.add(NAMESPACE, msg, &signer.public_key(), &sig));
-        assert!(batch.verify(&mut rand::thread_rng()));
-    }
-
-    #[test]
-    fn batch_verify_wrong_namespace() {
-        use crate::BatchVerifier;
-        use commonware_math::algebra::Random;
-
-        let signer = PrivateKey::random(&mut rand::thread_rng());
-        let msg = b"message";
-        let sig = signer.sign(NAMESPACE, msg);
-
-        let mut batch = Batch::new();
-        assert!(batch.add(b"wrong-namespace", msg, &signer.public_key(), &sig));
-        assert!(!batch.verify(&mut rand::thread_rng()));
     }
 
     #[cfg(feature = "arbitrary")]

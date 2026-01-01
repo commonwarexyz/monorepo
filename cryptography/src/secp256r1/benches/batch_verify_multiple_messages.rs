@@ -16,8 +16,8 @@ fn benchmark_batch_verify_multiple_messages(c: &mut Criterion) {
         c.bench_function(&format!("{}/msgs={}", module_path!(), n_messages), |b| {
             b.iter_batched(
                 || {
-                    let mut batch = secp256r1::standard::Batch::new();
-                    let signer = secp256r1::standard::PrivateKey::random(&mut thread_rng());
+                    let mut batch = secp256r1::recoverable::Batch::new();
+                    let signer = secp256r1::recoverable::PrivateKey::random(&mut thread_rng());
                     for msg in msgs.iter() {
                         let sig = signer.sign(namespace, msg);
                         assert!(batch.add(namespace, msg, &signer.public_key(), &sig));
