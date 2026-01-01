@@ -23,6 +23,7 @@ use ecdsa::RecoveryId;
 use p256::{
     ecdsa::VerifyingKey,
     elliptic_curve::{
+        bigint::Encoding as _,
         ops::{MulByGenerator, Reduce},
         scalar::IsHigh,
         sec1::FromEncodedPoint,
@@ -358,6 +359,12 @@ impl crate::BatchVerifier<PublicKey> for Batch {
     }
 }
 
+/// P-256 curve order n.
+/// n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+const CURVE_ORDER: U256 = U256::from_be_hex(
+    "FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551",
+);
+
 /// Recover the signature point R from the raw signature bytes and recovery ID.
 fn recover_r_point(
     raw: &[u8; SIGNATURE_LENGTH],
@@ -368,17 +375,20 @@ fn recover_r_point(
     let r_bytes: &[u8; 32] = raw[1..33].try_into().ok()?;
 
     // The x-coordinate might be r or r + n (if is_x_reduced)
-    // For P-256, this is extremely rare since n is close to p
-    if recovery_id.is_x_reduced() {
-        // r + n case - extremely rare for P-256
-        return None;
-    }
+    let x_bytes: [u8; 32] = if recovery_id.is_x_reduced() {
+        // x = r + n case (rare for P-256, but valid)
+        let r = U256::from_be_slice(r_bytes);
+        let x = r.wrapping_add(&CURVE_ORDER);
+        x.to_be_bytes()
+    } else {
+        *r_bytes
+    };
 
     // Use SEC1 point decompression: compressed point is [02|03 || x]
     // 02 = even y, 03 = odd y
     let mut encoded = [0u8; 33];
     encoded[0] = if recovery_id.is_y_odd() { 0x03 } else { 0x02 };
-    encoded[1..].copy_from_slice(r_bytes);
+    encoded[1..].copy_from_slice(&x_bytes);
 
     let encoded_point = EncodedPoint::from_bytes(encoded).ok()?;
     let affine = AffinePoint::from_encoded_point(&encoded_point);
