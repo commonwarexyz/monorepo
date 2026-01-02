@@ -63,16 +63,15 @@
 //! let mut reconciler_a = Reconciler::new(&storage_a, 16);
 //! let msg1 = reconciler_a.initiate();
 //!
-//! // Exchange messages until complete
+//! // Exchange messages, collecting missing IDs from each round
 //! let mut reconciler_b = Reconciler::new(&storage_b, 16);
-//! let msg2 = reconciler_b.reconcile(&msg1).unwrap();
-//! let msg3 = reconciler_a.reconcile(&msg2).unwrap();
-//! let _ = reconciler_b.reconcile(&msg3).unwrap();
+//! let (msg2, b_missing) = reconciler_b.reconcile(&msg1).unwrap();
+//! let (msg3, a_missing) = reconciler_a.reconcile(&msg2).unwrap();
+//! let (_, b_missing_2) = reconciler_b.reconcile(&msg3).unwrap();
 //!
-//! // Each side now knows what they're missing:
 //! // A is missing [0x03], B is missing [0x02]
-//! assert!(reconciler_a.missing().contains(&[0x03; 32].into()));
-//! assert!(reconciler_b.missing().contains(&[0x02; 32].into()));
+//! assert!(a_missing.contains(&[0x03; 32].into()));
+//! assert!(b_missing.contains(&[0x02; 32].into()) || b_missing_2.contains(&[0x02; 32].into()));
 //! ```
 //!
 //! # Acknowledgements
@@ -551,6 +550,7 @@ impl Storage for VecStorage {
 /// Reconciler for bi-directional set reconciliation.
 ///
 /// Each participant discovers items they're missing from the remote.
+/// Missing IDs are returned from each `reconcile()` call as they're discovered.
 /// The protocol is symmetric; the only difference is who initiates.
 ///
 /// Since reconciliation is bi-directional, the remote peer runs their own
@@ -558,10 +558,6 @@ impl Storage for VecStorage {
 pub struct Reconciler<'a, S: Storage> {
     storage: &'a S,
     branching_factor: usize,
-    /// IDs we're missing that the remote has (items to fetch)
-    missing: Vec<Digest>,
-    /// Whether reconciliation is complete
-    complete: bool,
     /// Whether we are the initiator (affects how we respond to IdList)
     is_initiator: bool,
 }
@@ -572,8 +568,6 @@ impl<'a, S: Storage> Reconciler<'a, S> {
         Self {
             storage,
             branching_factor: branching_factor.max(2),
-            missing: Vec::new(),
-            complete: false,
             is_initiator: false,
         }
     }
@@ -598,9 +592,10 @@ impl<'a, S: Storage> Reconciler<'a, S> {
 
     /// Process a received message and generate a response.
     ///
-    /// Returns the response message, or an error if the message is invalid.
-    pub fn reconcile(&mut self, msg: &Message) -> Result<Message, Error> {
+    /// Returns the response message and any missing IDs discovered in this round.
+    pub fn reconcile(&mut self, msg: &Message) -> Result<(Message, Vec<Digest>), Error> {
         let mut response_ranges = Vec::new();
+        let mut missing = Vec::new();
         let mut current_idx = 0;
 
         for range in &msg.ranges {
@@ -640,10 +635,10 @@ impl<'a, S: Storage> Reconciler<'a, S> {
                     // Compare ID lists to find what we're missing
                     let local_ids = self.storage.ids_in_range(current_idx, end_idx);
 
-                    // Find IDs remote has that we don't (we need to fetch these)
+                    // Find IDs remote has that we don't
                     for remote_id in remote_ids {
                         if !local_ids.contains(remote_id) {
-                            self.missing.push(*remote_id);
+                            missing.push(*remote_id);
                         }
                     }
 
@@ -665,13 +660,7 @@ impl<'a, S: Storage> Reconciler<'a, S> {
             current_idx = end_idx;
         }
 
-        // Check if reconciliation is complete
-        let result = Message::new(response_ranges);
-        if result.is_complete() {
-            self.complete = true;
-        }
-
-        Ok(result)
+        Ok((Message::new(response_ranges), missing))
     }
 
     /// Split a range into sub-ranges with fingerprints.
@@ -703,141 +692,6 @@ impl<'a, S: Storage> Reconciler<'a, S> {
             ranges.push(Range::new(bound, RangeMode::Fingerprint(fp)));
             current = chunk_end;
         }
-    }
-
-    /// Get IDs we're missing that the remote has (items to fetch).
-    pub fn missing(&self) -> &[Digest] {
-        &self.missing
-    }
-
-    /// Check if reconciliation is complete.
-    pub const fn is_complete(&self) -> bool {
-        self.complete
-    }
-
-    /// Clear the accumulated missing items list.
-    pub fn clear_missing(&mut self) {
-        self.missing.clear();
-    }
-}
-
-/// Aggregates reconciliation results from multiple peers.
-///
-/// When reconciling with multiple peers concurrently, use this to combine
-/// results and track which peers can provide which items we're missing.
-///
-/// # Example
-///
-/// ```rust
-/// use commonware_cryptography::rbsr::{Item, Reconciler, ReconciliationSet, VecStorage};
-///
-/// let mut storage = VecStorage::new();
-/// storage.insert(Item::from_bytes(1000, [0x01; 32]));
-///
-/// // Reconcile with multiple peers and aggregate results
-/// let mut aggregator: ReconciliationSet<u64> = ReconciliationSet::new();
-///
-/// // After reconciling with peer 1...
-/// // aggregator.add_peer_result(1, &reconciler1);
-///
-/// // After reconciling with peer 2...
-/// // aggregator.add_peer_result(2, &reconciler2);
-///
-/// // Now query aggregated results:
-/// // - aggregator.missing() returns all items we need
-/// // - aggregator.sources(&id) returns which peers have a specific item
-/// ```
-#[derive(Debug, Clone)]
-pub struct ReconciliationSet<P> {
-    /// Items we're missing (union across all peers)
-    missing: Vec<Digest>,
-    /// Which peers have each item we need (id -> list of peers)
-    sources: Vec<(Digest, Vec<P>)>,
-}
-
-impl<P> Default for ReconciliationSet<P> {
-    fn default() -> Self {
-        Self {
-            missing: Vec::new(),
-            sources: Vec::new(),
-        }
-    }
-}
-
-impl<P: Clone + PartialEq> ReconciliationSet<P> {
-    /// Create a new empty reconciliation set.
-    pub const fn new() -> Self {
-        Self {
-            missing: Vec::new(),
-            sources: Vec::new(),
-        }
-    }
-
-    /// Add results from a completed reconciliation with a peer.
-    ///
-    /// Records items the peer has that we need, tracking the peer as a source.
-    pub fn add_peer_result<S: Storage>(&mut self, peer: P, reconciler: &Reconciler<'_, S>) {
-        // Add items we're missing (that this peer has)
-        for id in reconciler.missing() {
-            // Add to missing set if not already present
-            if !self.missing.contains(id) {
-                self.missing.push(*id);
-            }
-
-            // Track this peer as a source for this item
-            if let Some((_, peers)) = self.sources.iter_mut().find(|(i, _)| i == id) {
-                if !peers.contains(&peer) {
-                    peers.push(peer.clone());
-                }
-            } else {
-                self.sources.push((*id, vec![peer.clone()]));
-            }
-        }
-    }
-
-    /// Get all items we're missing (union across all peers).
-    pub fn missing(&self) -> &[Digest] {
-        &self.missing
-    }
-
-    /// Get peers that have a specific item we need.
-    ///
-    /// Returns `None` if we don't need this item or no peers have it.
-    pub fn sources(&self, id: &Digest) -> Option<&[P]> {
-        self.sources
-            .iter()
-            .find(|(i, _)| i == id)
-            .map(|(_, peers)| peers.as_slice())
-    }
-
-    /// Get the total number of unique items we're missing.
-    pub const fn missing_count(&self) -> usize {
-        self.missing.len()
-    }
-
-    /// Check if a specific item is missing.
-    pub fn is_missing(&self, id: &Digest) -> bool {
-        self.missing.contains(id)
-    }
-
-    /// Remove an item from the missing set (e.g., after fetching it).
-    ///
-    /// Returns `true` if the item was present and removed.
-    pub fn mark_received(&mut self, id: &Digest) -> bool {
-        if let Some(pos) = self.missing.iter().position(|i| i == id) {
-            self.missing.remove(pos);
-            // Also remove from sources
-            self.sources.retain(|(i, _)| i != id);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Clear all aggregated data.
-    pub fn clear(&mut self) {
-        self.missing.clear();
-        self.sources.clear();
     }
 }
 
@@ -973,15 +827,18 @@ mod tests {
         let msg1 = reconciler_a.initiate();
 
         let mut reconciler_b = Reconciler::new(&storage_b, 4);
-        let msg2 = reconciler_b.reconcile(&msg1).unwrap();
+        let (msg2, missing_b) = reconciler_b.reconcile(&msg1).unwrap();
 
         // Should be a skip response since fingerprints match
         assert!(msg2.ranges[0].upper_bound.is_infinity());
         assert!(matches!(msg2.ranges[0].mode, RangeMode::Skip));
 
-        let msg3 = reconciler_a.reconcile(&msg2).unwrap();
+        let (msg3, missing_a) = reconciler_a.reconcile(&msg2).unwrap();
         assert!(msg3.is_complete());
-        assert!(reconciler_a.missing().is_empty());
+
+        // No missing items since sets are identical
+        assert!(missing_a.is_empty());
+        assert!(missing_b.is_empty());
     }
 
     #[test]
@@ -999,20 +856,20 @@ mod tests {
         let msg1 = reconciler_a.initiate();
 
         let mut reconciler_b = Reconciler::new(&storage_b, 4);
-        let msg2 = reconciler_b.reconcile(&msg1).unwrap();
+        let (msg2, _) = reconciler_b.reconcile(&msg1).unwrap();
 
         // A receives B's IdList, compares, sends its own IdList
-        let msg3 = reconciler_a.reconcile(&msg2).unwrap();
+        let (msg3, missing_a) = reconciler_a.reconcile(&msg2).unwrap();
 
         // B receives A's IdList, compares, sends Skip (completing the exchange)
-        let msg4 = reconciler_b.reconcile(&msg3).unwrap();
+        let (msg4, missing_b) = reconciler_b.reconcile(&msg3).unwrap();
         assert!(msg4.is_complete());
 
         // A should know it's missing [0x03]
-        assert!(reconciler_a.missing().contains(&Digest([0x03; 32])));
+        assert!(missing_a.contains(&Digest([0x03; 32])));
 
         // B should know it's missing [0x02]
-        assert!(reconciler_b.missing().contains(&Digest([0x02; 32])));
+        assert!(missing_b.contains(&Digest([0x02; 32])));
     }
 
     #[test]
@@ -1025,12 +882,12 @@ mod tests {
         let msg1 = reconciler_a.initiate();
 
         let mut reconciler_b = Reconciler::new(&storage_b, 4);
-        let msg2 = reconciler_b.reconcile(&msg1).unwrap();
+        let (msg2, _) = reconciler_b.reconcile(&msg1).unwrap();
 
-        let _msg3 = reconciler_a.reconcile(&msg2).unwrap();
+        let (_, missing_a) = reconciler_a.reconcile(&msg2).unwrap();
 
         // A should know it's missing the item B has
-        assert!(!reconciler_a.missing().is_empty());
+        assert!(!missing_a.is_empty());
     }
 
     #[test]
@@ -1107,14 +964,20 @@ mod tests {
 
         let mut msg = reconciler_a.initiate();
         let mut rounds = 0;
-        const MAX_ROUNDS: usize = 50; // Increase max rounds for larger sets
+        let mut missing_a = Vec::new();
+        let mut missing_b = Vec::new();
+        const MAX_ROUNDS: usize = 50;
 
         while !msg.is_complete() && rounds < MAX_ROUNDS {
-            msg = reconciler_b.reconcile(&msg).unwrap();
+            let (next_msg, found) = reconciler_b.reconcile(&msg).unwrap();
+            missing_b.extend(found);
+            msg = next_msg;
             if msg.is_complete() {
                 break;
             }
-            msg = reconciler_a.reconcile(&msg).unwrap();
+            let (next_msg, found) = reconciler_a.reconcile(&msg).unwrap();
+            missing_a.extend(found);
+            msg = next_msg;
             rounds += 1;
         }
 
@@ -1128,7 +991,7 @@ mod tests {
         // Check that differences were found
         // A should be missing the 10 items unique to B
         // B should be missing the 10 items unique to A
-        assert!(reconciler_a.missing().len() + reconciler_b.missing().len() > 0);
+        assert!(missing_a.len() + missing_b.len() > 0);
     }
 
     #[test]
@@ -1249,17 +1112,24 @@ mod tests {
         let mut reconciler_b = Reconciler::new(&storage_b, 16);
 
         let mut msg = reconciler_a.initiate();
+        let mut missing_a = Vec::new();
+        let mut missing_b = Vec::new();
 
         // Run reconciliation to completion (should be quick with small sets)
         for round in 0..10 {
-            msg = reconciler_b.reconcile(&msg).unwrap();
+            let (next_msg, found) = reconciler_b.reconcile(&msg).unwrap();
+            missing_b.extend(found);
+            msg = next_msg;
             if msg.is_complete() {
                 break;
             }
-            msg = reconciler_a.reconcile(&msg).unwrap();
+            let (next_msg, found) = reconciler_a.reconcile(&msg).unwrap();
+            missing_a.extend(found);
+            msg = next_msg;
             if msg.is_complete() {
                 // Final round for B
-                let _ = reconciler_b.reconcile(&msg).unwrap();
+                let (_, found) = reconciler_b.reconcile(&msg).unwrap();
+                missing_b.extend(found);
                 break;
             }
             assert!(round < 9, "reconciliation did not converge");
@@ -1267,20 +1137,12 @@ mod tests {
 
         // Verify A found all B's unique items (what A is missing)
         for id in &b_unique {
-            assert!(
-                reconciler_a.missing().contains(id),
-                "A should be missing {:?}",
-                id
-            );
+            assert!(missing_a.contains(id), "A should be missing {:?}", id);
         }
 
         // Verify B found all A's unique items (what B is missing)
         for id in &a_unique {
-            assert!(
-                reconciler_b.missing().contains(id),
-                "B should be missing {:?}",
-                id
-            );
+            assert!(missing_b.contains(id), "B should be missing {:?}", id);
         }
     }
 
@@ -1332,15 +1194,22 @@ mod tests {
         let mut reconciler_b = Reconciler::new(&storage_b, 16);
 
         let mut msg = reconciler_a.initiate();
+        let mut missing_a = Vec::new();
+        let mut missing_b = Vec::new();
 
         for round in 0..10 {
-            msg = reconciler_b.reconcile(&msg).unwrap();
+            let (next_msg, found) = reconciler_b.reconcile(&msg).unwrap();
+            missing_b.extend(found);
+            msg = next_msg;
             if msg.is_complete() {
                 break;
             }
-            msg = reconciler_a.reconcile(&msg).unwrap();
+            let (next_msg, found) = reconciler_a.reconcile(&msg).unwrap();
+            missing_a.extend(found);
+            msg = next_msg;
             if msg.is_complete() {
-                let _ = reconciler_b.reconcile(&msg).unwrap();
+                let (_, found) = reconciler_b.reconcile(&msg).unwrap();
+                missing_b.extend(found);
                 break;
             }
             assert!(round < 9, "reconciliation did not converge");
@@ -1348,20 +1217,12 @@ mod tests {
 
         // Verify A found B's unique items (what A is missing)
         for id in &b_unique {
-            assert!(
-                reconciler_a.missing().contains(id),
-                "A should be missing {:?}",
-                id
-            );
+            assert!(missing_a.contains(id), "A should be missing {:?}", id);
         }
 
         // Verify B found A's unique items (what B is missing)
         for id in &a_unique {
-            assert!(
-                reconciler_b.missing().contains(id),
-                "B should be missing {:?}",
-                id
-            );
+            assert!(missing_b.contains(id), "B should be missing {:?}", id);
         }
     }
 
@@ -1392,15 +1253,22 @@ mod tests {
         let mut reconciler_b = Reconciler::new(&storage_b, 16);
 
         let mut msg = reconciler_a.initiate();
+        let mut missing_a = Vec::new();
+        let mut missing_b = Vec::new();
 
         for round in 0..10 {
-            msg = reconciler_b.reconcile(&msg).unwrap();
+            let (next_msg, found) = reconciler_b.reconcile(&msg).unwrap();
+            missing_b.extend(found);
+            msg = next_msg;
             if msg.is_complete() {
                 break;
             }
-            msg = reconciler_a.reconcile(&msg).unwrap();
+            let (next_msg, found) = reconciler_a.reconcile(&msg).unwrap();
+            missing_a.extend(found);
+            msg = next_msg;
             if msg.is_complete() {
-                let _ = reconciler_b.reconcile(&msg).unwrap();
+                let (_, found) = reconciler_b.reconcile(&msg).unwrap();
+                missing_b.extend(found);
                 break;
             }
             assert!(round < 9, "reconciliation did not converge");
@@ -1408,12 +1276,8 @@ mod tests {
 
         // Since items are identified by ID only, both sides have the same 3 items.
         // No differences should be detected!
-        assert_eq!(
-            reconciler_a.missing().len(),
-            0,
-            "same IDs = same items, no differences"
-        );
-        assert_eq!(reconciler_b.missing().len(), 0);
+        assert_eq!(missing_a.len(), 0, "same IDs = same items, no differences");
+        assert_eq!(missing_b.len(), 0);
     }
 
     #[test]
@@ -1438,15 +1302,22 @@ mod tests {
         let mut reconciler_b = Reconciler::new(&storage_b, 16);
 
         let mut msg = reconciler_a.initiate();
+        let mut missing_a = Vec::new();
+        let mut missing_b = Vec::new();
 
         for round in 0..10 {
-            msg = reconciler_b.reconcile(&msg).unwrap();
+            let (next_msg, found) = reconciler_b.reconcile(&msg).unwrap();
+            missing_b.extend(found);
+            msg = next_msg;
             if msg.is_complete() {
                 break;
             }
-            msg = reconciler_a.reconcile(&msg).unwrap();
+            let (next_msg, found) = reconciler_a.reconcile(&msg).unwrap();
+            missing_a.extend(found);
+            msg = next_msg;
             if msg.is_complete() {
-                let _ = reconciler_b.reconcile(&msg).unwrap();
+                let (_, found) = reconciler_b.reconcile(&msg).unwrap();
+                missing_b.extend(found);
                 break;
             }
             assert!(round < 9, "reconciliation did not converge");
@@ -1455,128 +1326,9 @@ mod tests {
         // A should find it's missing [0x03] (unique to B)
         // B should find it's missing [0x02] (unique to A)
         // [0x01] matches despite different hints
-        assert_eq!(reconciler_a.missing().len(), 1);
-        assert!(reconciler_a.missing().contains(&Digest([0x03; 32])));
-        assert_eq!(reconciler_b.missing().len(), 1);
-        assert!(reconciler_b.missing().contains(&Digest([0x02; 32])));
-    }
-
-    #[test]
-    fn test_reconciliation_set_basic() {
-        // Our storage has items 1 and 2
-        let mut our_storage = VecStorage::new();
-        our_storage.insert(Item::from_bytes(1000, [0x01; 32]));
-        our_storage.insert(Item::from_bytes(1001, [0x02; 32]));
-
-        // Peer A has items 1 and 3
-        let mut peer_a_storage = VecStorage::new();
-        peer_a_storage.insert(Item::from_bytes(1000, [0x01; 32]));
-        peer_a_storage.insert(Item::from_bytes(1002, [0x03; 32]));
-
-        // Peer B has items 1 and 4
-        let mut peer_b_storage = VecStorage::new();
-        peer_b_storage.insert(Item::from_bytes(1000, [0x01; 32]));
-        peer_b_storage.insert(Item::from_bytes(1003, [0x04; 32]));
-
-        // Reconcile with peer A
-        let mut reconciler_a = Reconciler::new(&our_storage, 16);
-        let msg1 = reconciler_a.initiate();
-        let mut peer_a_reconciler = Reconciler::new(&peer_a_storage, 16);
-        let msg2 = peer_a_reconciler.reconcile(&msg1).unwrap();
-        let _ = reconciler_a.reconcile(&msg2).unwrap();
-
-        // Reconcile with peer B
-        let mut reconciler_b = Reconciler::new(&our_storage, 16);
-        let msg1 = reconciler_b.initiate();
-        let mut peer_b_reconciler = Reconciler::new(&peer_b_storage, 16);
-        let msg2 = peer_b_reconciler.reconcile(&msg1).unwrap();
-        let _ = reconciler_b.reconcile(&msg2).unwrap();
-
-        // Aggregate results
-        let mut aggregator: ReconciliationSet<&str> = ReconciliationSet::new();
-        aggregator.add_peer_result("peer_a", &reconciler_a);
-        aggregator.add_peer_result("peer_b", &reconciler_b);
-
-        // We should be missing items 3 and 4
-        assert_eq!(aggregator.missing_count(), 2);
-        assert!(aggregator.is_missing(&Digest([0x03; 32])));
-        assert!(aggregator.is_missing(&Digest([0x04; 32])));
-
-        // Check sources - each item available from one peer
-        let sources_3 = aggregator.sources(&Digest([0x03; 32])).unwrap();
-        assert_eq!(sources_3, &["peer_a"]);
-
-        let sources_4 = aggregator.sources(&Digest([0x04; 32])).unwrap();
-        assert_eq!(sources_4, &["peer_b"]);
-    }
-
-    #[test]
-    fn test_reconciliation_set_multiple_sources() {
-        // Our storage is empty
-        let our_storage = VecStorage::new();
-
-        // Both peer A and peer B have item 1
-        let mut peer_a_storage = VecStorage::new();
-        peer_a_storage.insert(Item::from_bytes(1000, [0x01; 32]));
-
-        let mut peer_b_storage = VecStorage::new();
-        peer_b_storage.insert(Item::from_bytes(1000, [0x01; 32]));
-
-        // Reconcile with peer A
-        let mut reconciler_a = Reconciler::new(&our_storage, 16);
-        let msg1 = reconciler_a.initiate();
-        let mut peer_a_reconciler = Reconciler::new(&peer_a_storage, 16);
-        let msg2 = peer_a_reconciler.reconcile(&msg1).unwrap();
-        let _ = reconciler_a.reconcile(&msg2).unwrap();
-
-        // Reconcile with peer B
-        let mut reconciler_b = Reconciler::new(&our_storage, 16);
-        let msg1 = reconciler_b.initiate();
-        let mut peer_b_reconciler = Reconciler::new(&peer_b_storage, 16);
-        let msg2 = peer_b_reconciler.reconcile(&msg1).unwrap();
-        let _ = reconciler_b.reconcile(&msg2).unwrap();
-
-        // Aggregate results
-        let mut aggregator: ReconciliationSet<u32> = ReconciliationSet::new();
-        aggregator.add_peer_result(1, &reconciler_a);
-        aggregator.add_peer_result(2, &reconciler_b);
-
-        // We're missing item 1, and both peers have it
-        assert_eq!(aggregator.missing_count(), 1);
-        let sources = aggregator.sources(&Digest([0x01; 32])).unwrap();
-        assert_eq!(sources.len(), 2);
-        assert!(sources.contains(&1));
-        assert!(sources.contains(&2));
-    }
-
-    #[test]
-    fn test_reconciliation_set_mark_received() {
-        let mut aggregator: ReconciliationSet<u32> = ReconciliationSet::new();
-
-        // Manually add some missing items (simulating reconciliation results)
-        let our_storage = VecStorage::new();
-        let mut peer_storage = VecStorage::new();
-        peer_storage.insert(Item::from_bytes(1000, [0x01; 32]));
-        peer_storage.insert(Item::from_bytes(1001, [0x02; 32]));
-
-        let mut reconciler = Reconciler::new(&our_storage, 16);
-        let msg1 = reconciler.initiate();
-        let mut peer_reconciler = Reconciler::new(&peer_storage, 16);
-        let msg2 = peer_reconciler.reconcile(&msg1).unwrap();
-        let _ = reconciler.reconcile(&msg2).unwrap();
-
-        aggregator.add_peer_result(1, &reconciler);
-
-        assert_eq!(aggregator.missing_count(), 2);
-
-        // Mark item 1 as received
-        let removed = aggregator.mark_received(&Digest([0x01; 32]));
-        assert!(removed);
-        assert_eq!(aggregator.missing_count(), 1);
-        assert!(!aggregator.is_missing(&Digest([0x01; 32])));
-        assert!(aggregator.is_missing(&Digest([0x02; 32])));
-
-        // Sources should also be removed
-        assert!(aggregator.sources(&Digest([0x01; 32])).is_none());
+        assert_eq!(missing_a.len(), 1);
+        assert!(missing_a.contains(&Digest([0x03; 32])));
+        assert_eq!(missing_b.len(), 1);
+        assert!(missing_b.contains(&Digest([0x02; 32])));
     }
 }
