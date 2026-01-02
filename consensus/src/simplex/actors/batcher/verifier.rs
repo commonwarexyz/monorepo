@@ -10,7 +10,7 @@ use rand::{CryptoRng, Rng};
 /// For schemes where [`Scheme::is_batchable()`](commonware_cryptography::certificate::Scheme::is_batchable)
 /// returns `true` (such as [ed25519], [bls12381_multisig] and [bls12381_threshold]), this struct collects
 /// messages and defers verification until enough messages exist to potentially reach a quorum, enabling
-/// efficient batch verification. For schemes where `is_batchable()` returns `false` (such as `secp256r1`),
+/// efficient batch verification. For schemes where `is_batchable()` returns `false` (such as [secp256r1]),
 /// signatures are verified eagerly as they arrive since there is no batching benefit.
 ///
 /// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
@@ -19,6 +19,7 @@ use rand::{CryptoRng, Rng};
 /// [ed25519]: crate::simplex::scheme::ed25519
 /// [bls12381_multisig]: crate::simplex::scheme::bls12381_multisig
 /// [bls12381_threshold]: crate::simplex::scheme::bls12381_threshold
+/// [secp256r1]: crate::simplex::scheme::secp256r1
 pub struct Verifier<S: Scheme<D>, D: Digest> {
     /// Signing scheme used to verify votes and assemble certificates.
     scheme: S,
@@ -452,17 +453,21 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 mod tests {
     use super::*;
     use crate::{
-        simplex::scheme::{bls12381_threshold, ed25519},
+        simplex::scheme::{bls12381_threshold, ed25519, secp256r1},
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
         bls12381::{dkg::deal_anonymous, primitives::variant::MinSig},
         ed25519::{PrivateKey as EdPrivateKey, PublicKey as EdPublicKey},
+        secp256r1::standard::{PrivateKey as SecpPrivateKey, PublicKey as SecpPublicKey},
         sha256::Digest as Sha256,
         Signer,
     };
     use commonware_math::algebra::Random;
-    use commonware_utils::{ordered::Set, quorum_from_slice, TryCollect, NZU32};
+    use commonware_utils::{
+        ordered::{BiMap, Set},
+        quorum_from_slice, TryCollect, NZU32,
+    };
     use rand::{
         rngs::{OsRng, StdRng},
         SeedableRng,
@@ -513,6 +518,34 @@ mod tests {
         private_keys
             .into_iter()
             .map(|sk| ed25519::Scheme::signer(participants.clone(), sk).unwrap())
+            .collect()
+    }
+
+    fn generate_secp256r1_schemes(n: usize, seed: u64) -> Vec<secp256r1::Scheme<EdPublicKey>> {
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        // Generate ed25519 identity keys
+        let identity_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::random(&mut rng)).collect();
+        let identity_publics: Vec<_> = identity_keys.iter().map(|p| p.public_key()).collect();
+
+        // Generate secp256r1 signing keys
+        let signing_private_keys: Vec<_> =
+            (0..n).map(|_| SecpPrivateKey::random(&mut rng)).collect();
+        let signing_publics: Vec<_> = signing_private_keys
+            .iter()
+            .map(|p| p.public_key())
+            .collect();
+
+        // Create BiMap of identity -> signing keys
+        let participants: BiMap<EdPublicKey, SecpPublicKey> = identity_publics
+            .into_iter()
+            .zip(signing_publics)
+            .try_collect()
+            .unwrap();
+
+        signing_private_keys
+            .into_iter()
+            .map(|sk| secp256r1::Scheme::signer(participants.clone(), sk).unwrap())
             .collect()
     }
 
@@ -597,6 +630,7 @@ mod tests {
     fn test_add_notarize() {
         add_notarize(generate_bls12381_threshold_schemes(5, 123));
         add_notarize(generate_ed25519_schemes(5, 123));
+        add_notarize(generate_secp256r1_schemes(5, 123));
     }
 
     fn set_leader<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -629,6 +663,7 @@ mod tests {
     fn test_set_leader() {
         set_leader(generate_bls12381_threshold_schemes(5, 124));
         set_leader(generate_ed25519_schemes(5, 124));
+        set_leader(generate_secp256r1_schemes(5, 124));
     }
 
     fn ready_and_verify_notarizes<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -692,6 +727,7 @@ mod tests {
     fn test_ready_and_verify_notarizes() {
         ready_and_verify_notarizes(generate_bls12381_threshold_schemes(5, 125));
         ready_and_verify_notarizes(generate_ed25519_schemes(5, 125));
+        ready_and_verify_notarizes(generate_secp256r1_schemes(5, 125));
     }
 
     fn add_nullify<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -713,6 +749,7 @@ mod tests {
     fn test_add_nullify() {
         add_nullify(generate_bls12381_threshold_schemes(5, 127));
         add_nullify(generate_ed25519_schemes(5, 127));
+        add_nullify(generate_secp256r1_schemes(5, 127));
     }
 
     fn ready_and_verify_nullifies<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -749,6 +786,7 @@ mod tests {
     fn test_ready_and_verify_nullifies() {
         ready_and_verify_nullifies(generate_bls12381_threshold_schemes(5, 128));
         ready_and_verify_nullifies(generate_ed25519_schemes(5, 128));
+        ready_and_verify_nullifies(generate_secp256r1_schemes(5, 128));
     }
 
     fn add_finalize<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -785,6 +823,7 @@ mod tests {
     fn test_add_finalize() {
         add_finalize(generate_bls12381_threshold_schemes(5, 129));
         add_finalize(generate_ed25519_schemes(5, 129));
+        add_finalize(generate_secp256r1_schemes(5, 129));
     }
 
     fn ready_and_verify_finalizes<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -826,6 +865,7 @@ mod tests {
     fn test_ready_and_verify_finalizes() {
         ready_and_verify_finalizes(generate_bls12381_threshold_schemes(5, 130));
         ready_and_verify_finalizes(generate_ed25519_schemes(5, 130));
+        ready_and_verify_finalizes(generate_secp256r1_schemes(5, 130));
     }
 
     fn leader_proposal_filters_messages<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -860,6 +900,7 @@ mod tests {
     fn test_leader_proposal_filters_messages() {
         leader_proposal_filters_messages(generate_bls12381_threshold_schemes(3, 201));
         leader_proposal_filters_messages(generate_ed25519_schemes(3, 201));
+        leader_proposal_filters_messages(generate_secp256r1_schemes(3, 201));
     }
 
     fn set_leader_twice_panics<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -879,6 +920,13 @@ mod tests {
     fn test_set_leader_twice_panics_ed() {
         set_leader_twice_panics(generate_ed25519_schemes(3, 213));
     }
+
+    #[test]
+    #[should_panic(expected = "self.leader.is_none()")]
+    fn test_set_leader_twice_panics_secp() {
+        set_leader_twice_panics(generate_secp256r1_schemes(3, 214));
+    }
+
     fn notarizes_wait_for_quorum<S: Scheme<Sha256>>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
@@ -912,6 +960,7 @@ mod tests {
     fn test_notarizes_wait_for_quorum() {
         notarizes_wait_for_quorum(generate_bls12381_threshold_schemes(5, 203));
         notarizes_wait_for_quorum(generate_ed25519_schemes(5, 203));
+        notarizes_wait_for_quorum(generate_secp256r1_schemes(5, 203));
     }
 
     fn ready_notarizes_without_leader<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -945,6 +994,7 @@ mod tests {
     fn test_ready_notarizes_without_leader_or_proposal() {
         ready_notarizes_without_leader(generate_bls12381_threshold_schemes(3, 204));
         ready_notarizes_without_leader(generate_ed25519_schemes(3, 204));
+        ready_notarizes_without_leader(generate_secp256r1_schemes(3, 204));
     }
 
     fn ready_finalizes_without_leader<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -977,6 +1027,7 @@ mod tests {
     fn test_ready_finalizes_without_leader_or_proposal() {
         ready_finalizes_without_leader(generate_bls12381_threshold_schemes(3, 205));
         ready_finalizes_without_leader(generate_ed25519_schemes(3, 205));
+        ready_finalizes_without_leader(generate_secp256r1_schemes(3, 205));
     }
 
     fn verify_notarizes_empty<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -993,6 +1044,7 @@ mod tests {
     fn test_verify_notarizes_empty_pending_when_forced() {
         verify_notarizes_empty(generate_bls12381_threshold_schemes(3, 206));
         verify_notarizes_empty(generate_ed25519_schemes(3, 206));
+        verify_notarizes_empty(generate_secp256r1_schemes(3, 206));
     }
 
     fn verify_nullifies_empty<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -1011,6 +1063,7 @@ mod tests {
     fn test_verify_nullifies_empty_pending() {
         verify_nullifies_empty(generate_bls12381_threshold_schemes(3, 207));
         verify_nullifies_empty(generate_ed25519_schemes(3, 207));
+        verify_nullifies_empty(generate_secp256r1_schemes(3, 207));
     }
 
     fn verify_finalizes_empty<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -1030,6 +1083,7 @@ mod tests {
     fn test_verify_finalizes_empty_pending() {
         verify_finalizes_empty(generate_bls12381_threshold_schemes(3, 208));
         verify_finalizes_empty(generate_ed25519_schemes(3, 208));
+        verify_finalizes_empty(generate_secp256r1_schemes(3, 208));
     }
 
     fn ready_notarizes_exact_quorum<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -1074,6 +1128,7 @@ mod tests {
     fn test_ready_notarizes_exact_quorum() {
         ready_notarizes_exact_quorum(generate_bls12381_threshold_schemes(5, 209));
         ready_notarizes_exact_quorum(generate_ed25519_schemes(5, 209));
+        ready_notarizes_exact_quorum(generate_secp256r1_schemes(5, 209));
     }
 
     fn ready_nullifies_exact_quorum<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -1104,6 +1159,7 @@ mod tests {
     fn test_ready_nullifies_exact_quorum() {
         ready_nullifies_exact_quorum(generate_bls12381_threshold_schemes(5, 210));
         ready_nullifies_exact_quorum(generate_ed25519_schemes(5, 210));
+        ready_nullifies_exact_quorum(generate_secp256r1_schemes(5, 210));
     }
 
     fn ready_finalizes_exact_quorum<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -1139,6 +1195,7 @@ mod tests {
     fn test_ready_finalizes_exact_quorum() {
         ready_finalizes_exact_quorum(generate_bls12381_threshold_schemes(5, 211));
         ready_finalizes_exact_quorum(generate_ed25519_schemes(5, 211));
+        ready_finalizes_exact_quorum(generate_secp256r1_schemes(5, 211));
     }
 
     fn ready_notarizes_quorum_already_met_by_verified<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -1181,6 +1238,7 @@ mod tests {
     fn test_ready_notarizes_quorum_already_met_by_verified() {
         ready_notarizes_quorum_already_met_by_verified(generate_bls12381_threshold_schemes(5, 212));
         ready_notarizes_quorum_already_met_by_verified(generate_ed25519_schemes(5, 212));
+        ready_notarizes_quorum_already_met_by_verified(generate_secp256r1_schemes(5, 212));
     }
 
     fn ready_nullifies_quorum_already_met_by_verified<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -1215,6 +1273,7 @@ mod tests {
     fn test_ready_nullifies_quorum_already_met_by_verified() {
         ready_nullifies_quorum_already_met_by_verified(generate_bls12381_threshold_schemes(5, 213));
         ready_nullifies_quorum_already_met_by_verified(generate_ed25519_schemes(5, 213));
+        ready_nullifies_quorum_already_met_by_verified(generate_secp256r1_schemes(5, 213));
     }
 
     fn ready_finalizes_quorum_already_met_by_verified<S: Scheme<Sha256>>(schemes: Vec<S>) {
@@ -1257,5 +1316,6 @@ mod tests {
     fn test_ready_finalizes_quorum_already_met_by_verified() {
         ready_finalizes_quorum_already_met_by_verified(generate_bls12381_threshold_schemes(5, 214));
         ready_finalizes_quorum_already_met_by_verified(generate_ed25519_schemes(5, 214));
+        ready_finalizes_quorum_already_met_by_verified(generate_secp256r1_schemes(5, 214));
     }
 }
