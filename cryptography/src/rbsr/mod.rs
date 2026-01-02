@@ -151,56 +151,50 @@ impl Read for Item {
 
 /// A bound representing the upper limit of a range.
 ///
-/// Bounds consist of a hint and an optional ID prefix. The ID prefix
-/// can be truncated to the minimum bytes needed for uniqueness, reducing
-/// message size.
+/// Bounds consist of a hint and an optional ID. When the ID is `None`,
+/// the bound represents either zero (hint=0) or infinity (hint=MAX_HINT).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bound {
     /// Hint component of the bound
     pub hint: u64,
-    /// ID prefix (can be empty or truncated for efficiency)
-    pub id_prefix: Vec<u8>,
+    /// ID component (None for zero/infinity bounds)
+    pub id: Option<Digest>,
 }
 
 impl Bound {
-    /// Create a new bound with the given hint and full ID.
-    pub fn new(hint: u64, id: Digest) -> Self {
-        Self {
-            hint,
-            id_prefix: id.as_ref().to_vec(),
-        }
+    /// Create a new bound with the given hint and ID.
+    pub const fn new(hint: u64, id: Digest) -> Self {
+        Self { hint, id: Some(id) }
     }
 
     /// Create a bound representing positive infinity.
     pub const fn infinity() -> Self {
         Self {
             hint: MAX_HINT,
-            id_prefix: Vec::new(),
+            id: None,
         }
     }
 
     /// Create a bound representing negative infinity (minimum).
     pub const fn zero() -> Self {
-        Self {
-            hint: 0,
-            id_prefix: Vec::new(),
-        }
+        Self { hint: 0, id: None }
     }
 
     /// Check if this bound represents infinity.
     pub const fn is_infinity(&self) -> bool {
-        self.hint == MAX_HINT && self.id_prefix.is_empty()
+        self.hint == MAX_HINT && self.id.is_none()
     }
 
     /// Compare this bound against an item.
     /// Returns Ordering::Less if bound < item, etc.
     pub fn cmp_item(&self, item: &Item) -> core::cmp::Ordering {
         match self.hint.cmp(&item.hint) {
-            core::cmp::Ordering::Equal => {
-                // Compare ID prefix against item ID
-                let prefix_len = self.id_prefix.len().min(ID_SIZE);
-                self.id_prefix[..prefix_len].cmp(&item.id.as_ref()[..prefix_len])
-            }
+            core::cmp::Ordering::Equal => self
+                .id
+                .as_ref()
+                .map_or(core::cmp::Ordering::Less, |id| {
+                    id.as_ref().cmp(item.id.as_ref())
+                }),
             ord => ord,
         }
     }
@@ -214,8 +208,7 @@ impl Bound {
 impl Write for Bound {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.hint).write(buf);
-        (self.id_prefix.len() as u8).write(buf);
-        buf.put_slice(&self.id_prefix);
+        self.id.write(buf);
     }
 }
 
@@ -224,19 +217,8 @@ impl Read for Bound {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let hint = UInt::<u64>::read(buf)?.into();
-        let prefix_len = u8::read(buf)? as usize;
-        if prefix_len > ID_SIZE {
-            return Err(CodecError::Invalid("Bound", "id_prefix length exceeds ID_SIZE"));
-        }
-        if buf.remaining() < prefix_len {
-            return Err(CodecError::EndOfBuffer);
-        }
-        let mut id_prefix = vec![0u8; prefix_len];
-        buf.copy_to_slice(&mut id_prefix);
-        Ok(Self {
-            hint,
-            id_prefix,
-        })
+        let id = Option::<Digest>::read(buf)?;
+        Ok(Self { hint, id })
     }
 }
 
@@ -359,22 +341,14 @@ impl Read for Range {
 /// A reconciliation message containing ranges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
-    /// Protocol version
-    pub version: u8,
     /// Ranges in this message
     pub ranges: Vec<Range>,
 }
 
 impl Message {
-    /// Current protocol version.
-    pub const VERSION: u8 = 1;
-
     /// Create a new message with the given ranges.
     pub const fn new(ranges: Vec<Range>) -> Self {
-        Self {
-            version: Self::VERSION,
-            ranges,
-        }
+        Self { ranges }
     }
 
     /// Check if this message represents completion (all ranges are Skip).
@@ -396,8 +370,7 @@ impl Message {
 
 impl Write for Message {
     fn write(&self, buf: &mut impl BufMut) {
-        self.version.write(buf);
-        (self.ranges.len() as u32).write(buf);
+        UInt(self.ranges.len() as u64).write(buf);
         for range in &self.ranges {
             range.write(buf);
         }
@@ -408,16 +381,12 @@ impl Read for Message {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let version = u8::read(buf)?;
-        if version != Self::VERSION {
-            return Err(CodecError::Invalid("Message", "unsupported protocol version"));
-        }
-        let count = u32::read(buf)? as usize;
-        let mut ranges = Vec::with_capacity(count);
+        let count: u64 = UInt::read(buf)?.into();
+        let mut ranges = Vec::with_capacity(count as usize);
         for _ in 0..count {
             ranges.push(Range::read(buf)?);
         }
-        Ok(Self { version, ranges })
+        Ok(Self { ranges })
     }
 }
 
@@ -427,9 +396,6 @@ pub enum Error {
     /// Invalid message format
     #[error("invalid message: {0}")]
     InvalidMessage(&'static str),
-    /// Protocol version mismatch
-    #[error("unsupported protocol version: {0}")]
-    UnsupportedVersion(u8),
     /// Codec error
     #[error("codec error: {0}")]
     Codec(#[from] CodecError),
@@ -541,7 +507,7 @@ impl Storage for VecStorage {
     }
 
     fn lower_bound(&self, bound: &Bound) -> usize {
-        if bound.hint == 0 && bound.id_prefix.is_empty() {
+        if bound.hint == 0 && bound.id.is_none() {
             return 0;
         }
         self.items.partition_point(|item| bound.item_below(item))
@@ -597,10 +563,6 @@ impl<'a, S: Storage> Reconciler<'a, S> {
     ///
     /// Returns the response message, or an error if the message is invalid.
     pub fn reconcile(&mut self, msg: &Message) -> Result<Message, Error> {
-        if msg.version != Message::VERSION {
-            return Err(Error::UnsupportedVersion(msg.version));
-        }
-
         let mut response_ranges = Vec::new();
         let mut current_idx = 0;
 
@@ -1114,34 +1076,6 @@ mod tests {
 
         assert!(storage.contains_id(&Digest([0x01; 32])));
         assert!(!storage.contains_id(&Digest([0x02; 32])));
-    }
-
-    #[test]
-    fn test_message_version_mismatch() {
-        // Create a message with wrong version
-        let mut buf = Vec::new();
-        2u8.write(&mut buf); // Wrong version
-        1u32.write(&mut buf); // 1 range
-        Bound::infinity().write(&mut buf);
-        RangeMode::Skip.write(&mut buf);
-
-        let result = Message::read(&mut &buf[..]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_reconciler_version_check() {
-        let storage = VecStorage::new();
-        let mut reconciler = Reconciler::new(&storage, 4);
-
-        // Create message with wrong version
-        let bad_msg = Message {
-            version: 99,
-            ranges: vec![Range::skip_to_infinity()],
-        };
-
-        let result = reconciler.reconcile(&bad_msg);
-        assert!(matches!(result, Err(Error::UnsupportedVersion(99))));
     }
 
     #[test]
