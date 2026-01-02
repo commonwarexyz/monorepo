@@ -8,7 +8,7 @@
 //! # Overview
 //!
 //! RBSR works by:
-//! 1. Ordering items by timestamp, then by ID
+//! 1. Ordering items by hint (ordering key), then by ID
 //! 2. Computing fingerprints over ranges of items
 //! 3. Exchanging range fingerprints between participants
 //! 4. Recursively splitting ranges where fingerprints differ
@@ -16,16 +16,17 @@
 //!
 //! # Item Identity
 //!
-//! Items are identified by their **ID only**, not by (timestamp, ID). The timestamp
+//! Items are identified by their **ID only**, not by (hint, ID). The hint
 //! is used purely for ordering and partitioning the search space. This means:
 //!
-//! - Two items with the same ID are considered identical, even with different timestamps
-//! - Timestamps do not need to be unique; multiple items can share the same timestamp
-//! - Items are sorted by (timestamp, ID) for efficient range queries
+//! - Two items with the same ID are considered identical, even with different hints
+//! - Hints do not need to be unique; multiple items can share the same hint
+//! - Items are sorted by (hint, ID) for efficient range queries
 //!
-//! This design is ideal for content-addressed data where the ID is a hash of the
-//! content (e.g., Nostr events). If your use case requires (timestamp, ID) identity,
-//! you should include the timestamp in your ID hash.
+//! The hint can be any `u64` value: Unix timestamps, block heights, sequence numbers,
+//! Lamport clocks, etc. This design is ideal for content-addressed data where the ID
+//! is a hash of the content. If your use case requires (hint, ID) identity, include
+//! the hint in your ID hash.
 //!
 //! # Properties
 //!
@@ -75,41 +76,42 @@
 use crate::blake3::Digest;
 use crate::lthash::LtHash;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{varint::UInt, Error as CodecError, FixedSize, Read, ReadExt, Write};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
 /// Size of an item ID in bytes (32-byte digest).
 pub const ID_SIZE: usize = Digest::SIZE;
 
-/// Maximum timestamp value, used as "infinity" bound.
-pub const MAX_TIMESTAMP: u64 = u64::MAX;
+/// Maximum hint value, used as "infinity" bound.
+pub const MAX_HINT: u64 = u64::MAX;
 
 /// Default branching factor for range splitting.
 pub const DEFAULT_BRANCHING_FACTOR: usize = 16;
 
-/// An item in the set, consisting of a timestamp and a 32-byte ID.
+/// An item in the set, consisting of a hint (ordering key) and a 32-byte ID.
 ///
-/// Items are ordered first by timestamp, then lexicographically by ID.
+/// Items are ordered first by hint, then lexicographically by ID.
+/// The hint is only used for ordering; item identity is determined solely by ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Item {
-    /// Timestamp for ordering (can be any unit: seconds, microseconds, etc.)
-    pub timestamp: u64,
+    /// Ordering hint (e.g., timestamp, block height, sequence number)
+    pub hint: u64,
     /// Unique identifier, typically a cryptographic hash of the item content
     pub id: Digest,
 }
 
 impl Item {
-    /// Create a new item with the given timestamp and ID.
-    pub const fn new(timestamp: u64, id: Digest) -> Self {
-        Self { timestamp, id }
+    /// Create a new item with the given hint and ID.
+    pub const fn new(hint: u64, id: Digest) -> Self {
+        Self { hint, id }
     }
 
-    /// Create a new item from a timestamp and raw bytes.
-    pub const fn from_bytes(timestamp: u64, id: [u8; ID_SIZE]) -> Self {
+    /// Create a new item from a hint and raw bytes.
+    pub const fn from_bytes(hint: u64, id: [u8; ID_SIZE]) -> Self {
         Self {
-            timestamp,
+            hint,
             id: Digest(id),
         }
     }
@@ -117,7 +119,7 @@ impl Item {
 
 impl Ord for Item {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        match self.timestamp.cmp(&other.timestamp) {
+        match self.hint.cmp(&other.hint) {
             core::cmp::Ordering::Equal => self.id.as_ref().cmp(other.id.as_ref()),
             ord => ord,
         }
@@ -132,7 +134,7 @@ impl PartialOrd for Item {
 
 impl Write for Item {
     fn write(&self, buf: &mut impl BufMut) {
-        self.timestamp.write(buf);
+        UInt(self.hint).write(buf);
         self.id.write(buf);
     }
 }
@@ -141,34 +143,30 @@ impl Read for Item {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let timestamp = u64::read(buf)?;
+        let hint = UInt::<u64>::read(buf)?.into();
         let id = Digest::read(buf)?;
-        Ok(Self { timestamp, id })
+        Ok(Self { hint, id })
     }
-}
-
-impl FixedSize for Item {
-    const SIZE: usize = 8 + ID_SIZE; // u64 + 32 bytes
 }
 
 /// A bound representing the upper limit of a range.
 ///
-/// Bounds consist of a timestamp and an optional ID prefix. The ID prefix
+/// Bounds consist of a hint and an optional ID prefix. The ID prefix
 /// can be truncated to the minimum bytes needed for uniqueness, reducing
 /// message size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bound {
-    /// Timestamp component of the bound
-    pub timestamp: u64,
+    /// Hint component of the bound
+    pub hint: u64,
     /// ID prefix (can be empty or truncated for efficiency)
     pub id_prefix: Vec<u8>,
 }
 
 impl Bound {
-    /// Create a new bound with the given timestamp and full ID.
-    pub fn new(timestamp: u64, id: Digest) -> Self {
+    /// Create a new bound with the given hint and full ID.
+    pub fn new(hint: u64, id: Digest) -> Self {
         Self {
-            timestamp,
+            hint,
             id_prefix: id.as_ref().to_vec(),
         }
     }
@@ -176,7 +174,7 @@ impl Bound {
     /// Create a bound representing positive infinity.
     pub const fn infinity() -> Self {
         Self {
-            timestamp: MAX_TIMESTAMP,
+            hint: MAX_HINT,
             id_prefix: Vec::new(),
         }
     }
@@ -184,20 +182,20 @@ impl Bound {
     /// Create a bound representing negative infinity (minimum).
     pub const fn zero() -> Self {
         Self {
-            timestamp: 0,
+            hint: 0,
             id_prefix: Vec::new(),
         }
     }
 
     /// Check if this bound represents infinity.
     pub const fn is_infinity(&self) -> bool {
-        self.timestamp == MAX_TIMESTAMP && self.id_prefix.is_empty()
+        self.hint == MAX_HINT && self.id_prefix.is_empty()
     }
 
     /// Compare this bound against an item.
     /// Returns Ordering::Less if bound < item, etc.
     pub fn cmp_item(&self, item: &Item) -> core::cmp::Ordering {
-        match self.timestamp.cmp(&item.timestamp) {
+        match self.hint.cmp(&item.hint) {
             core::cmp::Ordering::Equal => {
                 // Compare ID prefix against item ID
                 let prefix_len = self.id_prefix.len().min(ID_SIZE);
@@ -215,7 +213,7 @@ impl Bound {
 
 impl Write for Bound {
     fn write(&self, buf: &mut impl BufMut) {
-        self.timestamp.write(buf);
+        UInt(self.hint).write(buf);
         (self.id_prefix.len() as u8).write(buf);
         buf.put_slice(&self.id_prefix);
     }
@@ -225,7 +223,7 @@ impl Read for Bound {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let timestamp = u64::read(buf)?;
+        let hint = UInt::<u64>::read(buf)?.into();
         let prefix_len = u8::read(buf)? as usize;
         if prefix_len > ID_SIZE {
             return Err(CodecError::Invalid("Bound", "id_prefix length exceeds ID_SIZE"));
@@ -236,7 +234,7 @@ impl Read for Bound {
         let mut id_prefix = vec![0u8; prefix_len];
         buf.copy_to_slice(&mut id_prefix);
         Ok(Self {
-            timestamp,
+            hint,
             id_prefix,
         })
     }
@@ -439,7 +437,7 @@ pub enum Error {
 
 /// Trait for item storage backends.
 ///
-/// Implementations must maintain items in sorted order (by timestamp, then ID).
+/// Implementations must maintain items in sorted order (by hint, then ID).
 pub trait Storage {
     /// Get the number of items in storage.
     fn len(&self) -> usize;
@@ -543,7 +541,7 @@ impl Storage for VecStorage {
     }
 
     fn lower_bound(&self, bound: &Bound) -> usize {
-        if bound.timestamp == 0 && bound.id_prefix.is_empty() {
+        if bound.hint == 0 && bound.id_prefix.is_empty() {
             return 0;
         }
         self.items.partition_point(|item| bound.item_below(item))
@@ -705,7 +703,7 @@ impl<'a, S: Storage> Reconciler<'a, S> {
                 final_bound.clone()
             } else if let Some(item) = self.storage.get(chunk_end) {
                 // Use the item at chunk_end as the bound
-                Bound::new(item.timestamp, item.id)
+                Bound::new(item.hint, item.id)
             } else {
                 final_bound.clone()
             };
@@ -747,8 +745,8 @@ mod tests {
         let b = Item::from_bytes(1000, [0x02; 32]);
         let c = Item::from_bytes(1001, [0x01; 32]);
 
-        assert!(a < b); // Same timestamp, compare by ID
-        assert!(b < c); // Different timestamp
+        assert!(a < b); // Same hint, compare by ID
+        assert!(b < c); // Different hint
         assert!(a < c);
     }
 
@@ -828,9 +826,9 @@ mod tests {
         storage.insert(Item::from_bytes(1001, [0x02; 32]));
 
         // Should be sorted
-        assert_eq!(storage.get(0).unwrap().timestamp, 1000);
-        assert_eq!(storage.get(1).unwrap().timestamp, 1001);
-        assert_eq!(storage.get(2).unwrap().timestamp, 1002);
+        assert_eq!(storage.get(0).unwrap().hint, 1000);
+        assert_eq!(storage.get(1).unwrap().hint, 1001);
+        assert_eq!(storage.get(2).unwrap().hint, 1002);
     }
 
     #[test]
@@ -1236,45 +1234,45 @@ mod tests {
     }
 
     #[test]
-    fn test_same_timestamp_multiple_items() {
-        // Test that RBSR handles multiple items with the same timestamp correctly
+    fn test_same_hint_multiple_items() {
+        // Test that RBSR handles multiple items with the same hint correctly
         let mut storage_a = VecStorage::new();
         let mut storage_b = VecStorage::new();
 
-        // Add 5 items all with the same timestamp to both
-        let shared_timestamp = 1000u64;
+        // Add 5 items all with the same hint to both
+        let shared_hint = 1000u64;
         for i in 0u8..5 {
             let mut id = [0u8; 32];
             id[0] = i;
-            storage_a.insert(Item::from_bytes(shared_timestamp, id));
-            storage_b.insert(Item::from_bytes(shared_timestamp, id));
+            storage_a.insert(Item::from_bytes(shared_hint, id));
+            storage_b.insert(Item::from_bytes(shared_hint, id));
         }
 
-        // Add 2 more items with the SAME timestamp, unique to A
+        // Add 2 more items with the SAME hint, unique to A
         let mut a_unique = Vec::new();
         for i in 5u8..7 {
             let mut id = [0u8; 32];
             id[0] = i;
-            storage_a.insert(Item::from_bytes(shared_timestamp, id));
+            storage_a.insert(Item::from_bytes(shared_hint, id));
             a_unique.push(Digest(id));
         }
 
-        // Add 2 more items with the SAME timestamp, unique to B
+        // Add 2 more items with the SAME hint, unique to B
         let mut b_unique = Vec::new();
         for i in 7u8..9 {
             let mut id = [0u8; 32];
             id[0] = i;
-            storage_b.insert(Item::from_bytes(shared_timestamp, id));
+            storage_b.insert(Item::from_bytes(shared_hint, id));
             b_unique.push(Digest(id));
         }
 
-        // Verify storage is sorted correctly by ID within same timestamp
+        // Verify storage is sorted correctly by ID within same hint
         assert_eq!(storage_a.len(), 7);
         assert_eq!(storage_b.len(), 7);
         for i in 0..storage_a.len() - 1 {
             let curr = storage_a.get(i).unwrap();
             let next = storage_a.get(i + 1).unwrap();
-            assert_eq!(curr.timestamp, next.timestamp);
+            assert_eq!(curr.hint, next.hint);
             assert!(curr.id < next.id, "items should be sorted by ID");
         }
 
@@ -1297,7 +1295,7 @@ mod tests {
             assert!(round < 9, "reconciliation did not converge");
         }
 
-        // Verify A found B's unique items (same timestamp, different IDs)
+        // Verify A found B's unique items (same hint, different IDs)
         for id in &b_unique {
             assert!(
                 reconciler_a.have_ids().contains(id),
@@ -1335,15 +1333,15 @@ mod tests {
     }
 
     #[test]
-    fn test_same_ids_different_timestamps() {
-        // IMPORTANT: Items are identified by ID only, NOT by (timestamp, id).
-        // Timestamps are purely for ordering/partitioning the search space.
-        // If both sides have the same ID (even with different timestamps),
+    fn test_same_ids_different_hints() {
+        // IMPORTANT: Items are identified by ID only, NOT by (hint, id).
+        // Hints are purely for ordering/partitioning the search space.
+        // If both sides have the same ID (even with different hints),
         // they're considered to have the same item.
         let mut storage_a = VecStorage::new();
         let mut storage_b = VecStorage::new();
 
-        // Same IDs, but A uses timestamps 1000-1002, B uses timestamps 2000-2002
+        // Same IDs, but A uses hints 1000-1002, B uses hints 2000-2002
         let id1 = [0x01; 32];
         let id2 = [0x02; 32];
         let id3 = [0x03; 32];
@@ -1388,15 +1386,15 @@ mod tests {
     }
 
     #[test]
-    fn test_same_id_different_timestamp_with_unique_items() {
-        // Even when items have different timestamps, if they share IDs they match.
+    fn test_same_id_different_hint_with_unique_items() {
+        // Even when items have different hints, if they share IDs they match.
         // This test shows mixed scenario: some IDs match, some don't.
         let mut storage_a = VecStorage::new();
         let mut storage_b = VecStorage::new();
 
-        // Shared ID (different timestamps - still considered same item)
+        // Shared ID (different hints - still considered same item)
         storage_a.insert(Item::from_bytes(1000, [0x01; 32]));
-        storage_b.insert(Item::from_bytes(2000, [0x01; 32])); // Same ID, different timestamp
+        storage_b.insert(Item::from_bytes(2000, [0x01; 32])); // Same ID, different hint
 
         // Unique to A
         storage_a.insert(Item::from_bytes(1001, [0x02; 32]));
@@ -1425,7 +1423,7 @@ mod tests {
 
         // A should find B has [0x03] (unique to B)
         // A should know it has [0x02] (unique to A)
-        // [0x01] matches despite different timestamps
+        // [0x01] matches despite different hints
         assert_eq!(reconciler_a.have_ids().len(), 1);
         assert_eq!(reconciler_a.need_ids().len(), 1);
         assert!(reconciler_a.have_ids().contains(&Digest([0x03; 32])));
