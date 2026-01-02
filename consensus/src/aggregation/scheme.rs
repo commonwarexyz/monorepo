@@ -8,6 +8,8 @@
 //!
 //! - [`ed25519`]: Attributable signatures with individual verification. HSM-friendly,
 //!   no trusted setup required.
+//! - [`secp256r1`]: Attributable signatures with individual verification. HSM-friendly,
+//!   no trusted setup required.
 //! - [`bls12381_multisig`]: Attributable signatures with aggregated verification.
 //!   Compact certificates while preserving attribution.
 //! - [`bls12381_threshold`]: Non-attributable threshold signatures. Constant-size
@@ -63,4 +65,17 @@ pub mod ed25519 {
     use commonware_cryptography::impl_certificate_ed25519;
 
     impl_certificate_ed25519!(&'a Item<D>);
+}
+
+pub mod secp256r1 {
+    //! Secp256r1 implementation of the [`Scheme`](commonware_cryptography::certificate::Scheme) trait
+    //! for `aggregation`.
+    //!
+    //! This scheme is attributable: individual signatures can be safely exposed as
+    //! evidence of liveness or faults.
+
+    use super::Item;
+    use commonware_cryptography::impl_certificate_secp256r1;
+
+    impl_certificate_secp256r1!(&'a Item<D>);
 }
