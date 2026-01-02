@@ -5,15 +5,20 @@ use crate::simplex::{
 use commonware_cryptography::{certificate::Verification, Digest};
 use rand::{CryptoRng, Rng};
 
-/// `Verifier` is a utility for tracking and batch verifying consensus messages.
+/// `Verifier` is a utility for tracking and verifying consensus messages.
 ///
-/// In consensus, verifying multiple signatures at the same time can be much more efficient
-/// than verifying them one by one. This struct collects messages from participants in consensus
-/// and signals they are ready to be verified (when there exist enough messages to potentially reach
-/// a quorum).
+/// For schemes where [`Scheme::is_batchable()`](commonware_cryptography::certificate::Scheme::is_batchable)
+/// returns `true` (such as [ed25519], [bls12381_multisig] and [bls12381_threshold]), this struct collects
+/// messages and defers verification until enough messages exist to potentially reach a quorum, enabling
+/// efficient batch verification. For schemes where `is_batchable()` returns `false` (such as `secp256r1`),
+/// signatures are verified eagerly as they arrive since there is no batching benefit.
 ///
 /// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
+///
+/// [ed25519]: crate::simplex::scheme::ed25519
+/// [bls12381_multisig]: crate::simplex::scheme::bls12381_multisig
+/// [bls12381_threshold]: crate::simplex::scheme::bls12381_threshold
 pub struct Verifier<S: Scheme<D>, D: Digest> {
     /// Signing scheme used to verify votes and assemble certificates.
     scheme: S,
@@ -238,8 +243,9 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// 1. There are pending notarize messages to verify.
     /// 2. The leader and their proposal are known (so we know which proposal to verify for).
     /// 3. We haven't already verified enough messages to reach quorum.
-    /// 4. The sum of verified and pending messages could potentially reach quorum.
-    pub const fn ready_notarizes(&self) -> bool {
+    /// 4. The sum of verified and pending messages could potentially reach quorum,
+    ///    or the scheme doesn't benefit from batching (eager verification).
+    pub fn ready_notarizes(&self) -> bool {
         // If there are no pending notarizes, there is nothing to do.
         if self.notarizes.is_empty() {
             return false;
@@ -254,6 +260,11 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         // If we have already verified enough messages, there is nothing more to do.
         if self.notarizes_verified >= self.quorum {
             return false;
+        }
+
+        // For schemes that don't benefit from batching, verify immediately.
+        if !S::is_batchable() {
+            return true;
         }
 
         // If we don't have enough to reach the quorum, there is nothing to do yet.
@@ -315,8 +326,9 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// Verification is considered "ready" when all of the following are true:
     /// 1. There are pending nullify messages to verify.
     /// 2. We haven't already verified enough messages to reach quorum.
-    /// 3. The sum of verified and pending messages could potentially reach quorum.
-    pub const fn ready_nullifies(&self) -> bool {
+    /// 3. The sum of verified and pending messages could potentially reach quorum,
+    ///    or the scheme doesn't benefit from batching (eager verification).
+    pub fn ready_nullifies(&self) -> bool {
         // If there are no pending nullifies, there is nothing to do.
         if self.nullifies.is_empty() {
             return false;
@@ -325,6 +337,11 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         // If we have already verified enough messages, there is nothing more to do.
         if self.nullifies_verified >= self.quorum {
             return false;
+        }
+
+        // For schemes that don't benefit from batching, verify immediately.
+        if !S::is_batchable() {
+            return true;
         }
 
         // If we don't have enough to reach the quorum, there is nothing to do yet.
@@ -398,8 +415,9 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// 1. There are pending finalize messages to verify.
     /// 2. The leader and their proposal are known (so we know which proposal to verify for).
     /// 3. We haven't already verified enough messages to reach quorum.
-    /// 4. The sum of verified and pending messages could potentially reach quorum.
-    pub const fn ready_finalizes(&self) -> bool {
+    /// 4. The sum of verified and pending messages could potentially reach quorum,
+    ///    or the scheme doesn't benefit from batching (eager verification).
+    pub fn ready_finalizes(&self) -> bool {
         // If there are no pending finalizes, there is nothing to do.
         if self.finalizes.is_empty() {
             return false;
@@ -414,6 +432,11 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         // If we have already verified enough messages, there is nothing more to do.
         if self.finalizes_verified >= self.quorum {
             return false;
+        }
+
+        // For schemes that don't benefit from batching, verify immediately.
+        if !S::is_batchable() {
+            return true;
         }
 
         // If we don't have enough to reach the quorum, there is nothing to do yet.
@@ -622,13 +645,14 @@ mod tests {
 
         verifier.set_leader(notarizes[0].signer());
         verifier.add(Vote::Notarize(notarizes[0].clone()), false);
-        assert!(!verifier.ready_notarizes());
+        // Non-batchable schemes verify immediately when pending votes exist
+        assert_eq!(!verifier.ready_notarizes(), S::is_batchable());
         assert_eq!(verifier.notarizes.len(), 1);
 
         verifier.add(Vote::Notarize(notarizes[1].clone()), false);
-        assert!(!verifier.ready_notarizes());
+        assert_eq!(!verifier.ready_notarizes(), S::is_batchable());
         verifier.add(Vote::Notarize(notarizes[2].clone()), false);
-        assert!(!verifier.ready_notarizes());
+        assert_eq!(!verifier.ready_notarizes(), S::is_batchable());
         verifier.add(Vote::Notarize(notarizes[3].clone()), false);
         assert!(verifier.ready_notarizes());
         assert_eq!(verifier.notarizes.len(), 4);
@@ -705,9 +729,10 @@ mod tests {
         assert_eq!(verifier.nullifies_verified, 1);
 
         verifier.add(Vote::Nullify(nullifies[1].clone()), false);
-        assert!(!verifier.ready_nullifies());
+        // Non-batchable schemes verify immediately when pending votes exist
+        assert_eq!(!verifier.ready_nullifies(), S::is_batchable());
         verifier.add(Vote::Nullify(nullifies[2].clone()), false);
-        assert!(!verifier.ready_nullifies());
+        assert_eq!(!verifier.ready_nullifies(), S::is_batchable());
         verifier.add(Vote::Nullify(nullifies[3].clone()), false);
         assert!(verifier.ready_nullifies());
         assert_eq!(verifier.nullifies.len(), 3);
@@ -782,9 +807,10 @@ mod tests {
         assert!(verifier.finalizes.is_empty());
 
         verifier.add(Vote::Finalize(finalizes[1].clone()), false);
-        assert!(!verifier.ready_finalizes());
+        // Non-batchable schemes verify immediately when pending votes exist
+        assert_eq!(!verifier.ready_finalizes(), S::is_batchable());
         verifier.add(Vote::Finalize(finalizes[2].clone()), false);
-        assert!(!verifier.ready_finalizes());
+        assert_eq!(!verifier.ready_finalizes(), S::is_batchable());
         verifier.add(Vote::Finalize(finalizes[3].clone()), false);
         assert!(verifier.ready_finalizes());
 
@@ -862,9 +888,11 @@ mod tests {
 
         verifier.set_leader(leader_vote.signer());
         verifier.add(Vote::Notarize(leader_vote), false);
-        assert!(
+        // Non-batchable schemes verify immediately when pending votes exist
+        assert_eq!(
             !verifier.ready_notarizes(),
-            "Should not be ready with only one vote"
+            S::is_batchable(),
+            "Batchable schemes wait for quorum, non-batchable verify immediately"
         );
 
         for scheme in schemes.iter().skip(1).take(quorum as usize - 1) {
@@ -1017,10 +1045,6 @@ mod tests {
 
         for (i, scheme) in schemes.iter().enumerate().skip(1).take(quorum as usize - 1) {
             let is_last = i == quorum as usize - 1;
-            assert!(
-                !verifier.ready_notarizes(),
-                "Should not be ready before quorum"
-            );
             verifier.add(
                 Vote::Notarize(create_notarize(scheme, round, View::new(0), 1)),
                 false,
@@ -1030,6 +1054,12 @@ mod tests {
                     verifier.ready_notarizes(),
                     "Should be ready at exact quorum"
                 );
+            } else if S::is_batchable() {
+                // Batchable schemes wait for quorum
+                assert!(!verifier.ready_notarizes());
+            } else {
+                // Non-batchable schemes verify immediately when pending votes exist
+                assert!(verifier.ready_notarizes());
             }
         }
 
@@ -1054,12 +1084,20 @@ mod tests {
         verifier.add(Vote::Nullify(create_nullify(&schemes[0], round)), true);
         assert_eq!(verifier.nullifies_verified, 1);
 
-        for scheme in schemes.iter().take(quorum as usize).skip(1) {
-            assert!(!verifier.ready_nullifies());
+        let pending_schemes: Vec<_> = schemes.iter().take(quorum as usize).skip(1).collect();
+        for (i, scheme) in pending_schemes.iter().enumerate() {
+            let is_last = i == pending_schemes.len() - 1;
             verifier.add(Vote::Nullify(create_nullify(scheme, round)), false);
+            if is_last {
+                assert!(verifier.ready_nullifies());
+            } else if S::is_batchable() {
+                // Batchable schemes wait for quorum
+                assert!(!verifier.ready_nullifies());
+            } else {
+                // Non-batchable schemes verify immediately when pending votes exist
+                assert!(verifier.ready_nullifies());
+            }
         }
-
-        assert!(verifier.ready_nullifies());
     }
 
     #[test]
@@ -1078,15 +1116,23 @@ mod tests {
         verifier.add(Vote::Finalize(leader_finalize), true);
         assert_eq!(verifier.finalizes_verified, 1);
 
-        for scheme in schemes.iter().take(quorum as usize).skip(1) {
-            assert!(!verifier.ready_finalizes());
+        let pending_schemes: Vec<_> = schemes.iter().take(quorum as usize).skip(1).collect();
+        for (i, scheme) in pending_schemes.iter().enumerate() {
+            let is_last = i == pending_schemes.len() - 1;
             verifier.add(
                 Vote::Finalize(create_finalize(scheme, round, View::new(0), 1)),
                 false,
             );
+            if is_last {
+                assert!(verifier.ready_finalizes());
+            } else if S::is_batchable() {
+                // Batchable schemes wait for quorum
+                assert!(!verifier.ready_finalizes());
+            } else {
+                // Non-batchable schemes verify immediately when pending votes exist
+                assert!(verifier.ready_finalizes());
+            }
         }
-
-        assert!(verifier.ready_finalizes());
     }
 
     #[test]

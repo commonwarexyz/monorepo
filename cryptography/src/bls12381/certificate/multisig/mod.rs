@@ -290,6 +290,10 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         true
     }
 
+    pub const fn is_batchable() -> bool {
+        true
+    }
+
     pub const fn certificate_codec_config(&self) -> <Certificate<V> as Read>::Cfg {
         self.participants.len()
     }
@@ -511,6 +515,10 @@ mod macros {
 
                 fn is_attributable() -> bool {
                     $crate::bls12381::certificate::multisig::Generic::<P, V>::is_attributable()
+                }
+
+                fn is_batchable() -> bool {
+                    $crate::bls12381::certificate::multisig::Generic::<P, V>::is_batchable()
                 }
 
                 fn certificate_codec_config(
