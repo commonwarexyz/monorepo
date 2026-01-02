@@ -163,8 +163,6 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     fail_verification: bool,
     should_certify: Certifier<H::Digest>,
 
-    pending: HashMap<H::Digest, Bytes>,
-
     verified: HashSet<H::Digest>,
 }
 
@@ -198,7 +196,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 fail_verification: false,
                 should_certify: cfg.should_certify,
 
-                pending: HashMap::new(),
                 verified: HashSet::new(),
             },
             Mailbox::new(sender),
@@ -239,11 +236,10 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         // Mark verified
         self.verified.insert(digest);
 
-        // Store pending payload
-        self.pending.insert(digest, payload.clone().into());
-
         // Broadcast payload to other participants
-        self.broadcast(digest).await;
+        self.relay
+            .broadcast(&self.me, (digest, payload.into()))
+            .await;
         digest
     }
 
@@ -297,11 +293,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             Certifier::Sometimes => (payload.as_ref().last().copied().unwrap_or(0) % 11) < 9,
             Certifier::Custom(func) => func(payload),
         }
-    }
-
-    async fn broadcast(&mut self, payload: H::Digest) {
-        let contents = self.pending.remove(&payload).expect("missing payload");
-        self.relay.broadcast(&self.me, (payload, contents)).await;
     }
 
     pub fn start(mut self) -> Handle<()> {
