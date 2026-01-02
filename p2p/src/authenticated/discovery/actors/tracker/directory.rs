@@ -123,7 +123,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
-            blocked: blocked::Queue::new(),
+            blocked: blocked::Queue::new(metrics.blocked.clone()),
             releaser,
             metrics,
         }
@@ -309,7 +309,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         let blocked_until = self.context.current() + self.block_duration;
         self.blocked.block(peer.clone(), blocked_until);
-        self.metrics.blocked.inc();
     }
 
     // ---------- Getters ----------
@@ -401,11 +400,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let now = self.context.current();
         let unblocked = self.blocked.unblock_expired(now);
 
-        // Update metrics and knowledge bitmaps
+        // Update knowledge bitmaps
         for peer in unblocked {
-            self.metrics.blocked.dec();
             if let Some(record) = self.peers.get(&peer) {
-                // Update the knowledge bitmap for this peer
                 let want = record.want(self.dial_fail_limit);
                 for set in self.sets.values_mut() {
                     set.update(&peer, !want);
@@ -656,7 +653,8 @@ mod tests {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
 
             // Register a peer
-            let peer_set: OrderedSet<_> = [registered_pk.clone()].into_iter().try_collect().unwrap();
+            let peer_set: OrderedSet<_> =
+                [registered_pk.clone()].into_iter().try_collect().unwrap();
             directory.add_set(0, peer_set);
             assert_eq!(directory.metrics.blocked.get(), 0);
 

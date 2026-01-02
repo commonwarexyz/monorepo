@@ -122,7 +122,7 @@ impl<C: PublicKey> Record<C> {
     /// Mark this peer as having been blocked.
     ///
     /// Misbehaving bootstrappers should be deletable once no longer in any peer sets.
-    pub fn mark_blocked(&mut self) {
+    pub const fn mark_blocked(&mut self) {
         self.persistent = false;
     }
 
