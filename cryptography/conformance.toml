@@ -122,6 +122,10 @@ hash = "b98d0717af705e8b60af88a8337154eaced6659c3cc9f604aa4f55585a28b77f"
 n_cases = 65536
 hash = "47ab8f97f2b9ff2b56e952c4e219c8c95832cf3a58d5b682cdc769c2ecb79daf"
 
+["commonware_cryptography::secp256r1::certificate::tests::conformance::CodecConformance<Certificate>"]
+n_cases = 65536
+hash = "b3c9be5d89d172901f155032bba2297b5ff4e15532b8f6045ca4dbcd8a7eff7c"
+
 ["commonware_cryptography::secp256r1::common::tests::conformance::CodecConformance<PrivateKeyInner>"]
 n_cases = 65536
 hash = "3e17c0a4943a83bf61cc55d039570928871866f0d50f8846dfd628a23f00d69e"
