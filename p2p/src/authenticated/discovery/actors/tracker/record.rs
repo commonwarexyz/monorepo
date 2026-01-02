@@ -21,7 +21,8 @@ pub enum Address<C: PublicKey> {
     /// The `usize` indicates the number of times dialing this record has failed.
     Discovered(Info<C>, usize),
 
-    /// Peer is blocked. Address info is discarded so we don't serve it to others.
+    /// Peer is blocked.
+    /// Info can be restored when unblocked.
     Blocked,
 }
 
