@@ -550,47 +550,74 @@ impl Storage for VecStorage {
     }
 }
 
-/// Optimized storage with O(log n) ID lookups and O(1) range fingerprints.
+/// Default checkpoint interval for [`CachedStorage`].
+pub const DEFAULT_CHECKPOINT_INTERVAL: usize = 1024;
+
+/// Storage with cached fingerprints for efficient multi-peer reconciliation.
 ///
-/// Uses a BTreeSet for fast ID membership checks and prefix-sum LtHash
-/// accumulators for constant-time range fingerprint computation.
+/// Uses checkpoints at regular intervals to enable O(K) fingerprint queries
+/// where K is the checkpoint interval. Memory usage is O(n/K) instead of O(n).
 ///
-/// Call [`rebuild`](Self::rebuild) after batch mutations to update indices.
+/// For reconciling with multiple peers, fingerprints are computed once and
+/// reused. The checkpoint-based approach allows deriving any range fingerprint
+/// by combining cached checkpoints with partial computations.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut storage = CachedStorage::new(1024); // checkpoint every 1024 items
+/// for item in items {
+///     storage.insert(item);
+/// }
+/// storage.rebuild(); // Build checkpoint cache
+///
+/// // Now reconcile with multiple peers - fingerprints are cached
+/// let mut reconciler_a = Reconciler::new(&storage, 16);
+/// let mut reconciler_b = Reconciler::new(&storage, 16);
+/// ```
 #[derive(Debug, Clone)]
-pub struct IndexedStorage {
+pub struct CachedStorage {
     /// Items in sorted order (by hint, then ID)
     items: Vec<Item>,
     /// Set of all IDs for O(log n) membership checks
     id_set: BTreeSet<Digest>,
-    /// Prefix sums: prefix[i] = fingerprint of items[0..i]
-    /// fingerprint(a, b) = prefix[b] - prefix[a]
-    prefix_sums: Vec<LtHash>,
+    /// Checkpoint interval (store LtHash every K items)
+    checkpoint_interval: usize,
+    /// Checkpoints: checkpoint[i] = LtHash of items[0..i*interval]
+    checkpoints: Vec<LtHash>,
 }
 
-impl Default for IndexedStorage {
+impl Default for CachedStorage {
     fn default() -> Self {
-        Self::new()
+        Self::new(DEFAULT_CHECKPOINT_INTERVAL)
     }
 }
 
-impl IndexedStorage {
-    /// Create new empty storage.
-    pub fn new() -> Self {
+impl CachedStorage {
+    /// Create new empty storage with the given checkpoint interval.
+    ///
+    /// Smaller intervals use more memory but make fingerprint queries faster.
+    /// Larger intervals save memory but require more computation per query.
+    ///
+    /// Recommended: 256-2048 depending on memory constraints.
+    pub fn new(checkpoint_interval: usize) -> Self {
         Self {
             items: Vec::new(),
             id_set: BTreeSet::new(),
-            prefix_sums: vec![LtHash::new()], // prefix[0] = empty
+            checkpoint_interval: checkpoint_interval.max(1),
+            checkpoints: vec![LtHash::new()], // checkpoint[0] = empty
         }
     }
 
-    /// Create storage with the given capacity.
-    pub fn with_capacity(capacity: usize) -> Self {
-        let mut prefix_sums = Vec::with_capacity(capacity + 1);
-        prefix_sums.push(LtHash::new());
+    /// Create storage with the given capacity and checkpoint interval.
+    pub fn with_capacity(capacity: usize, checkpoint_interval: usize) -> Self {
+        let interval = checkpoint_interval.max(1);
+        let num_checkpoints = capacity / interval + 2;
         Self {
             items: Vec::with_capacity(capacity),
             id_set: BTreeSet::new(),
-            prefix_sums,
+            checkpoint_interval: interval,
+            checkpoints: Vec::with_capacity(num_checkpoints),
         }
     }
 
@@ -602,7 +629,6 @@ impl IndexedStorage {
         let pos = self.items.partition_point(|i| i < &item);
         self.items.insert(pos, item.clone());
         self.id_set.insert(item.id);
-        // Note: prefix_sums is now stale, call rebuild()
     }
 
     /// Remove an item. Call [`rebuild`](Self::rebuild) after batch removals.
@@ -610,25 +636,33 @@ impl IndexedStorage {
         if let Ok(pos) = self.items.binary_search(item) {
             self.id_set.remove(&self.items[pos].id);
             self.items.remove(pos);
-            // Note: prefix_sums is now stale, call rebuild()
             true
         } else {
             false
         }
     }
 
-    /// Rebuild indices after mutations. O(n) but enables O(1) queries.
+    /// Rebuild checkpoint cache after mutations.
+    ///
+    /// This is O(n) but only needs to be called once after batch mutations.
+    /// Subsequent fingerprint queries benefit from the cached checkpoints.
     pub fn rebuild(&mut self) {
-        // Rebuild prefix sums
-        self.prefix_sums.clear();
-        self.prefix_sums.reserve(self.items.len() + 1);
+        self.checkpoints.clear();
 
         let mut acc = LtHash::new();
-        self.prefix_sums.push(acc.clone());
+        self.checkpoints.push(acc.clone()); // checkpoint[0] = empty
 
-        for item in &self.items {
+        for (i, item) in self.items.iter().enumerate() {
             acc.add(item.id.as_ref());
-            self.prefix_sums.push(acc.clone());
+            // Store checkpoint at interval boundaries
+            if (i + 1) % self.checkpoint_interval == 0 {
+                self.checkpoints.push(acc.clone());
+            }
+        }
+
+        // Always store final checkpoint if not at boundary
+        if self.items.len() % self.checkpoint_interval != 0 {
+            self.checkpoints.push(acc);
         }
     }
 
@@ -641,12 +675,65 @@ impl IndexedStorage {
     pub fn clear(&mut self) {
         self.items.clear();
         self.id_set.clear();
-        self.prefix_sums.clear();
-        self.prefix_sums.push(LtHash::new());
+        self.checkpoints.clear();
+        self.checkpoints.push(LtHash::new());
+    }
+
+    /// Get the checkpoint interval.
+    pub fn checkpoint_interval(&self) -> usize {
+        self.checkpoint_interval
+    }
+
+    /// Get the number of checkpoints (for memory estimation).
+    pub fn num_checkpoints(&self) -> usize {
+        self.checkpoints.len()
+    }
+
+    /// Compute LtHash for a range, using checkpoints for efficiency.
+    fn compute_range_hash(&self, start_idx: usize, end_idx: usize) -> LtHash {
+        if start_idx >= end_idx || end_idx > self.items.len() {
+            return LtHash::new();
+        }
+
+        let interval = self.checkpoint_interval;
+
+        // Find checkpoint indices
+        let start_checkpoint = start_idx / interval;
+        let end_checkpoint = end_idx / interval;
+
+        // Start from the checkpoint at or before start_idx
+        let mut result = if end_checkpoint < self.checkpoints.len() {
+            self.checkpoints[end_checkpoint].clone()
+        } else if !self.checkpoints.is_empty() {
+            self.checkpoints.last().unwrap().clone()
+        } else {
+            LtHash::new()
+        };
+
+        // Subtract the start checkpoint
+        if start_checkpoint < self.checkpoints.len() {
+            result.difference(&self.checkpoints[start_checkpoint]);
+        }
+
+        // Adjust for items between checkpoints
+        let start_checkpoint_idx = start_checkpoint * interval;
+        let end_checkpoint_idx = end_checkpoint * interval;
+
+        // Subtract items from start_checkpoint_idx to start_idx
+        for i in start_checkpoint_idx..start_idx.min(self.items.len()) {
+            result.subtract(self.items[i].id.as_ref());
+        }
+
+        // Add items from end_checkpoint_idx to end_idx
+        for i in end_checkpoint_idx..end_idx.min(self.items.len()) {
+            result.add(self.items[i].id.as_ref());
+        }
+
+        result
     }
 }
 
-impl Storage for IndexedStorage {
+impl Storage for CachedStorage {
     fn len(&self) -> usize {
         self.items.len()
     }
@@ -663,13 +750,7 @@ impl Storage for IndexedStorage {
     }
 
     fn fingerprint(&self, start_idx: usize, end_idx: usize) -> Fingerprint {
-        if start_idx >= end_idx || end_idx > self.prefix_sums.len() - 1 {
-            return LtHash::new().checksum();
-        }
-        // fingerprint(a, b) = prefix[b] - prefix[a]
-        let mut result = self.prefix_sums[end_idx].clone();
-        result.difference(&self.prefix_sums[start_idx]);
-        result.checksum()
+        self.compute_range_hash(start_idx, end_idx).checksum()
     }
 
     fn contains_id(&self, id: &Digest) -> bool {
@@ -1497,10 +1578,10 @@ mod tests {
     }
 
     #[test]
-    fn test_indexed_storage_fingerprints() {
-        // Verify IndexedStorage produces identical fingerprints to VecStorage
+    fn test_cached_storage_fingerprints() {
+        // Verify CachedStorage produces identical fingerprints to VecStorage
         let mut vec_storage = VecStorage::new();
-        let mut indexed_storage = IndexedStorage::new();
+        let mut cached_storage = CachedStorage::new(16); // Small interval for testing
 
         // Add same items to both
         for i in 0..100u8 {
@@ -1509,43 +1590,47 @@ mod tests {
             id[1] = i.wrapping_mul(7);
             let item = Item::from_bytes(i as u64 * 10, id);
             vec_storage.insert(item.clone());
-            indexed_storage.insert(item);
+            cached_storage.insert(item);
         }
-        indexed_storage.rebuild();
+        cached_storage.rebuild();
 
         // Verify fingerprints match for various ranges
         assert_eq!(
             vec_storage.fingerprint(0, 100),
-            indexed_storage.fingerprint(0, 100)
+            cached_storage.fingerprint(0, 100)
         );
         assert_eq!(
             vec_storage.fingerprint(0, 50),
-            indexed_storage.fingerprint(0, 50)
+            cached_storage.fingerprint(0, 50)
         );
         assert_eq!(
             vec_storage.fingerprint(25, 75),
-            indexed_storage.fingerprint(25, 75)
+            cached_storage.fingerprint(25, 75)
         );
         assert_eq!(
             vec_storage.fingerprint(99, 100),
-            indexed_storage.fingerprint(99, 100)
+            cached_storage.fingerprint(99, 100)
         );
 
         // Verify contains_id works
         let mut id = [0u8; 32];
         id[0] = 50;
         id[1] = 50u8.wrapping_mul(7);
-        assert!(indexed_storage.contains_id(&Digest(id)));
+        assert!(cached_storage.contains_id(&Digest(id)));
 
         let missing_id = Digest([0xFF; 32]);
-        assert!(!indexed_storage.contains_id(&missing_id));
+        assert!(!cached_storage.contains_id(&missing_id));
+
+        // Verify checkpoints are stored efficiently
+        // With 100 items and interval=16, we should have ~7 checkpoints
+        assert!(cached_storage.num_checkpoints() < 10);
     }
 
     #[test]
-    fn test_indexed_storage_reconciliation() {
-        // Full reconciliation test with IndexedStorage
-        let mut storage_a = IndexedStorage::new();
-        let mut storage_b = IndexedStorage::new();
+    fn test_cached_storage_reconciliation() {
+        // Full reconciliation test with CachedStorage
+        let mut storage_a = CachedStorage::new(16);
+        let mut storage_b = CachedStorage::new(16);
 
         // A has [0x01], B has [0x02] - simple disjoint sets
         storage_a.insert(Item::from_bytes(1000, [0x01; 32]));
@@ -1589,5 +1674,35 @@ mod tests {
         assert!(missing_a.contains(&Digest([0x02; 32])));
         assert_eq!(missing_b.len(), 1);
         assert!(missing_b.contains(&Digest([0x01; 32])));
+    }
+
+    #[test]
+    fn test_cached_storage_memory_efficiency() {
+        // Verify CachedStorage uses less memory than full prefix sums
+        let mut storage = CachedStorage::new(1000);
+
+        // Add 10,000 items
+        for i in 0..10000u32 {
+            let mut id = [0u8; 32];
+            id[0..4].copy_from_slice(&i.to_be_bytes());
+            storage.insert(Item::from_bytes(i as u64, id));
+        }
+        storage.rebuild();
+
+        // With 10,000 items and interval=1000, we should have ~11 checkpoints
+        // (10 at boundaries + 1 final)
+        // vs 10,001 prefix sums for full approach
+        assert!(
+            storage.num_checkpoints() <= 12,
+            "expected ~11 checkpoints, got {}",
+            storage.num_checkpoints()
+        );
+
+        // Fingerprints should still work correctly
+        let fp1 = storage.fingerprint(0, 10000);
+        let fp2 = storage.fingerprint(0, 5000);
+        let fp3 = storage.fingerprint(5000, 10000);
+        assert_ne!(fp1, fp2);
+        assert_ne!(fp2, fp3);
     }
 }
