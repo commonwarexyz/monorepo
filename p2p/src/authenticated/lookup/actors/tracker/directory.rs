@@ -38,7 +38,7 @@ pub struct Config {
     /// The rate limit for allowing reservations per-peer.
     pub rate_limit: Quota,
 
-    /// Duration for which a blocked peer remains blocked before being allowed to reconnect.
+    /// Duration after which a blocked peer is allowed to reconnect.
     pub block_duration: Duration,
 }
 
@@ -59,7 +59,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Whether to skip IP verification for incoming connections (allows unknown IPs).
     bypass_ip_check: bool,
 
-    /// Duration for which a blocked peer remains blocked.
+    /// Duration after which a blocked peer is allowed to reconnect.
     block_duration: Duration,
 
     // ---------- State ----------

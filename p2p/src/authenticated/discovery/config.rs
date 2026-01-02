@@ -122,7 +122,7 @@ pub struct Config<C: Signer> {
     /// of which requires a signature verification).
     pub peer_gossip_max_count: usize,
 
-    /// Duration for which a blocked peer remains blocked before being allowed to reconnect.
+    /// Duration after which a blocked peer is allowed to reconnect.
     pub block_duration: Duration,
 }
 

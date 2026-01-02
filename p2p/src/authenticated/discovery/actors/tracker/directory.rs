@@ -39,7 +39,7 @@ pub struct Config {
     /// The rate limit for allowing reservations per-peer.
     pub rate_limit: Quota,
 
-    /// Duration for which a blocked peer remains blocked before being allowed to reconnect.
+    /// Duration after which a blocked peer is allowed to reconnect.
     pub block_duration: Duration,
 }
 
@@ -61,7 +61,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// peers for its peer info again.
     dial_fail_limit: usize,
 
-    /// Duration for which a blocked peer remains blocked.
+    /// Duration after which a blocked peer is allowed to reconnect.
     block_duration: Duration,
 
     // ---------- State ----------
@@ -128,7 +128,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Releases a peer.
     pub fn release(&mut self, metadata: Metadata<C>) {
         let peer = metadata.public_key();
-        let now = self.context.current();
         let Some(record) = self.peers.get_mut(peer) else {
             return;
         };
@@ -140,6 +139,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             record.dial_failure(ingress);
         }
 
+        // We may have to update the sets.
+        let now = self.context.current();
         let want = record.want(self.dial_fail_limit, now);
         for set in self.sets.values_mut() {
             set.update(peer, !want);
@@ -153,7 +154,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Panics if the peer is not tracked or if the peer is not in the reserved state.
     pub fn connect(&mut self, peer: &C, dialer: bool) {
-        let now = self.context.current();
         // Set the record as connected
         let record = self.peers.get_mut(peer).unwrap();
         if dialer {
@@ -162,6 +162,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         record.connect();
 
         // We may have to update the sets.
+        let now = self.context.current();
         let want = record.want(self.dial_fail_limit, now);
         for set in self.sets.values_mut() {
             set.update(peer, !want);
@@ -360,8 +361,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have an ingress.
     pub fn dialable(&self) -> Vec<C> {
-        let now = self.context.current();
         // Collect peers with known addresses
+        let now = self.context.current();
         let mut result: Vec<_> = self
             .peers
             .iter()
@@ -385,7 +386,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Returns `Some(Reservation)` if the peer was successfully reserved, `None` otherwise.
     fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<C>> {
         let peer = metadata.public_key();
-        let now = self.context.current();
 
         // Not reservable (must be in a peer set)
         if !self.eligible(peer) {
@@ -408,6 +408,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Reserve
+        let now = self.context.current();
         if record.reserve(now) {
             self.metrics.reserved.inc();
             return Some(Reservation::new(metadata, self.releaser.clone()));
@@ -419,12 +420,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `true` if the record was deleted, `false` otherwise.
     fn delete_if_needed(&mut self, peer: &C) -> bool {
-        let now = self.context.current();
         let Some(record) = self.peers.get_mut(peer) else {
             return false;
         };
 
         // Clear expired blocks and update metrics
+        let now = self.context.current();
         if record.clear_expired_block(now) {
             self.metrics.blocked.dec();
         }

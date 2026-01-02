@@ -97,7 +97,7 @@ pub struct Config<C: Signer> {
     /// key).
     pub tracked_peer_sets: usize,
 
-    /// Duration for which a blocked peer remains blocked before being allowed to reconnect.
+    /// Duration after which a blocked peer is allowed to reconnect.
     pub block_duration: Duration,
 }
 
