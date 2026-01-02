@@ -1,7 +1,7 @@
 use super::types::{Activity, Context, SequencersProvider};
 use crate::{
     types::{Epoch, EpochDelta},
-    Automaton, Monitor, Reporter,
+    Monitor, Reporter, RetryableAutomaton,
 };
 use commonware_cryptography::{certificate::Provider, Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
@@ -13,7 +13,7 @@ pub struct Config<
     S: SequencersProvider,
     P: Provider<Scope = Epoch>,
     D: Digest,
-    A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
+    A: RetryableAutomaton<Context = Context<C::PublicKey>, Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
 > {
@@ -27,6 +27,14 @@ pub struct Config<
     pub validators_provider: P,
 
     /// Proposes and verifies digests.
+    ///
+    /// The automaton is responsible for broadcasting the full payload data to other
+    /// participants during `propose()`. The engine only broadcasts signed digest
+    /// references (Node messages), not the payloads themselves. Validators need
+    /// access to the full payload to verify it.
+    ///
+    /// The engine will call `repropose()` when it needs to rebroadcast a payload
+    /// (e.g., after an epoch change when new validators need the payload).
     pub automaton: A,
 
     /// Notified when a chunk receives a quorum of acks.
@@ -47,6 +55,9 @@ pub struct Config<
     pub priority_acks: bool,
 
     /// How often a proposal is rebroadcast to all validators if no quorum is reached.
+    ///
+    /// This controls rebroadcast of the signed digest reference (Node message), not
+    /// the full payload. Payload rebroadcast is the application's responsibility.
     pub rebroadcast_timeout: Duration,
 
     /// A tuple representing the epochs to keep in memory.

@@ -1,4 +1,4 @@
-use crate::{ordered_broadcast::types::Context, types::Epoch, Automaton as A};
+use crate::{ordered_broadcast::types::Context, types::Epoch, Automaton as A, RetryableAutomaton as RA};
 use bytes::Bytes;
 use commonware_cryptography::{sha256, Hasher, PublicKey, Sha256};
 use futures::channel::oneshot;
@@ -56,5 +56,11 @@ impl<P: PublicKey> A for Automaton<P> {
         // Always say the payload is valid.
         sender.send(true).unwrap();
         receiver
+    }
+}
+
+impl<P: PublicKey> RA for Automaton<P> {
+    async fn repropose(&mut self, payload: Self::Digest) {
+        trace!(?payload, "repropose");
     }
 }

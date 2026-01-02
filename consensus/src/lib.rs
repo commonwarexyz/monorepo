@@ -128,6 +128,28 @@ cfg_if::cfg_if! {
             }
         }
 
+        /// RetryableAutomaton extends [Automaton] with the ability to re-broadcast payloads.
+        ///
+        /// This trait is useful for consensus implementations (like ordered_broadcast) where
+        /// validators need the full payload to verify, and the payload may need to be
+        /// re-broadcast when the validator set changes (e.g., after an epoch transition)
+        /// or when acknowledgements are not received in time.
+        pub trait RetryableAutomaton: Automaton {
+            /// Re-broadcast the payload associated with the given digest.
+            ///
+            /// Called by the engine when it needs to rebroadcast a proposal that hasn't
+            /// yet received a quorum of acks. This typically happens when:
+            /// - The rebroadcast timeout expires without achieving quorum
+            /// - The epoch changes, requiring the payload to be sent to new validators
+            ///
+            /// The implementation should ensure the full payload data is made available
+            /// to validators who need to verify it.
+            fn repropose(
+                &mut self,
+                payload: Self::Digest,
+            ) -> impl Future<Output = ()> + Send;
+        }
+
         /// Application is a minimal interface for standard implementations that operate over a stream
         /// of epoched blocks.
         pub trait Application<E>: Clone + Send + 'static

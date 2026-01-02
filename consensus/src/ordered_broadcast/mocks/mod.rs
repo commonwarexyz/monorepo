@@ -2,6 +2,8 @@
 
 mod automaton;
 pub use automaton::Automaton;
+mod drop_first_automaton;
+pub use drop_first_automaton::DropFirstAutomaton;
 mod monitor;
 pub use monitor::Monitor;
 mod reporter;

@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     types::{Epoch, EpochDelta},
-    Automaton, Monitor, Reporter,
+    Monitor, Reporter, RetryableAutomaton,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -67,7 +67,7 @@ pub struct Engine<
     S: SequencersProvider<PublicKey = C::PublicKey>,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
     D: Digest,
-    A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
+    A: RetryableAutomaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
 > {
@@ -201,7 +201,7 @@ impl<
         S: SequencersProvider<PublicKey = C::PublicKey>,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
         D: Digest,
-        A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
+        A: RetryableAutomaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
     > Engine<E, C, S, P, D, A, Z, M>
@@ -811,7 +811,10 @@ impl<
             return Err(Error::AlreadyCertified);
         }
 
-        // Broadcast the message, which resets the rebroadcast deadline
+        // Ask the application to re-broadcast the payload (e.g., to new validators after epoch change)
+        self.automaton.repropose(tip.chunk.payload).await;
+
+        // Broadcast the Node message, which resets the rebroadcast deadline
         guard.set(Status::Failure);
         self.broadcast(tip, node_sender, self.epoch).await?;
         guard.set(Status::Success);

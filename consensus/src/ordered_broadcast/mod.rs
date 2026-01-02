@@ -1063,4 +1063,114 @@ mod tests {
     fn test_1k_ed25519() {
         run_1k(ed25519::fixture);
     }
+
+    fn requires_repropose<S, F>(fixture: F)
+    where
+        S: Scheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let runner = deterministic::Runner::timed(Duration::from_secs(120));
+
+        runner.start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let num_validators = 4;
+            let fixture = fixture(&mut context, num_validators);
+
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let mut registrations =
+                register_participants(&mut oracle, &fixture.participants).await;
+            link_participants(
+                &mut oracle,
+                &fixture.participants,
+                Action::Link(RELIABLE_LINK),
+                None,
+            )
+            .await;
+
+            let mut reporters = BTreeMap::new();
+            let namespace = b"my testing namespace";
+
+            // Create a shared automaton - all validators share the same delivered state
+            // so when one sequencer's repropose succeeds, all validators can verify
+            let shared_automaton = mocks::DropFirstAutomaton::<PublicKey>::new();
+
+            for (idx, validator) in fixture.participants.iter().enumerate() {
+                let context = context.with_label(&format!("validator_{validator}"));
+                let monitor = mocks::Monitor::new(epoch);
+                let sequencers =
+                    mocks::Sequencers::<PublicKey>::new(fixture.participants.clone());
+
+                let validators_provider = mocks::Provider::new();
+                assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));
+
+                // Use DropFirstAutomaton which requires repropose to succeed
+                let automaton = shared_automaton.clone();
+                // Allow unlimited misses since every first proposal fails until repropose
+                let (reporter, reporter_mailbox) = mocks::Reporter::new(
+                    context.clone(),
+                    namespace,
+                    fixture.verifier.clone(),
+                    None,
+                );
+                context.with_label("reporter").spawn(|_| reporter.run());
+                reporters.insert(validator.clone(), reporter_mailbox);
+
+                let engine = Engine::new(
+                    context.with_label("engine"),
+                    Config {
+                        sequencer_signer: Some(fixture.private_keys[idx].clone()),
+                        sequencers_provider: sequencers,
+                        validators_provider,
+                        automaton,
+                        reporter: reporters.get(validator).unwrap().clone(),
+                        monitor,
+                        namespace: namespace.to_vec(),
+                        priority_proposals: false,
+                        priority_acks: false,
+                        // Short rebroadcast timeout to trigger repropose quickly
+                        rebroadcast_timeout: Duration::from_millis(100),
+                        epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
+                        height_bound: 2,
+                        journal_heights_per_section: 10,
+                        journal_replay_buffer: NZUsize!(4096),
+                        journal_write_buffer: NZUsize!(4096),
+                        journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
+                        journal_compression: Some(3),
+                        journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    },
+                );
+
+                let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
+                engine.start((a1, a2), (b1, b2));
+            }
+
+            // Test passes if validators can make progress despite first broadcast
+            // being ignored - this requires repropose to work correctly.
+            await_reporters(
+                context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
+                &reporters,
+                (50, epoch, true),
+            )
+            .await;
+        });
+    }
+
+    #[test_traced]
+    fn test_requires_repropose() {
+        requires_repropose(bls12381_threshold::fixture::<MinPk, _>);
+        requires_repropose(bls12381_threshold::fixture::<MinSig, _>);
+        requires_repropose(bls12381_multisig::fixture::<MinPk, _>);
+        requires_repropose(bls12381_multisig::fixture::<MinSig, _>);
+        requires_repropose(ed25519::fixture);
+    }
 }
