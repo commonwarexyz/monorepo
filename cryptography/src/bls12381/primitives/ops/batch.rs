@@ -6,9 +6,13 @@
 //!
 //! # How It Works
 //!
-//! These functions apply random scalar weights to ensure that the batch verification
-//! process returns the same result as checking each signature individually. Without
-//! randomness, an attacker could forge invalid signatures that cancel out when aggregated.
+//! These functions apply random scalar weights to each signature before internally performing
+//! [`aggregate`](super::aggregate) verification. Without weights, an attacker could forge invalid
+//! signatures that cancel out when aggregated (e.g., one signature "too high" and another "too low"
+//! by the same amount). With random weights `r_i`, the errors must satisfy `sum(r_i * err_i) = 0`,
+//! which requires predicting the weights before they're generated (probability ~1/2^255 per invalid
+//! signature). Note, the weights must be unpredictable to the attacker for this to work (i.e. they
+//! must be generated securely).
 
 use super::{
     super::{group::Scalar, variant::Variant, Error},
