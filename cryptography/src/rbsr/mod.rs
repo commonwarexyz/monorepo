@@ -1608,6 +1608,83 @@ mod tests {
     }
 
     #[test]
+    fn test_multi_checkpoint_fingerprints() {
+        // Test that fingerprint queries spanning multiple checkpoints are computed correctly.
+        // Uses a small checkpoint interval to ensure queries cross checkpoint boundaries.
+        let interval = 8;
+        let num_items = 100;
+        let mut storage = MemStorage::new(interval);
+
+        // Create items with distinct IDs
+        let mut items = Vec::new();
+        for i in 0..num_items {
+            let mut id = [0u8; 32];
+            id[0..4].copy_from_slice(&(i as u32).to_be_bytes());
+            let item = Item::from_bytes(i as u64 * 10, id);
+            items.push(item.clone());
+            storage.insert(item);
+        }
+        storage.rebuild();
+
+        // Verify we have multiple checkpoints
+        // With 100 items and interval=8, we should have ~13 checkpoints
+        assert!(
+            storage.num_checkpoints() >= 10,
+            "expected multiple checkpoints, got {}",
+            storage.num_checkpoints()
+        );
+
+        // Helper: compute fingerprint naively by iterating items
+        let naive_fingerprint = |start: usize, end: usize| -> Fingerprint {
+            let mut acc = FingerprintAccumulator::new();
+            for item in items.iter().take(end).skip(start) {
+                acc.add(item.id.as_ref());
+            }
+            acc.checksum()
+        };
+
+        // Test cases covering various checkpoint-spanning scenarios:
+        let test_cases = [
+            // (start, end, description)
+            (0, num_items, "full range - spans all checkpoints"),
+            (0, interval, "exactly one checkpoint worth"),
+            (0, interval * 3, "exactly 3 checkpoints"),
+            (1, interval - 1, "within first checkpoint, offset both ends"),
+            (interval + 2, interval * 2 - 3, "within second checkpoint"),
+            (5, interval + 5, "spans 2 checkpoints, unaligned"),
+            (3, interval * 4 + 7, "spans 5 checkpoints, unaligned"),
+            (interval, interval * 5, "spans 4 checkpoints, aligned start"),
+            (7, interval * 6, "spans 6 checkpoints, aligned end"),
+            (interval * 2, interval * 2 + 1, "single item at checkpoint boundary"),
+            (0, 1, "single item at start"),
+            (num_items - 1, num_items, "single item at end"),
+            (num_items / 2, num_items / 2 + interval * 2, "middle range spanning 2+ checkpoints"),
+        ];
+
+        for (start, end, desc) in test_cases {
+            let expected = naive_fingerprint(start, end);
+            let actual = storage.fingerprint(start, end);
+            assert_eq!(
+                expected, actual,
+                "fingerprint mismatch for range [{}..{}): {}",
+                start, end, desc
+            );
+        }
+
+        // Test edge cases
+        assert_eq!(
+            storage.fingerprint(0, 0),
+            naive_fingerprint(0, 0),
+            "empty range at start"
+        );
+        assert_eq!(
+            storage.fingerprint(50, 50),
+            naive_fingerprint(50, 50),
+            "empty range in middle"
+        );
+    }
+
+    #[test]
     fn test_cached_storage_memory_efficiency() {
         // Verify MemStorage uses less memory than full prefix sums
         let mut storage = MemStorage::new(1000);
