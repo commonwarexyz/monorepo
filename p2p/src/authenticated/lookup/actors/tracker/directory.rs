@@ -278,19 +278,49 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Return egress IPs we should listen for (accept incoming connections from).
     ///
     /// Returns a map of IP -> block expiration time:
-    /// - `None` means the peer is currently eligible
-    /// - `Some(time)` means the peer is blocked until that time (listener checks locally)
+    /// - `None` means at least one peer with this IP is currently eligible
+    /// - `Some(time)` means all peers with this IP are blocked, until this time
     ///
     /// Only includes IPs from peers that are:
     /// - In a peer set (not ourselves)
     /// - Have a valid egress IP (global, or private IPs are allowed)
+    ///
+    /// When multiple peers share an IP (e.g., behind NAT), the IP is allowed if ANY
+    /// peer is eligible. If all are blocked, use the earliest expiration time.
     pub fn listenable(&self) -> super::Listenable {
-        self.peers
-            .values()
-            .filter(|r| r.sets() > 0)
-            .filter_map(|r| r.egress_ip().map(|ip| (ip, r.blocked_until())))
-            .filter(|(ip, _)| self.allow_private_ips || IpAddrExt::is_global(ip))
-            .collect()
+        let mut result = super::Listenable::new();
+        for record in self.peers.values() {
+            if record.sets() == 0 {
+                continue;
+            }
+            let Some(ip) = record.egress_ip() else {
+                continue;
+            };
+            if !self.allow_private_ips && !IpAddrExt::is_global(&ip) {
+                continue;
+            }
+            let blocked_until = record.blocked_until();
+            match result.entry(ip) {
+                Entry::Vacant(e) => {
+                    e.insert(blocked_until);
+                }
+                Entry::Occupied(mut e) => {
+                    match (blocked_until, e.get()) {
+                        // New peer is eligible: IP should be allowed
+                        (None, _) => {
+                            e.insert(None);
+                        }
+                        // Both blocked: use earliest expiration so IP becomes allowed sooner
+                        (Some(new_until), Some(existing)) if new_until < *existing => {
+                            e.insert(blocked_until);
+                        }
+                        // Existing is None (eligible) or has earlier expiration: keep it
+                        _ => {}
+                    }
+                }
+            }
+        }
+        result
     }
 
     // --------- Helpers ----------
@@ -806,6 +836,71 @@ mod tests {
             let listenable = directory.listenable();
             assert!(listenable.contains_key(&Ipv4Addr::new(8, 8, 8, 8).into()));
             assert!(!listenable.contains_key(&Ipv4Addr::new(10, 0, 0, 1).into()));
+        });
+    }
+
+    #[test]
+    fn test_listenable_ip_collision_eligible_wins() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        // Two peers with the same egress IP (simulating NAT scenario)
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let shared_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let addr_1 = Address::Symmetric(SocketAddr::new(shared_ip, 8080));
+        let addr_2 = Address::Symmetric(SocketAddr::new(shared_ip, 8081));
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            // Add both peers with the same IP
+            directory.add_set(
+                0,
+                [(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]
+                    .try_into()
+                    .unwrap(),
+            );
+
+            // Both peers eligible: IP should show as eligible (None)
+            let listenable = directory.listenable();
+            assert_eq!(
+                listenable.get(&shared_ip),
+                Some(&None),
+                "IP should be eligible when both peers are eligible"
+            );
+
+            // Block one peer
+            directory.block(&pk_1);
+
+            // One eligible, one blocked: IP should still show as eligible (None)
+            let listenable = directory.listenable();
+            assert_eq!(
+                listenable.get(&shared_ip),
+                Some(&None),
+                "IP should be eligible when at least one peer is eligible"
+            );
+
+            // Block the other peer
+            directory.block(&pk_2);
+
+            // Both blocked: IP should show blocked with earliest expiration
+            let listenable = directory.listenable();
+            let blocked_until = listenable.get(&shared_ip).unwrap();
+            assert!(
+                blocked_until.is_some(),
+                "IP should be blocked when all peers are blocked"
+            );
         });
     }
 }
