@@ -84,7 +84,9 @@
 use crate::blake3::Digest;
 use crate::lthash::LtHash;
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::{collections::BTreeSet, vec, vec::Vec};
+#[cfg(feature = "std")]
+use std::collections::BTreeSet;
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Error as CodecError, FixedSize, Read, ReadExt, Write};
 
@@ -545,6 +547,133 @@ impl Storage for VecStorage {
             return 0;
         }
         self.items.partition_point(|item| bound.item_below(item))
+    }
+}
+
+/// Optimized storage with O(log n) ID lookups and O(1) range fingerprints.
+///
+/// Uses a BTreeSet for fast ID membership checks and prefix-sum LtHash
+/// accumulators for constant-time range fingerprint computation.
+///
+/// Call [`rebuild`](Self::rebuild) after batch mutations to update indices.
+#[derive(Debug, Clone)]
+pub struct IndexedStorage {
+    /// Items in sorted order (by hint, then ID)
+    items: Vec<Item>,
+    /// Set of all IDs for O(log n) membership checks
+    id_set: BTreeSet<Digest>,
+    /// Prefix sums: prefix[i] = fingerprint of items[0..i]
+    /// fingerprint(a, b) = prefix[b] - prefix[a]
+    prefix_sums: Vec<LtHash>,
+}
+
+impl Default for IndexedStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IndexedStorage {
+    /// Create new empty storage.
+    pub fn new() -> Self {
+        Self {
+            items: Vec::new(),
+            id_set: BTreeSet::new(),
+            prefix_sums: vec![LtHash::new()], // prefix[0] = empty
+        }
+    }
+
+    /// Create storage with the given capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut prefix_sums = Vec::with_capacity(capacity + 1);
+        prefix_sums.push(LtHash::new());
+        Self {
+            items: Vec::with_capacity(capacity),
+            id_set: BTreeSet::new(),
+            prefix_sums,
+        }
+    }
+
+    /// Insert an item. Call [`rebuild`](Self::rebuild) after batch inserts.
+    pub fn insert(&mut self, item: Item) {
+        if self.id_set.contains(&item.id) {
+            return; // Duplicate ID
+        }
+        let pos = self.items.partition_point(|i| i < &item);
+        self.items.insert(pos, item.clone());
+        self.id_set.insert(item.id);
+        // Note: prefix_sums is now stale, call rebuild()
+    }
+
+    /// Remove an item. Call [`rebuild`](Self::rebuild) after batch removals.
+    pub fn remove(&mut self, item: &Item) -> bool {
+        if let Ok(pos) = self.items.binary_search(item) {
+            self.id_set.remove(&self.items[pos].id);
+            self.items.remove(pos);
+            // Note: prefix_sums is now stale, call rebuild()
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Rebuild indices after mutations. O(n) but enables O(1) queries.
+    pub fn rebuild(&mut self) {
+        // Rebuild prefix sums
+        self.prefix_sums.clear();
+        self.prefix_sums.reserve(self.items.len() + 1);
+
+        let mut acc = LtHash::new();
+        self.prefix_sums.push(acc.clone());
+
+        for item in &self.items {
+            acc.add(item.id.as_ref());
+            self.prefix_sums.push(acc.clone());
+        }
+    }
+
+    /// Get an iterator over all items.
+    pub fn iter(&self) -> impl Iterator<Item = &Item> {
+        self.items.iter()
+    }
+
+    /// Clear all items.
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.id_set.clear();
+        self.prefix_sums.clear();
+        self.prefix_sums.push(LtHash::new());
+    }
+}
+
+impl Storage for IndexedStorage {
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    fn get(&self, index: usize) -> Option<&Item> {
+        self.items.get(index)
+    }
+
+    fn lower_bound(&self, bound: &Bound) -> usize {
+        if bound.hint == 0 && bound.id.is_none() {
+            return 0;
+        }
+        self.items.partition_point(|item| bound.item_below(item))
+    }
+
+    fn fingerprint(&self, start_idx: usize, end_idx: usize) -> Fingerprint {
+        if start_idx >= end_idx || end_idx > self.prefix_sums.len() - 1 {
+            return LtHash::new().checksum();
+        }
+        // fingerprint(a, b) = prefix[b] - prefix[a]
+        let mut result = self.prefix_sums[end_idx].clone();
+        result.difference(&self.prefix_sums[start_idx]);
+        result.checksum()
+    }
+
+    fn contains_id(&self, id: &Digest) -> bool {
+        self.id_set.contains(id)
     }
 }
 
@@ -1365,5 +1494,100 @@ mod tests {
         assert_eq!(msg2.ranges.len(), 1);
         assert!(matches!(msg2.ranges[0].mode, RangeMode::Skip));
         assert!(msg2.ranges[0].upper_bound.is_infinity());
+    }
+
+    #[test]
+    fn test_indexed_storage_fingerprints() {
+        // Verify IndexedStorage produces identical fingerprints to VecStorage
+        let mut vec_storage = VecStorage::new();
+        let mut indexed_storage = IndexedStorage::new();
+
+        // Add same items to both
+        for i in 0..100u8 {
+            let mut id = [0u8; 32];
+            id[0] = i;
+            id[1] = i.wrapping_mul(7);
+            let item = Item::from_bytes(i as u64 * 10, id);
+            vec_storage.insert(item.clone());
+            indexed_storage.insert(item);
+        }
+        indexed_storage.rebuild();
+
+        // Verify fingerprints match for various ranges
+        assert_eq!(
+            vec_storage.fingerprint(0, 100),
+            indexed_storage.fingerprint(0, 100)
+        );
+        assert_eq!(
+            vec_storage.fingerprint(0, 50),
+            indexed_storage.fingerprint(0, 50)
+        );
+        assert_eq!(
+            vec_storage.fingerprint(25, 75),
+            indexed_storage.fingerprint(25, 75)
+        );
+        assert_eq!(
+            vec_storage.fingerprint(99, 100),
+            indexed_storage.fingerprint(99, 100)
+        );
+
+        // Verify contains_id works
+        let mut id = [0u8; 32];
+        id[0] = 50;
+        id[1] = 50u8.wrapping_mul(7);
+        assert!(indexed_storage.contains_id(&Digest(id)));
+
+        let missing_id = Digest([0xFF; 32]);
+        assert!(!indexed_storage.contains_id(&missing_id));
+    }
+
+    #[test]
+    fn test_indexed_storage_reconciliation() {
+        // Full reconciliation test with IndexedStorage
+        let mut storage_a = IndexedStorage::new();
+        let mut storage_b = IndexedStorage::new();
+
+        // A has [0x01], B has [0x02] - simple disjoint sets
+        storage_a.insert(Item::from_bytes(1000, [0x01; 32]));
+        storage_b.insert(Item::from_bytes(1000, [0x02; 32]));
+        storage_a.rebuild();
+        storage_b.rebuild();
+
+        // Verify fingerprints are different
+        let fp_a = storage_a.fingerprint(0, 1);
+        let fp_b = storage_b.fingerprint(0, 1);
+        assert_ne!(fp_a, fp_b, "different items should have different fingerprints");
+
+        // Run reconciliation
+        let mut reconciler_a = Reconciler::new(&storage_a, 16);
+        let mut reconciler_b = Reconciler::new(&storage_b, 16);
+
+        let mut msg = reconciler_a.initiate();
+        let mut missing_a = Vec::new();
+        let mut missing_b = Vec::new();
+
+        for round in 0..10 {
+            let (next_msg, found) = reconciler_b.reconcile(&msg).unwrap();
+            missing_b.extend(found);
+            msg = next_msg;
+            if msg.is_complete() {
+                break;
+            }
+            let (next_msg, found) = reconciler_a.reconcile(&msg).unwrap();
+            missing_a.extend(found);
+            msg = next_msg;
+            if msg.is_complete() {
+                let (_, found) = reconciler_b.reconcile(&msg).unwrap();
+                missing_b.extend(found);
+                break;
+            }
+            assert!(round < 9, "reconciliation did not converge");
+        }
+
+        // A is missing [0x02], B is missing [0x01]
+        assert_eq!(missing_a.len(), 1);
+        assert!(missing_a.contains(&Digest([0x02; 32])));
+        assert_eq!(missing_b.len(), 1);
+        assert!(missing_b.contains(&Digest([0x01; 32])));
     }
 }

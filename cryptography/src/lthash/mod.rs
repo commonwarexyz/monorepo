@@ -136,6 +136,16 @@ impl LtHash {
         }
     }
 
+    /// Subtract another [LtHash] state from this one.
+    ///
+    /// This computes `self - other` using modular subtraction, useful for
+    /// computing range fingerprints from prefix sums.
+    pub fn difference(&mut self, other: &Self) {
+        for (i, val) in other.state.iter().enumerate() {
+            self.state[i] = self.state[i].wrapping_sub(*val);
+        }
+    }
+
     /// Return the [Digest] of the current state.
     pub fn checksum(&self) -> Digest {
         let mut hasher = Blake3::new();
