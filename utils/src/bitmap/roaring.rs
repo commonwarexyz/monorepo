@@ -173,6 +173,163 @@ impl Container {
             },
         }
     }
+
+    /// Creates a new container with all 2^16 bits set.
+    fn new_full() -> Self {
+        Self::Bitmap(vec![u64::MAX; BITMAP_CONTAINER_SIZE / 8])
+    }
+
+    /// Inserts all values in the range [start, end] (inclusive).
+    /// Returns the number of newly inserted values.
+    fn insert_range(&mut self, start: u16, end: u16) -> u64 {
+        if start > end {
+            return 0;
+        }
+
+        let range_size = (end - start) as usize + 1;
+
+        // If inserting a large range into an array, convert to bitmap first
+        if let Self::Array(arr) = self {
+            if arr.len() + range_size >= ARRAY_TO_BITMAP_THRESHOLD {
+                self.maybe_convert_to_bitmap();
+                // Force conversion by temporarily making it look large
+                if matches!(self, Self::Array(_)) {
+                    let mut bits = vec![0u64; BITMAP_CONTAINER_SIZE / 8];
+                    if let Self::Array(arr) = self {
+                        for &value in arr.iter() {
+                            let word_idx = value as usize / 64;
+                            let bit_idx = value as usize % 64;
+                            bits[word_idx] |= 1u64 << bit_idx;
+                        }
+                    }
+                    *self = Self::Bitmap(bits);
+                }
+            }
+        }
+
+        match self {
+            Self::Array(arr) => {
+                let mut inserted = 0u64;
+                for value in start..=end {
+                    if arr.binary_search(&value).is_err() {
+                        inserted += 1;
+                    }
+                }
+                // Rebuild the array with the range
+                let mut new_arr: Vec<u16> = arr
+                    .iter()
+                    .copied()
+                    .filter(|&v| v < start || v > end)
+                    .collect();
+                new_arr.extend(start..=end);
+                new_arr.sort_unstable();
+                *arr = new_arr;
+                self.maybe_convert_to_bitmap();
+                inserted
+            }
+            Self::Bitmap(bits) => {
+                let mut inserted = 0u64;
+
+                let start_word = start as usize / 64;
+                let end_word = end as usize / 64;
+                let start_bit = start as usize % 64;
+                let end_bit = end as usize % 64;
+
+                if start_word == end_word {
+                    // Range fits in a single word
+                    let width = end_bit - start_bit + 1;
+                    let mask = if width == 64 {
+                        u64::MAX
+                    } else {
+                        ((1u64 << width) - 1) << start_bit
+                    };
+                    inserted += (mask & !bits[start_word]).count_ones() as u64;
+                    bits[start_word] |= mask;
+                } else {
+                    // First partial word
+                    let first_mask = !0u64 << start_bit;
+                    inserted += (first_mask & !bits[start_word]).count_ones() as u64;
+                    bits[start_word] |= first_mask;
+
+                    // Full words in between
+                    for word in bits.iter_mut().take(end_word).skip(start_word + 1) {
+                        inserted += (!*word).count_ones() as u64;
+                        *word = u64::MAX;
+                    }
+
+                    // Last partial word
+                    let last_mask = if end_bit == 63 {
+                        u64::MAX
+                    } else {
+                        (1u64 << (end_bit + 1)) - 1
+                    };
+                    inserted += (last_mask & !bits[end_word]).count_ones() as u64;
+                    bits[end_word] |= last_mask;
+                }
+
+                inserted
+            }
+        }
+    }
+
+    /// Removes all values in the range [start, end] (inclusive).
+    /// Returns the number of removed values.
+    fn remove_range(&mut self, start: u16, end: u16) -> u64 {
+        if start > end {
+            return 0;
+        }
+
+        match self {
+            Self::Array(arr) => {
+                let original_len = arr.len();
+                arr.retain(|&v| v < start || v > end);
+                (original_len - arr.len()) as u64
+            }
+            Self::Bitmap(bits) => {
+                let mut removed = 0u64;
+
+                let start_word = start as usize / 64;
+                let end_word = end as usize / 64;
+                let start_bit = start as usize % 64;
+                let end_bit = end as usize % 64;
+
+                if start_word == end_word {
+                    // Range fits in a single word
+                    let width = end_bit - start_bit + 1;
+                    let mask = if width == 64 {
+                        u64::MAX
+                    } else {
+                        ((1u64 << width) - 1) << start_bit
+                    };
+                    removed += (mask & bits[start_word]).count_ones() as u64;
+                    bits[start_word] &= !mask;
+                } else {
+                    // First partial word
+                    let first_mask = !0u64 << start_bit;
+                    removed += (first_mask & bits[start_word]).count_ones() as u64;
+                    bits[start_word] &= !first_mask;
+
+                    // Full words in between
+                    for word in bits.iter_mut().take(end_word).skip(start_word + 1) {
+                        removed += word.count_ones() as u64;
+                        *word = 0;
+                    }
+
+                    // Last partial word
+                    let last_mask = if end_bit == 63 {
+                        u64::MAX
+                    } else {
+                        (1u64 << (end_bit + 1)) - 1
+                    };
+                    removed += (last_mask & bits[end_word]).count_ones() as u64;
+                    bits[end_word] &= !last_mask;
+                }
+
+                self.maybe_convert_to_array();
+                removed
+            }
+        }
+    }
 }
 
 /// Iterator over values in a container.
@@ -335,6 +492,138 @@ impl RoaringBitmap {
     /// Clears all values from the bitmap.
     pub fn clear(&mut self) {
         self.containers.clear();
+    }
+
+    /// Inserts all values in the given range.
+    ///
+    /// Returns the number of values that were newly inserted.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use commonware_utils::bitmap::RoaringBitmap;
+    ///
+    /// let mut bitmap = RoaringBitmap::new();
+    /// bitmap.insert_range(10..20);  // Insert 10..19
+    /// assert_eq!(bitmap.len(), 10);
+    ///
+    /// bitmap.insert_range(15..=25); // Insert 15..25 (inclusive)
+    /// assert_eq!(bitmap.len(), 16); // 10..25 inclusive
+    /// ```
+    pub fn insert_range<R: core::ops::RangeBounds<u64>>(&mut self, range: R) -> u64 {
+        let start = match range.start_bound() {
+            core::ops::Bound::Included(&n) => n,
+            core::ops::Bound::Excluded(&n) => n.saturating_add(1),
+            core::ops::Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            core::ops::Bound::Included(&n) => n,
+            core::ops::Bound::Excluded(&n) => n.saturating_sub(1),
+            core::ops::Bound::Unbounded => u64::MAX,
+        };
+
+        if start > end {
+            return 0;
+        }
+
+        let (start_high, start_low) = Self::split(start);
+        let (end_high, end_low) = Self::split(end);
+
+        let mut total_inserted = 0u64;
+
+        for high in start_high..=end_high {
+            let container_start = if high == start_high { start_low } else { 0 };
+            let container_end = if high == end_high { end_low } else { u16::MAX };
+
+            match self.find_container(high) {
+                Ok(idx) => {
+                    total_inserted +=
+                        self.containers[idx].1.insert_range(container_start, container_end);
+                }
+                Err(idx) => {
+                    // Create new container
+                    let container = if container_start == 0 && container_end == u16::MAX {
+                        // Full container
+                        total_inserted += 65536;
+                        Container::new_full()
+                    } else {
+                        let mut container = Container::new_array();
+                        total_inserted += container.insert_range(container_start, container_end);
+                        container
+                    };
+                    self.containers.insert(idx, (high, container));
+                }
+            }
+        }
+
+        total_inserted
+    }
+
+    /// Removes all values in the given range.
+    ///
+    /// Returns the number of values that were removed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use commonware_utils::bitmap::RoaringBitmap;
+    ///
+    /// let mut bitmap = RoaringBitmap::new();
+    /// bitmap.insert_range(0..100);
+    /// assert_eq!(bitmap.len(), 100);
+    ///
+    /// bitmap.remove_range(25..75);
+    /// assert_eq!(bitmap.len(), 50); // 0..24 and 75..99 remain
+    /// ```
+    pub fn remove_range<R: core::ops::RangeBounds<u64>>(&mut self, range: R) -> u64 {
+        let start = match range.start_bound() {
+            core::ops::Bound::Included(&n) => n,
+            core::ops::Bound::Excluded(&n) => n.saturating_add(1),
+            core::ops::Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            core::ops::Bound::Included(&n) => n,
+            core::ops::Bound::Excluded(&n) => n.saturating_sub(1),
+            core::ops::Bound::Unbounded => u64::MAX,
+        };
+
+        if start > end {
+            return 0;
+        }
+
+        let (start_high, start_low) = Self::split(start);
+        let (end_high, end_low) = Self::split(end);
+
+        let mut total_removed = 0u64;
+        let mut containers_to_remove = Vec::new();
+
+        for high in start_high..=end_high {
+            let container_start = if high == start_high { start_low } else { 0 };
+            let container_end = if high == end_high { end_low } else { u16::MAX };
+
+            if let Ok(idx) = self.find_container(high) {
+                if container_start == 0 && container_end == u16::MAX {
+                    // Remove entire container
+                    total_removed += self.containers[idx].1.len() as u64;
+                    containers_to_remove.push(high);
+                } else {
+                    total_removed +=
+                        self.containers[idx].1.remove_range(container_start, container_end);
+                    if self.containers[idx].1.is_empty() {
+                        containers_to_remove.push(high);
+                    }
+                }
+            }
+        }
+
+        // Remove empty containers (in reverse order to preserve indices)
+        for high in containers_to_remove.into_iter().rev() {
+            if let Ok(idx) = self.find_container(high) {
+                self.containers.remove(idx);
+            }
+        }
+
+        total_removed
     }
 
     /// Returns the minimum value in the bitmap, or None if empty.
@@ -1384,6 +1673,184 @@ mod tests {
         assert!(bitmap.contains(base));
         assert!(bitmap.contains(base + 1));
         assert!(bitmap.contains(base + 65_536));
+    }
+
+    #[test]
+    fn test_insert_range_exclusive() {
+        let mut bitmap = RoaringBitmap::new();
+
+        // Exclusive range
+        let inserted = bitmap.insert_range(10..20);
+        assert_eq!(inserted, 10);
+        assert_eq!(bitmap.len(), 10);
+
+        for i in 10..20 {
+            assert!(bitmap.contains(i), "Missing value: {}", i);
+        }
+        assert!(!bitmap.contains(9));
+        assert!(!bitmap.contains(20));
+    }
+
+    #[test]
+    fn test_insert_range_inclusive() {
+        let mut bitmap = RoaringBitmap::new();
+
+        // Inclusive range
+        let inserted = bitmap.insert_range(10..=20);
+        assert_eq!(inserted, 11);
+        assert_eq!(bitmap.len(), 11);
+
+        for i in 10..=20 {
+            assert!(bitmap.contains(i), "Missing value: {}", i);
+        }
+    }
+
+    #[test]
+    fn test_insert_range_overlapping() {
+        let mut bitmap = RoaringBitmap::new();
+
+        bitmap.insert_range(10..20);
+        assert_eq!(bitmap.len(), 10);
+
+        // Overlapping range should only insert new values
+        let inserted = bitmap.insert_range(15..=25);
+        assert_eq!(inserted, 6); // 20..25 are new
+        assert_eq!(bitmap.len(), 16); // 10..25 inclusive
+    }
+
+    #[test]
+    fn test_insert_range_spanning_containers() {
+        let mut bitmap = RoaringBitmap::new();
+
+        // Range spanning multiple containers
+        let start = 65_530u64;
+        let end = 65_550u64;
+        let inserted = bitmap.insert_range(start..=end);
+        assert_eq!(inserted, 21);
+        assert_eq!(bitmap.num_containers(), 2);
+
+        for i in start..=end {
+            assert!(bitmap.contains(i), "Missing value: {}", i);
+        }
+    }
+
+    #[test]
+    fn test_insert_range_full_container() {
+        let mut bitmap = RoaringBitmap::new();
+
+        // Insert a full container's worth
+        let inserted = bitmap.insert_range(0..65536);
+        assert_eq!(inserted, 65536);
+        assert_eq!(bitmap.len(), 65536);
+        assert_eq!(bitmap.num_containers(), 1);
+    }
+
+    #[test]
+    fn test_insert_range_large() {
+        let mut bitmap = RoaringBitmap::new();
+
+        // Insert a large range spanning multiple containers
+        let inserted = bitmap.insert_range(0..200_000);
+        assert_eq!(inserted, 200_000);
+        assert_eq!(bitmap.len(), 200_000);
+
+        // Should have multiple containers
+        assert!(bitmap.num_containers() > 1);
+
+        // Verify some values
+        assert!(bitmap.contains(0));
+        assert!(bitmap.contains(100_000));
+        assert!(bitmap.contains(199_999));
+        assert!(!bitmap.contains(200_000));
+    }
+
+    #[test]
+    fn test_remove_range_basic() {
+        let mut bitmap = RoaringBitmap::new();
+        bitmap.insert_range(0..100);
+
+        let removed = bitmap.remove_range(25..75);
+        assert_eq!(removed, 50);
+        assert_eq!(bitmap.len(), 50);
+
+        // Check remaining values
+        for i in 0..25 {
+            assert!(bitmap.contains(i), "Missing value: {}", i);
+        }
+        for i in 25..75 {
+            assert!(!bitmap.contains(i), "Should be removed: {}", i);
+        }
+        for i in 75..100 {
+            assert!(bitmap.contains(i), "Missing value: {}", i);
+        }
+    }
+
+    #[test]
+    fn test_remove_range_spanning_containers() {
+        let mut bitmap = RoaringBitmap::new();
+        bitmap.insert_range(0..200_000);
+
+        let removed = bitmap.remove_range(50_000..150_000);
+        assert_eq!(removed, 100_000);
+        assert_eq!(bitmap.len(), 100_000);
+
+        assert!(bitmap.contains(0));
+        assert!(bitmap.contains(49_999));
+        assert!(!bitmap.contains(50_000));
+        assert!(!bitmap.contains(100_000));
+        assert!(!bitmap.contains(149_999));
+        assert!(bitmap.contains(150_000));
+        assert!(bitmap.contains(199_999));
+    }
+
+    #[test]
+    fn test_remove_range_entire_container() {
+        let mut bitmap = RoaringBitmap::new();
+        bitmap.insert_range(0..65536);
+        bitmap.insert_range(65536..131072);
+        assert_eq!(bitmap.num_containers(), 2);
+
+        // Remove entire first container
+        let removed = bitmap.remove_range(0..65536);
+        assert_eq!(removed, 65536);
+        assert_eq!(bitmap.num_containers(), 1);
+        assert_eq!(bitmap.len(), 65536);
+    }
+
+    #[test]
+    fn test_remove_range_empty() {
+        let mut bitmap = RoaringBitmap::new();
+        bitmap.insert_range(100..200);
+
+        // Remove range that doesn't exist
+        let removed = bitmap.remove_range(0..50);
+        assert_eq!(removed, 0);
+        assert_eq!(bitmap.len(), 100);
+
+        // Remove range beyond existing values
+        let removed = bitmap.remove_range(300..400);
+        assert_eq!(removed, 0);
+        assert_eq!(bitmap.len(), 100);
+    }
+
+    #[test]
+    fn test_range_with_large_values() {
+        let mut bitmap = RoaringBitmap::new();
+
+        // Insert range with large u64 values
+        let start = 1_000_000_000_000u64;
+        let end = start + 1000;
+        let inserted = bitmap.insert_range(start..end);
+        assert_eq!(inserted, 1000);
+
+        for i in start..end {
+            assert!(bitmap.contains(i));
+        }
+
+        // Remove part of it
+        let removed = bitmap.remove_range(start + 500..end);
+        assert_eq!(removed, 500);
+        assert_eq!(bitmap.len(), 500);
     }
 
     #[cfg(feature = "arbitrary")]
