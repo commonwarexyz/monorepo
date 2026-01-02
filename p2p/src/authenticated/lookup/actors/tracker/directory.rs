@@ -15,7 +15,7 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::{
-    collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
+    collections::{hash_map::Entry, BTreeMap, HashMap},
     net::IpAddr,
     time::Duration,
 };
@@ -277,16 +277,19 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Return egress IPs we should listen for (accept incoming connections from).
     ///
+    /// Returns a map of IP -> block expiration time:
+    /// - `None` means the peer is currently eligible
+    /// - `Some(time)` means the peer is blocked until that time (listener checks locally)
+    ///
     /// Only includes IPs from peers that are:
-    /// - Eligible (in a peer set, not blocked, not ourselves)
+    /// - In a peer set (not ourselves)
     /// - Have a valid egress IP (global, or private IPs are allowed)
-    pub fn listenable(&self) -> HashSet<IpAddr> {
-        let now = self.context.current();
+    pub fn listenable(&self) -> super::Listenable {
         self.peers
             .values()
-            .filter(|r| r.eligible(now))
-            .filter_map(|r| r.egress_ip())
-            .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
+            .filter(|r| r.sets() > 0)
+            .filter_map(|r| r.egress_ip().map(|ip| (ip, r.blocked_until())))
+            .filter(|(ip, _)| self.allow_private_ips || IpAddrExt::is_global(ip))
             .collect()
     }
 
@@ -655,19 +658,19 @@ mod tests {
                 "Egress IP should be from the egress socket"
             );
 
-            // Verify registered() returns egress IPs for IP filtering
-            let registered = directory.listenable();
+            // Verify listenable() returns egress IPs for IP filtering
+            let listenable = directory.listenable();
             assert!(
-                registered.contains(&egress_socket.ip()),
-                "Registered should contain peer 1's egress IP"
+                listenable.contains_key(&egress_socket.ip()),
+                "Listenable should contain peer 1's egress IP"
             );
             assert!(
-                registered.contains(&egress_socket_2.ip()),
-                "Registered should contain peer 2's egress IP"
+                listenable.contains_key(&egress_socket_2.ip()),
+                "Listenable should contain peer 2's egress IP"
             );
             assert!(
-                !registered.contains(&ingress_socket.ip()),
-                "Registered should NOT contain peer 1's ingress IP"
+                !listenable.contains_key(&ingress_socket.ip()),
+                "Listenable should NOT contain peer 1's ingress IP"
             );
         });
     }
@@ -799,10 +802,10 @@ mod tests {
             assert_eq!(dialable.len(), 1);
             assert_eq!(dialable[0], pk_public);
 
-            // Verify registered() only returns public IP (private IP excluded from filter)
-            let registered = directory.listenable();
-            assert!(registered.contains(&Ipv4Addr::new(8, 8, 8, 8).into()));
-            assert!(!registered.contains(&Ipv4Addr::new(10, 0, 0, 1).into()));
+            // Verify listenable() only returns public IP (private IP excluded from filter)
+            let listenable = directory.listenable();
+            assert!(listenable.contains_key(&Ipv4Addr::new(8, 8, 8, 8).into()));
+            assert!(!listenable.contains_key(&Ipv4Addr::new(10, 0, 0, 1).into()));
         });
     }
 }

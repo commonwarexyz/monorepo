@@ -214,6 +214,11 @@ impl Record {
         }
     }
 
+    /// Return the time until which this peer is blocked, if any.
+    pub const fn blocked_until(&self) -> Option<SystemTime> {
+        self.blocked_until
+    }
+
     /// Returns `true` if the peer is reserved (or active).
     /// This is used to determine if we should attempt to reserve the peer again.
     pub const fn reserved(&self) -> bool {

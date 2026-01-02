@@ -16,11 +16,7 @@ use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
-use std::{
-    collections::HashSet,
-    net::{IpAddr, SocketAddr},
-    num::NonZeroU32,
-};
+use std::{net::SocketAddr, num::NonZeroU32};
 use tracing::debug;
 
 /// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
@@ -50,8 +46,8 @@ pub struct Actor<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Si
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
-    registered_ips: HashSet<IpAddr>,
-    mailbox: mpsc::Receiver<HashSet<IpAddr>>,
+    listenable: tracker::Listenable,
+    mailbox: mpsc::Receiver<tracker::Listenable>,
     handshakes_blocked: Counter,
     handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
@@ -59,7 +55,7 @@ pub struct Actor<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Si
 }
 
 impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
+    pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<tracker::Listenable>) -> Self {
         // Create metrics
         let handshakes_blocked = Counter::default();
         context.register(
@@ -96,7 +92,7 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
             allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
             allowed_handshake_rate_per_subnet: cfg.allowed_handshake_rate_per_subnet,
-            registered_ips: HashSet::new(),
+            listenable: tracker::Listenable::new(),
             mailbox,
             handshakes_blocked,
             handshakes_concurrent_rate_limited,
@@ -185,11 +181,11 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                 debug!("context shutdown, stopping listener");
             },
             update = self.mailbox.next() => {
-                let Some(registered_ips) = update else {
+                let Some(listenable) = update else {
                     debug!("mailbox closed");
                     break;
                 };
-                self.registered_ips = registered_ips;
+                self.listenable = listenable;
             },
             listener = listener.accept() => {
                 // Accept a new connection
@@ -210,11 +206,21 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                     continue;
                 }
 
-                // Check whether the IP is registered
-                if !self.bypass_ip_check && !self.registered_ips.contains(&ip) {
-                    self.handshakes_blocked.inc();
-                    debug!(?address, "rejecting unregistered address");
-                    continue;
+                // Check whether the IP is registered and not blocked
+                if !self.bypass_ip_check {
+                    let now = self.context.current();
+                    let is_allowed = self
+                        .listenable
+                        .get(&ip)
+                        .is_some_and(|blocked_until| {
+                            // None means eligible, Some(time) means blocked until time
+                            blocked_until.is_none_or(|until| now >= until)
+                        });
+                    if !is_allowed {
+                        self.handshakes_blocked.inc();
+                        debug!(?address, "rejecting unregistered or blocked address");
+                        continue;
+                    }
                 }
 
                 // Cleanup the rate limiters periodically
@@ -285,6 +291,7 @@ mod tests {
     use commonware_utils::NZU32;
     use futures::SinkExt;
     use std::{
+        collections::HashMap,
         net::{IpAddr, Ipv4Addr},
         time::Duration,
     };
@@ -323,8 +330,8 @@ mod tests {
                 updates_rx,
             );
 
-            let mut allowed = HashSet::new();
-            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
+            let mut allowed = HashMap::new();
+            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST), None);
             updates_tx
                 .send(allowed)
                 .await
@@ -654,8 +661,8 @@ mod tests {
             );
 
             // Register the IP so it would be allowed if not for the private IP check
-            let mut allowed = HashSet::new();
-            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
+            let mut allowed = HashMap::new();
+            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST), None);
             updates_tx
                 .send(allowed)
                 .await

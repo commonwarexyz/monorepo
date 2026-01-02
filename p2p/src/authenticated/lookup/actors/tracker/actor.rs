@@ -16,10 +16,7 @@ use commonware_runtime::{
 use commonware_utils::ordered::Set;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
-use std::{
-    collections::{HashMap, HashSet},
-    net::IpAddr,
-};
+use std::collections::HashMap;
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
@@ -35,7 +32,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     receiver: mpsc::UnboundedReceiver<Message<C::PublicKey>>,
 
     /// The mailbox for the listener.
-    listener: Mailbox<HashSet<IpAddr>>,
+    listener: Mailbox<super::Listenable>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
@@ -241,11 +238,13 @@ mod tests {
         time::Duration,
     };
 
+    type Listenable = crate::authenticated::lookup::actors::tracker::Listenable;
+
     // Test Configuration Setup
     fn test_config<C: Signer>(
         crypto: C,
         bypass_ip_check: bool,
-    ) -> (Config<C>, mpsc::Receiver<HashSet<IpAddr>>) {
+    ) -> (Config<C>, mpsc::Receiver<Listenable>) {
         let (registered_ips_sender, registered_ips_receiver) = Mailbox::new(1);
         (
             Config {
@@ -668,9 +667,9 @@ mod tests {
 
             // Wait for a listener update
             let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(registered_ips.contains(&my_addr.ip()));
-            assert!(registered_ips.contains(&addr_1.ip()));
-            assert!(!registered_ips.contains(&addr_2.ip()));
+            assert!(registered_ips.contains_key(&my_addr.ip()));
+            assert!(registered_ips.contains_key(&addr_1.ip()));
+            assert!(!registered_ips.contains_key(&addr_2.ip()));
 
             // Mark peer as connected
             let reservation = mailbox.listen(pk_1.clone()).await;
@@ -686,9 +685,9 @@ mod tests {
 
             // Wait for a listener update
             let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(!registered_ips.contains(&my_addr.ip()));
-            assert!(!registered_ips.contains(&addr_1.ip()));
-            assert!(registered_ips.contains(&addr_2.ip()));
+            assert!(!registered_ips.contains_key(&my_addr.ip()));
+            assert!(!registered_ips.contains_key(&addr_1.ip()));
+            assert!(registered_ips.contains_key(&addr_2.ip()));
 
             // The first peer should be have received a kill message because its
             // peer set was removed because `tracked_peer_sets` is 1.
