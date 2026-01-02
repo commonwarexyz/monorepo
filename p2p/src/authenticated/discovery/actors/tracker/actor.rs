@@ -135,7 +135,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 debug!("context shutdown, stopping tracker");
             },
             _ = blocked::wait_for(&self.context, self.directory.next_unblock_deadline()) => {
-                self.handle_unblock();
+                self.directory.unblock_expired();
             },
             msg = self.receiver.next() => {
                 let Some(msg) = msg else {
@@ -144,14 +144,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 };
                 self.handle_msg(msg).await;
             }
-        }
-    }
-
-    /// Handle unblocking of peers whose block has expired.
-    fn handle_unblock(&mut self) {
-        let unblocked = self.directory.unblock_expired();
-        if !unblocked.is_empty() {
-            debug!(count = unblocked.len(), "unblocked peers");
         }
     }
 

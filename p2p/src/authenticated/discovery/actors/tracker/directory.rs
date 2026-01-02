@@ -383,27 +383,23 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Unblock all peers whose block has expired and update the knowledge bitmap.
-    ///
-    /// Returns the list of peers that were unblocked (for logging/debugging).
-    pub fn unblock_expired(&mut self) -> Vec<C> {
+    pub fn unblock_expired(&mut self) {
         let now = self.context.current();
         let unblocked = self.blocked.unblock_expired(now);
 
         // Update metrics and clear blocks on records
-        for peer in &unblocked {
+        for peer in unblocked {
             self.metrics.blocked.dec();
-            if let Some(record) = self.peers.get_mut(peer) {
+            if let Some(record) = self.peers.get_mut(&peer) {
                 record.clear_expired_block();
 
                 // Update the knowledge bitmap for this peer
                 let want = record.want(self.dial_fail_limit);
                 for set in self.sets.values_mut() {
-                    set.update(peer, !want);
+                    set.update(&peer, !want);
                 }
             }
         }
-
-        unblocked
     }
 
     /// Get the next unblock deadline (earliest blocked_until time).
