@@ -1260,7 +1260,7 @@ mod tests {
             .push(certificate.signatures[0].clone());
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
