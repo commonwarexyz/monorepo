@@ -130,7 +130,7 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_secs(1),
             query_frequency: Duration::from_secs(60),
             tracked_peer_sets: 4,
-            block_duration: Duration::from_secs(3600), // 1 hour
+            block_duration: Duration::from_hours(4),
         }
     }
 
@@ -162,7 +162,7 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(500),
             query_frequency: Duration::from_secs(30),
             tracked_peer_sets: 4,
-            block_duration: Duration::from_secs(30),
+            block_duration: Duration::from_hours(1),
         }
     }
 
@@ -189,7 +189,7 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(200),
             query_frequency: Duration::from_secs(5),
             tracked_peer_sets: 4,
-            block_duration: Duration::from_secs(5),
+            block_duration: Duration::from_mins(1),
         }
     }
 }

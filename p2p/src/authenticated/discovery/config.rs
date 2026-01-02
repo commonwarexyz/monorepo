@@ -161,7 +161,7 @@ impl<C: Signer> Config<C> {
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(50),
             peer_gossip_max_count: 32,
-            block_duration: Duration::from_secs(3600), // 1 hour
+            block_duration: Duration::from_hours(4),
         }
     }
 
@@ -204,7 +204,7 @@ impl<C: Signer> Config<C> {
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
             peer_gossip_max_count: 32,
-            block_duration: Duration::from_secs(30),
+            block_duration: Duration::from_hours(1),
         }
     }
 
@@ -240,7 +240,7 @@ impl<C: Signer> Config<C> {
             max_peer_set_size: 1 << 8, // 2^8
             gossip_bit_vec_frequency: Duration::from_secs(1),
             peer_gossip_max_count: 32,
-            block_duration: Duration::from_secs(5),
+            block_duration: Duration::from_mins(1),
         }
     }
 }
