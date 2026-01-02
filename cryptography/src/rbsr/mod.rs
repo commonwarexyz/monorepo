@@ -47,17 +47,19 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_cryptography::rbsr::{Item, Reconciler, VecStorage};
+//! use commonware_cryptography::rbsr::{Item, Reconciler, MemStorage};
 //!
 //! // Create storage for participant A (has items 1 and 2)
-//! let mut storage_a = VecStorage::new();
+//! let mut storage_a = MemStorage::default();
 //! storage_a.insert(Item::from_bytes(1000, [0x01; 32]));
 //! storage_a.insert(Item::from_bytes(1001, [0x02; 32]));
+//! storage_a.rebuild();
 //!
 //! // Create storage for participant B (has items 1 and 3)
-//! let mut storage_b = VecStorage::new();
+//! let mut storage_b = MemStorage::default();
 //! storage_b.insert(Item::from_bytes(1000, [0x01; 32]));
 //! storage_b.insert(Item::from_bytes(1002, [0x03; 32]));
+//! storage_b.rebuild();
 //!
 //! // Participant A initiates reconciliation
 //! let mut reconciler_a = Reconciler::new(&storage_a, 16);
@@ -478,85 +480,14 @@ pub trait Storage {
     }
 }
 
-/// In-memory vector-based storage implementation.
-#[derive(Debug, Clone, Default)]
-pub struct VecStorage {
-    items: Vec<Item>,
-}
-
-impl VecStorage {
-    /// Create new empty storage.
-    pub const fn new() -> Self {
-        Self { items: Vec::new() }
-    }
-
-    /// Create storage with the given capacity.
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            items: Vec::with_capacity(capacity),
-        }
-    }
-
-    /// Insert an item, maintaining sorted order.
-    pub fn insert(&mut self, item: Item) {
-        let pos = self.items.partition_point(|i| i < &item);
-        // Don't insert duplicates
-        if pos < self.items.len() && self.items[pos] == item {
-            return;
-        }
-        self.items.insert(pos, item);
-    }
-
-    /// Remove an item if it exists.
-    pub fn remove(&mut self, item: &Item) -> bool {
-        if let Ok(pos) = self.items.binary_search(item) {
-            self.items.remove(pos);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Check if storage contains an item with the given ID.
-    pub fn contains_id(&self, id: &Digest) -> bool {
-        self.items.iter().any(|item| &item.id == id)
-    }
-
-    /// Get an iterator over all items.
-    pub fn iter(&self) -> impl Iterator<Item = &Item> {
-        self.items.iter()
-    }
-
-    /// Clear all items.
-    pub fn clear(&mut self) {
-        self.items.clear();
-    }
-}
-
-impl Storage for VecStorage {
-    fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    fn get(&self, index: usize) -> Option<&Item> {
-        self.items.get(index)
-    }
-
-    fn lower_bound(&self, bound: &Bound) -> usize {
-        if bound.hint == 0 && bound.id.is_none() {
-            return 0;
-        }
-        self.items.partition_point(|item| bound.item_below(item))
-    }
-}
-
-/// Default checkpoint interval for [`CachedStorage`].
+/// Default checkpoint interval for [`MemStorage`].
 pub const DEFAULT_CHECKPOINT_INTERVAL: usize = 1024;
 
-/// Storage with cached fingerprints for efficient multi-peer reconciliation.
+/// In-memory storage with cached fingerprints for efficient reconciliation.
 ///
 /// Uses checkpoints at regular intervals to enable O(K) fingerprint queries
-/// where K is the checkpoint interval. Memory usage is O(n/K) instead of O(n).
+/// where K is the checkpoint interval. Memory usage is O(n + n/K) for items
+/// plus checkpoints.
 ///
 /// For reconciling with multiple peers, fingerprints are computed once and
 /// reused. The checkpoint-based approach allows deriving any range fingerprint
@@ -565,7 +496,7 @@ pub const DEFAULT_CHECKPOINT_INTERVAL: usize = 1024;
 /// # Example
 ///
 /// ```ignore
-/// let mut storage = CachedStorage::new(1024); // checkpoint every 1024 items
+/// let mut storage = MemStorage::default(); // default checkpoint interval
 /// for item in items {
 ///     storage.insert(item);
 /// }
@@ -576,7 +507,7 @@ pub const DEFAULT_CHECKPOINT_INTERVAL: usize = 1024;
 /// let mut reconciler_b = Reconciler::new(&storage, 16);
 /// ```
 #[derive(Debug, Clone)]
-pub struct CachedStorage {
+pub struct MemStorage {
     /// Items in sorted order (by hint, then ID)
     items: Vec<Item>,
     /// Set of all IDs for O(log n) membership checks
@@ -587,13 +518,13 @@ pub struct CachedStorage {
     checkpoints: Vec<LtHash>,
 }
 
-impl Default for CachedStorage {
+impl Default for MemStorage {
     fn default() -> Self {
         Self::new(DEFAULT_CHECKPOINT_INTERVAL)
     }
 }
 
-impl CachedStorage {
+impl MemStorage {
     /// Create new empty storage with the given checkpoint interval.
     ///
     /// Smaller intervals use more memory but make fingerprint queries faster.
@@ -733,7 +664,7 @@ impl CachedStorage {
     }
 }
 
-impl Storage for CachedStorage {
+impl Storage for MemStorage {
     fn len(&self) -> usize {
         self.items.len()
     }
@@ -1000,7 +931,7 @@ mod tests {
 
     #[test]
     fn test_vec_storage_insert() {
-        let mut storage = VecStorage::new();
+        let mut storage = MemStorage::default();
         storage.insert(Item::from_bytes(1002, [0x03; 32]));
         storage.insert(Item::from_bytes(1000, [0x01; 32]));
         storage.insert(Item::from_bytes(1001, [0x02; 32]));
@@ -1013,7 +944,7 @@ mod tests {
 
     #[test]
     fn test_vec_storage_no_duplicates() {
-        let mut storage = VecStorage::new();
+        let mut storage = MemStorage::default();
         storage.insert(Item::from_bytes(1000, [0x01; 32]));
         storage.insert(Item::from_bytes(1000, [0x01; 32])); // Duplicate
 
@@ -1022,7 +953,7 @@ mod tests {
 
     #[test]
     fn test_vec_storage_lower_bound() {
-        let mut storage = VecStorage::new();
+        let mut storage = MemStorage::default();
         storage.insert(Item::from_bytes(1000, [0x01; 32]));
         storage.insert(Item::from_bytes(1001, [0x02; 32]));
         storage.insert(Item::from_bytes(1002, [0x03; 32]));
@@ -1035,11 +966,11 @@ mod tests {
     #[test]
     fn test_identical_sets_reconciliation() {
         // Two identical sets should complete in one round
-        let mut storage_a = VecStorage::new();
+        let mut storage_a = MemStorage::default();
         storage_a.insert(Item::from_bytes(1000, [0x01; 32]));
         storage_a.insert(Item::from_bytes(1001, [0x02; 32]));
 
-        let mut storage_b = VecStorage::new();
+        let mut storage_b = MemStorage::default();
         storage_b.insert(Item::from_bytes(1000, [0x01; 32]));
         storage_b.insert(Item::from_bytes(1001, [0x02; 32]));
 
@@ -1064,11 +995,11 @@ mod tests {
     #[test]
     fn test_different_sets_reconciliation() {
         // A has item that B doesn't, B has item that A doesn't
-        let mut storage_a = VecStorage::new();
+        let mut storage_a = MemStorage::default();
         storage_a.insert(Item::from_bytes(1000, [0x01; 32]));
         storage_a.insert(Item::from_bytes(1001, [0x02; 32])); // Only A has this
 
-        let mut storage_b = VecStorage::new();
+        let mut storage_b = MemStorage::default();
         storage_b.insert(Item::from_bytes(1000, [0x01; 32]));
         storage_b.insert(Item::from_bytes(1002, [0x03; 32])); // Only B has this
 
@@ -1094,8 +1025,8 @@ mod tests {
 
     #[test]
     fn test_empty_set_reconciliation() {
-        let storage_a = VecStorage::new();
-        let mut storage_b = VecStorage::new();
+        let storage_a = MemStorage::default();
+        let mut storage_b = MemStorage::default();
         storage_b.insert(Item::from_bytes(1000, [0x01; 32]));
 
         let mut reconciler_a = Reconciler::new(&storage_a, 4);
@@ -1154,8 +1085,8 @@ mod tests {
     #[test]
     fn test_large_set_reconciliation() {
         // Test with larger sets
-        let mut storage_a = VecStorage::new();
-        let mut storage_b = VecStorage::new();
+        let mut storage_a = MemStorage::default();
+        let mut storage_b = MemStorage::default();
 
         // Add 100 items to both, with 10 unique to each
         for i in 0u64..100 {
@@ -1216,7 +1147,7 @@ mod tests {
 
     #[test]
     fn test_fingerprint_determinism() {
-        let mut storage = VecStorage::new();
+        let mut storage = MemStorage::default();
         storage.insert(Item::from_bytes(1000, [0x01; 32]));
         storage.insert(Item::from_bytes(1001, [0x02; 32]));
 
@@ -1254,7 +1185,7 @@ mod tests {
 
     #[test]
     fn test_empty_fingerprint() {
-        let storage = VecStorage::new();
+        let storage = MemStorage::default();
         let fp = storage.fingerprint(0, 0);
 
         // Empty range should produce consistent fingerprint
@@ -1264,7 +1195,7 @@ mod tests {
 
     #[test]
     fn test_vec_storage_remove() {
-        let mut storage = VecStorage::new();
+        let mut storage = MemStorage::default();
         storage.insert(Item::from_bytes(1000, [0x01; 32]));
         storage.insert(Item::from_bytes(1001, [0x02; 32]));
         assert_eq!(storage.len(), 2);
@@ -1282,7 +1213,7 @@ mod tests {
 
     #[test]
     fn test_vec_storage_contains_id() {
-        let mut storage = VecStorage::new();
+        let mut storage = MemStorage::default();
         storage.insert(Item::from_bytes(1000, [0x01; 32]));
 
         assert!(storage.contains_id(&Digest([0x01; 32])));
@@ -1292,8 +1223,8 @@ mod tests {
     #[test]
     fn test_large_set_exact_differences() {
         // Test that all differences are found correctly
-        let mut storage_a = VecStorage::new();
-        let mut storage_b = VecStorage::new();
+        let mut storage_a = MemStorage::default();
+        let mut storage_b = MemStorage::default();
 
         // Add 10 shared items (small enough to trigger IdList directly)
         for i in 0u64..10 {
@@ -1362,8 +1293,8 @@ mod tests {
     #[test]
     fn test_same_hint_multiple_items() {
         // Test that RBSR handles multiple items with the same hint correctly
-        let mut storage_a = VecStorage::new();
-        let mut storage_b = VecStorage::new();
+        let mut storage_a = MemStorage::default();
+        let mut storage_b = MemStorage::default();
 
         // Add 5 items all with the same hint to both
         let shared_hint = 1000u64;
@@ -1445,8 +1376,8 @@ mod tests {
         // Hints are purely for ordering/partitioning the search space.
         // If both sides have the same ID (even with different hints),
         // they're considered to have the same item.
-        let mut storage_a = VecStorage::new();
-        let mut storage_b = VecStorage::new();
+        let mut storage_a = MemStorage::default();
+        let mut storage_b = MemStorage::default();
 
         // Same IDs, but A uses hints 1000-1002, B uses hints 2000-2002
         let id1 = [0x01; 32];
@@ -1497,8 +1428,8 @@ mod tests {
     fn test_same_id_different_hint_with_unique_items() {
         // Even when items have different hints, if they share IDs they match.
         // This test shows mixed scenario: some IDs match, some don't.
-        let mut storage_a = VecStorage::new();
-        let mut storage_b = VecStorage::new();
+        let mut storage_a = MemStorage::default();
+        let mut storage_b = MemStorage::default();
 
         // Shared ID (different hints - still considered same item)
         storage_a.insert(Item::from_bytes(1000, [0x01; 32]));
@@ -1549,8 +1480,8 @@ mod tests {
     fn test_skip_merging() {
         // Test that consecutive Skip ranges are merged to reduce bandwidth.
         // Create two identical large sets that will be split into many sub-ranges.
-        let mut storage_a = VecStorage::new();
-        let mut storage_b = VecStorage::new();
+        let mut storage_a = MemStorage::default();
+        let mut storage_b = MemStorage::default();
 
         // Add 100 items to both sets (identical)
         for i in 0..100u8 {
@@ -1579,9 +1510,9 @@ mod tests {
 
     #[test]
     fn test_cached_storage_fingerprints() {
-        // Verify CachedStorage produces identical fingerprints to VecStorage
-        let mut vec_storage = VecStorage::new();
-        let mut cached_storage = CachedStorage::new(16); // Small interval for testing
+        // Verify MemStorage produces identical fingerprints to MemStorage
+        let mut vec_storage = MemStorage::default();
+        let mut cached_storage = MemStorage::new(16); // Small interval for testing
 
         // Add same items to both
         for i in 0..100u8 {
@@ -1628,9 +1559,9 @@ mod tests {
 
     #[test]
     fn test_cached_storage_reconciliation() {
-        // Full reconciliation test with CachedStorage
-        let mut storage_a = CachedStorage::new(16);
-        let mut storage_b = CachedStorage::new(16);
+        // Full reconciliation test with MemStorage
+        let mut storage_a = MemStorage::new(16);
+        let mut storage_b = MemStorage::new(16);
 
         // A has [0x01], B has [0x02] - simple disjoint sets
         storage_a.insert(Item::from_bytes(1000, [0x01; 32]));
@@ -1678,8 +1609,8 @@ mod tests {
 
     #[test]
     fn test_cached_storage_memory_efficiency() {
-        // Verify CachedStorage uses less memory than full prefix sums
-        let mut storage = CachedStorage::new(1000);
+        // Verify MemStorage uses less memory than full prefix sums
+        let mut storage = MemStorage::new(1000);
 
         // Add 10,000 items
         for i in 0..10000u32 {
