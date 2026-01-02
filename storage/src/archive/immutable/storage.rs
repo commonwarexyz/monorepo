@@ -287,6 +287,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         }
     }
 
+    async fn index_for_key(&self, _key: &K) -> Result<Option<u64>, Error> {
+        // Immutable archive does not maintain a direct key -> index mapping.
+        // The structure stores: key -> cursor (in Freezer) and index -> cursor (in Ordinal).
+        // There is no efficient reverse lookup from key to index without scanning.
+        // Callers should use `get` and extract the index from the value if needed.
+        Ok(None)
+    }
+
     async fn sync(&mut self) -> Result<(), Error> {
         self.syncs.inc();
 

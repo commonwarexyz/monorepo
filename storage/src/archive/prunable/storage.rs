@@ -344,6 +344,29 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
         }
     }
 
+    async fn index_for_key(&self, key: &K) -> Result<Option<u64>, Error> {
+        // Fetch index from in-memory keys map without reading the value from disk
+        let min_allowed = self.oldest_allowed.unwrap_or(0);
+        for index in self.keys.get(key) {
+            // Skip indices that have been pruned
+            if *index < min_allowed {
+                continue;
+            }
+
+            // Verify the key matches by reading the record from disk
+            let offset = *self.indices.get(index).ok_or(Error::RecordCorrupted)?;
+            let section = self.section(*index);
+            let record = self.journal.get(section, offset).await?;
+
+            if record.key.as_ref() == key.as_ref() {
+                return Ok(Some(*index));
+            }
+            self.unnecessary_reads.inc();
+        }
+
+        Ok(None)
+    }
+
     async fn sync(&mut self) -> Result<(), Error> {
         let mut syncs = Vec::with_capacity(self.pending.len());
         for section in self.pending.iter() {

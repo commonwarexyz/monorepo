@@ -342,16 +342,13 @@ where
                     match message {
                         Message::GetInfo { identifier, response } => {
                             let info = match identifier {
-                                // TODO: Instead of pulling out the entire block, determine the
-                                // height directly from the archive by mapping the commitment to
-                                // the index, which is the same as the height.
                                 BlockID::Commitment(commitment) => self
                                     .finalized_blocks
-                                    .get(ArchiveID::Key(&commitment))
+                                    .get_height(&commitment)
                                     .await
                                     .ok()
                                     .flatten()
-                                    .map(|b| (b.height(), commitment)),
+                                    .map(|height| (height, commitment)),
                                 BlockID::Height(height) => self
                                     .finalizations_by_height
                                     .get(ArchiveID::Index(height))
