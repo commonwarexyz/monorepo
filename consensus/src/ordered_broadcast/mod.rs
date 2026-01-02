@@ -1086,8 +1086,7 @@ mod tests {
             );
             network.start();
 
-            let mut registrations =
-                register_participants(&mut oracle, &fixture.participants).await;
+            let mut registrations = register_participants(&mut oracle, &fixture.participants).await;
             link_participants(
                 &mut oracle,
                 &fixture.participants,
@@ -1106,8 +1105,7 @@ mod tests {
             for (idx, validator) in fixture.participants.iter().enumerate() {
                 let context = context.with_label(&format!("validator_{validator}"));
                 let monitor = mocks::Monitor::new(epoch);
-                let sequencers =
-                    mocks::Sequencers::<PublicKey>::new(fixture.participants.clone());
+                let sequencers = mocks::Sequencers::<PublicKey>::new(fixture.participants.clone());
 
                 let validators_provider = mocks::Provider::new();
                 assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));

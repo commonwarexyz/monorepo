@@ -1,4 +1,6 @@
-use crate::{ordered_broadcast::types::Context, types::Epoch, Automaton as A, RetryableAutomaton as RA};
+use crate::{
+    ordered_broadcast::types::Context, types::Epoch, Automaton as A, RetryableAutomaton as RA,
+};
 use bytes::Bytes;
 use commonware_cryptography::{sha256, Hasher, PublicKey, Sha256};
 use futures::channel::oneshot;
