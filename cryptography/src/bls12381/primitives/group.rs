@@ -214,7 +214,11 @@ pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
     fn from_bytes(mut ikm: [u8; 64]) -> Self {
-        // Generate a scalar from the randomly populated buffer
+        // Generate a scalar from the randomly populated buffer using IETF BLS KeyGen.
+        //
+        // Per IETF draft-irtf-cfrg-bls-signature-05 Section 2.3, KeyGen is guaranteed
+        // to return a non-zero scalar. The algorithm loops until a non-zero value is
+        // produced: "SK is guaranteed to be nonzero, as required by KeyValidate."
         let mut ret = blst_fr::default();
         // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
         unsafe {
@@ -483,8 +487,11 @@ impl Field for Scalar {
 }
 
 impl Random for Scalar {
+    /// Returns a random non-zero scalar.
+    ///
+    /// The underlying `from_bytes` uses IETF BLS KeyGen, which guarantees
+    /// a non-zero result (see `from_bytes` for details).
     fn random(mut rng: impl CryptoRngCore) -> Self {
-        // Generate a random 64 byte buffer
         let mut ikm = [0u8; 64];
         rng.fill_bytes(&mut ikm);
         Self::from_bytes(ikm)
