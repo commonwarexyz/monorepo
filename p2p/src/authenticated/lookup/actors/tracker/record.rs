@@ -14,6 +14,20 @@ pub enum Address {
     Blocked(types::Address),
 }
 
+impl Address {
+    /// Transition from `Blocked` to `Known`, restoring the preserved address.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the address is not `Blocked`.
+    fn unblock(&mut self) {
+        let Address::Blocked(addr) = std::mem::replace(self, Address::Myself) else {
+            panic!("unblock called on non-blocked address");
+        };
+        *self = Address::Known(addr);
+    }
+}
+
 /// Represents the connection status of a peer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Status {
@@ -101,10 +115,7 @@ impl Record {
     ///
     /// Panics if the peer is not blocked.
     pub fn clear_expired_block(&mut self) {
-        let Address::Blocked(addr) = &self.address else {
-            unreachable!()
-        };
-        self.address = Address::Known(addr.clone());
+        self.address.unblock();
     }
 
     /// Increase the count of peer sets this peer is part of.
