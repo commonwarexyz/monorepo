@@ -285,7 +285,6 @@ mod tests {
     use commonware_utils::NZU32;
     use futures::SinkExt;
     use std::{
-        collections::HashSet,
         net::{IpAddr, Ipv4Addr},
         time::Duration,
     };
@@ -324,7 +323,8 @@ mod tests {
                 updates_rx,
             );
 
-            let allowed = HashSet::from([IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+            let mut allowed = HashSet::new();
+            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
             updates_tx
                 .send(allowed)
                 .await
@@ -654,7 +654,8 @@ mod tests {
             );
 
             // Register the IP so it would be allowed if not for the private IP check
-            let allowed = HashSet::from([IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+            let mut allowed = HashSet::new();
+            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
             updates_tx
                 .send(allowed)
                 .await
