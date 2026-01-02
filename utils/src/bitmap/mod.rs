@@ -1,7 +1,12 @@
-//! Bitmap implementation
+//! Bitmap implementations.
 //!
-//! The bitmap is a compact representation of a sequence of bits, using chunks of bytes for a
-//! more-efficient memory layout than doing [`Vec<bool>`].
+//! This module provides two bitmap types:
+//!
+//! - [`BitMap`]: A compact representation of a sequence of bits, using chunks of bytes for a
+//!   more-efficient memory layout than doing [`Vec<bool>`].
+//!
+//! - [`RoaringBitmap`]: A compressed bitmap for efficiently storing sets of 32-bit unsigned
+//!   integers. It uses different storage strategies based on data density for optimal memory usage.
 
 #[cfg(not(feature = "std"))]
 use alloc::{collections::VecDeque, vec::Vec};
@@ -18,6 +23,9 @@ mod prunable;
 pub use prunable::Prunable;
 
 pub mod historical;
+
+mod roaring;
+pub use roaring::RoaringBitmap;
 
 /// The default [BitMap] chunk size in bytes.
 pub const DEFAULT_CHUNK_SIZE: usize = 8;
