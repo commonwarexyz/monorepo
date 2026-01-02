@@ -106,11 +106,8 @@ impl F {
         let (subtraction, underflow) = addition.overflowing_sub(P);
         // In the case of overflow, we use the subtraction (as mentioned above).
         // Otherwise, use the subtraction as long as we didn't underflow
-        if overflow || !underflow {
-            Self(subtraction)
-        } else {
-            Self(addition)
-        }
+        let mask = (!overflow as u64 & underflow as u64).wrapping_neg();
+        Self(subtraction.wrapping_add(P & mask))
     }
 
     const fn sub_inner(self, b: Self) -> Self {
@@ -119,11 +116,8 @@ impl F {
         // If an underflow happened, the largest result we can have is -1. Adding
         // P gives us P - 1, which is < P, so everything works.
         let (subtraction, underflow) = self.0.overflowing_sub(b.0);
-        if underflow {
-            Self(subtraction.wrapping_add(P))
-        } else {
-            Self(subtraction)
-        }
+        let mask = (underflow as u64).wrapping_neg();
+        Self(subtraction.wrapping_add(P & mask))
     }
 
     const fn reduce_64(x: u64) -> Self {
