@@ -337,6 +337,91 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
+    #[test]
+    fn test_interesting() {
+        let activity_timeout = ViewDelta::new(10);
+
+        // Genesis view is never interesting
+        assert!(!interesting(
+            activity_timeout,
+            View::zero(),
+            View::zero(),
+            View::zero(),
+            false
+        ));
+        assert!(!interesting(
+            activity_timeout,
+            View::zero(),
+            View::new(1),
+            View::zero(),
+            true
+        ));
+
+        // View below min_active is not interesting
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(5), // below min_active (10)
+            false
+        ));
+
+        // View at min_active boundary is interesting
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(10), // exactly min_active
+            false
+        ));
+
+        // Future view beyond current.next() is not interesting when allow_future is false
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(27),
+            false
+        ));
+
+        // Future view beyond current.next() is interesting when allow_future is true
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(27),
+            true
+        ));
+
+        // View at current.next() is interesting
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(26),
+            false
+        ));
+
+        // View within valid range is interesting
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(22),
+            false
+        ));
+
+        // When last_finalized is 0 and activity_timeout would underflow
+        // min_active saturates at 0, so view 1 should still be interesting
+        assert!(interesting(
+            activity_timeout,
+            View::zero(),
+            View::new(5),
+            View::new(1),
+            false
+        ));
+    }
+
     /// Register a validator with the oracle.
     async fn register_validator(
         oracle: &mut Oracle<PublicKey, deterministic::Context>,
