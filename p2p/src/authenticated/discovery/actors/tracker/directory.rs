@@ -457,10 +457,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return false;
         }
 
-        // If record is still blocked, decrement the blocked metric
-        if record.is_blocked() {
-            self.metrics.blocked.dec();
-        }
+        // We don't decrement the blocked metric here because the block
+        // persists in blocked::Queue even after the record is deleted. The metric
+        // is decremented in unblock_expired when the block actually expires.
         self.peers.remove(peer);
         self.metrics.tracked.dec();
         true

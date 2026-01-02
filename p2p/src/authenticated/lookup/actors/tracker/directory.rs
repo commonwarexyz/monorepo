@@ -369,10 +369,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return false;
         }
 
-        // If record is blocked, decrement the blocked metric
-        if record.is_blocked() {
-            self.metrics.blocked.dec();
-        }
+        // We don't decrement the blocked metric here because the block
+        // persists in blocked::Queue even after the record is deleted. The metric
+        // is decremented in unblock_expired when the block actually expires.
         self.peers.remove(peer);
         self.metrics.tracked.dec();
         true
@@ -928,10 +927,9 @@ mod tests {
             let deadline = directory.next_unblock_deadline();
             assert!(deadline.is_some(), "Should have an unblock deadline");
 
-            // unblock_expired should return empty before expiry
-            let unblocked = directory.unblock_expired();
+            // unblock_expired should return false before expiry
             assert!(
-                unblocked.is_empty(),
+                !directory.unblock_expired(),
                 "No peers should be unblocked before expiry"
             );
 
@@ -939,9 +937,7 @@ mod tests {
             context.sleep(block_duration + Duration::from_secs(1)).await;
 
             // Now unblock_expired should unblock the peer
-            let unblocked = directory.unblock_expired();
-            assert_eq!(unblocked.len(), 1, "One peer should be unblocked");
-            assert!(unblocked.contains(&pk_1), "pk_1 should be unblocked");
+            assert!(directory.unblock_expired(), "Should have unblocked a peer");
 
             // Verify peer is now listenable
             assert!(
@@ -981,16 +977,26 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
 
+            // Initially no blocked peers
+            assert_eq!(directory.metrics.blocked.get(), 0);
+
             // Add pk_1 and block it
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             directory.block(&pk_1);
             assert!(directory.peers.get(&pk_1).unwrap().is_blocked());
+            assert_eq!(directory.metrics.blocked.get(), 1);
 
             // Add a new set that evicts pk_1 (max_sets=1)
+            // The blocked metric should remain 1 since the block persists
             directory.add_set(1, [(pk_2.clone(), addr(addr_2))].try_into().unwrap());
             assert!(
                 !directory.peers.contains_key(&pk_1),
                 "pk_1 should be removed"
+            );
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                1,
+                "blocked metric should still be 1 after peer removal"
             );
 
             // Re-add pk_1 - should still be blocked because block persists
@@ -999,18 +1005,84 @@ mod tests {
                 directory.peers.get(&pk_1).unwrap().is_blocked(),
                 "Re-added pk_1 should still be blocked"
             );
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                1,
+                "blocked metric should still be 1 after re-add"
+            );
 
             // Advance time past block duration
             context.sleep(block_duration + Duration::from_secs(1)).await;
 
             // Now unblock_expired should unblock pk_1
-            let unblocked = directory.unblock_expired();
-            assert_eq!(unblocked.len(), 1, "pk_1 should be unblocked");
-            assert!(unblocked.contains(&pk_1));
+            assert!(directory.unblock_expired());
             assert!(
                 !directory.peers.get(&pk_1).unwrap().is_blocked(),
                 "pk_1 should no longer be blocked"
             );
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                0,
+                "blocked metric should be 0 after unblock"
+            );
+        });
+    }
+
+    #[test]
+    fn test_blocked_metric_multiple_peers() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236);
+        let pk_3 = ed25519::PrivateKey::from_seed(3).public_key();
+        let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            // Add all peers
+            directory.add_set(
+                0,
+                [
+                    (pk_1.clone(), addr(addr_1)),
+                    (pk_2.clone(), addr(addr_2)),
+                    (pk_3.clone(), addr(addr_3)),
+                ]
+                .try_into()
+                .unwrap(),
+            );
+            assert_eq!(directory.metrics.blocked.get(), 0);
+
+            // Block all three peers
+            directory.block(&pk_1);
+            assert_eq!(directory.metrics.blocked.get(), 1);
+            directory.block(&pk_2);
+            assert_eq!(directory.metrics.blocked.get(), 2);
+            directory.block(&pk_3);
+            assert_eq!(directory.metrics.blocked.get(), 3);
+
+            // Blocking again should not increment
+            directory.block(&pk_1);
+            assert_eq!(directory.metrics.blocked.get(), 3);
+
+            // Advance time and unblock all
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            assert!(directory.unblock_expired());
+            assert_eq!(directory.metrics.blocked.get(), 0);
         });
     }
 }
