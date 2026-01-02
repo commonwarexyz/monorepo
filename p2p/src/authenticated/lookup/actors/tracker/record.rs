@@ -88,6 +88,7 @@ impl Record {
             Address::Myself | Address::Blocked(_) => false,
             Address::Known(addr) => {
                 self.address = Address::Blocked(addr.clone());
+                // Misbehaving bootstrappers should be deletable once no longer in any peer sets.
                 self.persistent = false;
                 true
             }

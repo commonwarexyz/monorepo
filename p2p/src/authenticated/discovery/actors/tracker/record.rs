@@ -134,6 +134,7 @@ impl<C: PublicKey> Record<C> {
             return false;
         }
         self.address = Address::Blocked;
+        // Misbehaving bootstrappers should be deletable once no longer in any peer sets.
         self.persistent = false;
         true
     }
