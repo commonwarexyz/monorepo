@@ -296,7 +296,6 @@ impl<
             on_stopped => {
                 debug!("shutdown");
             },
-
             // Handle refresh epoch deadline
             epoch = epoch_updates.next() => {
                 // Error handling
@@ -330,7 +329,6 @@ impl<
 
                 continue;
             },
-
             // Sign a new ack
             request = self.digest_requests.next_completed() => {
                 let DigestRequest { index, result, timer } = request;
@@ -348,7 +346,6 @@ impl<
                     }
                 }
             },
-
             // Handle incoming acks
             msg = receiver.recv() => {
                 // Error handling
@@ -400,7 +397,6 @@ impl<
                 debug!(?sender, epoch = %ack.epoch, index = ack.item.index, "ack");
                 guard.set(Status::Success);
             },
-
             // Rebroadcast
             _ = rebroadcast => {
                 // Get the next index to rebroadcast

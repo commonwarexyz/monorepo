@@ -329,7 +329,6 @@ impl<
             on_stopped => {
                 debug!("shutdown");
             },
-
             // Handle refresh epoch deadline
             epoch = epoch_updates.next() => {
                 // Error handling
@@ -344,7 +343,6 @@ impl<
                 self.epoch = epoch;
                 continue;
             },
-
             // Handle rebroadcast deadline
             _ = rebroadcast => {
                 if let Some(ref signer) = self.sequencer_signer {
@@ -355,7 +353,6 @@ impl<
                     }
                 }
             },
-
             // Propose a new chunk
             receiver = propose => {
                 // Clear the pending proposal
@@ -374,7 +371,6 @@ impl<
                     continue;
                 }
             },
-
             // Handle incoming nodes
             msg = node_receiver.recv() => {
                 // Error handling
@@ -420,7 +416,6 @@ impl<
                 debug!(?sender, height=node.chunk.height, "node");
                 guard.set(Status::Success);
             },
-
             // Handle incoming acks
             msg = ack_receiver.recv() => {
                 // Error handling
@@ -451,7 +446,6 @@ impl<
                 debug!(?sender, epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = ack.chunk.height, "ack");
                 guard.set(Status::Success);
             },
-
             // Handle completed verification futures.
             verify = self.pending_verifies.next_completed() => {
                 let Verify { timer, context, payload, result } = verify;

@@ -192,7 +192,6 @@ impl<
                 debug!("shutdown");
                 self.serves.cancel_all();
             },
-
             // Handle peer set updates
             peer_set_update = peer_set_subscription.next() => {
                 let Some((id, _, all)) = peer_set_update else {
@@ -207,7 +206,6 @@ impl<
                     self.fetcher.reconcile(all.as_ref());
                 }
             },
-
             // Handle active deadline
             _ = deadline_active => {
                 if let Some(key) = self.fetcher.pop_active() {
@@ -216,12 +214,10 @@ impl<
                     self.fetcher.add_retry(key);
                 }
             },
-
             // Handle pending deadline
             _ = deadline_pending => {
                 self.fetcher.fetch(&mut sender).await;
             },
-
             // Handle mailbox messages
             msg = self.mailbox.next() => {
                 let Some(msg) = msg else {
@@ -312,7 +308,6 @@ impl<
                 }
                 assert_eq!(self.fetcher.len(), self.fetch_timers.len());
             },
-
             // Handle completed server requests
             serve = self.serves.next_completed() => {
                 let Serve { timer, peer, id, result } = serve;
@@ -332,7 +327,6 @@ impl<
                 // Send response to peer
                 self.handle_serve(&mut sender, peer, id, result, self.priority_responses).await;
             },
-
             // Handle network messages
             msg = receiver.recv() => {
                 // Break if the receiver is closed

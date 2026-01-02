@@ -160,7 +160,6 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
             on_stopped => {
                 debug!("shutdown");
             },
-
             // Handle mailbox messages
             mail = self.mailbox_receiver.next() => {
                 let Some(msg) = mail else {
@@ -182,7 +181,6 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
                     }
                 }
             },
-
             // Handle incoming messages
             msg = receiver.recv() => {
                 // Error handling
