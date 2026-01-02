@@ -226,8 +226,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 Record::unknown()
             });
             // If peer is blocked (from before they were removed), mark the new record
+            // so bootstrappers become deletable
             if self.blocked.is_blocked(peer) {
-                record.block();
+                record.mark_blocked();
             }
             record.increment();
             set.update(peer, !record.want(self.dial_fail_limit));
@@ -298,11 +299,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         }
 
-        // If record exists, use record.block() which handles Myself/Blocked
+        // If record exists, check if blockable (not Myself)
         if let Some(record) = self.peers.get_mut(peer) {
-            if !record.block() {
+            if !record.is_blockable() {
                 return;
             }
+            record.mark_blocked();
         }
 
         let blocked_until = self.context.current() + self.block_duration;
@@ -371,16 +373,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// A peer is eligible if it is in a peer set (or is persistent), not blocked, and not ourselves.
     pub fn eligible(&self, peer: &C) -> bool {
-        self.peers.get(peer).is_some_and(|r| r.eligible())
+        !self.blocked.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have an ingress.
     pub fn dialable(&self) -> Vec<C> {
-        // Collect peers with known addresses
+        // Collect peers with known addresses that are not blocked
         let mut result: Vec<_> = self
             .peers
             .iter()
-            .filter(|&(_, r)| r.dialable(self.allow_private_ips, self.allow_dns))
+            .filter(|&(peer, r)| {
+                !self.blocked.is_blocked(peer) && r.dialable(self.allow_private_ips, self.allow_dns)
+            })
             .map(|(peer, _)| peer.clone())
             .collect();
         result.sort();
@@ -389,7 +393,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns true if this peer is acceptable (can accept an incoming connection from them).
     pub fn acceptable(&self, peer: &C) -> bool {
-        self.peers.get(peer).is_some_and(|r| r.acceptable())
+        !self.blocked.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.acceptable())
     }
 
     /// Unblock all peers whose block has expired and update the knowledge bitmap.
@@ -397,12 +401,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let now = self.context.current();
         let unblocked = self.blocked.unblock_expired(now);
 
-        // Update metrics and clear blocks on records
+        // Update metrics and knowledge bitmaps
         for peer in unblocked {
             self.metrics.blocked.dec();
-            if let Some(record) = self.peers.get_mut(&peer) {
-                record.clear_expired_block();
-
+            if let Some(record) = self.peers.get(&peer) {
                 // Update the knowledge bitmap for this peer
                 let want = record.want(self.dial_fail_limit);
                 for set in self.sets.values_mut() {
@@ -594,13 +596,13 @@ mod tests {
             let peer_set: OrderedSet<_> = [unknown_pk.clone()].into_iter().try_collect().unwrap();
             directory.add_set(0, peer_set);
 
-            // Peer should now be in peers and blocked
+            // Peer should now be in peers and blocked (via blocked::Queue)
             assert!(
                 directory.peers.contains_key(&unknown_pk),
                 "Peer should be in peers after add_set"
             );
             assert!(
-                directory.peers.get(&unknown_pk).unwrap().is_blocked(),
+                directory.blocked.is_blocked(&unknown_pk),
                 "Peer should be blocked after add_set"
             );
 

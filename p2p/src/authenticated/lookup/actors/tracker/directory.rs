@@ -165,12 +165,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 }
                 Entry::Vacant(entry) => {
                     self.metrics.tracked.inc();
-                    let record = entry.insert(Record::known(addr.clone()));
-                    // If peer is blocked (from before they were removed), mark the new record
-                    if self.blocked.is_blocked(peer) {
-                        record.block();
-                    }
-                    record
+                    entry.insert(Record::known(addr.clone()))
                 }
             };
             record.increment();
@@ -237,9 +232,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         }
 
-        // If record exists, use record.block() which handles Myself/Blocked
-        if let Some(record) = self.peers.get_mut(peer) {
-            if !record.block() {
+        // If record exists, check if it's blockable (not Myself)
+        if let Some(record) = self.peers.get(peer) {
+            if !record.is_blockable() {
                 return;
             }
         }
@@ -267,16 +262,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// This does NOT check IP validity - that is done separately for dialing (ingress)
     /// and accepting (egress).
     pub fn eligible(&self, peer: &C) -> bool {
-        self.peers.get(peer).is_some_and(|r| r.eligible())
+        !self.blocked.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
     pub fn dialable(&self) -> Vec<C> {
-        // Collect peers with known addresses
+        // Collect peers with known addresses (excluding blocked peers)
         let mut result: Vec<_> = self
             .peers
             .iter()
-            .filter(|&(_, r)| r.dialable(self.allow_private_ips, self.allow_dns))
+            .filter(|&(peer, r)| {
+                !self.blocked.is_blocked(peer) && r.dialable(self.allow_private_ips, self.allow_dns)
+            })
             .map(|(peer, _)| peer.clone())
             .collect();
         result.sort();
@@ -285,11 +282,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns true if this peer is acceptable (can accept an incoming connection from them).
     ///
-    /// Checks eligibility (peer set membership), egress IP match (if not bypass_ip_check), and connection status.
+    /// Checks eligibility (peer set membership), blocked status, egress IP match (if not bypass_ip_check),
+    /// and connection status.
     pub fn acceptable(&self, peer: &C, source_ip: IpAddr) -> bool {
-        self.peers
-            .get(peer)
-            .is_some_and(|record| record.acceptable(source_ip, self.bypass_ip_check))
+        !self.blocked.is_blocked(peer)
+            && self
+                .peers
+                .get(peer)
+                .is_some_and(|record| record.acceptable(source_ip, self.bypass_ip_check))
     }
 
     /// Return egress IPs we should listen for (accept incoming connections from).
@@ -299,26 +299,23 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// - Have a valid egress IP (global, or private IPs are allowed)
     pub fn listenable(&self) -> HashSet<IpAddr> {
         self.peers
-            .values()
-            .filter(|r| r.eligible())
-            .filter_map(|r| r.egress_ip())
+            .iter()
+            .filter(|(peer, r)| !self.blocked.is_blocked(peer) && r.eligible())
+            .filter_map(|(_, r)| r.egress_ip())
             .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
             .collect()
     }
 
     /// Unblock all peers whose block has expired.
     ///
-    /// Returns the list of peers that were unblocked (for logging/debugging).
+    /// Returns `true` if any peers were unblocked.
     pub fn unblock_expired(&mut self) -> bool {
         let now = self.context.current();
         let unblocked = self.blocked.unblock_expired(now);
 
-        // Update metrics and clear blocks on records
-        for peer in &unblocked {
+        // Update metrics
+        for _ in &unblocked {
             self.metrics.blocked.dec();
-            if let Some(record) = self.peers.get_mut(peer) {
-                record.clear_expired_block();
-            }
         }
 
         !unblocked.is_empty()
@@ -584,28 +581,30 @@ mod tests {
 
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             directory.block(&pk_1);
-            let record = directory.peers.get(&pk_1).unwrap();
             assert!(
-                record.is_blocked(),
+                directory.blocked.is_blocked(&pk_1),
                 "Peer should be blocked after call to block"
             );
-            // Address is preserved in Blocked variant but ingress() returns None for blocked peers
-            assert!(
-                record.ingress().is_none(),
-                "Blocked peer should not expose ingress"
+            // Address is preserved (blocking is tracked in blocked::Queue)
+            let record = directory.peers.get(&pk_1).unwrap();
+            assert_eq!(
+                record.ingress(),
+                Some(Ingress::Socket(addr_1)),
+                "Record still has address (blocking is at Directory level)"
             );
 
             // Update the address while blocked
             directory.add_set(1, [(pk_1.clone(), addr(addr_2))].try_into().unwrap());
-            let record = directory.peers.get(&pk_1).unwrap();
             assert!(
-                record.is_blocked(),
+                directory.blocked.is_blocked(&pk_1),
                 "Blocked peer should remain blocked after update"
             );
-            // Address is still preserved but not exposed
-            assert!(
-                record.ingress().is_none(),
-                "Blocked peer should not expose ingress"
+            // Address is updated
+            let record = directory.peers.get(&pk_1).unwrap();
+            assert_eq!(
+                record.ingress(),
+                Some(Ingress::Socket(addr_2)),
+                "Record has updated address"
             );
 
             // Advance time past block duration and unblock
@@ -613,15 +612,15 @@ mod tests {
             directory.unblock_expired();
 
             // Verify the peer is unblocked with the UPDATED address
-            let record = directory.peers.get(&pk_1).unwrap();
             assert!(
-                !record.is_blocked(),
+                !directory.blocked.is_blocked(&pk_1),
                 "Peer should be unblocked after expiry"
             );
+            let record = directory.peers.get(&pk_1).unwrap();
             assert_eq!(
                 record.ingress(),
                 Some(Ingress::Socket(addr_2)),
-                "Unblocked peer should have the updated address, not the original"
+                "Unblocked peer should have the updated address"
             );
         });
     }
@@ -1013,7 +1012,7 @@ mod tests {
             // Add pk_1 and block it
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             directory.block(&pk_1);
-            assert!(directory.peers.get(&pk_1).unwrap().is_blocked());
+            assert!(directory.blocked.is_blocked(&pk_1));
             assert_eq!(directory.metrics.blocked.get(), 1);
 
             // Add a new set that evicts pk_1 (max_sets=1)
@@ -1032,7 +1031,7 @@ mod tests {
             // Re-add pk_1 - should still be blocked because block persists
             directory.add_set(2, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             assert!(
-                directory.peers.get(&pk_1).unwrap().is_blocked(),
+                directory.blocked.is_blocked(&pk_1),
                 "Re-added pk_1 should still be blocked"
             );
             assert_eq!(
@@ -1047,7 +1046,7 @@ mod tests {
             // Now unblock_expired should unblock pk_1
             assert!(directory.unblock_expired());
             assert!(
-                !directory.peers.get(&pk_1).unwrap().is_blocked(),
+                !directory.blocked.is_blocked(&pk_1),
                 "pk_1 should no longer be blocked"
             );
             assert_eq!(
@@ -1216,7 +1215,7 @@ mod tests {
                 "Peer should be in peers after add_set"
             );
             assert!(
-                directory.peers.get(&unknown_pk).unwrap().is_blocked(),
+                directory.blocked.is_blocked(&unknown_pk),
                 "Peer should be blocked after add_set"
             );
 
