@@ -130,7 +130,7 @@ impl<C: PublicKey> Record<C> {
     /// Address info is discarded when blocking so we serve info for honest peers
     /// instead.
     pub fn block(&mut self) -> bool {
-        if matches!(self.address, Address::Myself(_) | Address::Blocked) {
+        if matches!(self.address, Address::Blocked | Address::Myself(_)) {
             return false;
         }
         self.address = Address::Blocked;
@@ -156,10 +156,7 @@ impl<C: PublicKey> Record<C> {
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
     pub const fn reserve(&mut self) -> bool {
-        if matches!(self.address, Address::Myself(_)) {
-            return false;
-        }
-        if self.is_blocked() {
+        if matches!(self.address, Address::Blocked | Address::Myself(_)) {
             return false;
         }
         if matches!(self.status, Status::Inert) {
@@ -237,9 +234,6 @@ impl<C: PublicKey> Record<C> {
     /// Note: For DNS addresses, private IP checks are performed in the dialer after resolution.
     pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         if self.status != Status::Inert {
-            return false;
-        }
-        if self.is_blocked() {
             return false;
         }
         let ingress = match &self.address {
@@ -320,13 +314,12 @@ impl<C: PublicKey> Record<C> {
     /// - It is not blocked or ourselves
     /// - It is part of at least one peer set (or is persistent, e.g., bootstrapper)
     pub const fn eligible(&self) -> bool {
-        if matches!(self.address, Address::Myself(_)) {
-            return false;
+        match self.address {
+            Address::Blocked | Address::Myself(_) => false,
+            Address::Bootstrapper(_) | Address::Unknown | Address::Discovered(_, _) => {
+                self.sets > 0 || self.persistent
+            }
         }
-        if self.is_blocked() {
-            return false;
-        }
-        self.sets > 0 || self.persistent
     }
 }
 #[cfg(test)]

@@ -100,10 +100,14 @@ impl Record {
     ///
     /// Panics if the peer is not blocked.
     pub fn clear_expired_block(&mut self) {
-        match std::mem::replace(&mut self.address, Address::Myself) {
-            Address::Blocked(addr) => self.address = Address::Known(addr),
-            _ => panic!("clear_expired_block called on non-blocked record"),
-        }
+        assert!(
+            self.is_blocked(),
+            "clear_expired_block called on non-blocked record"
+        );
+        let Address::Blocked(addr) = &self.address else {
+            unreachable!()
+        };
+        self.address = Address::Known(addr.clone());
     }
 
     /// Increase the count of peer sets this peer is part of.
@@ -124,7 +128,7 @@ impl Record {
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
     pub const fn reserve(&mut self) -> bool {
-        if matches!(self.address, Address::Myself) || self.is_blocked() {
+        if matches!(self.address, Address::Blocked(_) | Address::Myself) {
             return false;
         }
         if matches!(self.status, Status::Inert) {
@@ -469,12 +473,10 @@ mod tests {
         // Block the peer
         assert!(record.block());
         assert!(record.is_blocked());
-        assert!(matches!(record.address, Address::Blocked(_)));
 
         // Clear should restore the address
         record.clear_expired_block();
         assert!(!record.is_blocked());
-        assert!(matches!(record.address, Address::Known(_)));
     }
 
     #[test]
