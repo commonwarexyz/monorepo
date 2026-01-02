@@ -18,9 +18,6 @@ pub use ingress::{Message, Oracle};
 pub use metadata::Metadata;
 pub use reservation::Reservation;
 
-/// Set of egress IPs from eligible peers that we should listen for.
-pub type Listenable = HashSet<IpAddr>;
-
 #[derive(Clone, Debug)]
 pub struct Config<C: Signer> {
     pub crypto: C,
@@ -29,6 +26,6 @@ pub struct Config<C: Signer> {
     pub allow_private_ips: bool,
     pub allow_dns: bool,
     pub bypass_ip_check: bool,
-    pub listener: Mailbox<Listenable>,
+    pub listener: Mailbox<HashSet<IpAddr>>,
     pub block_duration: Duration,
 }

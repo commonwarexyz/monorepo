@@ -16,7 +16,11 @@ use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
-use std::{net::SocketAddr, num::NonZeroU32};
+use std::{
+    collections::HashSet,
+    net::{IpAddr, SocketAddr},
+    num::NonZeroU32,
+};
 use tracing::debug;
 
 /// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
@@ -46,8 +50,8 @@ pub struct Actor<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Si
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
-    listenable: tracker::Listenable,
-    mailbox: mpsc::Receiver<tracker::Listenable>,
+    registered_ips: HashSet<IpAddr>,
+    mailbox: mpsc::Receiver<HashSet<IpAddr>>,
     handshakes_blocked: Counter,
     handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
@@ -55,7 +59,7 @@ pub struct Actor<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Si
 }
 
 impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<tracker::Listenable>) -> Self {
+    pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
         // Create metrics
         let handshakes_blocked = Counter::default();
         context.register(
@@ -92,7 +96,7 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
             allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
             allowed_handshake_rate_per_subnet: cfg.allowed_handshake_rate_per_subnet,
-            listenable: tracker::Listenable::new(),
+            registered_ips: HashSet::new(),
             mailbox,
             handshakes_blocked,
             handshakes_concurrent_rate_limited,
@@ -181,11 +185,11 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                 debug!("context shutdown, stopping listener");
             },
             update = self.mailbox.next() => {
-                let Some(listenable) = update else {
+                let Some(registered_ips) = update else {
                     debug!("mailbox closed");
                     break;
                 };
-                self.listenable = listenable;
+                self.registered_ips = registered_ips;
             },
             listener = listener.accept() => {
                 // Accept a new connection
@@ -207,7 +211,7 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                 }
 
                 // Check whether the IP is registered
-                if !self.bypass_ip_check && !self.listenable.contains(&ip) {
+                if !self.bypass_ip_check && !self.registered_ips.contains(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting unregistered address");
                     continue;

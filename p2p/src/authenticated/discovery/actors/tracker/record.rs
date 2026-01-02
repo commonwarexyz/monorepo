@@ -160,11 +160,11 @@ impl<C: PublicKey> Record<C> {
     /// Attempt to reserve the peer for connection.
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
-    pub fn reserve(&mut self, now: SystemTime) -> bool {
+    pub fn reserve(&mut self) -> bool {
         if matches!(self.address, Address::Myself(_)) {
             return false;
         }
-        if self.is_blocked(now) {
+        if self.is_blocked() {
             return false;
         }
         if matches!(self.status, Status::Inert) {
@@ -212,8 +212,11 @@ impl<C: PublicKey> Record<C> {
     // ---------- Getters ----------
 
     /// Returns `true` if the record is currently blocked.
-    pub fn is_blocked(&self, now: SystemTime) -> bool {
-        self.blocked_until.is_some_and(|until| now < until)
+    ///
+    /// Note: Blocks are cleared by the unblock timer, so this just checks if
+    /// `blocked_until` is set rather than comparing against current time.
+    pub const fn is_blocked(&self) -> bool {
+        self.blocked_until.is_some()
     }
 
     /// Check if the block has expired and clear it if so.
@@ -243,11 +246,11 @@ impl<C: PublicKey> Record<C> {
     /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
     ///
     /// Note: For DNS addresses, private IP checks are performed in the dialer after resolution.
-    pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool, now: SystemTime) -> bool {
+    pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         if self.status != Status::Inert {
             return false;
         }
-        if self.is_blocked(now) {
+        if self.is_blocked() {
             return false;
         }
         let ingress = match &self.address {
@@ -263,8 +266,8 @@ impl<C: PublicKey> Record<C> {
     /// A peer is acceptable if:
     /// - The peer is eligible (in a peer set, not blocked, not ourselves)
     /// - We are not already connected or reserved
-    pub fn acceptable(&self, now: SystemTime) -> bool {
-        self.eligible(now) && self.status == Status::Inert
+    pub fn acceptable(&self) -> bool {
+        self.eligible() && self.status == Status::Inert
     }
 
     /// Return the ingress address of the peer, if known.
@@ -301,11 +304,11 @@ impl<C: PublicKey> Record<C> {
     /// - Returns `true` for addresses for which we don't have peer info.
     /// - Returns true for addresses for which we do have peer info if-and-only-if we have failed to
     ///   dial at least `min_fails` times.
-    pub fn want(&self, min_fails: usize, now: SystemTime) -> bool {
+    pub fn want(&self, min_fails: usize) -> bool {
         // Ignore how many sets the peer is part of.
         // If the peer is not in any sets, this function is not called anyway.
 
-        if self.is_blocked(now) {
+        if self.is_blocked() {
             return false;
         }
 
@@ -329,11 +332,11 @@ impl<C: PublicKey> Record<C> {
     /// A peer is eligible if:
     /// - It is not blocked or ourselves
     /// - It is part of at least one peer set (or is persistent, e.g., bootstrapper)
-    pub fn eligible(&self, now: SystemTime) -> bool {
+    pub fn eligible(&self) -> bool {
         if matches!(self.address, Address::Myself(_)) {
             return false;
         }
-        if self.is_blocked(now) {
+        if self.is_blocked() {
             return false;
         }
         self.sets > 0 || self.persistent
@@ -407,11 +410,11 @@ mod tests {
         assert!(!record.persistent);
         assert!(record.ingress().is_none());
         assert!(record.sharable().is_none());
-        assert!(!record.is_blocked(now()));
+        assert!(!record.is_blocked());
         assert!(!record.reserved());
-        assert!(record.want(0, now()), "Should want info for unknown peer");
+        assert!(record.want(0), "Should want info for unknown peer");
         assert!(record.deletable());
-        assert!(!record.eligible(now()));
+        assert!(!record.eligible());
     }
 
     #[test]
@@ -429,11 +432,11 @@ mod tests {
             record.sharable().as_ref(),
             &my_info
         ));
-        assert!(!record.is_blocked(now()));
+        assert!(!record.is_blocked());
         assert!(!record.reserved());
-        assert!(!record.want(0, now()), "Should not want info for myself");
+        assert!(!record.want(0), "Should not want info for myself");
         assert!(!record.deletable());
-        assert!(!record.eligible(now()));
+        assert!(!record.eligible());
     }
 
     #[test]
@@ -447,11 +450,11 @@ mod tests {
         assert!(record.persistent);
         assert_eq!(record.ingress(), Some(&ingress));
         assert!(record.sharable().is_none());
-        assert!(!record.is_blocked(now()));
+        assert!(!record.is_blocked());
         assert!(!record.reserved());
-        assert!(record.want(0, now()), "Should want info for bootstrapper");
+        assert!(record.want(0), "Should want info for bootstrapper");
         assert!(!record.deletable());
-        assert!(record.eligible(now()));
+        assert!(record.eligible());
     }
 
     #[test]
@@ -545,9 +548,9 @@ mod tests {
         // Can update a blocked record (address info is preserved with new blocking design)
         let mut record_blocked = Record::<PublicKey>::unknown();
         assert!(record_blocked.block(block_until()));
-        assert!(record_blocked.is_blocked(now()));
+        assert!(record_blocked.is_blocked());
         assert!(record_blocked.update(other_info)); // Update succeeds
-        assert!(record_blocked.is_blocked(now())); // Still blocked
+        assert!(record_blocked.is_blocked()); // Still blocked
         assert!(record_blocked.ingress().is_some()); // But has address info now
     }
 
@@ -630,7 +633,7 @@ mod tests {
         let mut record_unknown = Record::<PublicKey>::unknown();
         assert!(!record_unknown.persistent);
         assert!(record_unknown.block(block_until())); // Newly blocked
-        assert!(record_unknown.is_blocked(now()));
+        assert!(record_unknown.is_blocked());
         // Address is preserved (still Unknown, not changed to Blocked)
         assert!(matches!(record_unknown.address, Address::Unknown));
         assert_eq!(record_unknown.status, Status::Inert);
@@ -641,7 +644,7 @@ mod tests {
         let mut record_boot = Record::<PublicKey>::bootstrapper(test_socket());
         assert!(record_boot.persistent);
         assert!(record_boot.block(block_until()));
-        assert!(record_boot.is_blocked(now()));
+        assert!(record_boot.is_blocked());
         // Address is preserved (still Bootstrapper)
         assert!(matches!(record_boot.address, Address::Bootstrapper(_)));
         assert!(!record_boot.persistent, "Blocking sets persistent=false");
@@ -651,7 +654,7 @@ mod tests {
         assert!(record_disc.update(sample_peer_info.clone()));
         assert!(!record_disc.persistent);
         assert!(record_disc.block(block_until()));
-        assert!(record_disc.is_blocked(now()));
+        assert!(record_disc.is_blocked());
         // Address is preserved (still Discovered)
         assert!(matches!(record_disc.address, Address::Discovered(_, _)));
         assert!(record_disc.ingress().is_some());
@@ -662,7 +665,7 @@ mod tests {
         assert!(record_disc_from_boot.update(sample_peer_info.clone()));
         assert!(record_disc_from_boot.persistent);
         assert!(record_disc_from_boot.block(block_until()));
-        assert!(record_disc_from_boot.is_blocked(now()));
+        assert!(record_disc_from_boot.is_blocked());
         // Address is preserved
         assert!(matches!(
             record_disc_from_boot.address,
@@ -676,13 +679,13 @@ mod tests {
         // Check status remains unchanged when blocking
         let mut record_reserved = Record::<PublicKey>::unknown();
         assert!(record_reserved.update(sample_peer_info.clone()));
-        assert!(record_reserved.reserve(now()));
+        assert!(record_reserved.reserve());
         assert!(record_reserved.block(block_until()));
         assert_eq!(record_reserved.status, Status::Reserved);
 
         let mut record_active = Record::<PublicKey>::unknown();
         assert!(record_active.update(sample_peer_info));
-        assert!(record_active.reserve(now()));
+        assert!(record_active.reserve());
         record_active.connect();
         assert!(record_active.block(block_until()));
         assert_eq!(record_active.status, Status::Active);
@@ -703,7 +706,7 @@ mod tests {
             !record_to_be_blocked.block(block_until()),
             "Cannot block already blocked peer (returns false)"
         );
-        assert!(record_to_be_blocked.is_blocked(now()));
+        assert!(record_to_be_blocked.is_blocked());
     }
 
     #[test]
@@ -711,25 +714,25 @@ mod tests {
         let mut record = Record::<PublicKey>::unknown();
 
         assert_eq!(record.status, Status::Inert);
-        assert!(record.reserve(now()));
+        assert!(record.reserve());
         assert_eq!(record.status, Status::Reserved);
         assert!(record.reserved());
 
-        assert!(!record.reserve(now()), "Cannot re-reserve when Reserved");
+        assert!(!record.reserve(), "Cannot re-reserve when Reserved");
         assert_eq!(record.status, Status::Reserved);
 
         record.connect();
         assert_eq!(record.status, Status::Active);
         assert!(record.reserved()); // reserved() is true for Active too
 
-        assert!(!record.reserve(now()), "Cannot reserve when Active");
+        assert!(!record.reserve(), "Cannot reserve when Active");
         assert_eq!(record.status, Status::Active);
 
         record.release(); // Release from Active
         assert_eq!(record.status, Status::Inert);
         assert!(!record.reserved());
 
-        assert!(record.reserve(now())); // Reserve again
+        assert!(record.reserve()); // Reserve again
         assert_eq!(record.status, Status::Reserved);
         record.release(); // Release from Reserved
         assert_eq!(record.status, Status::Inert);
@@ -746,7 +749,7 @@ mod tests {
     #[should_panic]
     fn test_connect_when_active_panics() {
         let mut record = Record::<PublicKey>::unknown();
-        assert!(record.reserve(now()));
+        assert!(record.reserve());
         record.connect();
         record.connect(); // Should panic
     }
@@ -789,7 +792,7 @@ mod tests {
         let mut record_disc = Record::<PublicKey>::unknown();
         assert!(record_disc.update(peer_info_data.clone()));
         assert!(record_disc.sharable().is_none()); // Status Inert
-        assert!(record_disc.reserve(now()));
+        assert!(record_disc.reserve());
         assert!(record_disc.sharable().is_none()); // Status Reserved
 
         // Discovered and Active: Sharable
@@ -808,7 +811,7 @@ mod tests {
     fn test_reserved_status_check() {
         let mut record = Record::<PublicKey>::unknown();
         assert!(!record.reserved()); // Inert
-        assert!(record.reserve(now()));
+        assert!(record.reserve());
         assert!(record.reserved()); // Reserved
         record.connect();
         assert!(record.reserved()); // Active
@@ -867,64 +870,64 @@ mod tests {
         let min_fails = 2;
 
         // Unknown and Bootstrapper always want info
-        assert!(Record::<PublicKey>::unknown().want(min_fails, now()));
-        assert!(Record::<PublicKey>::bootstrapper(socket).want(min_fails, now()));
+        assert!(Record::<PublicKey>::unknown().want(min_fails));
+        assert!(Record::<PublicKey>::bootstrapper(socket).want(min_fails));
 
         // Myself never wants info
-        assert!(!Record::myself(peer_info.clone()).want(min_fails, now()));
+        assert!(!Record::myself(peer_info.clone()).want(min_fails));
 
         // Blocked never wants info
         let mut blocked = Record::<PublicKey>::unknown();
         blocked.block(block_until());
-        assert!(!blocked.want(min_fails, now()));
+        assert!(!blocked.want(min_fails));
 
         let mut record_disc = Record::<PublicKey>::unknown();
         assert!(record_disc.update(peer_info));
 
         // Status Inert
         assert!(
-            !record_disc.want(min_fails, now()),
+            !record_disc.want(min_fails),
             "Should not want when fails=0 < min_fails"
         );
         record_disc.dial_failure(&ingress); // fails = 1
         assert!(
-            !record_disc.want(min_fails, now()),
+            !record_disc.want(min_fails),
             "Should not want when fails=1 < min_fails"
         );
         record_disc.dial_failure(&ingress); // fails = 2
         assert!(
-            record_disc.want(min_fails, now()),
+            record_disc.want(min_fails),
             "Should want when fails=2 >= min_fails"
         );
 
         // Status Reserved
-        assert!(record_disc.reserve(now()));
+        assert!(record_disc.reserve());
         assert!(
-            record_disc.want(min_fails, now()),
+            record_disc.want(min_fails),
             "Should still want when Reserved and fails >= min_fails"
         );
 
         // Status Active
         record_disc.connect();
         assert!(
-            !record_disc.want(min_fails, now()),
+            !record_disc.want(min_fails),
             "Should not want when Active"
         );
 
         // Status Inert again (after release)
         record_disc.release();
-        assert!(record_disc.want(min_fails, now()));
+        assert!(record_disc.want(min_fails));
 
         // Reset failures
         record_disc.dial_success(); // Reset failures
         assert!(
-            !record_disc.want(min_fails, now()),
+            !record_disc.want(min_fails),
             "Should not want when Inert and fails=0"
         );
         record_disc.dial_failure(&ingress); // fails = 1
-        assert!(!record_disc.want(min_fails, now()));
+        assert!(!record_disc.want(min_fails));
         record_disc.dial_failure(&ingress); // fails = 2
-        assert!(record_disc.want(min_fails, now()));
+        assert!(record_disc.want(min_fails));
     }
 
     #[test]
@@ -947,7 +950,7 @@ mod tests {
         record.increment(); // sets = 1
         assert!(!record.deletable()); // sets != 0
 
-        assert!(record.reserve(now())); // status = Reserved
+        assert!(record.reserve()); // status = Reserved
         assert!(!record.deletable()); // status != Inert
 
         record.connect(); // status = Active
@@ -977,28 +980,28 @@ mod tests {
         // Blocked and Myself are never eligible
         let mut record_blocked = Record::<PublicKey>::unknown();
         record_blocked.block(block_until());
-        assert!(!record_blocked.eligible(now()));
-        assert!(!Record::myself(peer_info.clone()).eligible(now()));
+        assert!(!record_blocked.eligible());
+        assert!(!Record::myself(peer_info.clone()).eligible());
 
         // Persistent records (Bootstrapper) are allowed even with sets=0
-        assert!(Record::<PublicKey>::bootstrapper(test_socket()).eligible(now()));
+        assert!(Record::<PublicKey>::bootstrapper(test_socket()).eligible());
         let mut record_pers = Record::<PublicKey>::bootstrapper(test_socket());
         assert!(record_pers.update(peer_info.clone()));
-        assert!(record_pers.eligible(now()));
+        assert!(record_pers.eligible());
 
         // Non-persistent records (Unknown, Discovered) require sets > 0
         let mut record_unknown = Record::<PublicKey>::unknown();
-        assert!(!record_unknown.eligible(now())); // sets = 0, !persistent
+        assert!(!record_unknown.eligible()); // sets = 0, !persistent
         record_unknown.increment(); // sets = 1
-        assert!(record_unknown.eligible(now())); // sets > 0
+        assert!(record_unknown.eligible()); // sets > 0
         record_unknown.decrement(); // sets = 0
-        assert!(!record_unknown.eligible(now()));
+        assert!(!record_unknown.eligible());
 
         let mut record_disc = Record::<PublicKey>::unknown();
         assert!(record_disc.update(peer_info));
-        assert!(!record_disc.eligible(now())); // sets = 0, !persistent
+        assert!(!record_disc.eligible()); // sets = 0, !persistent
         record_disc.increment(); // sets = 1
-        assert!(record_disc.eligible(now())); // sets > 0
+        assert!(record_disc.eligible()); // sets > 0
     }
 
     #[test]
@@ -1006,27 +1009,28 @@ mod tests {
         let mut record = Record::<PublicKey>::unknown();
 
         // Initially not blocked
-        assert!(!record.is_blocked(now()));
+        assert!(!record.is_blocked());
 
         // Block the peer
         assert!(record.block(block_until()));
-        assert!(record.is_blocked(now()));
-        assert!(!record.eligible(now()));
+        assert!(record.is_blocked());
+        assert!(!record.eligible());
 
-        // After block expires
+        // After block expires and is cleared
         let future = block_until() + Duration::from_secs(1);
-        assert!(!record.is_blocked(future));
+        assert!(record.clear_expired_block(future));
+        assert!(!record.is_blocked());
         record.increment(); // Need sets > 0 to be eligible
-        assert!(record.eligible(future));
+        assert!(record.eligible());
 
         // clear_expired_block clears the block
         let mut record2 = Record::<PublicKey>::unknown();
         record2.block(block_until());
-        assert!(record2.is_blocked(now()));
+        assert!(record2.is_blocked());
         assert!(!record2.clear_expired_block(now())); // Not expired yet
-        assert!(record2.is_blocked(now()));
+        assert!(record2.is_blocked());
         assert!(record2.clear_expired_block(future)); // Now expired
-        assert!(!record2.is_blocked(future));
+        assert!(!record2.is_blocked());
         assert!(!record2.clear_expired_block(future)); // Already cleared
     }
 }

@@ -16,7 +16,11 @@ use commonware_runtime::{
 use commonware_utils::ordered::Set;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
-use std::{collections::HashMap, time::SystemTime};
+use std::{
+    collections::{HashMap, HashSet},
+    net::IpAddr,
+    time::SystemTime,
+};
 use tracing::debug;
 
 /// Helper to sleep until a deadline, or wait forever if None.
@@ -40,7 +44,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     receiver: mpsc::UnboundedReceiver<Message<C::PublicKey>>,
 
     /// The mailbox for the listener.
-    listener: Mailbox<super::Listenable>,
+    listener: Mailbox<HashSet<IpAddr>>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
@@ -267,13 +271,11 @@ mod tests {
         time::Duration,
     };
 
-    type Listenable = crate::authenticated::lookup::actors::tracker::Listenable;
-
     // Test Configuration Setup
     fn test_config<C: Signer>(
         crypto: C,
         bypass_ip_check: bool,
-    ) -> (Config<C>, mpsc::Receiver<Listenable>) {
+    ) -> (Config<C>, mpsc::Receiver<HashSet<IpAddr>>) {
         let (registered_ips_sender, registered_ips_receiver) = Mailbox::new(1);
         (
             Config {

@@ -156,12 +156,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Create and store new peer set (all peers are tracked regardless of address validity)
-        let now = self.context.current();
         for (peer, addr) in &peers {
             let record = match self.peers.entry(peer.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
-                    entry.update(addr.clone(), now);
+                    entry.update(addr.clone());
                     entry
                 }
                 Entry::Vacant(entry) => {
@@ -254,18 +253,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// This does NOT check IP validity - that is done separately for dialing (ingress)
     /// and accepting (egress).
     pub fn eligible(&self, peer: &C) -> bool {
-        let now = self.context.current();
-        self.peers.get(peer).is_some_and(|r| r.eligible(now))
+        self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
     pub fn dialable(&self) -> Vec<C> {
-        let now = self.context.current();
         // Collect peers with known addresses
         let mut result: Vec<_> = self
             .peers
             .iter()
-            .filter(|&(_, r)| r.dialable(self.allow_private_ips, self.allow_dns, now))
+            .filter(|&(_, r)| r.dialable(self.allow_private_ips, self.allow_dns))
             .map(|(peer, _)| peer.clone())
             .collect();
         result.sort();
@@ -276,23 +273,20 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Checks eligibility (peer set membership), egress IP match (if not bypass_ip_check), and connection status.
     pub fn acceptable(&self, peer: &C, source_ip: IpAddr) -> bool {
-        let now = self.context.current();
         self.peers
             .get(peer)
-            .is_some_and(|record| record.acceptable(source_ip, self.bypass_ip_check, now))
+            .is_some_and(|record| record.acceptable(source_ip, self.bypass_ip_check))
     }
 
     /// Return egress IPs we should listen for (accept incoming connections from).
     ///
     /// Only includes IPs from peers that are:
-    /// - In a peer set (not ourselves)
-    /// - Currently eligible (not blocked)
+    /// - Currently eligible (not blocked, in a peer set)
     /// - Have a valid egress IP (global, or private IPs are allowed)
     pub fn listenable(&self) -> HashSet<IpAddr> {
-        let now = self.context.current();
         self.peers
             .values()
-            .filter(|r| r.sets() > 0 && r.eligible(now))
+            .filter(|r| r.eligible())
             .filter_map(|r| r.egress_ip())
             .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
             .collect()
@@ -337,7 +331,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Returns `Some(Reservation)` if the peer was successfully reserved, `None` otherwise.
     fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<C>> {
         let peer = metadata.public_key();
-        let now = self.context.current();
 
         // Not reservable (must be in a peer set)
         if !self.eligible(peer) {
@@ -360,7 +353,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Reserve
-        if record.reserve(now) {
+        if record.reserve() {
             self.metrics.reserved.inc();
             return Some(Reservation::new(metadata, self.releaser.clone()));
         }
@@ -371,22 +364,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `true` if the record was deleted, `false` otherwise.
     fn delete_if_needed(&mut self, peer: &C) -> bool {
-        let now = self.context.current();
-        let Some(record) = self.peers.get_mut(peer) else {
+        let Some(record) = self.peers.get(peer) else {
             return false;
         };
-
-        // Clear expired blocks and update metrics
-        if record.clear_expired_block(now) {
-            self.metrics.blocked.dec();
-        }
 
         if !record.deletable() {
             return false;
         }
 
-        // If record is still blocked (not expired), decrement the blocked metric
-        if record.is_blocked(now) {
+        // If record is blocked, decrement the blocked metric
+        if record.is_blocked() {
             self.metrics.blocked.dec();
         }
         self.peers.remove(peer);
@@ -590,10 +577,9 @@ mod tests {
 
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             directory.block(&pk_1);
-            let now = context.current();
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(
-                record.is_blocked(now),
+                record.is_blocked(),
                 "Peer should be blocked after call to block"
             );
             assert!(
@@ -604,7 +590,7 @@ mod tests {
             directory.add_set(1, [(pk_1.clone(), addr(addr_2))].try_into().unwrap());
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(
-                record.is_blocked(now),
+                record.is_blocked(),
                 "Blocked peer should remain blocked after update"
             );
             assert!(
