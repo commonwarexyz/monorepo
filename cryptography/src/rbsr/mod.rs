@@ -159,61 +159,44 @@ impl Read for Item {
 
 /// A bound representing the upper limit of a range.
 ///
-/// Bounds consist of a hint and an ID prefix. The prefix can be truncated
-/// to the minimum bytes needed for uniqueness, reducing message size.
-/// An empty prefix represents zero (hint=0) or infinity (hint=MAX_HINT).
+/// Bounds consist of a hint and an optional ID. When the ID is `None`,
+/// the bound acts as a sentinel: at hint=0 it's less than everything,
+/// at hint=MAX_HINT it's infinity (greater than everything).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bound {
     /// Hint component of the bound
     pub hint: u64,
-    /// ID prefix (can be empty or truncated for efficiency)
-    pub id_prefix: Vec<u8>,
+    /// Optional ID (None for sentinel bounds like infinity)
+    pub id: Option<Digest>,
 }
 
 impl Bound {
-    /// Create a new bound with the given hint and full ID.
+    /// Create a new bound with the given hint and ID.
     pub fn new(hint: u64, id: Digest) -> Self {
-        Self {
-            hint,
-            id_prefix: id.as_ref().to_vec(),
-        }
+        Self { hint, id: Some(id) }
     }
 
     /// Create a bound representing positive infinity.
     pub const fn infinity() -> Self {
         Self {
             hint: MAX_HINT,
-            id_prefix: Vec::new(),
-        }
-    }
-
-    /// Create a bound representing negative infinity (minimum).
-    pub const fn zero() -> Self {
-        Self {
-            hint: 0,
-            id_prefix: Vec::new(),
+            id: None,
         }
     }
 
     /// Check if this bound represents infinity.
-    pub const fn is_infinity(&self) -> bool {
-        self.hint == MAX_HINT && self.id_prefix.is_empty()
+    pub fn is_infinity(&self) -> bool {
+        self.hint == MAX_HINT && self.id.is_none()
     }
 
     /// Compare this bound against an item.
     /// Returns Ordering::Less if bound < item, etc.
     pub fn cmp_item(&self, item: &Item) -> core::cmp::Ordering {
         match self.hint.cmp(&item.hint) {
-            core::cmp::Ordering::Equal => {
-                // Compare prefix against item ID up to prefix length
-                let prefix_len = self.id_prefix.len().min(ID_SIZE);
-                if prefix_len == 0 {
-                    // Empty prefix is less than any ID
-                    core::cmp::Ordering::Less
-                } else {
-                    self.id_prefix[..prefix_len].cmp(&item.id.as_ref()[..prefix_len])
-                }
-            }
+            core::cmp::Ordering::Equal => match &self.id {
+                None => core::cmp::Ordering::Less, // Sentinel is less than any ID
+                Some(id) => id.cmp(&item.id),
+            },
             ord => ord,
         }
     }
@@ -227,8 +210,15 @@ impl Bound {
 impl Write for Bound {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.hint).write(buf);
-        (self.id_prefix.len() as u8).write(buf);
-        buf.put_slice(&self.id_prefix);
+        match &self.id {
+            Some(id) => {
+                (ID_SIZE as u8).write(buf);
+                id.write(buf);
+            }
+            None => {
+                0u8.write(buf);
+            }
+        }
     }
 }
 
@@ -237,19 +227,15 @@ impl Read for Bound {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let hint = UInt::<u64>::read(buf)?.into();
-        let prefix_len = u8::read(buf)? as usize;
-        if prefix_len > ID_SIZE {
-            return Err(CodecError::Invalid(
-                "Bound",
-                "id_prefix length exceeds ID_SIZE",
-            ));
-        }
-        if buf.remaining() < prefix_len {
-            return Err(CodecError::EndOfBuffer);
-        }
-        let mut id_prefix = vec![0u8; prefix_len];
-        buf.copy_to_slice(&mut id_prefix);
-        Ok(Self { hint, id_prefix })
+        let id_len = u8::read(buf)? as usize;
+        let id = if id_len == 0 {
+            None
+        } else if id_len == ID_SIZE {
+            Some(Digest::read(buf)?)
+        } else {
+            return Err(CodecError::Invalid("Bound", "id must be 0 or 32 bytes"));
+        };
+        Ok(Self { hint, id })
     }
 }
 
@@ -540,7 +526,7 @@ impl Storage for VecStorage {
     }
 
     fn lower_bound(&self, bound: &Bound) -> usize {
-        if bound.hint == 0 && bound.id_prefix.is_empty() {
+        if bound.hint == 0 && bound.id.is_none() {
             return 0;
         }
         self.items.partition_point(|item| bound.item_below(item))
@@ -1030,13 +1016,6 @@ mod tests {
         inf.write(&mut buf);
         let decoded = Bound::read(&mut &buf[..]).unwrap();
         assert_eq!(inf, decoded);
-
-        // Test zero bound
-        let zero = Bound::zero();
-        buf.clear();
-        zero.write(&mut buf);
-        let decoded = Bound::read(&mut &buf[..]).unwrap();
-        assert_eq!(zero, decoded);
     }
 
     #[test]
