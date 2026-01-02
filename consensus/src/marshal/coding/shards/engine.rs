@@ -542,7 +542,7 @@ mod test {
         bls12381::primitives::variant::MinSig,
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        Sha256, Signer,
+        Digest, Sha256, Signer,
     };
     use commonware_macros::{test_collect_traces, test_traced};
     use commonware_p2p::simulated::Link;
@@ -681,7 +681,7 @@ mod test {
         };
 
         fixture.start(|config, context, mut mailboxes, coding_config| async move {
-            let inner = B::new::<H>(H::EMPTY, 1, 2);
+            let inner = B::new::<H>(Sha256Digest::EMPTY, 1, 2);
             let coded_block = CodedBlock::<B, C>::new(inner, coding_config, CONCURRENCY);
             let peers: Vec<P> = mailboxes.keys().cloned().collect();
 
@@ -729,7 +729,7 @@ mod test {
         };
 
         fixture.start(|config, context, mut mailboxes, coding_config| async move {
-            let inner = B::new::<H>(H::EMPTY, 1, 2);
+            let inner = B::new::<H>(Sha256Digest::EMPTY, 1, 2);
             let coded_block = CodedBlock::<B, C>::new(inner, coding_config, CONCURRENCY);
             let peers: Vec<P> = mailboxes.keys().cloned().collect();
 
@@ -779,7 +779,7 @@ mod test {
         };
 
         fixture.start(|config, context, mut mailboxes, coding_config| async move {
-            let inner = B::new::<H>(H::EMPTY, 1, 2);
+            let inner = B::new::<H>(Sha256Digest::EMPTY, 1, 2);
             let coded_block = CodedBlock::<B, C>::new(inner, coding_config, CONCURRENCY);
             let peers: Vec<P> = mailboxes.keys().cloned().collect();
 
