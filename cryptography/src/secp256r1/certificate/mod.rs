@@ -19,7 +19,6 @@ use commonware_utils::ordered::{BiMap, Quorum, Set};
 use rand::{CryptoRng, Rng};
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
-use std::fmt::Debug;
 
 /// Generic Secp256r1 signing scheme implementation parameterized by identity type.
 ///
