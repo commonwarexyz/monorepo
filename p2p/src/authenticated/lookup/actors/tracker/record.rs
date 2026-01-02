@@ -132,7 +132,7 @@ impl Record {
     /// Attempt to reserve the peer for connection.
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
-    pub fn reserve(&mut self) -> bool {
+    pub const fn reserve(&mut self) -> bool {
         if matches!(self.address, Address::Myself) || self.is_blocked() {
             return false;
         }
@@ -237,7 +237,7 @@ impl Record {
     /// This is the base check for reserving a connection. IP validity is checked
     /// separately: ingress validity for dialing (in `dialable()`), egress validity
     /// for the IP filter (in `Directory::eligible_egress_ips()`).
-    pub fn eligible(&self) -> bool {
+    pub const fn eligible(&self) -> bool {
         if self.is_blocked() {
             return false;
         }

@@ -21,7 +21,7 @@ use rand::{seq::SliceRandom, Rng};
 use std::time::SystemTime;
 use tracing::debug;
 
-/// Helper to sleep until a deadline, or wait forever if None.
+/// Helper to sleep until the next unblock deadline, or wait forever if none.
 async fn wait_for_unblock<E: Clock>(context: &E, deadline: Option<SystemTime>) {
     match deadline {
         Some(time) => context.sleep_until(time).await,
@@ -61,9 +61,6 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     /// Subscribers to peer set updates.
     #[allow(clippy::type_complexity)]
     subscribers: Vec<mpsc::UnboundedSender<(u64, Set<C::PublicKey>, Set<C::PublicKey>)>>,
-
-    /// Next time a blocked peer should be unblocked.
-    next_unblock: Option<SystemTime>,
 }
 
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -125,7 +122,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 receiver,
                 directory,
                 subscribers: Vec::new(),
-                next_unblock: None,
             },
             mailbox,
             oracle,
@@ -144,7 +140,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             on_stopped => {
                 debug!("context shutdown, stopping tracker");
             },
-            _ = wait_for_unblock(&self.context, self.next_unblock) => {
+            _ = wait_for_unblock(&self.context, self.directory.next_unblock_deadline()) => {
                 self.handle_unblock();
             },
             msg = self.receiver.next() => {
@@ -163,7 +159,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         if !unblocked.is_empty() {
             debug!(count = unblocked.len(), "unblocked peers");
         }
-        self.next_unblock = self.directory.next_unblock_deadline();
     }
 
     /// Handle a [`Message`].
@@ -289,9 +284,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // We don't have to kill the peer now. It will be sent a `Kill` message the next
                 // time it sends the `Connect` or `Construct` message to the tracker.
-
-                // Update the unblock timer
-                self.next_unblock = self.directory.next_unblock_deadline();
             }
             Message::Release { metadata } => {
                 // Release the peer

@@ -160,7 +160,7 @@ impl<C: PublicKey> Record<C> {
     /// Attempt to reserve the peer for connection.
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
-    pub fn reserve(&mut self) -> bool {
+    pub const fn reserve(&mut self) -> bool {
         if matches!(self.address, Address::Myself(_)) {
             return false;
         }
@@ -332,7 +332,7 @@ impl<C: PublicKey> Record<C> {
     /// A peer is eligible if:
     /// - It is not blocked or ourselves
     /// - It is part of at least one peer set (or is persistent, e.g., bootstrapper)
-    pub fn eligible(&self) -> bool {
+    pub const fn eligible(&self) -> bool {
         if matches!(self.address, Address::Myself(_)) {
             return false;
         }
