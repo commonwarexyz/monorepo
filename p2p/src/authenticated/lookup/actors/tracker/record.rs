@@ -104,13 +104,12 @@ impl Record {
 
     /// Clear the block on this peer.
     ///
-    /// Returns `true` if a block was cleared.
-    pub const fn clear_expired_block(&mut self) -> bool {
-        if self.is_blocked() {
-            self.blocked_until = None;
-            return true;
-        }
-        false
+    /// # Panics
+    ///
+    /// Panics if the peer is not blocked.
+    pub fn clear_expired_block(&mut self) {
+        assert!(self.is_blocked());
+        self.blocked_until = None;
     }
 
     /// Increase the count of peer sets this peer is part of.
@@ -465,7 +464,7 @@ mod tests {
         assert!(!record.reserve());
 
         // After block is cleared, peer should be eligible again
-        assert!(record.clear_expired_block());
+        record.clear_expired_block();
         assert!(!record.is_blocked());
         assert!(record.eligible());
         assert!(record.reserve());
@@ -483,12 +482,9 @@ mod tests {
         assert!(record.block(block_until()));
         assert!(record.blocked_until.is_some());
 
-        // Clear should return true and clear the block
-        assert!(record.clear_expired_block());
+        // Clear should clear the block
+        record.clear_expired_block();
         assert!(record.blocked_until.is_none());
-
-        // Subsequent clear should return false
-        assert!(!record.clear_expired_block());
     }
 
     #[test]

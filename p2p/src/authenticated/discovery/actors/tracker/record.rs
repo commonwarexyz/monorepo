@@ -218,13 +218,12 @@ impl<C: PublicKey> Record<C> {
 
     /// Clear the block on this peer.
     ///
-    /// Returns `true` if a block was cleared.
-    pub const fn clear_expired_block(&mut self) -> bool {
-        if self.is_blocked() {
-            self.blocked_until = None;
-            return true;
-        }
-        false
+    /// # Panics
+    ///
+    /// Panics if the peer is not blocked.
+    pub fn clear_expired_block(&mut self) {
+        assert!(self.is_blocked());
+        self.blocked_until = None;
     }
 
     /// Returns the number of peer sets this peer is part of.
@@ -1009,18 +1008,16 @@ mod tests {
         assert!(!record.eligible());
 
         // After block is cleared
-        assert!(record.clear_expired_block());
+        record.clear_expired_block();
         assert!(!record.is_blocked());
         record.increment(); // Need sets > 0 to be eligible
         assert!(record.eligible());
 
-        // clear_expired_block returns false when not blocked
+        // Test clear on another record
         let mut record2 = Record::<PublicKey>::unknown();
-        assert!(!record2.clear_expired_block());
         record2.block(block_until());
         assert!(record2.is_blocked());
-        assert!(record2.clear_expired_block());
+        record2.clear_expired_block();
         assert!(!record2.is_blocked());
-        assert!(!record2.clear_expired_block());
     }
 }
