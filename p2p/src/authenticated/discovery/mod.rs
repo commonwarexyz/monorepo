@@ -1644,7 +1644,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_peer_restart_with_new_address() {
+    fn test_many_peer_restart_with_new_address() {
         let base_port = 3500;
         let n: usize = 5;
 
@@ -1842,6 +1842,221 @@ mod tests {
                         received.insert(sender);
                     }
                 }
+            }
+
+            assert_no_rate_limiting(&context);
+        });
+    }
+
+    #[test_traced]
+    fn test_peer_restart_with_new_address_must_dial() {
+        let base_port = 3600;
+        let n: usize = 5;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create peers
+            let peers: Vec<_> = (0..n)
+                .map(|i| ed25519::PrivateKey::from_seed(i as u64))
+                .collect();
+            let addresses: Vec<_> = peers.iter().map(|p| p.public_key()).collect();
+
+            // Track all senders/receivers/handles across restarts
+            type NetworkHandle = commonware_runtime::Handle<()>;
+            let mut senders: Vec<Option<channels::Sender<_, _>>> = (0..n).map(|_| None).collect();
+            let mut receivers: Vec<Option<channels::Receiver<_>>> = (0..n).map(|_| None).collect();
+            let mut handles: Vec<Option<NetworkHandle>> = (0..n).map(|_| None).collect();
+
+            // Track port allocations for each peer (updated on restart)
+            let mut ports: Vec<u16> = (0..n).map(|i| base_port + i as u16).collect();
+
+            // Peer 2 will advertise a WRONG dialable address (unreachable IP)
+            // All other peers advertise correct addresses
+            // This means when peer 1 restarts, it CANNOT dial peer 2 (wrong address)
+            // Peer 2 must dial peer 1 to reconnect
+            let wrong_ip = IpAddr::V4(Ipv4Addr::new(10, 255, 255, 1)); // Unreachable IP
+            let wrong_address_peer_idx = 2;
+
+            for (i, peer) in peers.iter().enumerate() {
+                let peer_context = context.with_label(&format!("peer_{i}"));
+                let listen_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[i]);
+
+                // Peer 2 advertises wrong IP, others advertise correct addresses
+                let dialable_addr: Ingress = if i == wrong_address_peer_idx {
+                    SocketAddr::new(wrong_ip, ports[i]).into()
+                } else {
+                    listen_addr.into()
+                };
+
+                // Create bootstrappers (everyone connects to peer 0)
+                let mut bootstrappers = Vec::new();
+                if i > 0 {
+                    bootstrappers.push((
+                        addresses[0].clone(),
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[0]).into(),
+                    ));
+                }
+
+                let mut config =
+                    Config::test(peer.clone(), listen_addr, bootstrappers, 1_024 * 1_024);
+                config.dialable = dialable_addr;
+
+                let (mut network, mut oracle) =
+                    Network::new(peer_context.with_label("network"), config);
+
+                oracle
+                    .update(0, addresses.clone().try_into().unwrap())
+                    .await;
+
+                let (sender, receiver) =
+                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                senders[i] = Some(sender);
+                receivers[i] = Some(receiver);
+
+                let handle = network.start();
+                handles[i] = Some(handle);
+            }
+
+            // Wait for full connectivity
+            for (i, sender) in senders.iter_mut().enumerate() {
+                let sender = sender.as_mut().unwrap();
+                loop {
+                    let sent = sender
+                        .send(Recipients::All, peers[i].public_key().to_vec().into(), true)
+                        .await
+                        .unwrap();
+                    if sent.len() == n - 1 {
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(100)).await;
+                }
+            }
+
+            // Verify each peer can receive from all others
+            for receiver in receivers.iter_mut() {
+                let receiver = receiver.as_mut().unwrap();
+                let mut received = HashSet::new();
+                while received.len() < n - 1 {
+                    let (sender, message) = receiver.recv().await.unwrap();
+                    assert_eq!(sender.as_ref(), message.as_ref());
+                    received.insert(sender);
+                }
+            }
+
+            // Restart peer 1 with a new port
+            // After restart, peer 1 can dial peers 0, 3, 4 (correct addresses)
+            // but CANNOT dial peer 2 (wrong address).
+            // Peer 2 must dial peer 1 to reconnect (after learning peer 1's new address
+            // through gossip from the bootstrapper).
+            let restart_peer_idx = 1;
+            let new_port = base_port + 100;
+            ports[restart_peer_idx] = new_port;
+
+            // Abort the peer's network
+            if let Some(handle) = handles[restart_peer_idx].take() {
+                handle.abort();
+            }
+            senders[restart_peer_idx] = None;
+            receivers[restart_peer_idx] = None;
+
+            // Wait for connections to be detected as closed
+            context.sleep(Duration::from_secs(2)).await;
+
+            // Verify the peer is no longer reachable from peer 0
+            let peer0_sender = senders[0].as_mut().unwrap();
+            let sent = peer0_sender
+                .send(
+                    Recipients::One(addresses[restart_peer_idx].clone()),
+                    addresses[0].to_vec().into(),
+                    true,
+                )
+                .await
+                .unwrap();
+            assert!(
+                sent.is_empty(),
+                "peer {restart_peer_idx} should be disconnected after shutdown"
+            );
+
+            // Restart the peer with a NEW port and CORRECT dialable address
+            let peer_context = context.with_label(&format!("peer_{restart_peer_idx}_restarted"));
+            let listen_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), new_port);
+            let bootstrappers = vec![(
+                addresses[0].clone(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[0]).into(),
+            )];
+
+            let config = Config::test(
+                peers[restart_peer_idx].clone(),
+                listen_addr,
+                bootstrappers,
+                1_024 * 1_024,
+            );
+
+            let (mut network, mut oracle) =
+                Network::new(peer_context.with_label("network"), config);
+
+            oracle
+                .update(0, addresses.clone().try_into().unwrap())
+                .await;
+
+            let (sender, receiver) =
+                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            senders[restart_peer_idx] = Some(sender);
+            receivers[restart_peer_idx] = Some(receiver);
+
+            let handle = network.start();
+            handles[restart_peer_idx] = Some(handle);
+
+            // Wait for the restarted peer to reconnect to all other peers
+            // For peer 2 (wrong address), this MUST happen via:
+            // 1. Restarted peer dials peer 0 (bootstrapper)
+            // 2. Peer 0 gossips restarted peer's new address to peer 2
+            // 3. Peer 2 dials the restarted peer
+            let restarted_sender = senders[restart_peer_idx].as_mut().unwrap();
+            loop {
+                let sent = restarted_sender
+                    .send(
+                        Recipients::All,
+                        peers[restart_peer_idx].public_key().to_vec().into(),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                if sent.len() == n - 1 {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+
+            // Verify all other peers can send to the restarted peer
+            for i in 0..n {
+                if i == restart_peer_idx {
+                    continue;
+                }
+                let sender = senders[i].as_mut().unwrap();
+                loop {
+                    let sent = sender
+                        .send(
+                            Recipients::One(addresses[restart_peer_idx].clone()),
+                            peers[i].public_key().to_vec().into(),
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                    if sent.len() == 1 {
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(100)).await;
+                }
+            }
+
+            // Verify the restarted peer receives from all others
+            let restarted_receiver = receivers[restart_peer_idx].as_mut().unwrap();
+            let mut received = HashSet::new();
+            while received.len() < n - 1 {
+                let (sender, message) = restarted_receiver.recv().await.unwrap();
+                assert_eq!(sender.as_ref(), message.as_ref());
+                received.insert(sender);
             }
 
             assert_no_rate_limiting(&context);
