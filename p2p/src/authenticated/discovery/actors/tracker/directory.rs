@@ -290,14 +290,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Attempt to block a peer for the configured duration, updating the metrics accordingly.
     pub fn block(&mut self, peer: &C) {
-        let blocked_until = self.context.current() + self.block_duration;
-        if self.blocked.block(peer.clone(), blocked_until) {
-            self.metrics.blocked.inc();
-            // Also mark the record as blocked if it exists
-            if let Some(record) = self.peers.get_mut(peer) {
-                record.block();
-            }
+        // Only add to queue if the record can actually be blocked
+        let Some(record) = self.peers.get_mut(peer) else {
+            return;
+        };
+        if !record.block() {
+            return;
         }
+        let blocked_until = self.context.current() + self.block_duration;
+        self.blocked.block(peer.clone(), blocked_until);
+        self.metrics.blocked.inc();
     }
 
     // ---------- Getters ----------
@@ -463,5 +465,122 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.peers.remove(peer);
         self.metrics.tracked.dec();
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox};
+    use commonware_cryptography::{secp256r1::standard::PrivateKey, Signer};
+    use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_utils::NZU32;
+    use std::net::SocketAddr;
+
+    const NAMESPACE: &[u8] = b"test";
+
+    fn test_socket() -> SocketAddr {
+        SocketAddr::from(([8, 8, 8, 8], 8080))
+    }
+
+    fn create_myself_info<S>(
+        signer: &S,
+        socket: SocketAddr,
+        timestamp: u64,
+    ) -> types::Info<S::PublicKey>
+    where
+        S: commonware_cryptography::Signer,
+    {
+        types::Info::sign(signer, NAMESPACE, socket, timestamp)
+    }
+
+    #[test]
+    fn test_block_myself_no_panic_on_expiry() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_pk = signer.public_key();
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = Config {
+            allow_private_ips: false,
+            allow_dns: true,
+            max_sets: 3,
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+
+            // Blocking myself should be ignored (Myself is unblockable)
+            directory.block(&my_pk);
+
+            // Metrics should not be incremented
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                0,
+                "Blocking myself should not increment metric"
+            );
+
+            // No unblock deadline should be set
+            assert!(
+                directory.next_unblock_deadline().is_none(),
+                "No deadline since nothing was blocked"
+            );
+
+            // Advance time past block duration
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+
+            // unblock_expired should not panic
+            directory.unblock_expired();
+        });
+    }
+
+    #[test]
+    fn test_block_nonexistent_peer_ignored() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let unknown_pk = PrivateKey::from_seed(99).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = Config {
+            allow_private_ips: false,
+            allow_dns: true,
+            max_sets: 3,
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+
+            // Blocking a peer that doesn't exist should be ignored
+            directory.block(&unknown_pk);
+
+            // Metrics should not be incremented
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                0,
+                "Blocking nonexistent peer should not increment metric"
+            );
+
+            // No unblock deadline should be set
+            assert!(
+                directory.next_unblock_deadline().is_none(),
+                "No deadline since nothing was blocked"
+            );
+
+            // Advance time past block duration
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+
+            // unblock_expired should not panic
+            directory.unblock_expired();
+        });
     }
 }

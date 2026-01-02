@@ -229,14 +229,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Attempt to block a peer for the configured duration, updating the metrics accordingly.
     pub fn block(&mut self, peer: &C) {
-        let blocked_until = self.context.current() + self.block_duration;
-        if self.blocked.block(peer.clone(), blocked_until) {
-            self.metrics.blocked.inc();
-            // Also mark the record as blocked if it exists
-            if let Some(record) = self.peers.get_mut(peer) {
-                record.block();
-            }
+        // Only add to queue if the record can actually be blocked
+        let Some(record) = self.peers.get_mut(peer) else {
+            return;
+        };
+        if !record.block() {
+            return;
         }
+        let blocked_until = self.context.current() + self.block_duration;
+        self.blocked.block(peer.clone(), blocked_until);
+        self.metrics.blocked.inc();
     }
 
     // ---------- Getters ----------
@@ -1085,6 +1087,93 @@ mod tests {
             context.sleep(block_duration + Duration::from_secs(1)).await;
             assert!(directory.unblock_expired());
             assert_eq!(directory.metrics.blocked.get(), 0);
+        });
+    }
+
+    #[test]
+    fn test_block_myself_no_panic_on_expiry() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk.clone(), config, releaser);
+
+            // Blocking myself should be ignored (Myself is unblockable)
+            directory.block(&my_pk);
+
+            // Metrics should not be incremented
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                0,
+                "Blocking myself should not increment metric"
+            );
+
+            // No unblock deadline should be set
+            assert!(
+                directory.next_unblock_deadline().is_none(),
+                "No deadline since nothing was blocked"
+            );
+
+            // Advance time past block duration
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+
+            // unblock_expired should not panic and return false
+            assert!(!directory.unblock_expired(), "No peers should be unblocked");
+        });
+    }
+
+    #[test]
+    fn test_block_nonexistent_peer_ignored() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let unknown_pk = ed25519::PrivateKey::from_seed(99).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            // Blocking a peer that doesn't exist should be ignored
+            directory.block(&unknown_pk);
+
+            // Metrics should not be incremented
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                0,
+                "Blocking nonexistent peer should not increment metric"
+            );
+
+            // No unblock deadline should be set
+            assert!(
+                directory.next_unblock_deadline().is_none(),
+                "No deadline since nothing was blocked"
+            );
+
+            // Advance time past block duration
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+
+            // unblock_expired should not panic and return false
+            assert!(!directory.unblock_expired(), "No peers should be unblocked");
         });
     }
 }
