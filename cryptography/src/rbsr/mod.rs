@@ -459,6 +459,21 @@ pub trait Storage {
         }
         ids
     }
+
+    /// Check if storage contains an item with the given ID.
+    ///
+    /// This searches the entire storage, not just a range, because items
+    /// are identified by ID only (hints are just for ordering).
+    fn contains_id(&self, id: &Digest) -> bool {
+        for i in 0..self.len() {
+            if let Some(item) = self.get(i) {
+                if &item.id == id {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 /// In-memory vector-based storage implementation.
@@ -618,12 +633,10 @@ impl<'a, S: Storage> Reconciler<'a, S> {
                     }
                 }
                 RangeMode::IdList(remote_ids) => {
-                    // Compare ID lists to find what we're missing
-                    let local_ids = self.storage.ids_in_range(current_idx, end_idx);
-
-                    // Find IDs remote has that we don't
+                    // Find IDs remote has that we don't (check entire storage,
+                    // not just range - ID may exist with different hint)
                     for remote_id in remote_ids {
-                        if !local_ids.contains(remote_id) {
+                        if !self.storage.contains_id(remote_id) {
                             missing.push(*remote_id);
                         }
                     }
@@ -632,6 +645,7 @@ impl<'a, S: Storage> Reconciler<'a, S> {
                     // - Initiator receiving IdList: send our IdList so responder can compare
                     // - Responder receiving IdList: this completes the exchange, reply with Skip
                     if self.is_initiator {
+                        let local_ids = self.storage.ids_in_range(current_idx, end_idx);
                         response_ranges.push(Range::new(
                             range.upper_bound.clone(),
                             RangeMode::IdList(local_ids),
