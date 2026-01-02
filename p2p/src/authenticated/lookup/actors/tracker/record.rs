@@ -74,8 +74,8 @@ impl Record {
     /// Update the record with a new address.
     pub fn update(&mut self, addr: types::Address) {
         match &mut self.address {
-            Address::Myself | Address::Blocked(_) => {}
-            Address::Known(existing) => *existing = addr,
+            Address::Myself => {}
+            Address::Known(existing) | Address::Blocked(existing) => *existing = addr,
         }
     }
 

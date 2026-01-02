@@ -557,13 +557,14 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
         let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
             rate_limit: Quota::per_second(NZU32!(10)),
-            block_duration: Duration::from_secs(100),
+            block_duration,
         };
 
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -586,6 +587,7 @@ mod tests {
                 "Blocked peer should not expose ingress"
             );
 
+            // Update the address while blocked
             directory.add_set(1, [(pk_1.clone(), addr(addr_2))].try_into().unwrap());
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(
@@ -596,6 +598,22 @@ mod tests {
             assert!(
                 record.ingress().is_none(),
                 "Blocked peer should not expose ingress"
+            );
+
+            // Advance time past block duration and unblock
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            // Verify the peer is unblocked with the UPDATED address
+            let record = directory.peers.get(&pk_1).unwrap();
+            assert!(
+                !record.is_blocked(),
+                "Peer should be unblocked after expiry"
+            );
+            assert_eq!(
+                record.ingress(),
+                Some(Ingress::Socket(addr_2)),
+                "Unblocked peer should have the updated address, not the original"
             );
         });
     }
