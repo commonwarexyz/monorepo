@@ -240,7 +240,6 @@ fn run<P: Simplex>(input: FuzzInput) {
                 scheme: schemes[i].clone(),
                 elector,
                 automaton: application.clone(),
-                relay: application.clone(),
                 reporter: reporter.clone(),
                 partition: validator.to_string(),
                 mailbox_size: 1024,

@@ -175,22 +175,6 @@ cfg_if::cfg_if! {
             ) -> impl Future<Output = bool> + Send;
         }
 
-        /// Relay is the interface responsible for broadcasting payloads to the network.
-        ///
-        /// The consensus engine is only aware of a payload's digest, not its contents. It is up
-        /// to the relay to efficiently broadcast the full payload to other participants.
-        pub trait Relay: Clone + Send + 'static {
-            /// Hash of an arbitrary payload.
-            type Digest: Digest;
-
-            /// Called once consensus begins working towards a proposal provided by `Automaton` (i.e.
-            /// it isn't dropped).
-            ///
-            /// Other participants may not begin voting on a proposal until they have the full contents,
-            /// so timely delivery often yields better performance.
-            fn broadcast(&mut self, payload: Self::Digest) -> impl Future<Output = ()> + Send;
-        }
-
         /// Reporter is the interface responsible for reporting activity to some external actor.
         pub trait Reporter: Clone + Send + 'static {
             /// Activity is specified by the underlying consensus implementation and can be interpreted if desired.

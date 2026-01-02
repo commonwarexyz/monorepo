@@ -240,7 +240,6 @@ fn main() {
                 elector: Random,
                 blocker: oracle,
                 automaton: mailbox.clone(),
-                relay: mailbox.clone(),
                 reporter: mailbox.clone(),
                 partition: String::from("log"),
                 mailbox_size: 1024,

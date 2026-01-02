@@ -16,7 +16,7 @@
 //! # Usage
 //!
 //! Wrap your application implementation with [Marshaled::new] and provide it to your
-//! consensus engine for the [Automaton] and [Relay]. The wrapper handles all epoch logic transparently.
+//! consensus engine as the [Automaton]. The wrapper handles all epoch logic transparently.
 //!
 //! ```rust,ignore
 //! let application = Marshaled::new(
@@ -37,8 +37,7 @@ use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
     simplex::types::Context,
     types::{Epoch, Epocher, Round},
-    Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
-    VerifyingApplication,
+    Application, Automaton, Block, CertifiableAutomaton, Epochable, Reporter, VerifyingApplication,
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
@@ -46,13 +45,12 @@ use commonware_utils::futures::ClosedExt;
 use futures::{
     channel::oneshot::{self, Canceled},
     future::{select, try_join, Either, Ready},
-    lock::Mutex,
     pin_mut,
 };
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
-use std::{sync::Arc, time::Instant};
-use tracing::{debug, warn};
+use std::time::Instant;
+use tracing::debug;
 
 /// An [Application] adapter that handles epoch transitions and validates block ancestry.
 ///
@@ -86,7 +84,6 @@ where
     application: A,
     marshal: marshal::Mailbox<S, B>,
     epocher: ES,
-    last_built: Arc<Mutex<Option<(Round, B)>>>,
 
     build_duration: Gauge,
 }
@@ -113,7 +110,6 @@ where
             application,
             marshal,
             epocher,
-            last_built: Arc::new(Mutex::new(None)),
 
             build_duration,
         }
@@ -172,15 +168,14 @@ where
     /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
-    /// contain the proposed block's commitment when ready. The built block is cached for later
-    /// broadcasting.
+    /// contain the proposed block's commitment when ready. The built block is persisted and
+    /// broadcast to the network before returning.
     async fn propose(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let last_built = self.last_built.clone();
         let epocher = self.epocher.clone();
 
         // Metrics
@@ -229,10 +224,7 @@ where
                     .expect("current epoch should exist");
                 if parent.height() == last_in_epoch {
                     let digest = parent.commitment();
-                    {
-                        let mut lock = last_built.lock().await;
-                        *lock = Some((consensus_context.round, parent));
-                    }
+                    marshal.proposed(consensus_context.round, parent).await;
 
                     let result = tx.send(digest);
                     debug!(
@@ -273,10 +265,7 @@ where
                 let _ = build_duration.try_set(start.elapsed().as_millis());
 
                 let digest = built_block.commitment();
-                {
-                    let mut lock = last_built.lock().await;
-                    *lock = Some((consensus_context.round, built_block));
-                }
+                marshal.proposed(consensus_context.round, built_block).await;
 
                 let result = tx.send(digest);
                 debug!(
@@ -442,46 +431,6 @@ where
     ES: Epocher,
 {
     // Uses default certify implementation which always returns true
-}
-
-impl<E, S, A, B, ES> Relay for Marshaled<E, S, A, B, ES>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
-    B: Block,
-    ES: Epocher,
-{
-    type Digest = B::Commitment;
-
-    /// Broadcasts a previously built block to the network.
-    ///
-    /// This uses the cached block from the last proposal operation. If no block was built or
-    /// the commitment does not match the cached block, the broadcast is skipped with a warning.
-    async fn broadcast(&mut self, commitment: Self::Digest) {
-        let Some((round, block)) = self.last_built.lock().await.clone() else {
-            warn!("missing block to broadcast");
-            return;
-        };
-
-        if block.commitment() != commitment {
-            warn!(
-                round = %round,
-                commitment = %block.commitment(),
-                height = block.height(),
-                "skipping requested broadcast of block with mismatched commitment"
-            );
-            return;
-        }
-
-        debug!(
-            round = %round,
-            commitment = %block.commitment(),
-            height = block.height(),
-            "requested broadcast of built block"
-        );
-        self.marshal.proposed(round, block).await;
-    }
 }
 
 impl<E, S, A, B, ES> Reporter for Marshaled<E, S, A, B, ES>

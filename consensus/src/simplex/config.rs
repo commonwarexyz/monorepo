@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     types::{Epoch, ViewDelta},
-    CertifiableAutomaton, Relay, Reporter,
+    CertifiableAutomaton, Reporter,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
@@ -18,7 +18,6 @@ pub struct Config<
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
-    R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
     /// Signing scheme for the consensus engine.
@@ -47,9 +46,6 @@ pub struct Config<
 
     /// Automaton for the consensus engine.
     pub automaton: A,
-
-    /// Relay for the consensus engine.
-    pub relay: R,
 
     /// Reporter for the consensus engine.
     ///
@@ -116,9 +112,8 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
-        R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
-    > Config<S, L, B, D, A, R, F>
+    > Config<S, L, B, D, A, F>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

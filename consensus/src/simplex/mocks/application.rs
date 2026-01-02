@@ -5,7 +5,7 @@ use super::relay::Relay;
 use crate::{
     simplex::types::Context,
     types::{Epoch, Round},
-    Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
+    Automaton as Au, CertifiableAutomaton as CAu,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
@@ -42,9 +42,6 @@ pub enum Message<D: Digest, P: PublicKey> {
     Certify {
         payload: D,
         response: oneshot::Sender<bool>,
-    },
-    Broadcast {
-        payload: D,
     },
 }
 
@@ -113,17 +110,6 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
     }
 }
 
-impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
-    type Digest = D;
-
-    async fn broadcast(&mut self, payload: Self::Digest) {
-        self.sender
-            .send(Message::Broadcast { payload })
-            .await
-            .expect("Failed to send broadcast");
-    }
-}
-
 const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
@@ -177,8 +163,6 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     fail_verification: bool,
     should_certify: Certifier<H::Digest>,
 
-    pending: HashMap<H::Digest, Bytes>,
-
     verified: HashSet<H::Digest>,
 }
 
@@ -212,7 +196,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 fail_verification: false,
                 should_certify: cfg.should_certify,
 
-                pending: HashMap::new(),
                 verified: HashSet::new(),
             },
             Mailbox::new(sender),
@@ -253,8 +236,10 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         // Mark verified
         self.verified.insert(digest);
 
-        // Store pending payload
-        self.pending.insert(digest, payload.into());
+        // Broadcast payload to other participants
+        self.relay
+            .broadcast(&self.me, (digest, payload.into()))
+            .await;
         digest
     }
 
@@ -310,11 +295,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         }
     }
 
-    async fn broadcast(&mut self, payload: H::Digest) {
-        let contents = self.pending.remove(&payload).expect("missing payload");
-        self.relay.broadcast(&self.me, (payload, contents)).await;
-    }
-
     pub fn start(mut self) -> Handle<()> {
         spawn_cell!(self.context, self.run().await)
     }
@@ -363,9 +343,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
                         let certified = self.certify(payload, contents).await;
                         let _ = response.send(certified);
-                    }
-                    Message::Broadcast { payload } => {
-                        self.broadcast(payload).await;
                     }
                 }
             },

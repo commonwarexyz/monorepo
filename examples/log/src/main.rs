@@ -208,7 +208,6 @@ fn main() {
             elector: RoundRobin::<Sha256>::default(),
             blocker: oracle,
             automaton: mailbox.clone(),
-            relay: mailbox.clone(),
             reporter: reporter.clone(),
             namespace,
             partition: String::from("log"),
