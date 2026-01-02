@@ -503,4 +503,15 @@ mod tests {
         batch_verify_rejects_malleability::<MinPk>();
         batch_verify_rejects_malleability::<MinSig>();
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<PartialSignature<MinPk>>,
+            CodecConformance<PartialSignature<MinSig>>,
+        }
+    }
 }
