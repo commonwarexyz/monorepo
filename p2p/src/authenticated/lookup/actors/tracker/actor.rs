@@ -3,10 +3,13 @@ use super::{
     ingress::{Message, Oracle},
     Config,
 };
-use crate::authenticated::{
-    lookup::actors::{peer, tracker::ingress::Releaser},
-    mailbox::UnboundedMailbox,
-    Mailbox,
+use crate::{
+    authenticated::{
+        lookup::actors::{peer, tracker::ingress::Releaser},
+        mailbox::UnboundedMailbox,
+        Mailbox,
+    },
+    utils::blocked,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
@@ -19,17 +22,8 @@ use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
     net::IpAddr,
-    time::SystemTime,
 };
 use tracing::debug;
-
-/// Helper to sleep until the next unblock deadline, or wait forever if none.
-async fn wait_for_unblock<E: Clock>(context: &E, deadline: Option<SystemTime>) {
-    match deadline {
-        Some(time) => context.sleep_until(time).await,
-        None => futures::future::pending().await,
-    }
-}
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
@@ -118,7 +112,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             on_stopped => {
                 debug!("context shutdown, stopping tracker");
             },
-            _ = wait_for_unblock(&self.context, self.directory.next_unblock_deadline()) => {
+            _ = blocked::wait_for(&self.context, self.directory.next_unblock_deadline()) => {
                 self.handle_unblock().await;
             },
             msg = self.receiver.next() => {

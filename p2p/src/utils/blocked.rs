@@ -1,5 +1,6 @@
 //! Utility for tracking blocked peers with expiration.
 
+use commonware_runtime::Clock;
 use std::{
     collections::{HashMap, VecDeque},
     hash::Hash,
@@ -78,6 +79,14 @@ impl<K: Eq + Hash + Clone> Queue<K> {
 impl<K: Eq + Hash + Clone> Default for Queue<K> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Sleep until the next deadline, or wait forever if none.
+pub async fn wait_for<E: Clock>(context: &E, deadline: Option<SystemTime>) {
+    match deadline {
+        Some(time) => context.sleep_until(time).await,
+        None => futures::future::pending().await,
     }
 }
 

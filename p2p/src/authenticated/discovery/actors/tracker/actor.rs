@@ -3,12 +3,15 @@ use super::{
     ingress::{Message, Oracle},
     Config,
 };
-use crate::authenticated::{
-    discovery::{
-        actors::tracker::ingress::Releaser,
-        types::{self, Info, InfoVerifier},
+use crate::{
+    authenticated::{
+        discovery::{
+            actors::tracker::ingress::Releaser,
+            types::{self, Info, InfoVerifier},
+        },
+        mailbox::UnboundedMailbox,
     },
-    mailbox::UnboundedMailbox,
+    utils::blocked,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
@@ -18,16 +21,7 @@ use commonware_runtime::{
 use commonware_utils::{ordered::Set, union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use rand::{seq::SliceRandom, Rng};
-use std::time::SystemTime;
 use tracing::debug;
-
-/// Helper to sleep until the next unblock deadline, or wait forever if none.
-async fn wait_for_unblock<E: Clock>(context: &E, deadline: Option<SystemTime>) {
-    match deadline {
-        Some(time) => context.sleep_until(time).await,
-        None => futures::future::pending().await,
-    }
-}
 
 // Bytes to add to the namespace to prevent replay attacks.
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
@@ -140,7 +134,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             on_stopped => {
                 debug!("context shutdown, stopping tracker");
             },
-            _ = wait_for_unblock(&self.context, self.directory.next_unblock_deadline()) => {
+            _ = blocked::wait_for(&self.context, self.directory.next_unblock_deadline()) => {
                 self.handle_unblock();
             },
             msg = self.receiver.next() => {
