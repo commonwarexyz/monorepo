@@ -101,10 +101,6 @@ impl Record {
     ///
     /// Panics if the peer is not blocked.
     pub fn clear_expired_block(&mut self) {
-        assert!(
-            self.is_blocked(),
-            "clear_expired_block called on non-blocked record"
-        );
         let Address::Blocked(addr) = &self.address else {
             unreachable!()
         };
@@ -156,6 +152,7 @@ impl Record {
     // ---------- Getters ----------
 
     /// Returns `true` if the peer is currently blocked.
+    #[cfg(test)]
     pub const fn is_blocked(&self) -> bool {
         matches!(self.address, Address::Blocked(_))
     }
