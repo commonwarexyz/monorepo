@@ -607,7 +607,7 @@ mod test {
     use crate::{marshal::mocks::block::Block as MockBlock, Block as _};
     use commonware_codec::{Decode, Encode};
     use commonware_coding::{CodecConfig, ReedSolomon};
-    use commonware_cryptography::Sha256;
+    use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
 
     const MAX_SHARD_SIZE: CodecConfig = CodecConfig {
         maximum_shard_size: 1024 * 1024, // 1 MiB
@@ -655,7 +655,7 @@ mod test {
         let (commitment, shards) = RS::encode(&CONFIG, MOCK_BLOCK_DATA, CONCURRENCY).unwrap();
         let raw_shard = shards.first().cloned().unwrap();
 
-        let commitment = CodingCommitment::from((Sha256::EMPTY, commitment, CONFIG));
+        let commitment = CodingCommitment::from((Sha256Digest::EMPTY, commitment, CONFIG));
         let shard = RShard::new(commitment, 0, DistributionShard::Strong(raw_shard.clone()));
         let encoded = shard.encode();
         let decoded = RShard::decode_cfg(&mut encoded.as_ref(), &MAX_SHARD_SIZE).unwrap();

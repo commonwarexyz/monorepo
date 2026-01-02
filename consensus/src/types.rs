@@ -606,7 +606,9 @@ impl Random for CodingCommitment {
     }
 }
 
-impl Digest for CodingCommitment {}
+impl Digest for CodingCommitment {
+    const EMPTY: Self = Self([0u8; Self::SIZE]);
+}
 
 impl Write for CodingCommitment {
     fn write(&self, buf: &mut impl bytes::BufMut) {

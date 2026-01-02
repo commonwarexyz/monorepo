@@ -137,7 +137,7 @@ where
 mod test {
     use super::*;
     use crate::marshal::mocks::block::Block;
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest as Sha256Digest, Digest, Sha256};
     use commonware_macros::test_async;
     use futures::StreamExt;
 
@@ -160,8 +160,8 @@ mod test {
         AncestorStream::new(
             MockProvider::default(),
             vec![
-                Block::new::<Sha256>(Sha256::EMPTY, 1, 1),
-                Block::new::<Sha256>(Sha256::EMPTY, 3, 3),
+                Block::new::<Sha256>(Sha256Digest::EMPTY, 1, 1),
+                Block::new::<Sha256>(Sha256Digest::EMPTY, 3, 3),
             ],
         );
     }
@@ -175,7 +175,7 @@ mod test {
 
     #[test_async]
     async fn test_yields_ancestors() {
-        let block1 = Block::new::<Sha256>(Sha256::EMPTY, 1, 1);
+        let block1 = Block::new::<Sha256>(Sha256Digest::EMPTY, 1, 1);
         let block2 = Block::new::<Sha256>(block1.digest(), 2, 2);
         let block3 = Block::new::<Sha256>(block2.digest(), 3, 3);
 
@@ -188,7 +188,7 @@ mod test {
 
     #[test_async]
     async fn test_yields_ancestors_all_buffered() {
-        let block1 = Block::new::<Sha256>(Sha256::EMPTY, 1, 1);
+        let block1 = Block::new::<Sha256>(Sha256Digest::EMPTY, 1, 1);
         let block2 = Block::new::<Sha256>(block1.digest(), 2, 2);
         let block3 = Block::new::<Sha256>(block2.digest(), 3, 3);
 
