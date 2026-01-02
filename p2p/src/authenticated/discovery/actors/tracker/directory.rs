@@ -289,14 +289,22 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Attempt to block a peer for the configured duration, updating the metrics accordingly.
+    ///
+    /// Peers can be blocked even if they don't have a record yet. The block will be applied
+    /// when they are added to a peer set via `add_set`.
     pub fn block(&mut self, peer: &C) {
-        // Only add to queue if the record can actually be blocked
-        let Some(record) = self.peers.get_mut(peer) else {
-            return;
-        };
-        if !record.block() {
+        // Already blocked in queue
+        if self.blocked.is_blocked(peer) {
             return;
         }
+
+        // If record exists, use record.block() which handles Myself/Blocked
+        if let Some(record) = self.peers.get_mut(peer) {
+            if !record.block() {
+                return;
+            }
+        }
+
         let blocked_until = self.context.current() + self.block_duration;
         self.blocked.block(peer.clone(), blocked_until);
         self.metrics.blocked.inc();
@@ -540,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn test_block_nonexistent_peer_ignored() {
+    fn test_block_nonexistent_peer_then_add_to_set() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
         let my_info = create_myself_info(&signer, test_socket(), 100);
@@ -560,27 +568,131 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
 
-            // Blocking a peer that doesn't exist should be ignored
+            // Block a peer that doesn't exist yet
             directory.block(&unknown_pk);
 
-            // Metrics should not be incremented
+            // Metrics should be incremented
             assert_eq!(
                 directory.metrics.blocked.get(),
-                0,
-                "Blocking nonexistent peer should not increment metric"
+                1,
+                "Blocking nonexistent peer should increment metric"
             );
 
-            // No unblock deadline should be set
+            // Unblock deadline should be set
             assert!(
-                directory.next_unblock_deadline().is_none(),
-                "No deadline since nothing was blocked"
+                directory.next_unblock_deadline().is_some(),
+                "Deadline should be set for blocked peer"
+            );
+
+            // Peer should not be in peers yet
+            assert!(
+                !directory.peers.contains_key(&unknown_pk),
+                "Peer should not be in peers yet"
+            );
+
+            // Now add the peer to a set
+            let peer_set: OrderedSet<_> = [unknown_pk.clone()].into_iter().try_collect().unwrap();
+            directory.add_set(0, peer_set);
+
+            // Peer should now be in peers and blocked
+            assert!(
+                directory.peers.contains_key(&unknown_pk),
+                "Peer should be in peers after add_set"
+            );
+            assert!(
+                directory.peers.get(&unknown_pk).unwrap().is_blocked(),
+                "Peer should be blocked after add_set"
+            );
+
+            // Peer should not be eligible
+            assert!(
+                !directory.eligible(&unknown_pk),
+                "Blocked peer should not be eligible"
             );
 
             // Advance time past block duration
             context.sleep(block_duration + Duration::from_secs(1)).await;
 
-            // unblock_expired should not panic
+            // Unblock the peer
             directory.unblock_expired();
+
+            // Metrics should be decremented
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                0,
+                "Blocked metric should be 0 after unblock"
+            );
+
+            // Peer should now be eligible
+            assert!(
+                directory.eligible(&unknown_pk),
+                "Peer should be eligible after unblock"
+            );
+        });
+    }
+
+    #[test]
+    fn test_block_peer_multiple_times() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let unknown_pk = PrivateKey::from_seed(99).public_key();
+        let registered_pk = PrivateKey::from_seed(50).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = Config {
+            allow_private_ips: false,
+            allow_dns: true,
+            max_sets: 3,
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+
+            // Register a peer
+            let peer_set: OrderedSet<_> = [registered_pk.clone()].into_iter().try_collect().unwrap();
+            directory.add_set(0, peer_set);
+            assert_eq!(directory.metrics.blocked.get(), 0);
+
+            // Block registered peer multiple times
+            directory.block(&registered_pk);
+            assert_eq!(directory.metrics.blocked.get(), 1);
+
+            directory.block(&registered_pk);
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                1,
+                "Blocking same registered peer twice should not increment metric"
+            );
+
+            directory.block(&registered_pk);
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                1,
+                "Blocking same registered peer thrice should not increment metric"
+            );
+
+            // Block a nonexistent peer multiple times
+            directory.block(&unknown_pk);
+            assert_eq!(directory.metrics.blocked.get(), 2);
+
+            directory.block(&unknown_pk);
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                2,
+                "Blocking same nonexistent peer twice should not increment metric"
+            );
+
+            directory.block(&unknown_pk);
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                2,
+                "Blocking same nonexistent peer thrice should not increment metric"
+            );
         });
     }
 }
