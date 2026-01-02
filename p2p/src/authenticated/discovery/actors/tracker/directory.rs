@@ -226,8 +226,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 Record::unknown()
             });
             // If peer is blocked (from before they were removed), mark the new record
-            if let Some(until) = self.blocked.blocked_until(peer) {
-                record.block(until);
+            if self.blocked.is_blocked(peer) {
+                record.block();
             }
             record.increment();
             set.update(peer, !record.want(self.dial_fail_limit));
@@ -295,7 +295,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             self.metrics.blocked.inc();
             // Also mark the record as blocked if it exists
             if let Some(record) = self.peers.get_mut(peer) {
-                record.block(blocked_until);
+                record.block();
             }
         }
     }

@@ -1,5 +1,5 @@
 use crate::types::{self, Ingress};
-use std::{net::IpAddr, time::SystemTime};
+use std::net::IpAddr;
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
@@ -9,6 +9,9 @@ pub enum Address {
 
     /// Address is provided when peer is registered.
     Known(types::Address),
+
+    /// Peer is blocked. Address info is preserved so it can be restored when unblocked.
+    Blocked(types::Address),
 }
 
 /// Represents the connection status of a peer.
@@ -41,9 +44,6 @@ pub struct Record {
 
     /// If `true`, the record should persist even if the peer is not part of any peer sets.
     persistent: bool,
-
-    /// If set, the peer is blocked until this time.
-    blocked_until: Option<SystemTime>,
 }
 
 impl Record {
@@ -56,7 +56,6 @@ impl Record {
             status: Status::Inert,
             sets: 0,
             persistent: false,
-            blocked_until: None,
         }
     }
 
@@ -67,7 +66,6 @@ impl Record {
             status: Status::Inert,
             sets: 0,
             persistent: true,
-            blocked_until: None,
         }
     }
 
@@ -75,33 +73,37 @@ impl Record {
 
     /// Update the record with a new address.
     pub fn update(&mut self, addr: types::Address) {
-        if matches!(self.address, Address::Myself) || self.is_blocked() {
-            return;
+        match &mut self.address {
+            Address::Myself | Address::Blocked(_) => {}
+            Address::Known(existing) => *existing = addr,
         }
-        self.address = Address::Known(addr);
     }
 
-    /// Attempt to mark the peer as blocked until a given time.
+    /// Attempt to mark the peer as blocked.
     ///
     /// Returns `true` if the peer was newly blocked.
     /// Returns `false` if the peer was already blocked or is the local node (unblockable).
-    pub const fn block(&mut self, until: SystemTime) -> bool {
-        if matches!(self.address, Address::Myself) || self.is_blocked() {
-            return false;
+    pub fn block(&mut self) -> bool {
+        match &self.address {
+            Address::Myself | Address::Blocked(_) => false,
+            Address::Known(addr) => {
+                self.address = Address::Blocked(addr.clone());
+                self.persistent = false;
+                true
+            }
         }
-        self.blocked_until = Some(until);
-        self.persistent = false;
-        true
     }
 
-    /// Clear the block on this peer.
+    /// Clear the block on this peer, restoring the original address.
     ///
     /// # Panics
     ///
     /// Panics if the peer is not blocked.
     pub fn clear_expired_block(&mut self) {
-        assert!(self.is_blocked());
-        self.blocked_until = None;
+        match std::mem::replace(&mut self.address, Address::Myself) {
+            Address::Blocked(addr) => self.address = Address::Known(addr),
+            _ => panic!("clear_expired_block called on non-blocked record"),
+        }
     }
 
     /// Increase the count of peer sets this peer is part of.
@@ -149,11 +151,8 @@ impl Record {
     // ---------- Getters ----------
 
     /// Returns `true` if the peer is currently blocked.
-    ///
-    /// Note: Blocks are cleared by the unblock timer, so this just checks if
-    /// `blocked_until` is set rather than comparing against current time.
     pub const fn is_blocked(&self) -> bool {
-        self.blocked_until.is_some()
+        matches!(self.address, Address::Blocked(_))
     }
 
     /// Returns the number of peer sets this peer is part of.
@@ -169,12 +168,12 @@ impl Record {
     /// - We are not already connected or reserved
     /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
     pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
-        if self.status != Status::Inert || self.is_blocked() {
+        if self.status != Status::Inert {
             return false;
         }
         let ingress = match &self.address {
             Address::Known(addr) => addr.ingress(),
-            Address::Myself => return false,
+            Address::Myself | Address::Blocked(_) => return false,
         };
         ingress.is_valid(allow_private_ips, allow_dns)
     }
@@ -194,14 +193,14 @@ impl Record {
         }
         match &self.address {
             Address::Known(addr) => addr.egress_ip() == source_ip,
-            Address::Myself => false,
+            Address::Myself | Address::Blocked(_) => false,
         }
     }
 
     /// Return the ingress address for dialing, if known.
     pub fn ingress(&self) -> Option<Ingress> {
         match &self.address {
-            Address::Myself => None,
+            Address::Myself | Address::Blocked(_) => None,
             Address::Known(addr) => Some(addr.ingress()),
         }
     }
@@ -209,7 +208,7 @@ impl Record {
     /// Return the egress IP for filtering, if known.
     pub const fn egress_ip(&self) -> Option<IpAddr> {
         match &self.address {
-            Address::Myself => None,
+            Address::Myself | Address::Blocked(_) => None,
             Address::Known(addr) => Some(addr.egress_ip()),
         }
     }
@@ -235,11 +234,8 @@ impl Record {
     /// separately: ingress validity for dialing (in `dialable()`), egress validity
     /// for the IP filter (in `Directory::eligible_egress_ips()`).
     pub const fn eligible(&self) -> bool {
-        if self.is_blocked() {
-            return false;
-        }
         match &self.address {
-            Address::Myself => false,
+            Address::Myself | Address::Blocked(_) => false,
             Address::Known(_) => self.sets > 0 || self.persistent,
         }
     }
@@ -247,7 +243,7 @@ impl Record {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{net::SocketAddr, time::Duration};
+    use std::net::SocketAddr;
 
     fn test_socket() -> SocketAddr {
         SocketAddr::from(([54, 12, 1, 9], 8080))
@@ -255,14 +251,6 @@ mod tests {
 
     fn test_address() -> types::Address {
         types::Address::Symmetric(test_socket())
-    }
-
-    fn now() -> SystemTime {
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000)
-    }
-
-    fn block_until() -> SystemTime {
-        now() + Duration::from_secs(100)
     }
 
     #[test]
@@ -282,7 +270,7 @@ mod tests {
     #[test]
     fn test_myself_blocked_to_known() {
         let mut record = Record::myself();
-        assert!(!record.block(block_until()), "Can't block myself");
+        assert!(!record.block(), "Can't block myself");
         assert!(!record.is_blocked(), "Can't block myself");
     }
 
@@ -315,32 +303,32 @@ mod tests {
     fn test_block_behavior_and_persistence() {
         let mut record_known = Record::known(test_address());
         assert!(!record_known.persistent);
-        assert!(record_known.block(block_until()));
+        assert!(record_known.block());
         assert!(record_known.is_blocked());
         assert!(!record_known.persistent);
 
         let mut record_reserved = Record::known(test_address());
         assert!(record_reserved.reserve());
-        assert!(record_reserved.block(block_until()));
+        assert!(record_reserved.block());
         assert_eq!(record_reserved.status, Status::Reserved);
 
         let mut record_active = Record::known(test_address());
         assert!(record_active.reserve());
         record_active.connect();
-        assert!(record_active.block(block_until()));
+        assert!(record_active.block());
         assert_eq!(record_active.status, Status::Active);
     }
 
     #[test]
     fn test_block_myself_and_already_blocked() {
         let mut record_myself = Record::myself();
-        assert!(!record_myself.block(block_until()), "Cannot block myself");
+        assert!(!record_myself.block(), "Cannot block myself");
         assert!(matches!(&record_myself.address, Address::Myself));
 
         let mut record_to_be_blocked = Record::known(test_address());
-        assert!(record_to_be_blocked.block(block_until()));
+        assert!(record_to_be_blocked.block());
         assert!(
-            !record_to_be_blocked.block(block_until()),
+            !record_to_be_blocked.block(),
             "Cannot block already blocked peer"
         );
         assert!(record_to_be_blocked.is_blocked());
@@ -439,7 +427,7 @@ mod tests {
     fn test_eligible_logic() {
         // Blocked and Myself are never eligible
         let mut record_blocked = Record::known(test_address());
-        record_blocked.block(block_until());
+        record_blocked.block();
         assert!(!record_blocked.eligible());
         assert!(!Record::myself().eligible());
 
@@ -458,7 +446,7 @@ mod tests {
         record.increment();
 
         // Block the peer
-        assert!(record.block(block_until()));
+        assert!(record.block());
         assert!(record.is_blocked());
         assert!(!record.eligible());
         assert!(!record.reserve());
@@ -479,12 +467,14 @@ mod tests {
         record.increment();
 
         // Block the peer
-        assert!(record.block(block_until()));
-        assert!(record.blocked_until.is_some());
+        assert!(record.block());
+        assert!(record.is_blocked());
+        assert!(matches!(record.address, Address::Blocked(_)));
 
-        // Clear should clear the block
+        // Clear should restore the address
         record.clear_expired_block();
-        assert!(record.blocked_until.is_none());
+        assert!(!record.is_blocked());
+        assert!(matches!(record.address, Address::Known(_)));
     }
 
     #[test]
@@ -538,7 +528,7 @@ mod tests {
         // Blocked - not acceptable
         let mut record_blocked = Record::known(types::Address::Symmetric(public_socket));
         record_blocked.increment();
-        record_blocked.block(block_until());
+        record_blocked.block();
         assert!(
             !record_blocked.acceptable(egress_ip, false),
             "Not acceptable when blocked"
@@ -569,7 +559,7 @@ mod tests {
         // Still not acceptable when blocked
         let mut record_blocked = Record::known(types::Address::Symmetric(public_socket));
         record_blocked.increment();
-        record_blocked.block(block_until());
+        record_blocked.block();
         assert!(
             !record_blocked.acceptable(egress_ip, true),
             "Not acceptable when blocked"
