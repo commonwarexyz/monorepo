@@ -20,11 +20,16 @@ import { z } from "zod";
 import type { Env } from "./env.d.ts";
 import {
   buildFileTree,
+  buildSnippets,
+  formatSnippet,
+  formatWithLineNumbers,
   getLanguage,
   isValidPath,
   parseSitemap,
   parseWorkspaceMembers,
   parseCrateInfo,
+  selectTopSnippets,
+  sortVersionsDesc,
   stripCratePrefix,
 } from "./utils.ts";
 import pkg from "../package.json";
@@ -36,16 +41,9 @@ interface CrateInfo {
   description: string;
 }
 
-interface SitemapData {
-  versions: string[];
-  files: Record<string, string[]>; // version -> file paths (JSON-serializable)
-}
-
 // Constants
-const FILE_CACHE_TTL = 60 * 60 * 24 * 365; // 1 year (versioned files are immutable)
-const SITEMAP_CACHE_TTL = 60 * 60; // 1 hour
 const MAX_SEARCH_RESULTS = 50;
-const SEARCH_BATCH_SIZE = 10;
+const INDEX_BUILD_BATCH_SIZE = 20; // D1 has 100 bind param limit, 20 rows × 3 cols = 60
 
 export class CommonwareMCP extends McpAgent<Env, {}, {}> {
   server!: McpServer;
@@ -61,7 +59,9 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       "get_file",
       "Retrieve a file from the Commonware repository by its path. " +
         "Paths should be relative to the repository root (e.g., 'commonware-cryptography/src/lib.rs'). " +
-        "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest.",
+        "Optionally specify a version (e.g., 'v0.0.64'), defaults to latest. " +
+        "Optionally specify start_line and end_line to fetch a specific range (0-indexed, inclusive). " +
+        "Line numbers in output match those returned by search_code.",
       {
         path: z
           .string()
@@ -72,8 +72,20 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           .string()
           .optional()
           .describe("Version tag (e.g., 'v0.0.64'). Defaults to latest."),
+        start_line: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Start line number (0-indexed, inclusive). Defaults to beginning of file."),
+        end_line: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("End line number (0-indexed, inclusive). Defaults to end of file."),
       },
-      async ({ path, version }) => {
+      async ({ path, version, start_line, end_line }) => {
         // Basic path validation - no path traversal
         if (!isValidPath(path)) {
           return {
@@ -99,11 +111,21 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           };
         }
 
+        // Format with line numbers (and optionally filter to range)
+        const formatted = formatWithLineNumbers(content, start_line, end_line);
+
+        // Build header with line range info if specified
+        const totalLines = content.split("\n").length;
+        const rangeInfo =
+          start_line !== undefined || end_line !== undefined
+            ? ` [lines ${start_line ?? 0}-${end_line ?? totalLines - 1}]`
+            : "";
+
         return {
           content: [
             {
               type: "text",
-              text: `# ${path} (${ver})\n\n\`\`\`${getLanguage(path)}\n${content}\n\`\`\``,
+              text: `# ${path} (${ver})${rangeInfo}\n\n\`\`\`${getLanguage(path)}\n${formatted}\n\`\`\``,
             },
           ],
         };
@@ -117,7 +139,15 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         "Returns matching files with relevant snippets. Useful for finding function definitions, " +
         "usage patterns, or understanding how features are implemented.",
       {
-        query: z.string().describe("Search pattern (case-insensitive substring match)"),
+        query: z.string().describe("Search query"),
+        mode: z
+          .enum(["substring", "word"])
+          .optional()
+          .default("substring")
+          .describe(
+            "Search mode: 'substring' for literal substring match (min 3 chars), " +
+              "'word' for word-based search with prefix matching"
+          ),
         crate: z
           .string()
           .optional()
@@ -136,71 +166,41 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
             `Maximum number of results to return (default: 10, max: ${MAX_SEARCH_RESULTS})`
           ),
       },
-      async ({ query, crate, file_type, version, max_results }) => {
-        // Clamp max_results to prevent excessive fetching
-        const limit = Math.min(max_results, MAX_SEARCH_RESULTS);
+      async ({ query, mode, crate, file_type, version, max_results }) => {
+        // Substring mode requires at least 3 characters (trigram tokenizer)
+        if (mode === "substring" && query.trim().length < 3) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error: Substring search requires at least 3 characters`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        // Clamp max_results to valid range (negative LIMIT in SQLite means no limit)
+        const limit = Math.max(1, Math.min(max_results, MAX_SEARCH_RESULTS));
 
         const ver = version || (await this.getLatestVersion());
-        const files = await this.getFileList(ver);
 
-        // Filter files by crate and type
-        // Strip commonware- prefix since folder paths don't include it
-        let filtered = files;
-        if (crate) {
-          const folderName = stripCratePrefix(crate);
-          filtered = filtered.filter((f) => f.startsWith(`${folderName}/`));
+        // Check if version exists
+        const isIndexed = await this.isVersionIndexed(ver);
+        if (!isIndexed) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error: Version '${ver}' not found`,
+              },
+            ],
+            isError: true,
+          };
         }
-        if (file_type && file_type !== "all") {
-          filtered = filtered.filter((f) => f.endsWith(`.${file_type}`));
-        }
 
-        const results: Array<{ file: string; matches: string[] }> = [];
-        const queryLower = query.toLowerCase();
-
-        // Search through files (limit concurrent requests)
-        for (let i = 0; i < filtered.length && results.length < limit; i += SEARCH_BATCH_SIZE) {
-          const batch = filtered.slice(i, i + SEARCH_BATCH_SIZE);
-          const responses = await Promise.all(
-            batch.map(async (file) => {
-              const content = await this.fetchFile(ver, file);
-              if (content === null) {
-                return null;
-              }
-              return { file, content };
-            })
-          );
-
-          for (const resp of responses) {
-            if (!resp || results.length >= limit) {
-              continue;
-            }
-
-            const lines = resp.content.split("\n");
-            const matches: string[] = [];
-
-            for (let lineNum = 0; lineNum < lines.length; lineNum++) {
-              if (lines[lineNum].toLowerCase().includes(queryLower)) {
-                // Include context (2 lines before and after)
-                const start = Math.max(0, lineNum - 2);
-                const end = Math.min(lines.length, lineNum + 3);
-                const snippet = lines
-                  .slice(start, end)
-                  .map((l, idx) => `${start + idx + 1}: ${l}`)
-                  .join("\n");
-                matches.push(snippet);
-
-                // Limit matches per file
-                if (matches.length >= 3) {
-                  break;
-                }
-              }
-            }
-
-            if (matches.length > 0) {
-              results.push({ file: resp.file, matches });
-            }
-          }
-        }
+        // Search using D1 FTS5
+        const results = await this.searchWithFTS(ver, query, mode, crate, file_type, limit);
 
         if (results.length === 0) {
           return {
@@ -224,7 +224,7 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           content: [
             {
               type: "text",
-              text: `# Search results for "${query}" (${ver})\n\nFound ${results.length} file(s):\n\n${output}`,
+              text: `# Search results for "${query}" (${ver})\n\nFound ${results.length} file(s):\n\n${output}\n\n---\nFiles are listed by path. Use \`list_crates\` to see crate name to path mappings. Use \`get_file\` with \`start_line\` and \`end_line\` to fetch specific line ranges instead of entire files.`,
             },
           ],
         };
@@ -238,6 +238,12 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       {},
       async () => {
         const versions = await this.getVersions();
+        if (versions.length === 0) {
+          return {
+            content: [{ type: "text", text: "No versions available" }],
+            isError: true,
+          };
+        }
         return {
           content: [
             {
@@ -269,13 +275,15 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
           };
         }
 
-        const output = crates.map((c) => `- **${c.name}**: ${c.description}`).join("\n");
+        const output = crates
+          .map((c) => `- **${c.name}** (${c.path}): ${c.description}`)
+          .join("\n");
 
         return {
           content: [
             {
               type: "text",
-              text: `# Commonware Crates (${ver})\n\n${output}\n\nUse \`get_crate_readme\` to get detailed documentation for any crate.`,
+              text: `# Commonware Crates (${ver})\n\n${output}\n\nUse \`get_crate_readme\` to get detailed documentation for any crate. Use the path in parentheses with \`list_files\` or \`get_file\` to browse crate contents.`,
             },
           ],
         };
@@ -296,32 +304,14 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
       },
       async ({ crate, version }) => {
         const ver = version || (await this.getLatestVersion());
-
-        // Validate crate exists
-        // Match by full name (commonware-*) or folder path
-        const crates = await this.getCrates(ver);
-        const folderName = stripCratePrefix(crate);
-        const crateInfo = crates.find((c) => c.name === crate || c.path === folderName);
-        if (!crateInfo) {
-          const names = crates.map((c) => c.name).join(", ");
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Error: Unknown crate '${crate}'. Available crates: ${names}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        const content = await this.fetchFile(ver, `${crateInfo.path}/README.md`);
+        const cratePath = await this.resolveCratePath(ver, crate);
+        const content = await this.fetchFile(ver, `${cratePath}/README.md`);
         if (content === null) {
           return {
             content: [
               {
                 type: "text",
-                text: `Error: README not found for crate '${crate}' (version ${ver})`,
+                text: `Error: README not found for crate '${crate}' (version ${ver}). Use \`list_crates\` to see available crates.`,
               },
             ],
             isError: true,
@@ -378,8 +368,8 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
         let prefix: string;
 
         if (crate) {
-          // Strip commonware- prefix for folder matching
-          const folderName = stripCratePrefix(crate);
+          // Resolve crate name or path to actual directory
+          const folderName = await this.resolveCratePath(ver, crate);
           prefix = `${folderName}/`;
           filtered = allFiles.filter((f) => f.startsWith(prefix));
 
@@ -430,98 +420,49 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
     );
   }
 
-  // Helper: Fetch file with Cache API caching (versioned files are immutable)
+  // Helper: Fetch file from commonware.xyz
   private async fetchFile(version: string, path: string): Promise<string | null> {
     const url = `${this.env.BASE_URL}/code/${version}/${path}`;
-    const cacheKey = new Request(url);
-    const cache = caches.default;
-
-    // Check cache first
-    const cachedResponse = await cache.match(cacheKey);
-    if (cachedResponse) {
-      return cachedResponse.text();
-    }
-
-    // Fetch from origin
     const response = await fetch(url);
     if (!response.ok) {
       return null;
     }
+    return response.text();
+  }
 
-    // Cache the response (versioned files are immutable)
-    const content = await response.text();
-    const cacheResponse = new Response(content, {
-      headers: {
-        "Content-Type": "text/plain",
-        "Cache-Control": `public, max-age=${FILE_CACHE_TTL}`,
-      },
-    });
-    await cache.put(cacheKey, cacheResponse);
+  // Helper: Get indexed versions from D1 (sorted descending)
+  private async getIndexedVersions(): Promise<string[]> {
+    const result = await this.env.SEARCH_DB.withSession()
+      .prepare("SELECT version FROM versions")
+      .all<{ version: string }>();
 
-    return content;
+    const versions = result.results.map((r) => r.version);
+    sortVersionsDesc(versions);
+    return versions;
   }
 
   // Helper: Get latest version
   private async getLatestVersion(): Promise<string> {
-    const sitemap = await this.getSitemap();
-    return sitemap.versions[0];
+    const versions = await this.getIndexedVersions();
+    if (versions.length === 0) {
+      throw new Error("No versions available");
+    }
+    return versions[0];
   }
 
-  // Helper: Get all versions from sitemap
+  // Helper: Get all versions
   private async getVersions(): Promise<string[]> {
-    const sitemap = await this.getSitemap();
-    return sitemap.versions;
+    return this.getIndexedVersions();
   }
 
-  // Helper: Get file list for a version
+  // Helper: Get file list for a version (from D1)
   private async getFileList(version: string): Promise<string[]> {
-    const sitemap = await this.getSitemap();
-    return sitemap.files[version] || [];
-  }
+    const result = await this.env.SEARCH_DB.withSession()
+      .prepare("SELECT path FROM files WHERE version = ?")
+      .bind(version)
+      .all<{ path: string }>();
 
-  // Helper: Fetch sitemap.xml with Cache API caching
-  private async fetchSitemap(): Promise<string> {
-    const url = `${this.env.BASE_URL}/sitemap.xml`;
-    const cacheKey = new Request(url);
-    const cache = caches.default;
-
-    // Check cache first
-    const cachedResponse = await cache.match(cacheKey);
-    if (cachedResponse) {
-      return cachedResponse.text();
-    }
-
-    // Fetch from origin
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error("Failed to fetch sitemap");
-    }
-
-    // Cache the raw response
-    const xml = await response.text();
-    const cacheResponse = new Response(xml, {
-      headers: {
-        "Content-Type": "application/xml",
-        "Cache-Control": `public, max-age=${SITEMAP_CACHE_TTL}`,
-      },
-    });
-    await cache.put(cacheKey, cacheResponse);
-
-    return xml;
-  }
-
-  // Helper: Get parsed sitemap data
-  private async getSitemap(): Promise<SitemapData> {
-    const xml = await this.fetchSitemap();
-    const { versions, files } = parseSitemap(xml);
-
-    // Convert Map to plain object
-    const filesObj: Record<string, string[]> = {};
-    for (const [version, paths] of files) {
-      filesObj[version] = paths;
-    }
-
-    return { versions, files: filesObj };
+    return result.results.map((r) => r.path);
   }
 
   // Helper: Get crates list (individual Cargo.toml files are cached via fetchFile)
@@ -561,31 +502,256 @@ export class CommonwareMCP extends McpAgent<Env, {}, {}> {
 
     return crates;
   }
+
+  // Helper: Check if a version has been indexed
+  private async isVersionIndexed(version: string): Promise<boolean> {
+    const result = await this.env.SEARCH_DB.withSession()
+      .prepare("SELECT 1 FROM versions WHERE version = ?")
+      .bind(version)
+      .first();
+    return result !== null;
+  }
+
+  // Helper: Resolve crate name or path to actual directory path
+  private async resolveCratePath(version: string, crate: string): Promise<string> {
+    // Try matching by crate name first (e.g., "commonware-consensus-fuzz" -> "consensus/fuzz")
+    const crates = await this.getCrates(version);
+    const byName = crates.find((c) => c.name === crate);
+    if (byName) {
+      return byName.path;
+    }
+
+    // Otherwise strip prefix and use as path (e.g., "commonware-cryptography" -> "cryptography")
+    return stripCratePrefix(crate);
+  }
+
+  // Helper: Search using D1 FTS5
+  private async searchWithFTS(
+    version: string,
+    query: string,
+    mode: "substring" | "word",
+    crate: string | undefined,
+    fileType: string,
+    limit: number
+  ): Promise<Array<{ file: string; matches: string[] }>> {
+    // Build FTS query based on mode
+    const { ftsQuery, snippetMatcher } = this.buildFTSQuery(query, mode);
+    if (ftsQuery === null) {
+      return [];
+    }
+
+    // Select FTS table based on mode
+    const ftsTable = mode === "substring" ? "files_fts_substring" : "files_fts_word";
+
+    // Build the SQL query with filters
+    let sql = `
+      SELECT f.path, f.content
+      FROM ${ftsTable}
+      JOIN files f ON ${ftsTable}.rowid = f.id
+      WHERE ${ftsTable} MATCH ?
+        AND f.version = ?
+    `;
+    const params: (string | number)[] = [ftsQuery, version];
+
+    // Add crate filter (escape LIKE wildcards)
+    if (crate) {
+      const folderName = await this.resolveCratePath(version, crate);
+      const escaped = folderName.replace(/[%_\\]/g, "\\$&");
+      sql += " AND f.path LIKE ? ESCAPE '\\'";
+      params.push(`${escaped}/%`);
+    }
+
+    // Add file type filter (escape LIKE wildcards)
+    if (fileType !== "all") {
+      const escaped = fileType.replace(/[%_\\]/g, "\\$&");
+      sql += " AND f.path LIKE ? ESCAPE '\\'";
+      params.push(`%.${escaped}`);
+    }
+
+    // Order by relevance and limit
+    sql += ` ORDER BY bm25(${ftsTable}) LIMIT ?`;
+    params.push(limit);
+
+    // Execute the SQL query
+    const results = await this.env.SEARCH_DB.withSession()
+      .prepare(sql)
+      .bind(...params)
+      .all<{ path: string; content: string }>();
+
+    // Extract snippets with context
+    const output: Array<{ file: string; matches: string[] }> = [];
+
+    for (const row of results.results) {
+      const lines = row.content.split("\n");
+
+      // Score each line by number of matching terms
+      const lineScores = lines.map((line) => snippetMatcher(line.toLowerCase()));
+
+      // Build and select top non-overlapping snippets
+      const snippets = buildSnippets(lineScores);
+      const selected = selectTopSnippets(snippets, 5);
+
+      // Format selected snippets
+      const matches = selected.map(({ start, end }) => formatSnippet(lines, start, end));
+
+      // Always include file if FTS5 matched it
+      output.push({ file: row.path, matches });
+    }
+
+    return output;
+  }
+
+  // Helper: Build FTS5 query based on mode
+  // Returns a snippetMatcher that scores lines (0 = no match, higher = more matches)
+  private buildFTSQuery(
+    query: string,
+    mode: "substring" | "word"
+  ): { ftsQuery: string | null; snippetMatcher: (line: string) => number } {
+    const trimmed = query.trim();
+
+    if (mode === "substring") {
+      // Trigram requires at least 3 characters
+      if (trimmed.length < 3) {
+        return { ftsQuery: null, snippetMatcher: () => 0 };
+      }
+      // Escape double quotes for FTS5
+      const escaped = trimmed.replace(/"/g, '""');
+      const queryLower = trimmed.toLowerCase();
+      return {
+        ftsQuery: `"${escaped}"`,
+        // Substring mode: count occurrences
+        snippetMatcher: (line) => {
+          let count = 0;
+          let idx = 0;
+          while ((idx = line.indexOf(queryLower, idx)) !== -1) {
+            count++;
+            idx += queryLower.length;
+          }
+          return count;
+        },
+      };
+    } else {
+      // Word mode: escape special chars and add prefix matching
+      const escaped = trimmed.replace(/["()*:^-]/g, " ").trim();
+      const words = escaped.split(/\s+/).filter((w) => w.length > 0);
+      if (words.length === 0) {
+        return { ftsQuery: null, snippetMatcher: () => 0 };
+      }
+      const ftsQuery = words.map((w) => `${w}*`).join(" ");
+      const wordsLower = words.map((w) => w.toLowerCase());
+      return {
+        ftsQuery,
+        // Word mode: count total occurrences of all query words
+        snippetMatcher: (line) => {
+          let count = 0;
+          for (const word of wordsLower) {
+            let idx = 0;
+            while ((idx = line.indexOf(word, idx)) !== -1) {
+              count++;
+              idx += word.length;
+            }
+          }
+          return count;
+        },
+      };
+    }
+  }
 }
 
 // Create MCP handler using McpAgent.serve() for proper session management
+// CORS is handled automatically by the WorkerTransport with permissive defaults
 const mcpHandler = McpAgent.serve("/", { binding: "MCP" });
+
+// Helper: Sync indexed versions with sitemap (index one version per run to avoid timeout)
+async function reindexVersions(
+  env: Env
+): Promise<{ indexed: string | null; pruned: string | null }> {
+  // Fetch sitemap to get available versions
+  const sitemapUrl = `${env.BASE_URL}/sitemap.xml`;
+  const response = await fetch(sitemapUrl);
+  if (!response.ok) {
+    throw new Error("Failed to fetch sitemap");
+  }
+  const xml = await response.text();
+  const { versions: sitemapVersions, files } = parseSitemap(xml);
+  const sitemapSet = new Set(sitemapVersions);
+
+  // Get already indexed versions (use primary for writes)
+  const session = env.SEARCH_DB.withSession("first-primary");
+  const indexedResult = await session.prepare("SELECT version FROM versions").all<{
+    version: string;
+  }>();
+  const indexedSet = new Set(indexedResult.results.map((r) => r.version));
+
+  // Prune ONE version not in sitemap (delete version record first to prevent
+  // queries from finding a version with no files)
+  let pruned: string | null = null;
+  for (const oldVersion of indexedSet) {
+    if (!sitemapSet.has(oldVersion)) {
+      await session.batch([
+        session.prepare("DELETE FROM versions WHERE version = ?").bind(oldVersion),
+        session.prepare("DELETE FROM files WHERE version = ?").bind(oldVersion),
+      ]);
+      pruned = oldVersion;
+      break;
+    }
+  }
+
+  // Index ONE version not yet indexed (newest first since sitemapVersions is sorted desc)
+  let indexed: string | null = null;
+  for (const version of sitemapVersions) {
+    if (indexedSet.has(version)) {
+      continue;
+    }
+
+    // Get all files for this version
+    const versionFiles = files.get(version) || [];
+
+    // Fetch and index all files in batches
+    for (let i = 0; i < versionFiles.length; i += INDEX_BUILD_BATCH_SIZE) {
+      const batch = versionFiles.slice(i, i + INDEX_BUILD_BATCH_SIZE);
+      const results = await Promise.all(
+        batch.map(async (file) => {
+          const fileUrl = `${env.BASE_URL}/code/${version}/${file}`;
+          const res = await fetch(fileUrl);
+          if (!res.ok) {
+            throw new Error(`Failed to fetch ${file} for ${version}: ${res.status}`);
+          }
+          const content = await res.text();
+          return { file, content };
+        })
+      );
+
+      // Use multi-row INSERT for better performance
+      const placeholders = results.map(() => "(?, ?, ?)").join(", ");
+      const params = results.flatMap((r) => [version, r.file, r.content]);
+      await session
+        .prepare(`INSERT OR REPLACE INTO files (version, path, content) VALUES ${placeholders}`)
+        .bind(...params)
+        .run();
+    }
+
+    // Mark version as indexed
+    await session
+      .prepare("INSERT OR REPLACE INTO versions (version) VALUES (?)")
+      .bind(version)
+      .run();
+    indexed = version;
+    break;
+  }
+
+  return { indexed, pruned };
+}
 
 // Worker fetch handler
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-
-    // Health check endpoint
-    if (url.pathname === "/health") {
-      return new Response(
-        JSON.stringify({
-          name: "commonware-mcp",
-          version: pkg.version,
-          status: "ok",
-        }),
-        {
-          headers: { "Content-Type": "application/json" },
-        }
-      );
-    }
-
-    // Route to MCP agent
+    // Route all requests to MCP agent (handles CORS including OPTIONS preflight)
     return mcpHandler.fetch(request, env, ctx);
+  },
+
+  // Scheduled handler for automatic indexing
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(reindexVersions(env));
   },
 };

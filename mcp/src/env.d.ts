@@ -2,6 +2,7 @@
 
 export interface Env {
   MCP: DurableObjectNamespace;
+  SEARCH_DB: D1Database;
   BASE_URL: string;
 }
 

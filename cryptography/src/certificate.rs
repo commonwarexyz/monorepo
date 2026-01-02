@@ -39,8 +39,8 @@
 //!   authenticated, evidence can be used locally (as it must be sent by said participant) but
 //!   cannot be used by an external observer.
 //!
-//! The [`Scheme::is_attributable()`] method signals whether evidence can be safely exposed to
-//! third parties.
+//! The [`Scheme::is_attributable()`] associated function signals whether evidence can be safely
+//! exposed to third parties.
 //!
 //! # Identity Keys vs Signing Keys
 //!
@@ -265,7 +265,17 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     ///
     /// Schemes where individual signatures can be safely reported as fault evidence should
     /// return `true`.
-    fn is_attributable(&self) -> bool;
+    fn is_attributable() -> bool;
+
+    /// Returns whether this scheme benefits from batch verification.
+    ///
+    /// Schemes that benefit from batch verification (like [`ed25519`], [`bls12381_multisig`]
+    /// and [`bls12381_threshold`]) should return `true`, allowing callers to optimize by
+    /// deferring verification until multiple signatures are available.
+    ///
+    /// Schemes that don't benefit from batch verification (like `secp256r1`) should
+    /// return `false`, indicating that eager per-signature verification is preferred.
+    fn is_batchable() -> bool;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;

@@ -4,7 +4,7 @@ use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, W
 use commonware_consensus::Block as ConsensusBlock;
 use commonware_cryptography::{
     bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
-    Committable, Digestible, Hasher, Signer,
+    Committable, Digest, Digestible, Hasher, Signer,
 };
 use std::num::NonZeroU32;
 
@@ -132,5 +132,5 @@ where
     C: Signer,
     V: Variant,
 {
-    Block::new(H::EMPTY, 0, None)
+    Block::new(<<H as Hasher>::Digest as Digest>::EMPTY, 0, None)
 }

@@ -375,8 +375,14 @@ impl Generic {
         true
     }
 
-    pub const fn is_attributable(&self) -> bool {
+    pub const fn is_attributable() -> bool {
         true
+    }
+
+    pub const fn is_batchable() -> bool {
+        // Batch verification requires the `std` feature because it depends on
+        // `ed25519_consensus::batch::Verifier`.
+        cfg!(feature = "std")
     }
 
     pub const fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
@@ -617,8 +623,12 @@ mod macros {
                         .verify_certificates::<Self, _, D, _>(rng, namespace, certificates)
                 }
 
-                fn is_attributable(&self) -> bool {
-                    self.generic.is_attributable()
+                fn is_attributable() -> bool {
+                    $crate::ed25519::certificate::Generic::is_attributable()
+                }
+
+                fn is_batchable() -> bool {
+                    $crate::ed25519::certificate::Generic::is_batchable()
                 }
 
                 fn certificate_codec_config(
@@ -683,6 +693,26 @@ mod tests {
         let verifier = Scheme::verifier(participants);
 
         (signers, verifier)
+    }
+
+    #[test]
+    fn test_is_attributable() {
+        assert!(Generic::is_attributable());
+        assert!(Scheme::is_attributable());
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn test_is_batchable() {
+        assert!(Generic::is_batchable());
+        assert!(Scheme::is_batchable());
+    }
+
+    #[test]
+    #[cfg(not(feature = "std"))]
+    fn test_is_not_batchable() {
+        assert!(!Generic::is_batchable());
+        assert!(!Scheme::is_batchable());
     }
 
     #[test]
@@ -1203,6 +1233,37 @@ mod tests {
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_signers_size_mismatch() {
+        let (schemes, verifier) = setup_signers(4, 65);
+        let participants_len = schemes.len();
+
+        let attestations: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|s| {
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                    .unwrap()
+            })
+            .collect();
+
+        let mut certificate = schemes[0].assemble(attestations).unwrap();
+
+        // Make the signers bitmap size larger than participants
+        let signers: Vec<u32> = certificate.signers.iter().collect();
+        certificate.signers = Signers::from(participants_len + 1, signers);
+        certificate
+            .signatures
+            .push(certificate.signatures[0].clone());
+
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            TestSubject { message: MESSAGE },
+            &certificate
         ));
     }
 

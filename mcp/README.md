@@ -18,7 +18,13 @@ Interact with the Commonware Library via [MCP](https://modelcontextprotocol.io/)
 | `get_overview` | Get the repository README/overview |
 | `list_files` | List files in a crate or directory |
 
+_Try these tools out on the [Commonware Library MCP Explorer](https://commonware.xyz/mcp)._
+
 ## Connecting
+
+LLMs are trained on code from months ago. Web search (the default fallback for finding missing information) returns GitHub links that must be iterated file-by-file to extract relevant information (if not rate-limited first). And, the results you do find probably don't match the version you're building against.
+
+We built our own MCP server to make LLMs building with the Commonware Library more effective. [mcp.commonware.xyz](https://mcp.commonware.xyz) provides unlimited access to a version-pinned index of all source code and documentation, along with a ranked search tool that surfaces more relevant snippets than grep (with surrounding context).
 
 ### Claude Code
 
@@ -51,10 +57,6 @@ Or add to `.mcp.json` in your project:
 }
 ```
 
-### Cloudflare AI Playground
-
-Visit [playground.ai.cloudflare.com](https://playground.ai.cloudflare.com) and connect to `https://mcp.commonware.xyz`.
-
 ## Development
 
 ### Prerequisites
@@ -73,7 +75,17 @@ npm install
 ### Local Development
 
 ```bash
+# Create local D1 database and run migrations
+npx wrangler d1 migrations apply commonware-mcp-search --local
+
+# Start dev server
 npm run dev
+```
+
+In a separate terminal, trigger indexing to populate the search index:
+
+```bash
+curl "http://localhost:8787/__scheduled?cron=*"
 ```
 
 The server will be available at `http://localhost:8787`. Use the MCP inspector to test:
@@ -90,8 +102,17 @@ In the inspector UI, select **Streamable HTTP** transport, enter `http://localho
 # Login to Cloudflare (first time only)
 npx wrangler login
 
+# Create D1 database (first time only)
+npx wrangler d1 create commonware-mcp-search
+# Update database_id in wrangler.jsonc with the returned ID
+
+# Run migrations (first time and after schema changes)
+npx wrangler d1 migrations apply commonware-mcp-search
+
 # Deploy
 npm run deploy
+
+# Indexing runs automatically via cron (every 10 minutes)
 ```
 
 ## Architecture
@@ -99,13 +120,8 @@ npm run deploy
 The server uses Cloudflare's [Agents SDK](https://developers.cloudflare.com/agents/) with the `McpAgent` class:
 
 - **Durable Objects**: Maintains persistent connections for MCP clients
-- **Sitemap-based discovery**: Parses `commonware.xyz/sitemap.xml` to discover available files
-- **Caching**: Files cached indefinitely (immutable); sitemap cached for 1 hour
-
-### Endpoints
-
-- `/` - MCP server (Streamable HTTP transport)
-- `/health` - Health check (JSON status)
+- **Sitemap-based discovery**: Parses `commonware.xyz/sitemap.xml` to discover available versions
+- **D1 + FTS5**: Full-text search index powered by SQLite FTS5
 
 ## Example Usage
 

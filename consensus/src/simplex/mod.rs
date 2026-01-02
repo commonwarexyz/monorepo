@@ -120,10 +120,14 @@
 //!
 //! ### Batched Verification
 //!
-//! Unlike other consensus constructions that verify all incoming messages received from peers, `simplex`
-//! lazily verifies messages (only when a quorum is met). If an invalid signature is detected, the `Batcher`
-//! will perform repeated bisections over collected messages to find the offending message (and block the
-//! peer(s) that sent it via [commonware_p2p::Blocker]).
+//! Unlike other consensus constructions that verify all incoming messages received from peers, for schemes
+//! where [`Scheme::is_batchable()`](commonware_cryptography::certificate::Scheme::is_batchable) returns `true`
+//! (such as [scheme::ed25519], [scheme::bls12381_multisig] and [scheme::bls12381_threshold]), `simplex` lazily
+//! verifies messages (only when a quorum is met), enabling efficient batch verification. For schemes where
+//! `is_batchable()` returns `false`, signatures are verified eagerly as they arrive since there is no batching benefit.
+//!
+//! If an invalid signature is detected, the `Batcher` will perform repeated bisections over collected
+//! messages to find the offending message (and block the peer(s) that sent it via [commonware_p2p::Blocker]).
 //!
 //! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
 //! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
@@ -169,7 +173,7 @@
 //!
 //! ### [scheme::bls12381_threshold]
 //!
-//! Last but not least, [scheme::bls12381_threshold]  employs threshold cryptography (specifically BLS12-381 threshold signatures
+//! Last but not least, [scheme::bls12381_threshold] employs threshold cryptography (specifically BLS12-381 threshold signatures
 //! with a `2f+1` of `3f+1` quorum) to generate both a bias-resistant beacon (for leader election and post-facto execution randomness)
 //! and succinct consensus certificates (any certificate can be verified with just the static public key of the consensus instance) for each view
 //! with zero message overhead (natively integrated). While powerful, this scheme requires both instantiating the shared secret
@@ -4250,7 +4254,7 @@ mod tests {
                     let signers: usize = payloads.values().map(|signers| signers.len()).sum();
 
                     // For attributable schemes, we should see peer activities
-                    if schemes[0].is_attributable() {
+                    if S::is_attributable() {
                         assert!(signers > 1, "view {view}: {signers}");
                     } else {
                         // For non-attributable, we shouldn't see any peer activities
@@ -4264,7 +4268,7 @@ mod tests {
                     let signers: usize = payloads.values().map(|signers| signers.len()).sum();
 
                     // For attributable schemes, we should see peer activities
-                    if schemes[0].is_attributable() {
+                    if S::is_attributable() {
                         assert!(signers > 1);
                     } else {
                         // For non-attributable, we shouldn't see any peer activities

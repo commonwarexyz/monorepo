@@ -6,7 +6,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
+        contiguous::{Contiguous, MutableContiguous},
     },
     mmr::{
         mem::{Clean, Dirty, State},
@@ -19,7 +19,7 @@ use crate::{
         store::LogStore,
         Error, FloorHelper,
     },
-    AuthenticatedBitMap,
+    AuthenticatedBitMap, Persistable,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
@@ -307,7 +307,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: PersistableContiguous<Item = Operation<K, V, U>>,
+    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = crate::journal::Error>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -357,12 +357,6 @@ where
     /// Sync all database state to disk.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
-    }
-
-    /// Close the db. Operations that have not been committed will be lost or rolled back on
-    /// restart.
-    pub async fn close(self) -> Result<(), Error> {
-        self.log.close().await.map_err(Into::into)
     }
 
     /// Destroy the db, removing all data from disk.

@@ -69,8 +69,12 @@ pub struct Dirty {
 
 impl private::Sealed for Dirty {}
 impl<D: Digest> State<D> for Dirty {
-    fn add_leaf_digest<H: Hasher<D>>(mmr: &mut DirtyMmr<D>, hasher: &mut H, digest: D) -> Position {
-        mmr.add_leaf_digest(hasher, digest)
+    fn add_leaf_digest<H: Hasher<D>>(
+        mmr: &mut DirtyMmr<D>,
+        _hasher: &mut H,
+        digest: D,
+    ) -> Position {
+        mmr.add_leaf_digest(digest)
     }
 }
 
@@ -315,7 +319,7 @@ impl<D: Digest> CleanMmr<D> {
     /// MMR's structure.
     pub(super) fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<D>, digest: D) -> Position {
         let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
-        let leaf_pos = dirty_mmr.add_leaf_digest(hasher, digest);
+        let leaf_pos = dirty_mmr.add_leaf_digest(digest);
         *self = dirty_mmr.merkleize(hasher, None);
         leaf_pos
     }
@@ -494,8 +498,7 @@ impl<D: Digest> DirtyMmr<D> {
     }
 
     /// Add `digest` as a new leaf in the MMR, returning its position.
-    // TODO(#2318): Remove _hasher which is only used to create dummy digests.
-    pub(super) fn add_leaf_digest<H: Hasher<D>>(&mut self, _hasher: &mut H, digest: D) -> Position {
+    pub(super) fn add_leaf_digest(&mut self, digest: D) -> Position {
         // Compute the new parent nodes, if any.
         let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
             .into_iter()
@@ -506,8 +509,7 @@ impl<D: Digest> DirtyMmr<D> {
         let mut height = 1;
         for _ in nodes_needing_parents {
             let new_node_pos = self.size();
-            self.nodes
-                .push_back(<H::Inner as commonware_cryptography::Hasher>::EMPTY);
+            self.nodes.push_back(D::EMPTY);
             self.state.dirty_nodes.insert((new_node_pos, height));
             height += 1;
         }
