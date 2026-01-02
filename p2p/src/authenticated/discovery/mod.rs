@@ -229,7 +229,8 @@ mod tests {
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        deterministic, tokio, Clock, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner,
+        deterministic, tokio, Clock, Handle, Metrics, Network as RNetwork, Quota, Resolver, Runner,
+        Spawner,
     };
     use commonware_utils::{hostname, ordered::Set, TryCollect, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -1657,10 +1658,9 @@ mod tests {
             let addresses: Vec<_> = peers.iter().map(|p| p.public_key()).collect();
 
             // Track all senders/receivers/handles across restarts
-            type NetworkHandle = commonware_runtime::Handle<()>;
             let mut senders: Vec<Option<channels::Sender<_, _>>> = (0..n).map(|_| None).collect();
             let mut receivers: Vec<Option<channels::Receiver<_>>> = (0..n).map(|_| None).collect();
-            let mut handles: Vec<Option<NetworkHandle>> = (0..n).map(|_| None).collect();
+            let mut handles: Vec<Option<Handle<()>>> = (0..n).map(|_| None).collect();
 
             // Track port allocations for each peer (updated on restart)
             let mut ports: Vec<u16> = (0..n).map(|i| base_port + i as u16).collect();
@@ -1862,10 +1862,9 @@ mod tests {
             let addresses: Vec<_> = peers.iter().map(|p| p.public_key()).collect();
 
             // Track all senders/receivers/handles across restarts
-            type NetworkHandle = commonware_runtime::Handle<()>;
             let mut senders: Vec<Option<channels::Sender<_, _>>> = (0..n).map(|_| None).collect();
             let mut receivers: Vec<Option<channels::Receiver<_>>> = (0..n).map(|_| None).collect();
-            let mut handles: Vec<Option<NetworkHandle>> = (0..n).map(|_| None).collect();
+            let mut handles: Vec<Option<Handle<()>>> = (0..n).map(|_| None).collect();
 
             // Track port allocations for each peer (updated on restart)
             let mut ports: Vec<u16> = (0..n).map(|i| base_port + i as u16).collect();
