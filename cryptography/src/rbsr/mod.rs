@@ -1222,6 +1222,105 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_same_timestamp_multiple_items() {
+        // Test that RBSR handles multiple items with the same timestamp correctly
+        let mut storage_a = VecStorage::new();
+        let mut storage_b = VecStorage::new();
+
+        // Add 5 items all with the same timestamp to both
+        let shared_timestamp = 1000u64;
+        for i in 0u8..5 {
+            let mut id = [0u8; 32];
+            id[0] = i;
+            storage_a.insert(Item::from_bytes(shared_timestamp, id));
+            storage_b.insert(Item::from_bytes(shared_timestamp, id));
+        }
+
+        // Add 2 more items with the SAME timestamp, unique to A
+        let mut a_unique = Vec::new();
+        for i in 5u8..7 {
+            let mut id = [0u8; 32];
+            id[0] = i;
+            storage_a.insert(Item::from_bytes(shared_timestamp, id));
+            a_unique.push(Digest(id));
+        }
+
+        // Add 2 more items with the SAME timestamp, unique to B
+        let mut b_unique = Vec::new();
+        for i in 7u8..9 {
+            let mut id = [0u8; 32];
+            id[0] = i;
+            storage_b.insert(Item::from_bytes(shared_timestamp, id));
+            b_unique.push(Digest(id));
+        }
+
+        // Verify storage is sorted correctly by ID within same timestamp
+        assert_eq!(storage_a.len(), 7);
+        assert_eq!(storage_b.len(), 7);
+        for i in 0..storage_a.len() - 1 {
+            let curr = storage_a.get(i).unwrap();
+            let next = storage_a.get(i + 1).unwrap();
+            assert_eq!(curr.timestamp, next.timestamp);
+            assert!(curr.id < next.id, "items should be sorted by ID");
+        }
+
+        // Run reconciliation
+        let mut reconciler_a = Reconciler::new(&storage_a, 16);
+        let mut reconciler_b = Reconciler::new(&storage_b, 16);
+
+        let mut msg = reconciler_a.initiate();
+
+        for round in 0..10 {
+            msg = reconciler_b.reconcile(&msg).unwrap();
+            if msg.is_complete() {
+                break;
+            }
+            msg = reconciler_a.reconcile(&msg).unwrap();
+            if msg.is_complete() {
+                let _ = reconciler_b.reconcile(&msg).unwrap();
+                break;
+            }
+            assert!(round < 9, "reconciliation did not converge");
+        }
+
+        // Verify A found B's unique items (same timestamp, different IDs)
+        for id in &b_unique {
+            assert!(
+                reconciler_a.have_ids().contains(id),
+                "A should know B has {:?}",
+                id
+            );
+        }
+
+        // Verify A knows what B needs
+        for id in &a_unique {
+            assert!(
+                reconciler_a.need_ids().contains(id),
+                "A should know B needs {:?}",
+                id
+            );
+        }
+
+        // Verify B found A's unique items
+        for id in &a_unique {
+            assert!(
+                reconciler_b.have_ids().contains(id),
+                "B should know A has {:?}",
+                id
+            );
+        }
+
+        // Verify B knows what A needs
+        for id in &b_unique {
+            assert!(
+                reconciler_b.need_ids().contains(id),
+                "B should know A needs {:?}",
+                id
+            );
+        }
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
