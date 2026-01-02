@@ -909,10 +909,7 @@ mod tests {
 
         // Status Active
         record_disc.connect();
-        assert!(
-            !record_disc.want(min_fails),
-            "Should not want when Active"
-        );
+        assert!(!record_disc.want(min_fails), "Should not want when Active");
 
         // Status Inert again (after release)
         record_disc.release();
