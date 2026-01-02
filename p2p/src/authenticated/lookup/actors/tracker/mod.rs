@@ -3,11 +3,7 @@
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use std::{
-    collections::HashMap,
-    net::IpAddr,
-    time::{Duration, SystemTime},
-};
+use std::{collections::HashSet, net::IpAddr, time::Duration};
 
 pub mod actor;
 mod directory;
@@ -22,10 +18,8 @@ pub use ingress::{Message, Oracle};
 pub use metadata::Metadata;
 pub use reservation::Reservation;
 
-/// Listenable IPs with optional block expiration times.
-/// - `None` means the peer is currently eligible
-/// - `Some(time)` means the peer is blocked until that time
-pub type Listenable = HashMap<IpAddr, Option<SystemTime>>;
+/// Set of egress IPs from eligible peers that we should listen for.
+pub type Listenable = HashSet<IpAddr>;
 
 #[derive(Clone, Debug)]
 pub struct Config<C: Signer> {

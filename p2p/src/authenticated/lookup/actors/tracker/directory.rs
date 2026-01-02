@@ -15,9 +15,9 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::{
-    collections::{hash_map::Entry, BTreeMap, HashMap},
+    collections::{hash_map::Entry, BTreeMap, HashMap, HashSet, VecDeque},
     net::IpAddr,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
 
@@ -72,6 +72,11 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Rate limiter for connection attempts.
     rate_limiter: KeyedRateLimiter<C, E>,
 
+    /// Queue of (unblock_time, peer) entries, ordered by time (oldest first).
+    /// Since time is monotonic and block_duration is fixed, new entries are always
+    /// appended to the back, and expired entries are popped from the front.
+    unblock_queue: VecDeque<(SystemTime, C)>,
+
     // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
     releaser: Releaser<C>,
@@ -104,6 +109,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
+            unblock_queue: VecDeque::new(),
             releaser,
             metrics,
         }
@@ -226,6 +232,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .is_some_and(|r| r.block(blocked_until))
         {
             self.metrics.blocked.inc();
+            self.unblock_queue.push_back((blocked_until, peer.clone()));
         }
     }
 
@@ -277,50 +284,50 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Return egress IPs we should listen for (accept incoming connections from).
     ///
-    /// Returns a map of IP -> block expiration time:
-    /// - `None` means at least one peer with this IP is currently eligible
-    /// - `Some(time)` means all peers with this IP are blocked, until this time
-    ///
     /// Only includes IPs from peers that are:
     /// - In a peer set (not ourselves)
+    /// - Currently eligible (not blocked)
     /// - Have a valid egress IP (global, or private IPs are allowed)
+    pub fn listenable(&self) -> HashSet<IpAddr> {
+        let now = self.context.current();
+        self.peers
+            .values()
+            .filter(|r| r.sets() > 0 && r.eligible(now))
+            .filter_map(|r| r.egress_ip())
+            .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
+            .collect()
+    }
+
+    /// Unblock all peers whose block has expired.
     ///
-    /// When multiple peers share an IP (e.g., behind NAT), the IP is allowed if ANY
-    /// peer is eligible. If all are blocked, use the earliest expiration time.
-    pub fn listenable(&self) -> super::Listenable {
-        let mut result = super::Listenable::new();
-        for record in self.peers.values() {
-            if record.sets() == 0 {
-                continue;
+    /// Returns the list of peers that were unblocked (for logging/debugging).
+    pub fn unblock_expired(&mut self) -> Vec<C> {
+        let now = self.context.current();
+        let mut unblocked = Vec::new();
+
+        // Pop expired entries from the front of the queue
+        while let Some((blocked_until, _)) = self.unblock_queue.front() {
+            if *blocked_until > now {
+                break;
             }
-            let Some(ip) = record.egress_ip() else {
-                continue;
-            };
-            if !self.allow_private_ips && !IpAddrExt::is_global(&ip) {
-                continue;
-            }
-            let blocked_until = record.blocked_until();
-            match result.entry(ip) {
-                Entry::Vacant(e) => {
-                    e.insert(blocked_until);
-                }
-                Entry::Occupied(mut e) => {
-                    match (blocked_until, e.get()) {
-                        // New peer is eligible: IP should be allowed
-                        (None, _) => {
-                            e.insert(None);
-                        }
-                        // Both blocked: use earliest expiration so IP becomes allowed sooner
-                        (Some(new_until), Some(existing)) if new_until < *existing => {
-                            e.insert(blocked_until);
-                        }
-                        // Existing is None (eligible) or has earlier expiration: keep it
-                        _ => {}
-                    }
+            let (_, peer) = self.unblock_queue.pop_front().unwrap();
+
+            // Check if peer still exists and clear the block
+            if let Some(record) = self.peers.get_mut(&peer) {
+                if record.clear_expired_block(now) {
+                    self.metrics.blocked.dec();
+                    unblocked.push(peer);
                 }
             }
         }
-        result
+        unblocked
+    }
+
+    /// Get the next unblock deadline (earliest blocked_until time).
+    ///
+    /// Returns `None` if no peers are currently blocked.
+    pub fn next_unblock_deadline(&self) -> Option<SystemTime> {
+        self.unblock_queue.front().map(|(time, _)| *time)
     }
 
     // --------- Helpers ----------
@@ -691,15 +698,15 @@ mod tests {
             // Verify listenable() returns egress IPs for IP filtering
             let listenable = directory.listenable();
             assert!(
-                listenable.contains_key(&egress_socket.ip()),
+                listenable.contains(&egress_socket.ip()),
                 "Listenable should contain peer 1's egress IP"
             );
             assert!(
-                listenable.contains_key(&egress_socket_2.ip()),
+                listenable.contains(&egress_socket_2.ip()),
                 "Listenable should contain peer 2's egress IP"
             );
             assert!(
-                !listenable.contains_key(&ingress_socket.ip()),
+                !listenable.contains(&ingress_socket.ip()),
                 "Listenable should NOT contain peer 1's ingress IP"
             );
         });
@@ -834,8 +841,8 @@ mod tests {
 
             // Verify listenable() only returns public IP (private IP excluded from filter)
             let listenable = directory.listenable();
-            assert!(listenable.contains_key(&Ipv4Addr::new(8, 8, 8, 8).into()));
-            assert!(!listenable.contains_key(&Ipv4Addr::new(10, 0, 0, 1).into()));
+            assert!(listenable.contains(&Ipv4Addr::new(8, 8, 8, 8).into()));
+            assert!(!listenable.contains(&Ipv4Addr::new(10, 0, 0, 1).into()));
         });
     }
 
@@ -872,34 +879,97 @@ mod tests {
                     .unwrap(),
             );
 
-            // Both peers eligible: IP should show as eligible (None)
+            // Both peers eligible: IP should be in listenable set
             let listenable = directory.listenable();
-            assert_eq!(
-                listenable.get(&shared_ip),
-                Some(&None),
-                "IP should be eligible when both peers are eligible"
+            assert!(
+                listenable.contains(&shared_ip),
+                "IP should be listenable when both peers are eligible"
             );
 
             // Block one peer
             directory.block(&pk_1);
 
-            // One eligible, one blocked: IP should still show as eligible (None)
+            // One eligible, one blocked: IP should still be listenable
             let listenable = directory.listenable();
-            assert_eq!(
-                listenable.get(&shared_ip),
-                Some(&None),
-                "IP should be eligible when at least one peer is eligible"
+            assert!(
+                listenable.contains(&shared_ip),
+                "IP should be listenable when at least one peer is eligible"
             );
 
             // Block the other peer
             directory.block(&pk_2);
 
-            // Both blocked: IP should show blocked with earliest expiration
+            // Both blocked: IP should NOT be in listenable set
             let listenable = directory.listenable();
-            let blocked_until = listenable.get(&shared_ip).unwrap();
             assert!(
-                blocked_until.is_some(),
-                "IP should be blocked when all peers are blocked"
+                !listenable.contains(&shared_ip),
+                "IP should not be listenable when all peers are blocked"
+            );
+        });
+    }
+
+    #[test]
+    fn test_unblock_expired() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            // Block the peer
+            directory.block(&pk_1);
+
+            // Verify peer is blocked and not listenable
+            assert!(
+                !directory.listenable().contains(&addr_1.ip()),
+                "Blocked peer should not be listenable"
+            );
+
+            // Verify next_unblock_deadline is set
+            let deadline = directory.next_unblock_deadline();
+            assert!(deadline.is_some(), "Should have an unblock deadline");
+
+            // unblock_expired should return empty before expiry
+            let unblocked = directory.unblock_expired();
+            assert!(
+                unblocked.is_empty(),
+                "No peers should be unblocked before expiry"
+            );
+
+            // Advance time past block duration
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+
+            // Now unblock_expired should unblock the peer
+            let unblocked = directory.unblock_expired();
+            assert_eq!(unblocked.len(), 1, "One peer should be unblocked");
+            assert!(unblocked.contains(&pk_1), "pk_1 should be unblocked");
+
+            // Verify peer is now listenable
+            assert!(
+                directory.listenable().contains(&addr_1.ip()),
+                "Unblocked peer should be listenable"
+            );
+
+            // Verify next_unblock_deadline is now None
+            assert!(
+                directory.next_unblock_deadline().is_none(),
+                "No more blocked peers, no deadline"
             );
         });
     }

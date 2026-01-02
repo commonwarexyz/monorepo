@@ -16,8 +16,16 @@ use commonware_runtime::{
 use commonware_utils::ordered::Set;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
-use std::collections::HashMap;
+use std::{collections::HashMap, time::SystemTime};
 use tracing::debug;
+
+/// Helper to sleep until a deadline, or wait forever if None.
+async fn wait_for_unblock<E: Clock>(context: &E, deadline: Option<SystemTime>) {
+    match deadline {
+        Some(time) => context.sleep_until(time).await,
+        None => futures::future::pending().await,
+    }
+}
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
@@ -45,6 +53,9 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     /// Subscribers to peer set updates.
     #[allow(clippy::type_complexity)]
     subscribers: Vec<mpsc::UnboundedSender<(u64, Set<C::PublicKey>, Set<C::PublicKey>)>>,
+
+    /// Next time a blocked peer should be unblocked.
+    next_unblock: Option<SystemTime>,
 }
 
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -89,6 +100,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 listener: cfg.listener,
                 mailboxes: HashMap::new(),
                 subscribers: Vec::new(),
+                next_unblock: None,
             },
             mailbox,
             oracle,
@@ -106,6 +118,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             on_stopped => {
                 debug!("context shutdown, stopping tracker");
             },
+            _ = wait_for_unblock(&self.context, self.next_unblock) => {
+                self.handle_unblock().await;
+            },
             msg = self.receiver.next() => {
                 let Some(msg) = msg else {
                     debug!("mailbox closed, stopping tracker");
@@ -114,6 +129,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 self.handle_msg(msg).await;
             }
         }
+    }
+
+    /// Handle unblocking of peers whose block has expired.
+    async fn handle_unblock(&mut self) {
+        let unblocked = self.directory.unblock_expired();
+        if !unblocked.is_empty() {
+            debug!(count = unblocked.len(), "unblocked peers");
+            // Send updated listenable IPs to the listener
+            let _ = self.listener.send(self.directory.listenable()).await;
+        }
+        self.next_unblock = self.directory.next_unblock_deadline();
     }
 
     /// Handle a [`Message`].
@@ -208,6 +234,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Send the updated listenable IPs to the listener.
                 let _ = self.listener.send(self.directory.listenable()).await;
+
+                // Update the unblock timer
+                self.next_unblock = self.directory.next_unblock_deadline();
             }
             Message::Release { metadata } => {
                 // Clear the peer handle if it exists
@@ -667,9 +696,9 @@ mod tests {
 
             // Wait for a listener update
             let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(registered_ips.contains_key(&my_addr.ip()));
-            assert!(registered_ips.contains_key(&addr_1.ip()));
-            assert!(!registered_ips.contains_key(&addr_2.ip()));
+            assert!(registered_ips.contains(&my_addr.ip()));
+            assert!(registered_ips.contains(&addr_1.ip()));
+            assert!(!registered_ips.contains(&addr_2.ip()));
 
             // Mark peer as connected
             let reservation = mailbox.listen(pk_1.clone()).await;
@@ -685,9 +714,9 @@ mod tests {
 
             // Wait for a listener update
             let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(!registered_ips.contains_key(&my_addr.ip()));
-            assert!(!registered_ips.contains_key(&addr_1.ip()));
-            assert!(registered_ips.contains_key(&addr_2.ip()));
+            assert!(!registered_ips.contains(&my_addr.ip()));
+            assert!(!registered_ips.contains(&addr_1.ip()));
+            assert!(registered_ips.contains(&addr_2.ip()));
 
             // The first peer should be have received a kill message because its
             // peer set was removed because `tracked_peer_sets` is 1.

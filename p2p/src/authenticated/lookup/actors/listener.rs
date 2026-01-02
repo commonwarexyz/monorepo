@@ -206,21 +206,11 @@ impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<
                     continue;
                 }
 
-                // Check whether the IP is registered and not blocked
-                if !self.bypass_ip_check {
-                    let now = self.context.current();
-                    let is_allowed = self
-                        .listenable
-                        .get(&ip)
-                        .is_some_and(|blocked_until| {
-                            // None means eligible, Some(time) means blocked until time
-                            blocked_until.is_none_or(|until| now >= until)
-                        });
-                    if !is_allowed {
-                        self.handshakes_blocked.inc();
-                        debug!(?address, "rejecting unregistered or blocked address");
-                        continue;
-                    }
+                // Check whether the IP is registered
+                if !self.bypass_ip_check && !self.listenable.contains(&ip) {
+                    self.handshakes_blocked.inc();
+                    debug!(?address, "rejecting unregistered address");
+                    continue;
                 }
 
                 // Cleanup the rate limiters periodically
@@ -291,7 +281,7 @@ mod tests {
     use commonware_utils::NZU32;
     use futures::SinkExt;
     use std::{
-        collections::HashMap,
+        collections::HashSet,
         net::{IpAddr, Ipv4Addr},
         time::Duration,
     };
@@ -330,8 +320,7 @@ mod tests {
                 updates_rx,
             );
 
-            let mut allowed = HashMap::new();
-            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST), None);
+            let allowed = HashSet::from([IpAddr::V4(Ipv4Addr::LOCALHOST)]);
             updates_tx
                 .send(allowed)
                 .await
@@ -661,8 +650,7 @@ mod tests {
             );
 
             // Register the IP so it would be allowed if not for the private IP check
-            let mut allowed = HashMap::new();
-            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST), None);
+            let allowed = HashSet::from([IpAddr::V4(Ipv4Addr::LOCALHOST)]);
             updates_tx
                 .send(allowed)
                 .await

@@ -15,9 +15,9 @@ use commonware_runtime::{
 use commonware_utils::{ordered::Set as OrderedSet, SystemTimeExt, TryCollect};
 use rand::{seq::IteratorRandom, Rng};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     ops::Deref,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
 
@@ -74,6 +74,11 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Rate limiter for connection attempts.
     rate_limiter: KeyedRateLimiter<C, E>,
 
+    /// Queue of (unblock_time, peer) entries, ordered by time (oldest first).
+    /// Since time is monotonic and block_duration is fixed, new entries are always
+    /// appended to the back, and expired entries are popped from the front.
+    unblock_queue: VecDeque<(SystemTime, C)>,
+
     // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
     releaser: Releaser<C>,
@@ -118,6 +123,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
+            unblock_queue: VecDeque::new(),
             releaser,
             metrics,
         }
@@ -291,6 +297,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .is_some_and(|r| r.block(blocked_until))
         {
             self.metrics.blocked.inc();
+            self.unblock_queue.push_back((blocked_until, peer.clone()));
         }
     }
 
@@ -377,6 +384,45 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     pub fn acceptable(&self, peer: &C) -> bool {
         let now = self.context.current();
         self.peers.get(peer).is_some_and(|r| r.acceptable(now))
+    }
+
+    /// Unblock all peers whose block has expired and update the knowledge bitmap.
+    ///
+    /// Returns the list of peers that were unblocked (for logging/debugging).
+    pub fn unblock_expired(&mut self) -> Vec<C> {
+        let now = self.context.current();
+        let mut unblocked = Vec::new();
+
+        // Pop expired entries from the front of the queue
+        while let Some((blocked_until, _)) = self.unblock_queue.front() {
+            if *blocked_until > now {
+                break;
+            }
+            let (_, peer) = self.unblock_queue.pop_front().unwrap();
+
+            // Check if peer still exists and clear the block
+            if let Some(record) = self.peers.get_mut(&peer) {
+                if record.clear_expired_block(now) {
+                    self.metrics.blocked.dec();
+
+                    // Update the knowledge bitmap for this peer
+                    let want = record.want(self.dial_fail_limit, now);
+                    for set in self.sets.values_mut() {
+                        set.update(&peer, !want);
+                    }
+
+                    unblocked.push(peer);
+                }
+            }
+        }
+        unblocked
+    }
+
+    /// Get the next unblock deadline (earliest blocked_until time).
+    ///
+    /// Returns `None` if no peers are currently blocked.
+    pub fn next_unblock_deadline(&self) -> Option<SystemTime> {
+        self.unblock_queue.front().map(|(time, _)| *time)
     }
 
     // --------- Helpers ----------
