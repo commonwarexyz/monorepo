@@ -604,17 +604,16 @@ impl<'a, S: Storage> Reconciler<'a, S> {
 
             match &range.mode {
                 RangeMode::Skip => {
-                    // Remote says skip, we skip too
-                    response_ranges.push(Range::new(range.upper_bound.clone(), RangeMode::Skip));
+                    // Remote says skip - merge with previous Skip if possible
+                    Self::push_skip(&mut response_ranges, range.upper_bound.clone());
                 }
                 RangeMode::Fingerprint(remote_fp) => {
                     let local_fp = self.storage.fingerprint(current_idx, end_idx);
                     let item_count = end_idx - current_idx;
 
                     if local_fp == *remote_fp {
-                        // Fingerprints match, skip this range
-                        response_ranges
-                            .push(Range::new(range.upper_bound.clone(), RangeMode::Skip));
+                        // Fingerprints match - merge with previous Skip if possible
+                        Self::push_skip(&mut response_ranges, range.upper_bound.clone());
                     } else if item_count <= self.branching_factor {
                         // Small enough range, send ID list
                         let ids = self.storage.ids_in_range(current_idx, end_idx);
@@ -651,8 +650,7 @@ impl<'a, S: Storage> Reconciler<'a, S> {
                             RangeMode::IdList(local_ids),
                         ));
                     } else {
-                        response_ranges
-                            .push(Range::new(range.upper_bound.clone(), RangeMode::Skip));
+                        Self::push_skip(&mut response_ranges, range.upper_bound.clone());
                     }
                 }
             }
@@ -661,6 +659,18 @@ impl<'a, S: Storage> Reconciler<'a, S> {
         }
 
         Ok((Message::new(response_ranges), missing))
+    }
+
+    /// Push a Skip range, merging with the previous range if it's also a Skip.
+    fn push_skip(ranges: &mut Vec<Range>, bound: Bound) {
+        if let Some(last) = ranges.last_mut() {
+            if matches!(last.mode, RangeMode::Skip) {
+                // Merge: just update the bound of the existing Skip
+                last.upper_bound = bound;
+                return;
+            }
+        }
+        ranges.push(Range::new(bound, RangeMode::Skip));
     }
 
     /// Split a range into sub-ranges with fingerprints.
@@ -1323,5 +1333,37 @@ mod tests {
         assert!(missing_a.contains(&Digest([0x03; 32])));
         assert_eq!(missing_b.len(), 1);
         assert!(missing_b.contains(&Digest([0x02; 32])));
+    }
+
+    #[test]
+    fn test_skip_merging() {
+        // Test that consecutive Skip ranges are merged to reduce bandwidth.
+        // Create two identical large sets that will be split into many sub-ranges.
+        let mut storage_a = VecStorage::new();
+        let mut storage_b = VecStorage::new();
+
+        // Add 100 items to both sets (identical)
+        for i in 0..100u8 {
+            let mut id = [0u8; 32];
+            id[0] = i;
+            storage_a.insert(Item::from_bytes(i as u64 * 10, id));
+            storage_b.insert(Item::from_bytes(i as u64 * 10, id));
+        }
+
+        // Use small branching factor to force many sub-ranges
+        let mut reconciler_a = Reconciler::new(&storage_a, 4);
+        let msg1 = reconciler_a.initiate();
+
+        // First message should have 1 range (full fingerprint)
+        assert_eq!(msg1.ranges.len(), 1);
+
+        let mut reconciler_b = Reconciler::new(&storage_b, 4);
+        let (msg2, _) = reconciler_b.reconcile(&msg1).unwrap();
+
+        // Since fingerprints match, response should be a single merged Skip
+        // (not many individual Skip ranges)
+        assert_eq!(msg2.ranges.len(), 1);
+        assert!(matches!(msg2.ranges[0].mode, RangeMode::Skip));
+        assert!(msg2.ranges[0].upper_bound.is_infinity());
     }
 }
