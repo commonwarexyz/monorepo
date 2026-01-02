@@ -87,7 +87,7 @@ use crate::{
         },
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable as _, Operation as _},
-        store::{Clean, Dirty, LogStore, PrunableStore, State},
+        store::{Durable, LogStore, NonDurable, PrunableStore, State},
         update_key, Error, FloorHelper,
     },
     translator::Translator,
@@ -126,7 +126,7 @@ pub struct Config<T: Translator, C> {
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
-pub struct Db<E, K, V, T, S = Clean>
+pub struct Db<E, K, V, T, S = Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -255,7 +255,7 @@ where
     }
 }
 
-impl<E, K, V, T> Db<E, K, V, T, Clean>
+impl<E, K, V, T> Db<E, K, V, T, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -307,19 +307,19 @@ where
             active_keys,
             inactivity_floor_loc,
             last_commit_loc,
-            state: Clean,
+            state: Durable,
         })
     }
 
     /// Convert this clean store into its dirty counterpart for making updates.
-    pub fn into_dirty(self) -> Db<E, K, V, T, Dirty> {
+    pub fn into_dirty(self) -> Db<E, K, V, T, NonDurable> {
         Db {
             log: self.log,
             snapshot: self.snapshot,
             active_keys: self.active_keys,
             inactivity_floor_loc: self.inactivity_floor_loc,
             last_commit_loc: self.last_commit_loc,
-            state: Dirty::default(),
+            state: NonDurable::default(),
         }
     }
 
@@ -336,7 +336,7 @@ where
     }
 }
 
-impl<E, K, V, T> Db<E, K, V, T, Dirty>
+impl<E, K, V, T> Db<E, K, V, T, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -417,7 +417,7 @@ where
     pub async fn commit(
         mut self,
         metadata: Option<V>,
-    ) -> Result<(Db<E, K, V, T, Clean>, Range<Location>), Error> {
+    ) -> Result<(Db<E, K, V, T, Durable>, Range<Location>), Error> {
         let start_loc = self.last_commit_loc + 1;
 
         // Raise the inactivity floor by taking `self.state.steps` steps, plus 1 to account for the
@@ -452,14 +452,14 @@ where
                 active_keys: self.active_keys,
                 inactivity_floor_loc: self.inactivity_floor_loc,
                 last_commit_loc: self.last_commit_loc,
-                state: Clean,
+                state: Durable,
             },
             range,
         ))
     }
 }
 
-impl<E, K, V, T> Persistable for Db<E, K, V, T, Clean>
+impl<E, K, V, T> Persistable for Db<E, K, V, T, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -539,7 +539,7 @@ where
     }
 }
 
-impl<E, K, V, T> Updatable for Db<E, K, V, T, Dirty>
+impl<E, K, V, T> Updatable for Db<E, K, V, T, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -551,7 +551,7 @@ where
     }
 }
 
-impl<E, K, V, T> Deletable for Db<E, K, V, T, Dirty>
+impl<E, K, V, T> Deletable for Db<E, K, V, T, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -563,7 +563,7 @@ where
     }
 }
 
-impl<E, K, V, T> Batchable for Db<E, K, V, T, Dirty>
+impl<E, K, V, T> Batchable for Db<E, K, V, T, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -602,7 +602,7 @@ mod test {
     const PAGE_CACHE_SIZE: usize = 9;
 
     /// The type of the store used in tests.
-    type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap, Clean>;
+    type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap, Durable>;
 
     async fn create_test_store(context: deterministic::Context) -> TestStore {
         let cfg = Config {

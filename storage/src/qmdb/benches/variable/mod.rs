@@ -176,7 +176,9 @@ where
     }
 
     let iter = batch.into_iter();
-    assert!(db.write_batch(iter).await.is_ok());
-    let (durable, _) = db.commit(None).await.unwrap();
+    db.write_batch(iter)
+        .await
+        .expect("write_batch shouldn't fail");
+    let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
     durable
 }

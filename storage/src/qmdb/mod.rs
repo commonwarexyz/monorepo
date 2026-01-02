@@ -7,8 +7,8 @@
 //! In a _keyed_ database, a _key_ either has a _value_ or it doesn't, and different types of
 //! operations modify the state of a specific key. A key that has a value can change to one without
 //! a value through the _delete_ operation. The _update_ operation gives a key a specific value. We
-//! sometimes call an update for a key that doesn't already a value a _create_ operation, but its
-//! representation in the log is the same.
+//! sometimes call an update for a key that doesn't already have a value a _create_ operation, but
+//! its representation in the log is the same.
 //!
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
@@ -33,7 +33,7 @@
 //! - `Mutable.into_merkleized()`                   → `(Merkleized,NonDurable)`
 //! - `Mutable.commit()`                            → `(Unmerkleized,Durable)`
 //!
-//! An authendicated database implements [store::LogStore] in every state, and keyed databases
+//! An authenticated database implements [store::LogStore] in every state, and keyed databases
 //! additionally implement [crate::kv::Gettable]. Additional functionality in other states includes:
 //!
 //! - Clean: [store::MerkleizedStore], [store::PrunableStore], [super::Persistable]
@@ -127,9 +127,9 @@ pub type Merkleized<H> = crate::mmr::mem::Clean<DigestOf<H>>;
 /// Type alias for unmerkleized state of a QMDB.
 pub type Unmerkleized = crate::mmr::mem::Dirty;
 /// Type alias for durable state of a QMDB.
-pub type Durable = store::Clean;
+pub type Durable = store::Durable;
 /// Type alias for non-durable state of a QMDB.
-pub type NonDurable = store::Dirty;
+pub type NonDurable = store::NonDurable;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.

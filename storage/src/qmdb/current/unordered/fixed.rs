@@ -27,7 +27,7 @@ use crate::{
             proof::{OperationProof, RangeProof},
             root, FixedConfig as Config,
         },
-        store::{LogStore, MerkleizedStore, PrunableStore},
+        store::{self, LogStore, MerkleizedStore, PrunableStore},
         DurabilityState, Durable, Error, MerkleizationState, Merkleized, NonDurable, Unmerkleized,
     },
     translator::Translator,
@@ -271,7 +271,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-        D: crate::qmdb::store::State,
+        D: store::State,
     > Db<E, K, V, H, T, N, Merkleized<H>, D>
 {
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
@@ -424,7 +424,7 @@ impl<
             inactivity_floor_loc: self.any.inactivity_floor_loc,
             last_commit_loc: self.any.last_commit_loc,
             snapshot: self.any.snapshot,
-            durable_state: crate::qmdb::store::Clean,
+            durable_state: store::Durable,
             active_keys: self.any.active_keys,
             _update: core::marker::PhantomData,
         };
@@ -693,7 +693,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-        D: crate::qmdb::store::State,
+        D: store::State,
     > MerkleizedStore for Db<E, K, V, H, T, N, Merkleized<H>, D>
 {
     type Digest = H::Digest;

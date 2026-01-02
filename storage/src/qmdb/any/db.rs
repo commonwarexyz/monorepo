@@ -234,7 +234,7 @@ where
             snapshot: index,
             last_commit_loc,
             active_keys,
-            durable_state: store::Clean,
+            durable_state: store::Durable,
             _update: core::marker::PhantomData,
         })
     }
@@ -257,7 +257,7 @@ where
             last_commit_loc: self.last_commit_loc,
             snapshot: self.snapshot,
             active_keys: self.active_keys,
-            durable_state: store::Dirty { steps: 0 },
+            durable_state: NonDurable { steps: 0 },
             _update: core::marker::PhantomData,
         }
     }
@@ -283,7 +283,7 @@ where
             last_commit_loc: self.last_commit_loc,
             snapshot: self.snapshot,
             active_keys: self.active_keys,
-            durable_state: store::Dirty { steps: 0 },
+            durable_state: store::NonDurable { steps: 0 },
             _update: core::marker::PhantomData,
         }
     }
@@ -421,7 +421,7 @@ where
             last_commit_loc: self.last_commit_loc,
             snapshot: self.snapshot,
             active_keys: self.active_keys,
-            durable_state: store::Clean,
+            durable_state: store::Durable,
             _update: core::marker::PhantomData,
         };
 

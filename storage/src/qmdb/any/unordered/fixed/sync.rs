@@ -317,13 +317,9 @@ mod tests {
         }
 
         async fn apply_ops(db: Self::Db, ops: Vec<Operation<Digest, Digest>>) -> Self::Db {
-            apply_ops(db.into_mutable(), ops)
-                .await
-                .commit(None)
-                .await
-                .unwrap()
-                .0
-                .into_merkleized()
+            let mut db = db.into_mutable();
+            apply_ops(&mut db, ops).await;
+            db.commit(None::<Digest>).await.unwrap().0.into_merkleized()
         }
     }
 

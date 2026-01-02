@@ -254,25 +254,32 @@ where
     for i in 0u64..num_elements {
         let k = Sha256::hash(&i.to_be_bytes());
         let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        assert!(batch.update(k, v).await.is_ok());
+        batch.update(k, v).await.expect("update shouldn't fail");
     }
     let iter = batch.into_iter();
-    assert!(db.write_batch(iter).await.is_ok());
+    db.write_batch(iter)
+        .await
+        .expect("write_batch shouldn't fail");
     batch = db.start_batch();
 
     for _ in 0u64..num_operations {
         let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
-            assert!(batch.delete(rand_key).await.is_ok());
+            batch.delete(rand_key).await.expect("delete shouldn't fail");
             continue;
         }
         let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        assert!(batch.update(rand_key, v).await.is_ok());
+        batch
+            .update(rand_key, v)
+            .await
+            .expect("update shouldn't fail");
         if let Some(freq) = commit_frequency {
             if rng.next_u32() % freq == 0 {
                 let iter = batch.into_iter();
-                assert!(db.write_batch(iter).await.is_ok());
-                let (durable, _) = db.commit(None).await.unwrap();
+                db.write_batch(iter)
+                    .await
+                    .expect("write_batch shouldn't fail");
+                let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
                 db = durable.into_mutable();
                 batch = db.start_batch();
             }
@@ -280,7 +287,9 @@ where
     }
 
     let iter = batch.into_iter();
-    assert!(db.write_batch(iter).await.is_ok());
-    let (durable, _) = db.commit(None).await.unwrap();
+    db.write_batch(iter)
+        .await
+        .expect("write_batch shouldn't fail");
+    let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
     durable
 }

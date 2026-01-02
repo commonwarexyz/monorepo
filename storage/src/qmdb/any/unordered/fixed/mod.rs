@@ -174,10 +174,7 @@ pub(super) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(
-        mut db: DirtyAnyTest,
-        ops: Vec<Operation<Digest, Digest>>,
-    ) -> DirtyAnyTest {
+    pub(crate) async fn apply_ops(db: &mut DirtyAnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
                 Operation::Update(Update(key, value)) => {
@@ -186,13 +183,11 @@ pub(super) mod test {
                 Operation::Delete(key) => {
                     db.delete(key).await.unwrap();
                 }
-                Operation::CommitFloor(metadata, _) => {
-                    db = db.commit(metadata).await.unwrap().0.into_mutable();
+                Operation::CommitFloor(_, _) => {
+                    panic!("CommitFloor not supported in apply_ops");
                 }
             }
         }
-
-        db
     }
 
     #[test_traced("WARN")]
@@ -302,9 +297,9 @@ pub(super) mod test {
     fn test_any_fixed_db_historical_proof_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = create_test_db(context.clone()).await.into_mutable();
+            let mut db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(20);
-            let db = apply_ops(db, ops.clone()).await;
+            apply_ops(&mut db, ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root_hash = db.root();
             let original_op_count = db.op_count();
@@ -332,9 +327,9 @@ pub(super) mod test {
             ));
 
             // Add more operations to the database
-            let db = db.into_mutable();
+            let mut db = db.into_mutable();
             let more_ops = create_test_ops(5);
-            let db = apply_ops(db, more_ops.clone()).await;
+            apply_ops(&mut db, more_ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             // Historical proof should remain the same even though database has grown
@@ -374,9 +369,9 @@ pub(super) mod test {
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = create_test_db(context.clone()).await.into_mutable();
+            let mut db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(50);
-            let db = apply_ops(db, ops.clone()).await;
+            apply_ops(&mut db, ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let mut hasher = StandardHasher::<Sha256>::new();
@@ -397,8 +392,8 @@ pub(super) mod test {
             assert_eq!(single_ops.len(), 1);
 
             // Create historical database with single operation without committing it.
-            let single_db = create_test_db(context.clone()).await.into_mutable();
-            let single_db = apply_ops(single_db, ops[0..1].to_vec()).await;
+            let mut single_db = create_test_db(context.clone()).await.into_mutable();
+            apply_ops(&mut single_db, ops[0..1].to_vec()).await;
             let single_db = single_db.into_merkleized();
             let single_root = single_db.root();
 
@@ -450,9 +445,9 @@ pub(super) mod test {
     fn test_any_fixed_db_historical_proof_different_historical_sizes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = create_test_db(context.clone()).await.into_mutable();
+            let mut db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(100);
-            let db = apply_ops(db, ops.clone()).await;
+            apply_ops(&mut db, ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let mut hasher = StandardHasher::<Sha256>::new();
@@ -470,10 +465,9 @@ pub(super) mod test {
                 assert_eq!(historical_proof.size, Position::try_from(end_loc).unwrap());
 
                 // Create reference database at the given historical size
-                let ref_db = create_test_db(context.clone()).await.into_mutable();
-                let ref_db = apply_ops(ref_db, ops[0..(*end_loc - 1) as usize].to_vec())
-                    .await
-                    .into_merkleized();
+                let mut ref_db = create_test_db(context.clone()).await.into_mutable();
+                apply_ops(&mut ref_db, ops[0..(*end_loc - 1) as usize].to_vec()).await;
+                let ref_db = ref_db.into_merkleized();
 
                 let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
                 assert_eq!(ref_proof.size, historical_proof.size);
@@ -507,9 +501,9 @@ pub(super) mod test {
     fn test_any_fixed_db_historical_proof_invalid() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = create_test_db(context.clone()).await.into_mutable();
+            let mut db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(10);
-            let db = apply_ops(db, ops).await;
+            apply_ops(&mut db, ops).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let historical_op_count = Location::new_unchecked(5);

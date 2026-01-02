@@ -23,7 +23,7 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use std::num::{NonZeroU64, NonZeroUsize};
 
-pub mod db;
+pub(crate) mod db;
 mod operation;
 #[cfg(any(test, feature = "test-traits"))]
 pub mod states;

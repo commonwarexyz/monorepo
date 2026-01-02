@@ -290,14 +290,12 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        if uncommitted_ops > 0 {
-            let (durable_db, _) = db.commit(None).await.expect("Final commit should not fail");
-            db = durable_db.into_mutable();
-        }
+        let (durable_db, _) = db.commit(None).await.expect("Final commit should not fail");
+        let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
 
         for key in &all_keys {
             let k = Key::new(*key);
-            let result = db.get(&k).await.expect("Final get should not fail");
+            let result = clean_db.get(&k).await.expect("Final get should not fail");
 
             match expected_state.get(key) {
                 Some(Some(expected_value)) => {
@@ -315,10 +313,7 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        let (durable_db, _) = db.commit(None).await.expect("Final commit should not fail");
-        let mut merkleized = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
-        merkleized.sync().await.expect("Sync should not fail");
-        drop(merkleized);
+        clean_db.destroy().await.expect("destroy should not fail");
     });
 }
 
