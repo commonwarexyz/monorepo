@@ -3,7 +3,7 @@
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use std::{collections::HashSet, net::IpAddr};
+use std::{collections::HashSet, net::IpAddr, time::Duration};
 
 pub mod actor;
 mod directory;
@@ -27,4 +27,5 @@ pub struct Config<C: Signer> {
     pub allow_dns: bool,
     pub bypass_ip_check: bool,
     pub listener: Mailbox<HashSet<IpAddr>>,
+    pub block_duration: Duration,
 }

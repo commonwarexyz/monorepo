@@ -79,6 +79,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             max_sets: cfg.tracked_peer_sets,
             dial_fail_limit: cfg.dial_fail_limit,
             rate_limit: cfg.allowed_connection_rate_per_peer,
+            block_duration: cfg.block_duration,
         };
 
         // Create the mailboxes
@@ -319,6 +320,7 @@ mod tests {
             peer_gossip_max_count: 5,
             max_peer_set_size: 128,
             dial_fail_limit: 1,
+            block_duration: Duration::from_secs(100),
         }
     }
 

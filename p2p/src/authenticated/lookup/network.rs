@@ -63,6 +63,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
                 allow_dns: cfg.allow_dns,
                 bypass_ip_check: cfg.bypass_ip_check,
                 listener: listener_mailbox,
+                block_duration: cfg.block_duration,
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(
