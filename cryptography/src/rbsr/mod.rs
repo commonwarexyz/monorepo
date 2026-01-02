@@ -1,9 +1,18 @@
-//! Range-Based Set Reconciliation (RBSR) for efficient set synchronization.
+//! Range-Based Set Reconciliation (RBSR) for efficient bi-directional set synchronization.
 //!
 //! This module implements the Negentropy protocol for comparing and reconciling
 //! sets between two participants. RBSR uses a divide-and-conquer approach where
 //! participants exchange fingerprints of ranges, recursively splitting non-matching
 //! ranges until differences are identified.
+//!
+//! # Bi-directional Reconciliation
+//!
+//! RBSR is **bi-directional**: both participants discover the symmetric difference
+//! between their sets. After reconciliation, each side knows:
+//! - Items they're missing (to fetch from the other participant)
+//! - Items the other is missing (to send to them)
+//!
+//! The protocol is symmetric; the only difference is who sends the first message.
 //!
 //! # Overview
 //!
@@ -12,7 +21,7 @@
 //! 2. Computing fingerprints over ranges of items
 //! 3. Exchanging range fingerprints between participants
 //! 4. Recursively splitting ranges where fingerprints differ
-//! 5. Directly transmitting items once ranges become small enough
+//! 5. Exchanging ID lists once ranges become small enough
 //!
 //! # Item Identity
 //!
@@ -30,9 +39,10 @@
 //!
 //! # Properties
 //!
+//! - **Bi-directional**: Both sides discover items to send and receive
 //! - **Efficient**: Round-trips scale logarithmically with set size (log_B(N) / 2)
 //! - **Flexible**: No rigid tree structure required; implementations can vary
-//! - **Stateless**: Servers don't need per-connection state
+//! - **Stateless**: No per-connection state required between messages
 //! - **DoS Resistant**: Fingerprint computation is deterministic
 //!
 //! # Example
@@ -40,13 +50,12 @@
 //! ```rust
 //! use commonware_cryptography::rbsr::{Item, Reconciler, VecStorage};
 //!
-//! // Create storage for participant A
+//! // Create storage for participant A (has items 1 and 2)
 //! let mut storage_a = VecStorage::new();
 //! storage_a.insert(Item::from_bytes(1000, [0x01; 32]));
 //! storage_a.insert(Item::from_bytes(1001, [0x02; 32]));
-//! storage_a.insert(Item::from_bytes(1002, [0x03; 32]));
 //!
-//! // Create storage for participant B (missing one item)
+//! // Create storage for participant B (has items 1 and 3)
 //! let mut storage_b = VecStorage::new();
 //! storage_b.insert(Item::from_bytes(1000, [0x01; 32]));
 //! storage_b.insert(Item::from_bytes(1002, [0x03; 32]));
@@ -55,15 +64,19 @@
 //! let mut reconciler_a = Reconciler::new(&storage_a, 16);
 //! let msg1 = reconciler_a.initiate();
 //!
-//! // Participant B processes and responds
+//! // Exchange messages until complete
 //! let mut reconciler_b = Reconciler::new(&storage_b, 16);
 //! let msg2 = reconciler_b.reconcile(&msg1).unwrap();
-//!
-//! // Participant A processes response
 //! let msg3 = reconciler_a.reconcile(&msg2).unwrap();
+//! let _ = reconciler_b.reconcile(&msg3).unwrap();
 //!
-//! // After reconciliation completes, check what B needs
-//! // (B is missing the item with ID [0x02; 32])
+//! // Both sides now know the symmetric difference:
+//! // A is missing [0x03] (has it locally: false, remote has: true)
+//! // B is missing [0x02] (has it locally: false, remote has: true)
+//! assert!(reconciler_a.missing_locally().contains(&[0x03; 32].into()));
+//! assert!(reconciler_a.missing_remotely().contains(&[0x02; 32].into()));
+//! assert!(reconciler_b.missing_locally().contains(&[0x02; 32].into()));
+//! assert!(reconciler_b.missing_remotely().contains(&[0x03; 32].into()));
 //! ```
 //!
 //! # Acknowledgements
@@ -539,14 +552,20 @@ impl Storage for VecStorage {
     }
 }
 
-/// Main reconciler for performing set reconciliation.
+/// Reconciler for bi-directional set reconciliation.
+///
+/// Both participants discover the symmetric difference between their sets:
+/// - Items they're missing (to fetch from the remote)
+/// - Items the remote is missing (to send to the remote)
+///
+/// The protocol is symmetric; the only difference is who initiates.
 pub struct Reconciler<'a, S: Storage> {
     storage: &'a S,
     branching_factor: usize,
-    /// IDs that the remote has but we don't
-    have_ids: Vec<Digest>,
-    /// IDs that we have but the remote doesn't
-    need_ids: Vec<Digest>,
+    /// IDs we're missing that the remote has (items to fetch)
+    missing_locally: Vec<Digest>,
+    /// IDs the remote is missing that we have (items to send)
+    missing_remotely: Vec<Digest>,
     /// Whether reconciliation is complete
     complete: bool,
     /// Whether we are the initiator (affects how we respond to IdList)
@@ -559,8 +578,8 @@ impl<'a, S: Storage> Reconciler<'a, S> {
         Self {
             storage,
             branching_factor: branching_factor.max(2),
-            have_ids: Vec::new(),
-            need_ids: Vec::new(),
+            missing_locally: Vec::new(),
+            missing_remotely: Vec::new(),
             complete: false,
             is_initiator: false,
         }
@@ -631,14 +650,14 @@ impl<'a, S: Storage> Reconciler<'a, S> {
                     // Find IDs remote has that we don't (we need to fetch these)
                     for remote_id in remote_ids {
                         if !local_ids.contains(remote_id) {
-                            self.have_ids.push(*remote_id);
+                            self.missing_locally.push(*remote_id);
                         }
                     }
 
-                    // Find IDs we have that remote doesn't (remote needs these)
+                    // Find IDs we have that remote doesn't (we need to send these)
                     for local_id in &local_ids {
                         if !remote_ids.contains(local_id) {
-                            self.need_ids.push(*local_id);
+                            self.missing_remotely.push(*local_id);
                         }
                     }
 
@@ -700,14 +719,14 @@ impl<'a, S: Storage> Reconciler<'a, S> {
         }
     }
 
-    /// Get IDs that the remote has but we don't (items we need to fetch).
-    pub fn have_ids(&self) -> &[Digest] {
-        &self.have_ids
+    /// Get IDs we're missing that the remote has (items to fetch).
+    pub fn missing_locally(&self) -> &[Digest] {
+        &self.missing_locally
     }
 
-    /// Get IDs that we have but the remote doesn't (items to send to remote).
-    pub fn need_ids(&self) -> &[Digest] {
-        &self.need_ids
+    /// Get IDs the remote is missing that we have (items to send).
+    pub fn missing_remotely(&self) -> &[Digest] {
+        &self.missing_remotely
     }
 
     /// Check if reconciliation is complete.
@@ -717,8 +736,8 @@ impl<'a, S: Storage> Reconciler<'a, S> {
 
     /// Clear the accumulated difference lists.
     pub fn clear_differences(&mut self) {
-        self.have_ids.clear();
-        self.need_ids.clear();
+        self.missing_locally.clear();
+        self.missing_remotely.clear();
     }
 }
 
@@ -862,8 +881,8 @@ mod tests {
 
         let msg3 = reconciler_a.reconcile(&msg2).unwrap();
         assert!(msg3.is_complete());
-        assert!(reconciler_a.have_ids().is_empty());
-        assert!(reconciler_a.need_ids().is_empty());
+        assert!(reconciler_a.missing_locally().is_empty());
+        assert!(reconciler_a.missing_remotely().is_empty());
     }
 
     #[test]
@@ -891,14 +910,18 @@ mod tests {
         assert!(msg4.is_complete());
 
         // A should know B has [0x03] (A needs to fetch)
-        assert!(reconciler_a.have_ids().contains(&Digest([0x03; 32])));
+        assert!(reconciler_a.missing_locally().contains(&Digest([0x03; 32])));
         // A should know it has [0x02] that B needs
-        assert!(reconciler_a.need_ids().contains(&Digest([0x02; 32])));
+        assert!(reconciler_a
+            .missing_remotely()
+            .contains(&Digest([0x02; 32])));
 
         // B should know A has [0x02] (B needs to fetch)
-        assert!(reconciler_b.have_ids().contains(&Digest([0x02; 32])));
+        assert!(reconciler_b.missing_locally().contains(&Digest([0x02; 32])));
         // B should know it has [0x03] that A needs
-        assert!(reconciler_b.need_ids().contains(&Digest([0x03; 32])));
+        assert!(reconciler_b
+            .missing_remotely()
+            .contains(&Digest([0x03; 32])));
     }
 
     #[test]
@@ -916,7 +939,10 @@ mod tests {
         let _msg3 = reconciler_a.reconcile(&msg2).unwrap();
 
         // A should know B has an item
-        assert!(!reconciler_a.have_ids().is_empty() || !reconciler_b.need_ids().is_empty());
+        assert!(
+            !reconciler_a.missing_locally().is_empty()
+                || !reconciler_b.missing_remotely().is_empty()
+        );
     }
 
     #[test]
@@ -1012,10 +1038,10 @@ mod tests {
         );
 
         // Check that differences were found
-        let a_have = reconciler_a.have_ids().len();
-        let a_need = reconciler_a.need_ids().len();
-        let b_have = reconciler_b.have_ids().len();
-        let b_need = reconciler_b.need_ids().len();
+        let a_have = reconciler_a.missing_locally().len();
+        let a_need = reconciler_a.missing_remotely().len();
+        let b_have = reconciler_b.missing_locally().len();
+        let b_need = reconciler_b.missing_remotely().len();
 
         // Total differences should be 20 (10 unique to each)
         assert!(a_have + a_need + b_have + b_need > 0);
@@ -1158,7 +1184,7 @@ mod tests {
         // Verify A found all B's unique items
         for id in &b_unique {
             assert!(
-                reconciler_a.have_ids().contains(id),
+                reconciler_a.missing_locally().contains(id),
                 "A should know B has {:?}",
                 id
             );
@@ -1167,7 +1193,7 @@ mod tests {
         // Verify A knows what B needs
         for id in &a_unique {
             assert!(
-                reconciler_a.need_ids().contains(id),
+                reconciler_a.missing_remotely().contains(id),
                 "A should know B needs {:?}",
                 id
             );
@@ -1176,7 +1202,7 @@ mod tests {
         // Verify B found all A's unique items
         for id in &a_unique {
             assert!(
-                reconciler_b.have_ids().contains(id),
+                reconciler_b.missing_locally().contains(id),
                 "B should know A has {:?}",
                 id
             );
@@ -1185,7 +1211,7 @@ mod tests {
         // Verify B knows what A needs
         for id in &b_unique {
             assert!(
-                reconciler_b.need_ids().contains(id),
+                reconciler_b.missing_remotely().contains(id),
                 "B should know A needs {:?}",
                 id
             );
@@ -1257,7 +1283,7 @@ mod tests {
         // Verify A found B's unique items (same hint, different IDs)
         for id in &b_unique {
             assert!(
-                reconciler_a.have_ids().contains(id),
+                reconciler_a.missing_locally().contains(id),
                 "A should know B has {:?}",
                 id
             );
@@ -1266,7 +1292,7 @@ mod tests {
         // Verify A knows what B needs
         for id in &a_unique {
             assert!(
-                reconciler_a.need_ids().contains(id),
+                reconciler_a.missing_remotely().contains(id),
                 "A should know B needs {:?}",
                 id
             );
@@ -1275,7 +1301,7 @@ mod tests {
         // Verify B found A's unique items
         for id in &a_unique {
             assert!(
-                reconciler_b.have_ids().contains(id),
+                reconciler_b.missing_locally().contains(id),
                 "B should know A has {:?}",
                 id
             );
@@ -1284,7 +1310,7 @@ mod tests {
         // Verify B knows what A needs
         for id in &b_unique {
             assert!(
-                reconciler_b.need_ids().contains(id),
+                reconciler_b.missing_remotely().contains(id),
                 "B should know A needs {:?}",
                 id
             );
@@ -1335,13 +1361,13 @@ mod tests {
         // Since items are identified by ID only, both sides have the same 3 items.
         // No differences should be detected!
         assert_eq!(
-            reconciler_a.have_ids().len(),
+            reconciler_a.missing_locally().len(),
             0,
             "same IDs = same items, no differences"
         );
-        assert_eq!(reconciler_a.need_ids().len(), 0);
-        assert_eq!(reconciler_b.have_ids().len(), 0);
-        assert_eq!(reconciler_b.need_ids().len(), 0);
+        assert_eq!(reconciler_a.missing_remotely().len(), 0);
+        assert_eq!(reconciler_b.missing_locally().len(), 0);
+        assert_eq!(reconciler_b.missing_remotely().len(), 0);
     }
 
     #[test]
@@ -1383,10 +1409,12 @@ mod tests {
         // A should find B has [0x03] (unique to B)
         // A should know it has [0x02] (unique to A)
         // [0x01] matches despite different hints
-        assert_eq!(reconciler_a.have_ids().len(), 1);
-        assert_eq!(reconciler_a.need_ids().len(), 1);
-        assert!(reconciler_a.have_ids().contains(&Digest([0x03; 32])));
-        assert!(reconciler_a.need_ids().contains(&Digest([0x02; 32])));
+        assert_eq!(reconciler_a.missing_locally().len(), 1);
+        assert_eq!(reconciler_a.missing_remotely().len(), 1);
+        assert!(reconciler_a.missing_locally().contains(&Digest([0x03; 32])));
+        assert!(reconciler_a
+            .missing_remotely()
+            .contains(&Digest([0x02; 32])));
     }
 
     #[cfg(feature = "arbitrary")]
