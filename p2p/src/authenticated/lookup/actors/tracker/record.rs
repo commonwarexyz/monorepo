@@ -86,7 +86,7 @@ impl Record {
     /// Returns `true` if the peer was newly blocked.
     /// Returns `false` if the peer was already blocked or is the local node (unblockable).
     pub const fn block(&mut self, until: SystemTime) -> bool {
-        if matches!(self.address, Address::Myself) || self.blocked_until.is_some() {
+        if matches!(self.address, Address::Myself) || self.is_blocked() {
             return false;
         }
         self.blocked_until = Some(until);
@@ -102,15 +102,13 @@ impl Record {
         self.blocked_until.is_some()
     }
 
-    /// Check if block has expired and clear it if so.
+    /// Clear the block on this peer.
     ///
-    /// Returns `true` if a block was cleared (for metric decrement).
-    pub fn clear_expired_block(&mut self, now: SystemTime) -> bool {
-        if let Some(until) = self.blocked_until {
-            if now >= until {
-                self.blocked_until = None;
-                return true;
-            }
+    /// Returns `true` if a block was cleared.
+    pub const fn clear_expired_block(&mut self) -> bool {
+        if self.is_blocked() {
+            self.blocked_until = None;
+            return true;
         }
         false
     }
@@ -466,9 +464,8 @@ mod tests {
         assert!(!record.eligible());
         assert!(!record.reserve());
 
-        // After block expires and is cleared, peer should be eligible again
-        let after_expiry = block_until() + Duration::from_secs(1);
-        assert!(record.clear_expired_block(after_expiry));
+        // After block is cleared, peer should be eligible again
+        assert!(record.clear_expired_block());
         assert!(!record.is_blocked());
         assert!(record.eligible());
         assert!(record.reserve());
@@ -486,17 +483,12 @@ mod tests {
         assert!(record.block(block_until()));
         assert!(record.blocked_until.is_some());
 
-        // Clear should return false when block hasn't expired
-        assert!(!record.clear_expired_block(now()));
-        assert!(record.blocked_until.is_some());
-
-        // Clear should return true and clear the block when expired
-        let after_expiry = block_until() + Duration::from_secs(1);
-        assert!(record.clear_expired_block(after_expiry));
+        // Clear should return true and clear the block
+        assert!(record.clear_expired_block());
         assert!(record.blocked_until.is_none());
 
         // Subsequent clear should return false
-        assert!(!record.clear_expired_block(after_expiry));
+        assert!(!record.clear_expired_block());
     }
 
     #[test]

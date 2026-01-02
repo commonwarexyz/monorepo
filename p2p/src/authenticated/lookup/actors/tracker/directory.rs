@@ -2,6 +2,7 @@ use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::{
     authenticated::lookup::{actors::tracker::ingress::Releaser, metrics},
     types::Address,
+    utils::blocked,
     Ingress,
 };
 use commonware_cryptography::PublicKey;
@@ -15,7 +16,7 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::{
-    collections::{hash_map::Entry, BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
     net::IpAddr,
     time::{Duration, SystemTime},
 };
@@ -72,10 +73,9 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Rate limiter for connection attempts.
     rate_limiter: KeyedRateLimiter<C, E>,
 
-    /// Queue of (unblock_time, peer) entries, ordered by time (oldest first).
-    /// Since time is monotonic and block_duration is fixed, new entries are always
-    /// appended to the back, and expired entries are popped from the front.
-    unblock_queue: VecDeque<(SystemTime, C)>,
+    /// Tracks blocked peers and their unblock time. This is the source of truth for
+    /// whether a peer is blocked, persisting even if the peer record is deleted.
+    blocked: blocked::Queue<C>,
 
     // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
@@ -109,7 +109,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
-            unblock_queue: VecDeque::new(),
+            blocked: blocked::Queue::new(),
             releaser,
             metrics,
         }
@@ -165,7 +165,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 }
                 Entry::Vacant(entry) => {
                     self.metrics.tracked.inc();
-                    entry.insert(Record::known(addr.clone()))
+                    let record = entry.insert(Record::known(addr.clone()));
+                    // If peer is blocked (from before they were removed), mark the new record
+                    if let Some(until) = self.blocked.blocked_until(peer) {
+                        record.block(until);
+                    }
+                    record
                 }
             };
             record.increment();
@@ -225,13 +230,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to block a peer for the configured duration, updating the metrics accordingly.
     pub fn block(&mut self, peer: &C) {
         let blocked_until = self.context.current() + self.block_duration;
-        if self
-            .peers
-            .get_mut(peer)
-            .is_some_and(|r| r.block(blocked_until))
-        {
+        if self.blocked.block(peer.clone(), blocked_until) {
             self.metrics.blocked.inc();
-            self.unblock_queue.push_back((blocked_until, peer.clone()));
+            // Also mark the record as blocked if it exists
+            if let Some(record) = self.peers.get_mut(peer) {
+                record.block(blocked_until);
+            }
         }
     }
 
@@ -297,23 +301,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Returns the list of peers that were unblocked (for logging/debugging).
     pub fn unblock_expired(&mut self) -> Vec<C> {
         let now = self.context.current();
-        let mut unblocked = Vec::new();
+        let unblocked = self.blocked.unblock_expired(now);
 
-        // Pop expired entries from the front of the queue
-        while let Some((blocked_until, _)) = self.unblock_queue.front() {
-            if *blocked_until > now {
-                break;
-            }
-            let (_, peer) = self.unblock_queue.pop_front().unwrap();
-
-            // Check if peer still exists and clear the block
-            if let Some(record) = self.peers.get_mut(&peer) {
-                if record.clear_expired_block(now) {
-                    self.metrics.blocked.dec();
-                    unblocked.push(peer);
-                }
+        // Update metrics and clear blocks on records
+        for peer in &unblocked {
+            self.metrics.blocked.dec();
+            if let Some(record) = self.peers.get_mut(peer) {
+                record.clear_expired_block();
             }
         }
+
         unblocked
     }
 
@@ -321,7 +318,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `None` if no peers are currently blocked.
     pub fn next_unblock_deadline(&self) -> Option<SystemTime> {
-        self.unblock_queue.front().map(|(time, _)| *time)
+        self.blocked.next_deadline()
     }
 
     // --------- Helpers ----------
@@ -956,6 +953,63 @@ mod tests {
             assert!(
                 directory.next_unblock_deadline().is_none(),
                 "No more blocked peers, no deadline"
+            );
+        });
+    }
+
+    #[test]
+    fn test_unblock_expired_peer_removed_and_readded() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 1, // Only keep 1 set so we can evict peers
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            // Add pk_1 and block it
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.block(&pk_1);
+            assert!(directory.peers.get(&pk_1).unwrap().is_blocked());
+
+            // Add a new set that evicts pk_1 (max_sets=1)
+            directory.add_set(1, [(pk_2.clone(), addr(addr_2))].try_into().unwrap());
+            assert!(
+                !directory.peers.contains_key(&pk_1),
+                "pk_1 should be removed"
+            );
+
+            // Re-add pk_1 - should still be blocked because block persists
+            directory.add_set(2, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            assert!(
+                directory.peers.get(&pk_1).unwrap().is_blocked(),
+                "Re-added pk_1 should still be blocked"
+            );
+
+            // Advance time past block duration
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+
+            // Now unblock_expired should unblock pk_1
+            let unblocked = directory.unblock_expired();
+            assert_eq!(unblocked.len(), 1, "pk_1 should be unblocked");
+            assert!(unblocked.contains(&pk_1));
+            assert!(
+                !directory.peers.get(&pk_1).unwrap().is_blocked(),
+                "pk_1 should no longer be blocked"
             );
         });
     }
