@@ -1,4 +1,4 @@
-use crate::{ordered_broadcast::types::Context, types::Epoch, Automaton as A, Relay as R};
+use crate::{ordered_broadcast::types::Context, types::Epoch, Automaton as A};
 use bytes::Bytes;
 use commonware_cryptography::{sha256, Hasher, PublicKey, Sha256};
 use futures::channel::oneshot;
@@ -56,12 +56,5 @@ impl<P: PublicKey> A for Automaton<P> {
         // Always say the payload is valid.
         sender.send(true).unwrap();
         receiver
-    }
-}
-
-impl<P: PublicKey> R for Automaton<P> {
-    type Digest = sha256::Digest;
-    async fn broadcast(&mut self, payload: Self::Digest) {
-        trace!(?payload, "broadcast");
     }
 }

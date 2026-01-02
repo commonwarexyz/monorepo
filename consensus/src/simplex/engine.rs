@@ -4,7 +4,7 @@ use super::{
     elector::Config as Elector,
     types::{Activity, Context},
 };
-use crate::{simplex::scheme::Scheme, CertifiableAutomaton, Relay, Reporter};
+use crate::{simplex::scheme::Scheme, CertifiableAutomaton, Reporter};
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
@@ -20,12 +20,11 @@ pub struct Engine<
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-    R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, S, L, B, D, A, R, F>,
+    voter: voter::Actor<E, S, L, B, D, A, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
     batcher: batcher::Actor<E, S, B, D, F>,
@@ -42,12 +41,11 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-        R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Engine<E, S, L, B, D, A, R, F>
+    > Engine<E, S, L, B, D, A, F>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, F>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -74,7 +72,6 @@ impl<
                 elector: cfg.elector,
                 blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
-                relay: cfg.relay,
                 reporter: cfg.reporter,
                 partition: cfg.partition,
                 mailbox_size: cfg.mailbox_size,

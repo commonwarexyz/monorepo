@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     types::{Epoch, EpochDelta},
-    Automaton, Monitor, Relay, Reporter,
+    Automaton, Monitor, Reporter,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -68,7 +68,6 @@ pub struct Engine<
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
-    R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
 > {
@@ -80,7 +79,6 @@ pub struct Engine<
     sequencers_provider: S,
     validators_provider: P,
     automaton: A,
-    relay: R,
     monitor: M,
     reporter: Z,
 
@@ -204,13 +202,12 @@ impl<
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
-        R: Relay<Digest = D>,
         Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
-    > Engine<E, C, S, P, D, A, R, Z, M>
+    > Engine<E, C, S, P, D, A, Z, M>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M>) -> Self {
+    pub fn new(context: E, cfg: Config<C, S, P, D, A, Z, M>) -> Self {
         // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
 
@@ -220,7 +217,6 @@ impl<
             sequencers_provider: cfg.sequencers_provider,
             validators_provider: cfg.validators_provider,
             automaton: cfg.automaton,
-            relay: cfg.relay,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
             namespace: cfg.namespace,
@@ -834,9 +830,6 @@ impl<
             return Err(Error::UnknownScheme(epoch));
         };
         let validators = scheme.participants();
-
-        // Tell the relay to broadcast the full data
-        self.relay.broadcast(node.chunk.payload).await;
 
         // Send the node to all validators
         node_sender

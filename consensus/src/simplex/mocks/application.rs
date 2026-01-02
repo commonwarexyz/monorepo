@@ -5,7 +5,7 @@ use super::relay::Relay;
 use crate::{
     simplex::types::Context,
     types::{Epoch, Round},
-    Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
+    Automaton as Au, CertifiableAutomaton as CAu,
 };
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
@@ -42,9 +42,6 @@ pub enum Message<D: Digest, P: PublicKey> {
     Certify {
         payload: D,
         response: oneshot::Sender<bool>,
-    },
-    Broadcast {
-        payload: D,
     },
 }
 
@@ -110,17 +107,6 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
             .await
             .expect("Failed to send certify");
         rx
-    }
-}
-
-impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
-    type Digest = D;
-
-    async fn broadcast(&mut self, payload: Self::Digest) {
-        self.sender
-            .send(Message::Broadcast { payload })
-            .await
-            .expect("Failed to send broadcast");
     }
 }
 
@@ -254,7 +240,10 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         self.verified.insert(digest);
 
         // Store pending payload
-        self.pending.insert(digest, payload.into());
+        self.pending.insert(digest, payload.clone().into());
+
+        // Broadcast payload to other participants
+        self.broadcast(digest).await;
         digest
     }
 
@@ -363,9 +352,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
                         let certified = self.certify(payload, contents).await;
                         let _ = response.send(certified);
-                    }
-                    Message::Broadcast { payload } => {
-                        self.broadcast(payload).await;
                     }
                 }
             },

@@ -230,7 +230,6 @@ mod tests {
                     sequencers_provider: sequencers,
                     validators_provider,
                     automaton: automaton.clone(),
-                    relay: automaton.clone(),
                     reporter: reporters.get(validator).unwrap().clone(),
                     monitor,
                     namespace: namespace.to_vec(),
@@ -735,7 +734,6 @@ mod tests {
                         sequencer_signer: Some(fixture.private_keys[idx].clone()),
                         sequencers_provider: sequencers,
                         validators_provider,
-                        relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(validator).unwrap().clone(),
                         monitor,
@@ -886,7 +884,6 @@ mod tests {
                         sequencer_signer: None::<PrivateKey>, // Validators don't propose in this test
                         sequencers_provider: sequencers,
                         validators_provider,
-                        relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(validator).unwrap().clone(),
                         monitor,
@@ -935,7 +932,6 @@ mod tests {
                             sequencer.public_key()
                         ]),
                         validators_provider,
-                        relay: automaton.clone(),
                         automaton,
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
                         monitor: mocks::Monitor::new(epoch),

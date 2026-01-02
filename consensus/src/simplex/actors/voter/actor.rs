@@ -16,7 +16,7 @@ use crate::{
         },
     },
     types::{Round as Rnd, View},
-    CertifiableAutomaton, Relay, Reporter, Viewable, LATENCY,
+    CertifiableAutomaton, Reporter, Viewable, LATENCY,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
@@ -98,14 +98,12 @@ pub struct Actor<
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
-    R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
     context: ContextCell<E>,
     state: State<E, S, L, D>,
     blocker: B,
     automaton: A,
-    relay: R,
     reporter: F,
 
     certificate_config: <S::Certificate as Read>::Cfg,
@@ -130,11 +128,10 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
-        R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Actor<E, S, L, B, D, A, R, F>
+    > Actor<E, S, L, B, D, A, F>
 {
-    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, F>) -> (Self, Mailbox<S, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -183,7 +180,6 @@ impl<
                 state,
                 blocker: cfg.blocker,
                 automaton: cfg.automaton,
-                relay: cfg.relay,
                 reporter: cfg.reporter,
 
                 certificate_config,
@@ -925,9 +921,6 @@ impl<
                         continue;
                     }
                     view = self.state.current_view();
-
-                    // Notify application of proposal
-                    self.relay.broadcast(proposed).await;
                 },
                 (context, verified) = verify_wait => {
                     // Clear verify waiter

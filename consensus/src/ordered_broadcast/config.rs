@@ -1,7 +1,7 @@
 use super::types::{Activity, Context, SequencersProvider};
 use crate::{
     types::{Epoch, EpochDelta},
-    Automaton, Monitor, Relay, Reporter,
+    Automaton, Monitor, Reporter,
 };
 use commonware_cryptography::{certificate::Provider, Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
@@ -14,7 +14,6 @@ pub struct Config<
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
-    R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
 > {
@@ -29,9 +28,6 @@ pub struct Config<
 
     /// Proposes and verifies digests.
     pub automaton: A,
-
-    /// Broadcasts the raw payload.
-    pub relay: R,
 
     /// Notified when a chunk receives a quorum of acks.
     pub reporter: Z,
