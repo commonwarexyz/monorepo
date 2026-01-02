@@ -206,16 +206,6 @@ impl<C: PublicKey> Record<C> {
         }
     }
 
-    // ---------- Getters ----------
-
-    /// Returns `true` if the record is currently blocked.
-    ///
-    /// Note: Blocks are cleared by the unblock timer, so this just checks if
-    /// `blocked_until` is set rather than comparing against current time.
-    pub const fn is_blocked(&self) -> bool {
-        self.blocked_until.is_some()
-    }
-
     /// Clear the block on this peer.
     ///
     /// # Panics
@@ -224,6 +214,16 @@ impl<C: PublicKey> Record<C> {
     pub fn clear_expired_block(&mut self) {
         assert!(self.is_blocked());
         self.blocked_until = None;
+    }
+
+    // ---------- Getters ----------
+
+    /// Returns `true` if the record is currently blocked.
+    ///
+    /// Note: Blocks are cleared by the unblock timer, so this just checks if
+    /// `blocked_until` is set rather than comparing against current time.
+    pub const fn is_blocked(&self) -> bool {
+        self.blocked_until.is_some()
     }
 
     /// Returns the number of peer sets this peer is part of.
