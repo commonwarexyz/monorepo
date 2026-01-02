@@ -270,6 +270,10 @@ pub(crate) fn interesting(
     pending: View,
     allow_future: bool,
 ) -> bool {
+    // If the view is genesis, skip it, genesis doesn't have votes
+    if pending.is_zero() {
+        return false;
+    }
     if pending < min_active(activity_timeout, last_finalized) {
         return false;
     }
