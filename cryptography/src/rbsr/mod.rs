@@ -14,6 +14,19 @@
 //! 4. Recursively splitting ranges where fingerprints differ
 //! 5. Directly transmitting items once ranges become small enough
 //!
+//! # Item Identity
+//!
+//! Items are identified by their **ID only**, not by (timestamp, ID). The timestamp
+//! is used purely for ordering and partitioning the search space. This means:
+//!
+//! - Two items with the same ID are considered identical, even with different timestamps
+//! - Timestamps do not need to be unique; multiple items can share the same timestamp
+//! - Items are sorted by (timestamp, ID) for efficient range queries
+//!
+//! This design is ideal for content-addressed data where the ID is a hash of the
+//! content (e.g., Nostr events). If your use case requires (timestamp, ID) identity,
+//! you should include the timestamp in your ID hash.
+//!
 //! # Properties
 //!
 //! - **Efficient**: Round-trips scale logarithmically with set size (log_B(N) / 2)
@@ -1319,6 +1332,104 @@ mod tests {
                 id
             );
         }
+    }
+
+    #[test]
+    fn test_same_ids_different_timestamps() {
+        // IMPORTANT: Items are identified by ID only, NOT by (timestamp, id).
+        // Timestamps are purely for ordering/partitioning the search space.
+        // If both sides have the same ID (even with different timestamps),
+        // they're considered to have the same item.
+        let mut storage_a = VecStorage::new();
+        let mut storage_b = VecStorage::new();
+
+        // Same IDs, but A uses timestamps 1000-1002, B uses timestamps 2000-2002
+        let id1 = [0x01; 32];
+        let id2 = [0x02; 32];
+        let id3 = [0x03; 32];
+
+        storage_a.insert(Item::from_bytes(1000, id1));
+        storage_a.insert(Item::from_bytes(1001, id2));
+        storage_a.insert(Item::from_bytes(1002, id3));
+
+        storage_b.insert(Item::from_bytes(2000, id1));
+        storage_b.insert(Item::from_bytes(2001, id2));
+        storage_b.insert(Item::from_bytes(2002, id3));
+
+        // Run reconciliation
+        let mut reconciler_a = Reconciler::new(&storage_a, 16);
+        let mut reconciler_b = Reconciler::new(&storage_b, 16);
+
+        let mut msg = reconciler_a.initiate();
+
+        for round in 0..10 {
+            msg = reconciler_b.reconcile(&msg).unwrap();
+            if msg.is_complete() {
+                break;
+            }
+            msg = reconciler_a.reconcile(&msg).unwrap();
+            if msg.is_complete() {
+                let _ = reconciler_b.reconcile(&msg).unwrap();
+                break;
+            }
+            assert!(round < 9, "reconciliation did not converge");
+        }
+
+        // Since items are identified by ID only, both sides have the same 3 items.
+        // No differences should be detected!
+        assert_eq!(
+            reconciler_a.have_ids().len(),
+            0,
+            "same IDs = same items, no differences"
+        );
+        assert_eq!(reconciler_a.need_ids().len(), 0);
+        assert_eq!(reconciler_b.have_ids().len(), 0);
+        assert_eq!(reconciler_b.need_ids().len(), 0);
+    }
+
+    #[test]
+    fn test_same_id_different_timestamp_with_unique_items() {
+        // Even when items have different timestamps, if they share IDs they match.
+        // This test shows mixed scenario: some IDs match, some don't.
+        let mut storage_a = VecStorage::new();
+        let mut storage_b = VecStorage::new();
+
+        // Shared ID (different timestamps - still considered same item)
+        storage_a.insert(Item::from_bytes(1000, [0x01; 32]));
+        storage_b.insert(Item::from_bytes(2000, [0x01; 32])); // Same ID, different timestamp
+
+        // Unique to A
+        storage_a.insert(Item::from_bytes(1001, [0x02; 32]));
+
+        // Unique to B
+        storage_b.insert(Item::from_bytes(2001, [0x03; 32]));
+
+        // Run reconciliation
+        let mut reconciler_a = Reconciler::new(&storage_a, 16);
+        let mut reconciler_b = Reconciler::new(&storage_b, 16);
+
+        let mut msg = reconciler_a.initiate();
+
+        for round in 0..10 {
+            msg = reconciler_b.reconcile(&msg).unwrap();
+            if msg.is_complete() {
+                break;
+            }
+            msg = reconciler_a.reconcile(&msg).unwrap();
+            if msg.is_complete() {
+                let _ = reconciler_b.reconcile(&msg).unwrap();
+                break;
+            }
+            assert!(round < 9, "reconciliation did not converge");
+        }
+
+        // A should find B has [0x03] (unique to B)
+        // A should know it has [0x02] (unique to A)
+        // [0x01] matches despite different timestamps
+        assert_eq!(reconciler_a.have_ids().len(), 1);
+        assert_eq!(reconciler_a.need_ids().len(), 1);
+        assert!(reconciler_a.have_ids().contains(&Digest([0x03; 32])));
+        assert!(reconciler_a.need_ids().contains(&Digest([0x02; 32])));
     }
 
     #[cfg(feature = "arbitrary")]
