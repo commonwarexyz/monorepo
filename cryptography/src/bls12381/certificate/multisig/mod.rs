@@ -432,7 +432,7 @@ mod macros {
 
             impl<
                 P: $crate::PublicKey,
-                V: $crate::bls12381::primitives::variant::Variant + Send + Sync,
+                V: $crate::bls12381::primitives::variant::Variant,
             > $crate::certificate::Scheme for Scheme<P, V> {
                 type Subject<'a, D: $crate::Digest> = $subject;
                 type PublicKey = P;
@@ -607,7 +607,23 @@ mod tests {
         (signers, verifier)
     }
 
-    fn test_sign_vote_roundtrip<V: Variant + Send + Sync>() {
+    #[test]
+    fn test_is_attributable() {
+        assert!(Generic::<ed25519::PublicKey, MinPk>::is_attributable());
+        assert!(Scheme::<ed25519::PublicKey, MinPk>::is_attributable());
+        assert!(Generic::<ed25519::PublicKey, MinSig>::is_attributable());
+        assert!(Scheme::<ed25519::PublicKey, MinSig>::is_attributable());
+    }
+
+    #[test]
+    fn test_is_batchable() {
+        assert!(Generic::<ed25519::PublicKey, MinPk>::is_batchable());
+        assert!(Scheme::<ed25519::PublicKey, MinPk>::is_batchable());
+        assert!(Generic::<ed25519::PublicKey, MinSig>::is_batchable());
+        assert!(Scheme::<ed25519::PublicKey, MinSig>::is_batchable());
+    }
+
+    fn test_sign_vote_roundtrip<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 42);
         let scheme = &schemes[0];
 
@@ -627,7 +643,7 @@ mod tests {
         test_sign_vote_roundtrip::<MinSig>();
     }
 
-    fn test_verifier_cannot_sign<V: Variant + Send + Sync>() {
+    fn test_verifier_cannot_sign<V: Variant>() {
         let (_, verifier) = setup_signers::<V>(4, 43);
         assert!(verifier
             .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
@@ -640,7 +656,7 @@ mod tests {
         test_verifier_cannot_sign::<MinSig>();
     }
 
-    fn test_verify_attestations_filters_invalid<V: Variant + Send + Sync>() {
+    fn test_verify_attestations_filters_invalid<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(5, 44);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -694,7 +710,7 @@ mod tests {
         test_verify_attestations_filters_invalid::<MinSig>();
     }
 
-    fn test_assemble_certificate<V: Variant + Send + Sync>() {
+    fn test_assemble_certificate<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 46);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -717,7 +733,7 @@ mod tests {
         test_assemble_certificate::<MinSig>();
     }
 
-    fn test_assemble_certificate_sorts_signers<V: Variant + Send + Sync>() {
+    fn test_assemble_certificate_sorts_signers<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 47);
 
         // Create votes in non-sorted order (indices 2, 0, 1)
@@ -746,7 +762,7 @@ mod tests {
         test_assemble_certificate_sorts_signers::<MinSig>();
     }
 
-    fn test_verify_certificate<V: Variant + Send + Sync>() {
+    fn test_verify_certificate<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 48);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -776,7 +792,7 @@ mod tests {
         test_verify_certificate::<MinSig>();
     }
 
-    fn test_verify_certificate_detects_corruption<V: Variant + Send + Sync>() {
+    fn test_verify_certificate_detects_corruption<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 50);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -816,7 +832,7 @@ mod tests {
         test_verify_certificate_detects_corruption::<MinSig>();
     }
 
-    fn test_certificate_codec_roundtrip<V: Variant + Send + Sync>() {
+    fn test_certificate_codec_roundtrip<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 51);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -842,7 +858,7 @@ mod tests {
         test_certificate_codec_roundtrip::<MinSig>();
     }
 
-    fn test_certificate_rejects_sub_quorum<V: Variant + Send + Sync>() {
+    fn test_certificate_rejects_sub_quorum<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 52);
         let sub_quorum = 2; // Less than quorum (3)
 
@@ -864,7 +880,7 @@ mod tests {
         test_certificate_rejects_sub_quorum::<MinSig>();
     }
 
-    fn test_certificate_rejects_invalid_signer<V: Variant + Send + Sync>() {
+    fn test_certificate_rejects_invalid_signer<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 53);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -889,7 +905,7 @@ mod tests {
         test_certificate_rejects_invalid_signer::<MinSig>();
     }
 
-    fn test_verify_certificate_rejects_sub_quorum<V: Variant + Send + Sync>() {
+    fn test_verify_certificate_rejects_sub_quorum<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 54);
         let participants_len = schemes.len();
 
@@ -923,40 +939,7 @@ mod tests {
         test_verify_certificate_rejects_sub_quorum::<MinSig>();
     }
 
-    fn test_verify_certificate_rejects_signers_size_mismatch<V: Variant + Send + Sync>() {
-        let (schemes, verifier) = setup_signers::<V>(4, 55);
-        let participants_len = schemes.len();
-
-        let attestations: Vec<_> = schemes
-            .iter()
-            .take(3)
-            .map(|s| {
-                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
-                    .unwrap()
-            })
-            .collect();
-
-        let mut certificate = schemes[0].assemble(attestations).unwrap();
-
-        // Make the signers bitmap size larger than participants
-        let signers: Vec<u32> = certificate.signers.iter().collect();
-        certificate.signers = Signers::from(participants_len + 1, signers);
-
-        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
-            NAMESPACE,
-            TestSubject { message: MESSAGE },
-            &certificate
-        ));
-    }
-
-    #[test]
-    fn test_verify_certificate_rejects_signers_size_mismatch_variants() {
-        test_verify_certificate_rejects_signers_size_mismatch::<MinPk>();
-        test_verify_certificate_rejects_signers_size_mismatch::<MinSig>();
-    }
-
-    fn test_verify_certificates_batch<V: Variant + Send + Sync>() {
+    fn test_verify_certificates_batch<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 56);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -990,7 +973,7 @@ mod tests {
         test_verify_certificates_batch::<MinSig>();
     }
 
-    fn test_verify_certificates_batch_detects_failure<V: Variant + Send + Sync>() {
+    fn test_verify_certificates_batch_detects_failure<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 58);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -1029,7 +1012,38 @@ mod tests {
         test_verify_certificates_batch_detects_failure::<MinSig>();
     }
 
-    fn test_scheme_clone_and_verifier<V: Variant + Send + Sync>() {
+    fn test_assemble_certificate_rejects_duplicate_signers<V: Variant>() {
+        let (schemes, _) = setup_signers::<V>(4, 60);
+
+        let mut attestations: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|s| {
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                    .unwrap()
+            })
+            .collect();
+
+        // Add a duplicate of the last attestation
+        attestations.push(attestations.last().unwrap().clone());
+
+        // This should panic due to duplicate signer
+        schemes[0].assemble(attestations);
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate signer")]
+    fn test_assemble_certificate_rejects_duplicate_signers_min_pk() {
+        test_assemble_certificate_rejects_duplicate_signers::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate signer")]
+    fn test_assemble_certificate_rejects_duplicate_signers_min_sig() {
+        test_assemble_certificate_rejects_duplicate_signers::<MinSig>();
+    }
+
+    fn test_scheme_clone_and_verifier<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 60);
 
         // Clone a signer
@@ -1056,7 +1070,7 @@ mod tests {
         test_scheme_clone_and_verifier::<MinSig>();
     }
 
-    fn test_certificate_decode_validation<V: Variant + Send + Sync>() {
+    fn test_certificate_decode_validation<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 61);
         let participants_len = schemes.len();
 
@@ -1100,7 +1114,7 @@ mod tests {
         test_certificate_decode_validation::<MinSig>();
     }
 
-    fn test_verify_certificate_rejects_unknown_signer<V: Variant + Send + Sync>() {
+    fn test_verify_certificate_rejects_unknown_signer<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 62);
         let participants_len = schemes.len();
 
@@ -1132,6 +1146,81 @@ mod tests {
     fn test_verify_certificate_rejects_unknown_signer_variants() {
         test_verify_certificate_rejects_unknown_signer::<MinPk>();
         test_verify_certificate_rejects_unknown_signer::<MinSig>();
+    }
+
+    fn test_verify_certificate_rejects_invalid_certificate_signers_size<V: Variant>() {
+        let (schemes, verifier) = setup_signers::<V>(4, 66);
+        let participants_len = schemes.len();
+
+        let attestations: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|s| {
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                    .unwrap()
+            })
+            .collect();
+
+        let mut certificate = schemes[0].assemble(attestations).unwrap();
+
+        // Valid certificate passes
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            TestSubject { message: MESSAGE },
+            &certificate,
+        ));
+
+        // Make the signers bitmap size larger (mismatched with participants)
+        let signers: Vec<u32> = certificate.signers.iter().collect();
+        certificate.signers = Signers::from(participants_len + 1, signers);
+
+        // Certificate verification should fail due to size mismatch
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            TestSubject { message: MESSAGE },
+            &certificate,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_invalid_certificate_signers_size_variants() {
+        test_verify_certificate_rejects_invalid_certificate_signers_size::<MinPk>();
+        test_verify_certificate_rejects_invalid_certificate_signers_size::<MinSig>();
+    }
+
+    fn test_verify_certificate_rejects_signers_size_mismatch<V: Variant>() {
+        let (schemes, verifier) = setup_signers::<V>(4, 55);
+        let participants_len = schemes.len();
+
+        let attestations: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|s| {
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                    .unwrap()
+            })
+            .collect();
+
+        let mut certificate = schemes[0].assemble(attestations).unwrap();
+
+        // Make the signers bitmap size larger than participants
+        let signers: Vec<u32> = certificate.signers.iter().collect();
+        certificate.signers = Signers::from(participants_len + 1, signers);
+
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            TestSubject { message: MESSAGE },
+            &certificate
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_signers_size_mismatch_variants() {
+        test_verify_certificate_rejects_signers_size_mismatch::<MinPk>();
+        test_verify_certificate_rejects_signers_size_mismatch::<MinSig>();
     }
 
     #[cfg(feature = "arbitrary")]
