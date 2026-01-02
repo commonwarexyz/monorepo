@@ -691,6 +691,26 @@ mod tests {
     }
 
     #[test]
+    fn test_is_attributable() {
+        assert!(Generic::is_attributable());
+        assert!(Scheme::is_attributable());
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn test_is_batchable() {
+        assert!(Generic::is_batchable());
+        assert!(Scheme::is_batchable());
+    }
+
+    #[test]
+    #[cfg(not(feature = "std"))]
+    fn test_is_not_batchable() {
+        assert!(!Generic::is_batchable());
+        assert!(!Scheme::is_batchable());
+    }
+
+    #[test]
     fn test_sign_vote_roundtrip() {
         let (schemes, _) = setup_signers(4, 42);
         let scheme = &schemes[0];
@@ -1205,6 +1225,37 @@ mod tests {
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_signers_size_mismatch() {
+        let (schemes, verifier) = setup_signers(4, 65);
+        let participants_len = schemes.len();
+
+        let attestations: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|s| {
+                s.sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
+                    .unwrap()
+            })
+            .collect();
+
+        let mut certificate = schemes[0].assemble(attestations).unwrap();
+
+        // Make the signers bitmap size larger than participants
+        let signers: Vec<u32> = certificate.signers.iter().collect();
+        certificate.signers = Signers::from(participants_len + 1, signers);
+        certificate
+            .signatures
+            .push(certificate.signatures[0].clone());
+
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            TestSubject { message: MESSAGE },
+            &certificate
         ));
     }
 

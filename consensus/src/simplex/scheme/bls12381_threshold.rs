@@ -393,7 +393,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P,
     }
 }
 
-impl<P: PublicKey, V: Variant + Send + Sync> certificate::Scheme for Scheme<P, V> {
+impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
     type Subject<'a, D: Digest> = Subject<'a, D>;
     type PublicKey = P;
     type Signature = Signature<V>;
@@ -806,6 +806,18 @@ mod tests {
     #[should_panic(expected = "polynomial total must equal participant len")]
     fn test_verifier_polynomial_threshold_must_equal_quorum_min_sig() {
         verifier_polynomial_threshold_must_equal_quorum::<MinSig>();
+    }
+
+    #[test]
+    fn test_is_not_attributable() {
+        assert!(!Scheme::<MinPk>::is_attributable());
+        assert!(!Scheme::<MinSig>::is_attributable());
+    }
+
+    #[test]
+    fn test_is_batchable() {
+        assert!(Scheme::<MinPk>::is_batchable());
+        assert!(Scheme::<MinSig>::is_batchable());
     }
 
     fn sign_vote_roundtrip_for_each_context<V: Variant>() {

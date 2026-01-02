@@ -463,7 +463,7 @@ mod macros {
 
             impl<
                 P: $crate::PublicKey,
-                V: $crate::bls12381::primitives::variant::Variant + Send + Sync,
+                V: $crate::bls12381::primitives::variant::Variant,
             > $crate::certificate::Scheme for Scheme<P, V> {
                 type Subject<'a, D: $crate::Digest> = $subject;
                 type PublicKey = P;
@@ -643,7 +643,7 @@ mod tests {
         (signers, verifier, polynomial)
     }
 
-    fn test_sign_vote_roundtrip<V: Variant + Send + Sync>() {
+    fn test_sign_vote_roundtrip<V: Variant>() {
         let (schemes, _, _) = setup_signers::<V>(4, 42);
         let scheme = &schemes[0];
 
@@ -663,7 +663,7 @@ mod tests {
         test_sign_vote_roundtrip::<MinSig>();
     }
 
-    fn test_verifier_cannot_sign<V: Variant + Send + Sync>() {
+    fn test_verifier_cannot_sign<V: Variant>() {
         let (_, verifier, _) = setup_signers::<V>(4, 43);
         assert!(verifier
             .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
@@ -676,7 +676,7 @@ mod tests {
         test_verifier_cannot_sign::<MinSig>();
     }
 
-    fn test_verify_attestations_filters_invalid<V: Variant + Send + Sync>() {
+    fn test_verify_attestations_filters_invalid<V: Variant>() {
         let (schemes, _, _) = setup_signers::<V>(5, 44);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -730,7 +730,7 @@ mod tests {
         test_verify_attestations_filters_invalid::<MinSig>();
     }
 
-    fn test_assemble_certificate<V: Variant + Send + Sync>() {
+    fn test_assemble_certificate<V: Variant>() {
         let (schemes, verifier, _) = setup_signers::<V>(4, 46);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -760,7 +760,7 @@ mod tests {
         test_assemble_certificate::<MinSig>();
     }
 
-    fn test_verify_certificate<V: Variant + Send + Sync>() {
+    fn test_verify_certificate<V: Variant>() {
         let (schemes, verifier, _) = setup_signers::<V>(4, 48);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -790,7 +790,7 @@ mod tests {
         test_verify_certificate::<MinSig>();
     }
 
-    fn test_verify_certificate_detects_corruption<V: Variant + Send + Sync>() {
+    fn test_verify_certificate_detects_corruption<V: Variant>() {
         let (schemes, verifier, _) = setup_signers::<V>(4, 50);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -829,7 +829,7 @@ mod tests {
         test_verify_certificate_detects_corruption::<MinSig>();
     }
 
-    fn test_certificate_codec_roundtrip<V: Variant + Send + Sync>() {
+    fn test_certificate_codec_roundtrip<V: Variant>() {
         let (schemes, _, _) = setup_signers::<V>(4, 51);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -854,7 +854,7 @@ mod tests {
         test_certificate_codec_roundtrip::<MinSig>();
     }
 
-    fn test_certificate_rejects_sub_quorum<V: Variant + Send + Sync>() {
+    fn test_certificate_rejects_sub_quorum<V: Variant>() {
         let (schemes, _, _) = setup_signers::<V>(4, 52);
         let sub_quorum = 2; // Less than quorum (3)
 
@@ -876,7 +876,7 @@ mod tests {
         test_certificate_rejects_sub_quorum::<MinSig>();
     }
 
-    fn test_verify_certificates_batch<V: Variant + Send + Sync>() {
+    fn test_verify_certificates_batch<V: Variant>() {
         let (schemes, verifier, _) = setup_signers::<V>(4, 56);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -910,7 +910,7 @@ mod tests {
         test_verify_certificates_batch::<MinSig>();
     }
 
-    fn test_verify_certificates_batch_detects_failure<V: Variant + Send + Sync>() {
+    fn test_verify_certificates_batch_detects_failure<V: Variant>() {
         let (schemes, verifier, _) = setup_signers::<V>(4, 58);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -949,7 +949,7 @@ mod tests {
         test_verify_certificates_batch_detects_failure::<MinSig>();
     }
 
-    fn test_certificate_verifier<V: Variant + Send + Sync>() {
+    fn test_certificate_verifier<V: Variant>() {
         let (schemes, _, polynomial) = setup_signers::<V>(4, 60);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -988,18 +988,23 @@ mod tests {
         test_certificate_verifier::<MinSig>();
     }
 
-    fn test_is_not_attributable<V: Variant + Send + Sync>() {
-        // Threshold signatures are non-attributable
-        assert!(!Scheme::<ed25519::PublicKey, V>::is_attributable());
+    #[test]
+    fn test_is_not_attributable() {
+        assert!(!Generic::<ed25519::PublicKey, MinPk>::is_attributable());
+        assert!(!Scheme::<ed25519::PublicKey, MinPk>::is_attributable());
+        assert!(!Generic::<ed25519::PublicKey, MinSig>::is_attributable());
+        assert!(!Scheme::<ed25519::PublicKey, MinSig>::is_attributable());
     }
 
     #[test]
-    fn test_is_not_attributable_variants() {
-        test_is_not_attributable::<MinPk>();
-        test_is_not_attributable::<MinSig>();
+    fn test_is_batchable() {
+        assert!(Generic::<ed25519::PublicKey, MinPk>::is_batchable());
+        assert!(Scheme::<ed25519::PublicKey, MinPk>::is_batchable());
+        assert!(Generic::<ed25519::PublicKey, MinSig>::is_batchable());
+        assert!(Scheme::<ed25519::PublicKey, MinSig>::is_batchable());
     }
 
-    fn test_verifier_accepts_votes<V: Variant + Send + Sync>() {
+    fn test_verifier_accepts_votes<V: Variant>() {
         let (schemes, verifier, _) = setup_signers::<V>(4, 62);
 
         let vote = schemes[1]
@@ -1018,7 +1023,7 @@ mod tests {
         test_verifier_accepts_votes::<MinSig>();
     }
 
-    fn test_scheme_clone_and_verifier<V: Variant + Send + Sync>() {
+    fn test_scheme_clone_and_verifier<V: Variant>() {
         let (schemes, verifier, _) = setup_signers::<V>(4, 63);
 
         // Clone a signer
@@ -1045,7 +1050,7 @@ mod tests {
         test_scheme_clone_and_verifier::<MinSig>();
     }
 
-    fn certificate_verifier_panics_on_vote<V: Variant + Send + Sync>() {
+    fn certificate_verifier_panics_on_vote<V: Variant>() {
         let (schemes, _, _) = setup_signers::<V>(4, 37);
         let certificate_verifier =
             Scheme::<ed25519::PublicKey, V>::certificate_verifier(*schemes[0].identity());
@@ -1074,7 +1079,7 @@ mod tests {
         certificate_verifier_panics_on_vote::<MinSig>();
     }
 
-    fn signer_shares_must_match_participant_indices<V: Variant + Send + Sync>() {
+    fn signer_shares_must_match_participant_indices<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(64);
 
         // Generate identity keys (ed25519)
@@ -1159,7 +1164,7 @@ mod tests {
         verifier_polynomial_threshold_must_equal_quorum::<MinSig>();
     }
 
-    fn certificate_decode_rejects_length_mismatch<V: Variant + Send + Sync>() {
+    fn certificate_decode_rejects_length_mismatch<V: Variant>() {
         let (schemes, _, _) = setup_signers::<V>(4, 65);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -1184,7 +1189,7 @@ mod tests {
         certificate_decode_rejects_length_mismatch::<MinSig>();
     }
 
-    fn sign_vote_partial_matches_share<V: Variant + Send + Sync>() {
+    fn sign_vote_partial_matches_share<V: Variant>() {
         let (schemes, _, _) = setup_signers::<V>(4, 66);
         let scheme = &schemes[0];
 
