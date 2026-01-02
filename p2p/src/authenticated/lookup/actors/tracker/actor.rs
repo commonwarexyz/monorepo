@@ -113,8 +113,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 debug!("context shutdown, stopping tracker");
             },
             _ = blocked::wait_for(&self.context, self.directory.next_unblock_deadline()) => {
-                let unblocked = self.directory.unblock_expired();
-                if !unblocked.is_empty() {
+                if self.directory.unblock_expired() {
                     let _ = self.listener.send(self.directory.listenable()).await;
                 }
             },

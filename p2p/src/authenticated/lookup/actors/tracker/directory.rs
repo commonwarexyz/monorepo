@@ -299,7 +299,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Unblock all peers whose block has expired.
     ///
     /// Returns the list of peers that were unblocked (for logging/debugging).
-    pub fn unblock_expired(&mut self) -> Vec<C> {
+    pub fn unblock_expired(&mut self) -> bool {
         let now = self.context.current();
         let unblocked = self.blocked.unblock_expired(now);
 
@@ -311,7 +311,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             }
         }
 
-        unblocked
+        !unblocked.is_empty()
     }
 
     /// Get the next unblock deadline (earliest blocked_until time).
