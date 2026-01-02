@@ -8,6 +8,8 @@
 //!
 //! - [`ed25519`]: Attributable signatures with individual verification. HSM-friendly,
 //!   no trusted setup required.
+//! - [`secp256r1`]: Attributable signatures with individual verification. HSM-friendly,
+//!   no trusted setup required.
 //! - [`bls12381_multisig`]: Attributable signatures with aggregated verification.
 //!   Compact certificates while preserving attribution.
 //! - [`bls12381_threshold`]: Non-attributable threshold signatures. Constant-size
@@ -72,4 +74,18 @@ pub mod ed25519 {
     use commonware_cryptography::{ed25519, impl_certificate_ed25519};
 
     impl_certificate_ed25519!(AckSubject<'a, ed25519::PublicKey, D>);
+}
+
+pub mod secp256r1 {
+    //! Secp256r1 implementation of the [`Scheme`] trait for `ordered_broadcast`.
+    //!
+    //! [`Scheme`] is **attributable**: individual signatures can be safely
+    //! presented to some third party as evidence of either liveness or of committing a fault. Certificates
+    //! contain signer indices alongside individual signatures, enabling secure
+    //! per-validator activity tracking and fault detection.
+
+    use crate::ordered_broadcast::types::AckSubject;
+    use commonware_cryptography::impl_certificate_secp256r1;
+
+    impl_certificate_secp256r1!(AckSubject<'a, P, D>);
 }

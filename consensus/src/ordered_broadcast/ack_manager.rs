@@ -151,7 +151,7 @@ mod tests {
     use super::*;
     use crate::ordered_broadcast::{
         mocks,
-        scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
         types::Chunk,
     };
     use commonware_cryptography::{
@@ -287,6 +287,7 @@ mod tests {
     #[test]
     fn test_chunk_different_payloads() {
         chunk_different_payloads(ed25519::fixture);
+        chunk_different_payloads(secp256r1::fixture);
         chunk_different_payloads(bls12381_multisig::fixture::<MinPk, _>);
         chunk_different_payloads(bls12381_multisig::fixture::<MinSig, _>);
         chunk_different_payloads(bls12381_threshold::fixture::<MinPk, _>);
@@ -333,6 +334,7 @@ mod tests {
     #[test]
     fn test_sequencer_different_heights() {
         sequencer_different_heights(ed25519::fixture);
+        sequencer_different_heights(secp256r1::fixture);
         sequencer_different_heights(bls12381_multisig::fixture::<MinPk, _>);
         sequencer_different_heights(bls12381_multisig::fixture::<MinSig, _>);
         sequencer_different_heights(bls12381_threshold::fixture::<MinPk, _>);
@@ -381,6 +383,7 @@ mod tests {
     #[test]
     fn test_sequencer_contiguous_heights() {
         sequencer_contiguous_heights(ed25519::fixture);
+        sequencer_contiguous_heights(secp256r1::fixture);
         sequencer_contiguous_heights(bls12381_multisig::fixture::<MinPk, _>);
         sequencer_contiguous_heights(bls12381_multisig::fixture::<MinSig, _>);
         sequencer_contiguous_heights(bls12381_threshold::fixture::<MinPk, _>);
@@ -427,6 +430,7 @@ mod tests {
     #[test]
     fn test_chunk_different_epochs() {
         chunk_different_epochs(ed25519::fixture);
+        chunk_different_epochs(secp256r1::fixture);
         chunk_different_epochs(bls12381_multisig::fixture::<MinPk, _>);
         chunk_different_epochs(bls12381_multisig::fixture::<MinSig, _>);
         chunk_different_epochs(bls12381_threshold::fixture::<MinPk, _>);
@@ -467,6 +471,7 @@ mod tests {
     #[test]
     fn test_add_certificate() {
         add_certificate(ed25519::fixture);
+        add_certificate(secp256r1::fixture);
         add_certificate(bls12381_multisig::fixture::<MinPk, _>);
         add_certificate(bls12381_multisig::fixture::<MinSig, _>);
         add_certificate(bls12381_threshold::fixture::<MinPk, _>);
@@ -495,6 +500,7 @@ mod tests {
     #[test]
     fn test_duplicate_attestation_submission() {
         duplicate_attestation_submission(ed25519::fixture);
+        duplicate_attestation_submission(secp256r1::fixture);
         duplicate_attestation_submission(bls12381_multisig::fixture::<MinPk, _>);
         duplicate_attestation_submission(bls12381_multisig::fixture::<MinSig, _>);
         duplicate_attestation_submission(bls12381_threshold::fixture::<MinPk, _>);
@@ -532,6 +538,7 @@ mod tests {
     #[test]
     fn test_subsequent_acks_after_certificate_reached() {
         subsequent_acks_after_certificate_reached(ed25519::fixture);
+        subsequent_acks_after_certificate_reached(secp256r1::fixture);
         subsequent_acks_after_certificate_reached(bls12381_multisig::fixture::<MinPk, _>);
         subsequent_acks_after_certificate_reached(bls12381_multisig::fixture::<MinSig, _>);
         subsequent_acks_after_certificate_reached(bls12381_threshold::fixture::<MinPk, _>);
@@ -571,6 +578,7 @@ mod tests {
     #[test]
     fn test_multiple_sequencers() {
         multiple_sequencers(ed25519::fixture);
+        multiple_sequencers(secp256r1::fixture);
         multiple_sequencers(bls12381_multisig::fixture::<MinPk, _>);
         multiple_sequencers(bls12381_multisig::fixture::<MinSig, _>);
         multiple_sequencers(bls12381_threshold::fixture::<MinPk, _>);
@@ -601,6 +609,7 @@ mod tests {
     #[test]
     fn test_incomplete_quorum() {
         incomplete_quorum(ed25519::fixture);
+        incomplete_quorum(secp256r1::fixture);
         incomplete_quorum(bls12381_multisig::fixture::<MinPk, _>);
         incomplete_quorum(bls12381_multisig::fixture::<MinSig, _>);
         incomplete_quorum(bls12381_threshold::fixture::<MinPk, _>);
@@ -658,6 +667,7 @@ mod tests {
     #[test]
     fn test_interleaved_payloads() {
         interleaved_payloads(ed25519::fixture);
+        interleaved_payloads(secp256r1::fixture);
         interleaved_payloads(bls12381_multisig::fixture::<MinPk, _>);
         interleaved_payloads(bls12381_multisig::fixture::<MinSig, _>);
         interleaved_payloads(bls12381_threshold::fixture::<MinPk, _>);

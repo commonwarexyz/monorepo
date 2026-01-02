@@ -124,7 +124,8 @@
 //! where [`Scheme::is_batchable()`](commonware_cryptography::certificate::Scheme::is_batchable) returns `true`
 //! (such as [scheme::ed25519], [scheme::bls12381_multisig] and [scheme::bls12381_threshold]), `simplex` lazily
 //! verifies messages (only when a quorum is met), enabling efficient batch verification. For schemes where
-//! `is_batchable()` returns `false`, signatures are verified eagerly as they arrive since there is no batching benefit.
+//! `is_batchable()` returns `false` (such as [scheme::secp256r1]), signatures are verified eagerly as they
+//! arrive since there is no batching benefit.
 //!
 //! If an invalid signature is detected, the `Batcher` will perform repeated bisections over collected
 //! messages to find the offending message (and block the peer(s) that sent it via [commonware_p2p::Blocker]).
@@ -170,6 +171,13 @@
 //! Unlike [commonware_cryptography::ed25519], signatures from multiple participants (say the signers in a certificate) can be aggregated
 //! into a single signature (reducing bandwidth usage per broadcast). That being said, [commonware_cryptography::bls12381] is much slower
 //! to verify than [commonware_cryptography::ed25519] and isn't supported by most HSMs (a standardization effort expired in 2022).
+//!
+//! ### [scheme::secp256r1]
+//!
+//! [commonware_cryptography::secp256r1] signatures use the NIST P-256 elliptic curve (also known as prime256v1), which is widely
+//! supported by commercial HSMs and hardware security modules. Unlike [commonware_cryptography::ed25519], Secp256r1 does not
+//! benefit from batch verification, so signatures are verified individually. Certificates grow linearly with quorum size
+//! (similar to ed25519).
 //!
 //! ### [scheme::bls12381_threshold]
 //!
@@ -262,6 +270,10 @@ pub(crate) fn interesting(
     pending: View,
     allow_future: bool,
 ) -> bool {
+    // If the view is genesis, skip it, genesis doesn't have votes
+    if pending.is_zero() {
+        return false;
+    }
     if pending < min_active(activity_timeout, last_finalized) {
         return false;
     }
@@ -280,7 +292,7 @@ mod tests {
             mocks::twins::Strategy,
             scheme::{
                 bls12381_multisig, bls12381_threshold, bls12381_threshold::Seedable, ed25519,
-                Scheme,
+                secp256r1, Scheme,
             },
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
@@ -324,6 +336,91 @@ mod tests {
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    #[test]
+    fn test_interesting() {
+        let activity_timeout = ViewDelta::new(10);
+
+        // Genesis view is never interesting
+        assert!(!interesting(
+            activity_timeout,
+            View::zero(),
+            View::zero(),
+            View::zero(),
+            false
+        ));
+        assert!(!interesting(
+            activity_timeout,
+            View::zero(),
+            View::new(1),
+            View::zero(),
+            true
+        ));
+
+        // View below min_active is not interesting
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(5), // below min_active (10)
+            false
+        ));
+
+        // View at min_active boundary is interesting
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(10), // exactly min_active
+            false
+        ));
+
+        // Future view beyond current.next() is not interesting when allow_future is false
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(27),
+            false
+        ));
+
+        // Future view beyond current.next() is interesting when allow_future is true
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(27),
+            true
+        ));
+
+        // View at current.next() is interesting
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(26),
+            false
+        ));
+
+        // View within valid range is interesting
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(22),
+            false
+        ));
+
+        // When last_finalized is 0 and activity_timeout would underflow
+        // min_active saturates at 0, so view 1 should still be interesting
+        assert!(interesting(
+            activity_timeout,
+            View::zero(),
+            View::new(5),
+            View::new(1),
+            false
+        ));
+    }
 
     /// Register a validator with the oracle.
     async fn register_validator(
@@ -688,6 +785,7 @@ mod tests {
         all_online::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         all_online::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         all_online::<_, _, RoundRobin>(ed25519::fixture);
+        all_online::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn observer<S, F, L>(mut fixture: F)
@@ -853,6 +951,7 @@ mod tests {
         observer::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         observer::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         observer::<_, _, RoundRobin>(ed25519::fixture);
+        observer::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn unclean_shutdown<S, F, L>(mut fixture: F)
@@ -1052,6 +1151,7 @@ mod tests {
         unclean_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         unclean_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         unclean_shutdown::<_, _, RoundRobin>(ed25519::fixture);
+        unclean_shutdown::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn backfill<S, F, L>(mut fixture: F)
@@ -1312,6 +1412,7 @@ mod tests {
         backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         backfill::<_, _, RoundRobin>(ed25519::fixture);
+        backfill::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn one_offline<S, F, L>(mut fixture: F)
@@ -1575,6 +1676,7 @@ mod tests {
         one_offline::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         one_offline::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         one_offline::<_, _, RoundRobin>(ed25519::fixture);
+        one_offline::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn slow_validator<S, F, L>(mut fixture: F)
@@ -1764,6 +1866,7 @@ mod tests {
         slow_validator::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         slow_validator::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         slow_validator::<_, _, RoundRobin>(ed25519::fixture);
+        slow_validator::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn all_recovery<S, F, L>(mut fixture: F)
@@ -1978,6 +2081,7 @@ mod tests {
         all_recovery::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         all_recovery::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         all_recovery::<_, _, RoundRobin>(ed25519::fixture);
+        all_recovery::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn partition<S, F, L>(mut fixture: F)
@@ -2180,6 +2284,7 @@ mod tests {
         partition::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         partition::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         partition::<_, _, RoundRobin>(ed25519::fixture);
+        partition::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn slow_and_lossy_links<S, F, L>(seed: u64, mut fixture: F) -> String
@@ -2341,6 +2446,7 @@ mod tests {
         slow_and_lossy_links::<_, _, RoundRobin>(0, bls12381_multisig::fixture::<MinPk, _>);
         slow_and_lossy_links::<_, _, RoundRobin>(0, bls12381_multisig::fixture::<MinSig, _>);
         slow_and_lossy_links::<_, _, RoundRobin>(0, ed25519::fixture);
+        slow_and_lossy_links::<_, _, RoundRobin>(0, secp256r1::fixture);
     }
 
     #[test_group("slow")]
@@ -2389,12 +2495,17 @@ mod tests {
             let ed_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(seed, ed25519::fixture);
             assert_eq!(ed_state_1, ed_state_2);
 
+            let secp_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(seed, secp256r1::fixture);
+            let secp_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(seed, secp256r1::fixture);
+            assert_eq!(secp_state_1, secp_state_2);
+
             let states = [
                 ("threshold-minpk", ts_pk_state_1),
                 ("threshold-minsig", ts_sig_state_1),
                 ("multisig-minpk", ms_pk_state_1),
                 ("multisig-minsig", ms_sig_state_1),
                 ("ed25519", ed_state_1),
+                ("secp256r1", secp_state_1),
             ];
 
             // Sanity check that different types can't be identical
@@ -2593,6 +2704,7 @@ mod tests {
             conflicter::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             conflicter::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             conflicter::<_, _, RoundRobin>(seed, ed25519::fixture);
+            conflicter::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
@@ -2764,6 +2876,7 @@ mod tests {
             invalid::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             invalid::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             invalid::<_, _, RoundRobin>(seed, ed25519::fixture);
+            invalid::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
@@ -2936,6 +3049,7 @@ mod tests {
             impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             impersonator::<_, _, RoundRobin>(seed, ed25519::fixture);
+            impersonator::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
@@ -3236,6 +3350,16 @@ mod tests {
         );
     }
 
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_equivocator_secp256r1() {
+        let detected = (0..5).any(|seed| equivocator::<_, _, RoundRobin>(seed, secp256r1::fixture));
+        assert!(
+            detected,
+            "expected at least one seed to detect equivocation"
+        );
+    }
+
     fn reconfigurer<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -3404,6 +3528,7 @@ mod tests {
             reconfigurer::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             reconfigurer::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             reconfigurer::<_, _, RoundRobin>(seed, ed25519::fixture);
+            reconfigurer::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
@@ -3585,6 +3710,7 @@ mod tests {
             nuller::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             nuller::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             nuller::<_, _, RoundRobin>(seed, ed25519::fixture);
+            nuller::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
@@ -3749,6 +3875,7 @@ mod tests {
             outdated::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             outdated::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             outdated::<_, _, RoundRobin>(seed, ed25519::fixture);
+            outdated::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
@@ -3924,6 +4051,12 @@ mod tests {
         run_1k::<_, _, RoundRobin>(ed25519::fixture);
     }
 
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_1k_secp256r1() {
+        run_1k::<_, _, RoundRobin>(secp256r1::fixture);
+    }
+
     fn engine_shutdown<S, F, L>(mut fixture: F, graceful: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -4039,7 +4172,7 @@ mod tests {
             assert!(is_running("engine_resolver"));
 
             // Make sure the engine is still running
-            context.sleep(Duration::from_millis(1000)).await;
+            context.sleep(Duration::from_millis(1500)).await;
             assert!(is_running("engine"));
 
             // Shutdown engine and ensure children stop
@@ -4082,6 +4215,7 @@ mod tests {
         engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>, false);
         engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>, false);
         engine_shutdown::<_, _, RoundRobin>(ed25519::fixture, false);
+        engine_shutdown::<_, _, RoundRobin>(secp256r1::fixture, false);
     }
 
     #[test_traced]
@@ -4091,6 +4225,7 @@ mod tests {
         engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>, true);
         engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>, true);
         engine_shutdown::<_, _, RoundRobin>(ed25519::fixture, true);
+        engine_shutdown::<_, _, RoundRobin>(secp256r1::fixture, true);
     }
 
     fn attributable_reporter_filtering<S, F, L>(mut fixture: F)
@@ -4292,6 +4427,7 @@ mod tests {
             bls12381_multisig::fixture::<MinSig, _>,
         );
         attributable_reporter_filtering::<_, _, RoundRobin>(ed25519::fixture);
+        attributable_reporter_filtering::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn split_views_no_lockup<S, F, L>(mut fixture: F)
@@ -4666,6 +4802,7 @@ mod tests {
         split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         split_views_no_lockup::<_, _, RoundRobin>(ed25519::fixture);
+        split_views_no_lockup::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn tle<V, L>()
@@ -5221,6 +5358,15 @@ mod tests {
         );
     }
 
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_hailstorm_secp256r1() {
+        assert_eq!(
+            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), secp256r1::fixture),
+            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), secp256r1::fixture)
+        );
+    }
+
     /// Implementation of [Twins: BFT Systems Made Robust](https://arxiv.org/abs/2004.10617).
     fn twins<S, F, L>(seed: u64, n: u32, strategy: Strategy, link: Link, mut fixture: F)
     where
@@ -5599,6 +5745,12 @@ mod tests {
     #[test_traced]
     fn test_twins_ed25519() {
         test_twins::<_, _, RoundRobin>(ed25519::fixture);
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_secp256r1() {
+        test_twins::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     #[test_group("slow")]

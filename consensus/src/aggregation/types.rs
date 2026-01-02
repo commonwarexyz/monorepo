@@ -430,7 +430,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme};
+    use crate::aggregation::scheme::{
+        bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme,
+    };
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
@@ -549,6 +551,7 @@ mod tests {
     #[test]
     fn test_codec() {
         codec(ed25519::fixture);
+        codec(secp256r1::fixture);
         codec(bls12381_multisig::fixture::<MinPk, _>);
         codec(bls12381_multisig::fixture::<MinSig, _>);
         codec(bls12381_threshold::fixture::<MinPk, _>);
@@ -578,6 +581,7 @@ mod tests {
     #[test]
     fn test_activity_invalid_enum() {
         activity_invalid_enum(ed25519::fixture);
+        activity_invalid_enum(secp256r1::fixture);
         activity_invalid_enum(bls12381_multisig::fixture::<MinPk, _>);
         activity_invalid_enum(bls12381_multisig::fixture::<MinSig, _>);
         activity_invalid_enum(bls12381_threshold::fixture::<MinPk, _>);

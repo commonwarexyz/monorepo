@@ -55,7 +55,7 @@ mod tests {
             actors::{batcher, resolver, resolver::MailboxMessage},
             elector::{Config as ElectorConfig, Elector, Random, RoundRobin, RoundRobinElector},
             mocks,
-            scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
+            scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
         types::{Round, View},
@@ -354,6 +354,7 @@ mod tests {
         stale_backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         stale_backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         stale_backfill::<_, _, RoundRobin>(ed25519::fixture);
+        stale_backfill::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     /// Process an interesting view below the oldest tracked view:
@@ -643,6 +644,7 @@ mod tests {
         append_old_interesting_view::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         append_old_interesting_view::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         append_old_interesting_view::<_, _, RoundRobin>(ed25519::fixture);
+        append_old_interesting_view::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     /// Test that voter can process finalization from batcher without notarization.
@@ -828,6 +830,7 @@ mod tests {
             bls12381_multisig::fixture::<MinSig, _>,
         );
         finalization_without_notarization_certificate::<_, _, RoundRobin>(ed25519::fixture);
+        finalization_without_notarization_certificate::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn certificate_conflicts_proposal<S, F, L>(mut fixture: F)
@@ -1025,6 +1028,7 @@ mod tests {
         certificate_conflicts_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         certificate_conflicts_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         certificate_conflicts_proposal::<_, _, RoundRobin>(ed25519::fixture);
+        certificate_conflicts_proposal::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn proposal_conflicts_certificate<S, F, L>(mut fixture: F)
@@ -1205,6 +1209,7 @@ mod tests {
         proposal_conflicts_certificate::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         proposal_conflicts_certificate::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         proposal_conflicts_certificate::<_, _, RoundRobin>(ed25519::fixture);
+        proposal_conflicts_certificate::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn certificate_verifies_proposal<S, F, L>(mut fixture: F)
@@ -1377,6 +1382,7 @@ mod tests {
         certificate_verifies_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         certificate_verifies_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         certificate_verifies_proposal::<_, _, RoundRobin>(ed25519::fixture);
+        certificate_verifies_proposal::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     /// Test that our proposal is dropped when it conflicts with a peer's notarize vote.
@@ -1604,6 +1610,7 @@ mod tests {
         drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinPk, _>);
         drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinSig, _>);
         drop_our_proposal_on_conflict(ed25519::fixture);
+        drop_our_proposal_on_conflict(secp256r1::fixture);
     }
 
     fn populate_resolver_on_restart<S, F, L>(mut fixture: F)
@@ -1834,6 +1841,7 @@ mod tests {
         populate_resolver_on_restart::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         populate_resolver_on_restart::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         populate_resolver_on_restart::<_, _, RoundRobin>(ed25519::fixture);
+        populate_resolver_on_restart::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn finalization_from_resolver<S, F, L>(mut fixture: F)
@@ -1993,6 +2001,7 @@ mod tests {
         finalization_from_resolver::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         finalization_from_resolver::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         finalization_from_resolver::<_, _, RoundRobin>(ed25519::fixture);
+        finalization_from_resolver::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     /// Test that certificates received from the resolver are not sent back to it.
@@ -2171,6 +2180,7 @@ mod tests {
         no_resolver_boomerang::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         no_resolver_boomerang::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         no_resolver_boomerang::<_, _, RoundRobin>(ed25519::fixture);
+        no_resolver_boomerang::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     /// Tests that when proposal verification fails, the voter emits a nullify vote
@@ -2393,6 +2403,7 @@ mod tests {
             bls12381_multisig::fixture::<MinSig, _>,
         );
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(ed25519::fixture);
+        verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     /// Tests that after replay, we do not re-certify views that have already
@@ -2663,5 +2674,6 @@ mod tests {
             bls12381_multisig::fixture::<MinSig, _>,
         );
         no_recertification_after_replay::<_, _, RoundRobin>(ed25519::fixture);
+        no_recertification_after_replay::<_, _, RoundRobin>(secp256r1::fixture);
     }
 }
