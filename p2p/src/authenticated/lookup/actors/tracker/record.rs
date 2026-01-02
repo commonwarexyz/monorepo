@@ -94,14 +94,6 @@ impl Record {
         true
     }
 
-    /// Returns `true` if the peer is currently blocked.
-    ///
-    /// Note: Blocks are cleared by the unblock timer, so this just checks if
-    /// `blocked_until` is set rather than comparing against current time.
-    pub const fn is_blocked(&self) -> bool {
-        self.blocked_until.is_some()
-    }
-
     /// Clear the block on this peer.
     ///
     /// # Panics
@@ -155,6 +147,14 @@ impl Record {
     }
 
     // ---------- Getters ----------
+
+    /// Returns `true` if the peer is currently blocked.
+    ///
+    /// Note: Blocks are cleared by the unblock timer, so this just checks if
+    /// `blocked_until` is set rather than comparing against current time.
+    pub const fn is_blocked(&self) -> bool {
+        self.blocked_until.is_some()
+    }
 
     /// Returns the number of peer sets this peer is part of.
     pub const fn sets(&self) -> usize {
