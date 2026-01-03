@@ -31,6 +31,8 @@ use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{util::at_least, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use core::fmt::{self, Formatter};
+use core::ops::{Bound, RangeBounds};
+use rand::Rng;
 
 /// The threshold at which we switch from array to bitmap container.
 /// Below this cardinality, an array container is more space-efficient.
@@ -815,6 +817,224 @@ impl RoaringBitmap {
         result.xor(other);
         result
     }
+
+    /// Returns a random contiguous run of values that are in `other` but not in `self`.
+    ///
+    /// This is useful for peer synchronization: when helping a peer catch up, you can request
+    /// a random subset of missing items. By using different random seeds, multiple peers can
+    /// work on different portions of the missing data concurrently.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The reference bitmap containing values we might be missing
+    /// * `size_range` - Bounds on the number of items to return (min..max or min..=max)
+    /// * `rng` - Random number generator for selecting the starting position
+    ///
+    /// # Returns
+    ///
+    /// A vector of consecutive missing values, or an empty vector if:
+    /// - There are no missing values
+    /// - No contiguous run meets the minimum size requirement
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use commonware_utils::bitmap::RoaringBitmap;
+    /// use rand::rngs::StdRng;
+    /// use rand::SeedableRng;
+    ///
+    /// let mut have = RoaringBitmap::new();
+    /// have.insert_range(0..50);
+    /// have.insert_range(100..150);
+    ///
+    /// let mut want = RoaringBitmap::new();
+    /// want.insert_range(0..200);
+    ///
+    /// let mut rng = StdRng::seed_from_u64(42);
+    /// let missing = have.random_missing_run(&want, 1..=20, &mut rng);
+    ///
+    /// // Returns up to 20 consecutive values from ranges 50..100 or 150..200
+    /// assert!(!missing.is_empty());
+    /// assert!(missing.len() <= 20);
+    /// ```
+    pub fn random_missing_run<R: RangeBounds<usize>>(
+        &self,
+        other: &Self,
+        size_range: R,
+        rng: &mut impl Rng,
+    ) -> Vec<u64> {
+        let min_size = match size_range.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n.saturating_add(1),
+            Bound::Unbounded => 1,
+        };
+        let max_size = match size_range.end_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n.saturating_sub(1),
+            Bound::Unbounded => usize::MAX,
+        };
+
+        if min_size == 0 || max_size == 0 || min_size > max_size {
+            return Vec::new();
+        }
+
+        // Two-pass algorithm to avoid storing all runs:
+        // Pass 1: Count valid starting positions
+        // Pass 2: Find the randomly selected position
+
+        let mut valid_positions: u64 = 0;
+        let min_size_u64 = min_size as u64;
+
+        // Pass 1: Count valid starting positions
+        for_each_missing_run(self, other, |run_len| {
+            if run_len >= min_size_u64 {
+                valid_positions += run_len - min_size_u64 + 1;
+            }
+        });
+
+        if valid_positions == 0 {
+            return Vec::new();
+        }
+
+        // Pick a random starting position
+        let target_pos = rng.gen_range(0..valid_positions);
+
+        // Pass 2: Find the run containing our target position
+        let mut pos_counter: u64 = 0;
+        let mut result = Vec::new();
+
+        for_each_missing_run_with_values(self, other, |run_start, run_len| {
+            if run_len >= min_size_u64 {
+                let positions_in_run = run_len - min_size_u64 + 1;
+                if target_pos < pos_counter + positions_in_run {
+                    // Found the run - extract values
+                    let offset = target_pos - pos_counter;
+                    let actual_start = run_start + offset;
+                    let items_available = run_len - offset;
+                    let items_to_take = core::cmp::min(items_available, max_size as u64);
+
+                    result.reserve(items_to_take as usize);
+                    for v in actual_start..actual_start + items_to_take {
+                        result.push(v);
+                    }
+                    return true; // Stop iteration
+                }
+                pos_counter += positions_in_run;
+            }
+            false // Continue iteration
+        });
+
+        result
+    }
+}
+
+/// Iterates over runs of consecutive missing values (in `other` but not in `have`),
+/// calling the callback with just the run length. Used for counting.
+fn for_each_missing_run(have: &RoaringBitmap, other: &RoaringBitmap, mut callback: impl FnMut(u64)) {
+    for_each_missing_run_with_values(have, other, |_start, len| {
+        callback(len);
+        false // Continue iteration
+    });
+}
+
+/// Iterates over runs of consecutive missing values (in `other` but not in `have`),
+/// calling the callback with (run_start, run_length). Returns early if callback returns true.
+///
+/// Works at the container level for efficiency:
+/// - Containers only in `other`: all values are missing
+/// - Containers in both: compute difference and find runs within
+fn for_each_missing_run_with_values(
+    have: &RoaringBitmap,
+    other: &RoaringBitmap,
+    mut callback: impl FnMut(u64, u64) -> bool,
+) {
+    let mut have_idx = 0;
+    let mut current_run_start: Option<u64> = None;
+    let mut current_run_end: u64 = 0;
+
+    // Helper to finalize a run and call callback
+    let finalize_run = |start: &mut Option<u64>, end: u64, cb: &mut dyn FnMut(u64, u64) -> bool| -> bool {
+        if let Some(s) = start.take() {
+            let len = end - s + 1;
+            if cb(s, len) {
+                return true; // Early exit requested
+            }
+        }
+        false
+    };
+
+    for (other_high, other_container) in &other.containers {
+        // Skip have containers that are before this other container
+        while have_idx < have.containers.len() && have.containers[have_idx].0 < *other_high {
+            have_idx += 1;
+        }
+
+        let base = *other_high << 16;
+
+        if have_idx < have.containers.len() && have.containers[have_idx].0 == *other_high {
+            // Both have this container - find missing values within
+            let have_container = &have.containers[have_idx].1;
+
+            for value_u16 in other_container.iter() {
+                let value = base | (value_u16 as u64);
+                if !have_container.contains(value_u16) {
+                    // This value is missing
+                    match current_run_start {
+                        None => {
+                            current_run_start = Some(value);
+                            current_run_end = value;
+                        }
+                        Some(_) if value == current_run_end + 1 => {
+                            current_run_end = value;
+                        }
+                        Some(_) => {
+                            // Gap - finalize current run
+                            if finalize_run(&mut current_run_start, current_run_end, &mut callback) {
+                                return;
+                            }
+                            current_run_start = Some(value);
+                            current_run_end = value;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Container only in other - all values are missing
+            // Iterate through the container's values
+            for value_u16 in other_container.iter() {
+                let value = base | (value_u16 as u64);
+                match current_run_start {
+                    None => {
+                        current_run_start = Some(value);
+                        current_run_end = value;
+                    }
+                    Some(_) if value == current_run_end + 1 => {
+                        current_run_end = value;
+                    }
+                    Some(_) => {
+                        // Gap within container (sparse array container)
+                        if finalize_run(&mut current_run_start, current_run_end, &mut callback) {
+                            return;
+                        }
+                        current_run_start = Some(value);
+                        current_run_end = value;
+                    }
+                }
+            }
+        }
+
+        // Check for gap between containers
+        if current_run_start.is_some() {
+            // Peek at next other container to see if there's a gap
+            // The gap check happens naturally in the next iteration when we see
+            // a non-consecutive value
+        }
+    }
+
+    // Finalize last run
+    if current_run_start.is_some() {
+        finalize_run(&mut current_run_start, current_run_end, &mut callback);
+    }
 }
 
 /// AND two containers together.
@@ -1204,7 +1424,8 @@ impl arbitrary::Arbitrary<'_> for RoaringBitmap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Decode, Encode};
+    use bytes::BytesMut;
+    use commonware_codec::{Decode, Encode, Error as CodecError, Write};
 
     #[test]
     fn test_new() {
@@ -1587,6 +1808,149 @@ mod tests {
     }
 
     #[test]
+    fn test_codec_truncated_buffer() {
+        // Empty buffer
+        let result = RoaringBitmap::decode_cfg(&[][..], &100);
+        assert!(result.is_err());
+
+        // Buffer too short for container count
+        let result = RoaringBitmap::decode_cfg(&[0u8; 4][..], &100);
+        assert!(result.is_err());
+
+        // Claims 1 container but no container data
+        let mut buf = BytesMut::new();
+        1u64.write(&mut buf);
+        let result = RoaringBitmap::decode_cfg(buf.freeze(), &100);
+        assert!(result.is_err());
+
+        // Has container key but no container data
+        let mut buf = BytesMut::new();
+        1u64.write(&mut buf); // 1 container
+        0u64.write(&mut buf); // container key
+        let result = RoaringBitmap::decode_cfg(buf.freeze(), &100);
+        assert!(result.is_err());
+
+        // Has container type but truncated array length
+        let mut buf = BytesMut::new();
+        1u64.write(&mut buf); // 1 container
+        0u64.write(&mut buf); // container key
+        CONTAINER_TYPE_ARRAY.write(&mut buf);
+        let result = RoaringBitmap::decode_cfg(buf.freeze(), &100);
+        assert!(result.is_err());
+
+        // Has array length but not enough values
+        let mut buf = BytesMut::new();
+        1u64.write(&mut buf); // 1 container
+        0u64.write(&mut buf); // container key
+        CONTAINER_TYPE_ARRAY.write(&mut buf);
+        5u16.write(&mut buf); // claims 5 values
+        1u16.write(&mut buf); // only 1 value
+        let result = RoaringBitmap::decode_cfg(buf.freeze(), &100);
+        assert!(result.is_err());
+
+        // Truncated bitmap container
+        let mut buf = BytesMut::new();
+        1u64.write(&mut buf); // 1 container
+        0u64.write(&mut buf); // container key
+        CONTAINER_TYPE_BITMAP.write(&mut buf);
+        // Only write partial bitmap data (should be 8192 bytes)
+        for _ in 0..100 {
+            0u64.write(&mut buf);
+        }
+        let result = RoaringBitmap::decode_cfg(buf.freeze(), &100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_codec_invalid_container_type() {
+        let mut buf = BytesMut::new();
+        1u64.write(&mut buf); // 1 container
+        0u64.write(&mut buf); // container key
+        99u8.write(&mut buf); // invalid container type (not 0 or 1)
+
+        let result = RoaringBitmap::decode_cfg(buf.freeze(), &100);
+        assert!(matches!(
+            result,
+            Err(CodecError::Invalid("Container", "Invalid container type tag"))
+        ));
+    }
+
+    #[test]
+    fn test_codec_unsorted_containers() {
+        // Create a manually encoded bitmap with unsorted container keys
+        let mut buf = BytesMut::new();
+        2u64.write(&mut buf); // 2 containers
+
+        // First container with key 100
+        100u64.write(&mut buf);
+        CONTAINER_TYPE_ARRAY.write(&mut buf);
+        1u16.write(&mut buf); // 1 value
+        42u16.write(&mut buf);
+
+        // Second container with key 50 (out of order!)
+        50u64.write(&mut buf);
+        CONTAINER_TYPE_ARRAY.write(&mut buf);
+        1u16.write(&mut buf);
+        10u16.write(&mut buf);
+
+        let result = RoaringBitmap::decode_cfg(buf.freeze(), &100);
+        assert!(matches!(
+            result,
+            Err(CodecError::Invalid(
+                "RoaringBitmap",
+                "Containers must be in ascending order with unique keys"
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_codec_duplicate_container_keys() {
+        // Create a manually encoded bitmap with duplicate container keys
+        let mut buf = BytesMut::new();
+        2u64.write(&mut buf); // 2 containers
+
+        // First container with key 50
+        50u64.write(&mut buf);
+        CONTAINER_TYPE_ARRAY.write(&mut buf);
+        1u16.write(&mut buf);
+        42u16.write(&mut buf);
+
+        // Second container also with key 50 (duplicate!)
+        50u64.write(&mut buf);
+        CONTAINER_TYPE_ARRAY.write(&mut buf);
+        1u16.write(&mut buf);
+        10u16.write(&mut buf);
+
+        let result = RoaringBitmap::decode_cfg(buf.freeze(), &100);
+        assert!(matches!(
+            result,
+            Err(CodecError::Invalid(
+                "RoaringBitmap",
+                "Containers must be in ascending order with unique keys"
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_codec_empty_container() {
+        // Create a manually encoded bitmap with an empty array container
+        let mut buf = BytesMut::new();
+        1u64.write(&mut buf); // 1 container
+        0u64.write(&mut buf); // container key
+        CONTAINER_TYPE_ARRAY.write(&mut buf);
+        0u16.write(&mut buf); // 0 values (empty container)
+
+        let result = RoaringBitmap::decode_cfg(buf.freeze(), &100);
+        assert!(matches!(
+            result,
+            Err(CodecError::Invalid(
+                "RoaringBitmap",
+                "Empty containers are not allowed"
+            ))
+        ));
+    }
+
+    #[test]
     fn test_encode_size() {
         let mut bitmap = RoaringBitmap::new();
         bitmap.extend([1u64, 2, 3]);
@@ -1851,6 +2215,186 @@ mod tests {
         let removed = bitmap.remove_range(start + 500..end);
         assert_eq!(removed, 500);
         assert_eq!(bitmap.len(), 500);
+    }
+
+    #[test]
+    fn test_random_missing_run_basic() {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut have = RoaringBitmap::new();
+        have.insert_range(0..50);
+        have.insert_range(100..150);
+
+        let mut want = RoaringBitmap::new();
+        want.insert_range(0..200);
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let missing = have.random_missing_run(&want, 1..=20, &mut rng);
+
+        // Should return values from 50..100 or 150..200
+        assert!(!missing.is_empty());
+        assert!(missing.len() <= 20);
+
+        // All returned values should be missing from 'have'
+        for v in &missing {
+            assert!(!have.contains(*v));
+            assert!(want.contains(*v));
+        }
+
+        // Values should be consecutive
+        for i in 1..missing.len() {
+            assert_eq!(missing[i], missing[i - 1] + 1);
+        }
+    }
+
+    #[test]
+    fn test_random_missing_run_no_missing() {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut have = RoaringBitmap::new();
+        have.insert_range(0..100);
+
+        let mut want = RoaringBitmap::new();
+        want.insert_range(0..100);
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let missing = have.random_missing_run(&want, 1..=20, &mut rng);
+
+        // No missing values
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn test_random_missing_run_min_size_not_met() {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut have = RoaringBitmap::new();
+        have.insert_range(0..100);
+        // Missing: 100, 101, 102 (only 3 items)
+        have.insert_range(103..200);
+
+        let mut want = RoaringBitmap::new();
+        want.insert_range(0..200);
+
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Request minimum of 10, but only 3 consecutive missing items exist
+        let missing = have.random_missing_run(&want, 10..=20, &mut rng);
+        assert!(missing.is_empty());
+
+        // Request minimum of 3 should work
+        let missing = have.random_missing_run(&want, 3..=20, &mut rng);
+        assert_eq!(missing.len(), 3);
+        assert_eq!(missing, vec![100, 101, 102]);
+    }
+
+    #[test]
+    fn test_random_missing_run_max_size_respected() {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let have = RoaringBitmap::new(); // Have nothing
+
+        let mut want = RoaringBitmap::new();
+        want.insert_range(0..1000);
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let missing = have.random_missing_run(&want, 1..=10, &mut rng);
+
+        // Should respect max_size
+        assert!(!missing.is_empty());
+        assert!(missing.len() <= 10);
+    }
+
+    #[test]
+    fn test_random_missing_run_deterministic() {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut have = RoaringBitmap::new();
+        have.insert_range(0..50);
+
+        let mut want = RoaringBitmap::new();
+        want.insert_range(0..100);
+
+        // Same seed should give same result
+        let mut rng1 = StdRng::seed_from_u64(123);
+        let mut rng2 = StdRng::seed_from_u64(123);
+
+        let result1 = have.random_missing_run(&want, 1..=20, &mut rng1);
+        let result2 = have.random_missing_run(&want, 1..=20, &mut rng2);
+
+        assert_eq!(result1, result2);
+    }
+
+    #[test]
+    fn test_random_missing_run_multiple_gaps() {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut have = RoaringBitmap::new();
+        have.insert_range(0..100);
+        // Gap: 100..200
+        have.insert_range(200..300);
+        // Gap: 300..400
+        have.insert_range(400..500);
+
+        let mut want = RoaringBitmap::new();
+        want.insert_range(0..500);
+
+        // With different seeds, should sometimes pick different gaps
+        let mut seen_starts: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for seed in 0..100 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let missing = have.random_missing_run(&want, 1..=10, &mut rng);
+            if !missing.is_empty() {
+                seen_starts.insert(missing[0]);
+            }
+        }
+
+        // Should have seen starts in multiple gaps
+        // Gap 1: 100..200, Gap 2: 300..400
+        let in_gap1 = seen_starts.iter().any(|&v| v >= 100 && v < 200);
+        let in_gap2 = seen_starts.iter().any(|&v| v >= 300 && v < 400);
+        assert!(in_gap1 && in_gap2, "Should randomly select from different gaps");
+    }
+
+    #[test]
+    fn test_random_missing_run_empty_range() {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let have = RoaringBitmap::new();
+        let mut want = RoaringBitmap::new();
+        want.insert_range(0..100);
+
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Invalid range: min > max
+        let missing = have.random_missing_run(&want, 20..=10, &mut rng);
+        assert!(missing.is_empty());
+
+        // Zero size
+        let missing = have.random_missing_run(&want, 0..=0, &mut rng);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn test_random_missing_run_spanning_containers() {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut have = RoaringBitmap::new();
+        have.insert_range(0..65530);
+
+        let mut want = RoaringBitmap::new();
+        want.insert_range(0..66000);
+
+        // Missing: 65530..66000 (spans container boundary at 65536)
+        let mut rng = StdRng::seed_from_u64(42);
+        let missing = have.random_missing_run(&want, 1..=100, &mut rng);
+
+        assert!(!missing.is_empty());
+        for v in &missing {
+            assert!(*v >= 65530);
+            assert!(*v < 66000);
+            assert!(!have.contains(*v));
+        }
     }
 
     #[cfg(feature = "arbitrary")]
