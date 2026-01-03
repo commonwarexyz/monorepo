@@ -15,6 +15,11 @@ pub trait Storage<D: Digest>: Send + Sync {
         -> impl Future<Output = Result<Option<D>, Error>> + Send;
 }
 
+pub trait MemoryStorage<D: Digest>: Storage<D> {
+    /// Return the specified node of the MMR if it exists & hasn't been pruned.
+    fn get_node(&self, position: Position) -> Option<D>;
+}
+
 impl<D> Storage<D> for CleanMmr<D>
 where
     D: Digest,
@@ -25,5 +30,14 @@ where
 
     async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
         Ok(Self::get_node(self, position))
+    }
+}
+
+impl<D> MemoryStorage<D> for CleanMmr<D>
+where
+    D: Digest,
+{
+    fn get_node(&self, position: Position) -> Option<D> {
+        Self::get_node(self, position)
     }
 }

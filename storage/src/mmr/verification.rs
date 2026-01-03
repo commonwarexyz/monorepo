@@ -11,7 +11,12 @@
 //! Historical proofs are essential for sync operations where we need to prove elements against a
 //! past state of the MMR rather than its current state.
 
-use crate::mmr::{hasher::Hasher, proof, storage::Storage, Error, Location, Position, Proof};
+use crate::mmr::{
+    hasher::Hasher,
+    proof,
+    storage::{MemoryStorage, Storage},
+    Error, Location, Position, Proof,
+};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 use futures::future::try_join_all;
@@ -118,6 +123,48 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
             Some(hash) => digests.push(hash),
             None => return Err(Error::ElementPruned(positions[i])),
         };
+    }
+
+    Ok(Proof { size, digests })
+}
+
+/// Return an inclusion proof for the elements at the specified locations. This is analogous to
+/// range_proof but supports non-contiguous locations.
+///
+/// The order of positions does not affect the output (sorted internally).
+///
+/// # Errors
+///
+/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::mmr::MAX_LOCATION]
+/// Returns [Error::RangeOutOfBounds] if any location in `locations` > `mmr.size()`
+/// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
+/// Returns [Error::Empty] if locations is empty
+pub fn multi_proof_sync<D: Digest, S: MemoryStorage<D>>(
+    mmr: &S,
+    locations: &[Location],
+) -> Result<Proof<D>, Error> {
+    if locations.is_empty() {
+        // Disallow proofs over empty element lists just as we disallow proofs over empty ranges.
+        return Err(Error::Empty);
+    }
+
+    // Collect all required node positions
+    let size = mmr.size();
+    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, locations)?;
+
+    // Fetch all required digests in parallel and collect with positions
+    let results: Vec<_> = node_positions
+        .iter()
+        .map(|&pos| (pos, MemoryStorage::get_node(mmr, pos)))
+        .collect();
+
+    // Build the proof, returning error with correct position on pruned nodes
+    let mut digests = Vec::with_capacity(results.len());
+    for (pos, digest) in results {
+        match digest {
+            Some(digest) => digests.push(digest),
+            None => return Err(Error::ElementPruned(pos)),
+        }
     }
 
     Ok(Proof { size, digests })

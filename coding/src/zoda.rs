@@ -125,7 +125,9 @@ use commonware_math::{
     ntt::{EvaluationVector, Matrix},
 };
 use commonware_storage::mmr::{
-    mem::DirtyMmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
+    mem::DirtyMmr,
+    verification::{multi_proof, multi_proof_sync},
+    Error as MmrError, Location, Proof, StandardHasher,
 };
 use futures::executor::block_on;
 use rand::seq::SliceRandom as _;
@@ -644,7 +646,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         // Step 3: Commit to the rows of the data.
         let mut hasher = StandardHasher::<H>::new();
         let mut mmr = DirtyMmr::new();
-        if concurrency > 1 {
+        let mmr = if concurrency > 1 {
             let pool = ThreadPoolBuilder::new()
                 .num_threads(concurrency)
                 .build()
@@ -658,12 +660,13 @@ impl<H: Hasher> Scheme for Zoda<H> {
             for hash in &row_hashes {
                 mmr.add(&mut hasher, hash);
             }
+            mmr.merkleize(&mut hasher, Some(Arc::new(pool)))
         } else {
             for row in encoded_data.iter() {
                 mmr.add(&mut hasher, &row_digest::<H>(row));
             }
-        }
-        let mmr = mmr.merkleize(&mut hasher, None);
+            mmr.merkleize(&mut hasher, None)
+        };
         let root = *mmr.root();
 
         // Step 4: Commit to the root, and the size of the data.
@@ -693,8 +696,8 @@ impl<H: Hasher> Scheme for Zoda<H> {
                         .iter()
                         .flat_map(|&i| encoded_data[u64::from(i) as usize].iter().copied()),
                 );
-                let inclusion_proof = block_on(multi_proof(&mmr, indices))
-                    .map_err(Error::FailedToCreateInclusionProof)?;
+                let inclusion_proof =
+                    multi_proof_sync(&mmr, indices).map_err(Error::FailedToCreateInclusionProof)?;
                 Ok(Shard {
                     data_bytes,
                     root,
