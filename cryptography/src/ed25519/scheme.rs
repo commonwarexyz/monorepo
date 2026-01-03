@@ -95,15 +95,7 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = PRIVATE_KEY_LENGTH;
 }
 
-impl Span for PrivateKey {}
-
 impl Eq for PrivateKey {}
-
-impl Hash for PrivateKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.expose(|raw| raw.hash(state));
-    }
-}
 
 impl PartialEq for PrivateKey {
     fn eq(&self, other: &Self) -> bool {

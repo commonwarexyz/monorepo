@@ -6,11 +6,11 @@ use crate::{
     Signer as _,
 };
 use commonware_math::algebra::Random;
-use commonware_utils::{ordered::BiMap, TryCollect as _};
+use commonware_utils::{ordered::Map, TryCollect as _};
 use rand::{CryptoRng, RngCore};
 
 /// Generates ed25519 identity participants.
-pub fn participants<R>(rng: &mut R, n: u32) -> BiMap<PublicKey, PrivateKey>
+pub fn participants<R>(rng: &mut R, n: u32) -> Map<PublicKey, PrivateKey>
 where
     R: RngCore + CryptoRng,
 {
