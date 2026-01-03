@@ -128,6 +128,14 @@ impl PublicKeyInner {
     pub fn from_private_key(private_key: &PrivateKeyInner) -> Self {
         Self::new(private_key.verifying_key())
     }
+
+    /// aws-lc-rs can decompress keys, but since we already have the key parsed
+    /// in memory, extracting the uncompressed form directly is faster.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    pub fn to_uncompressed(&self) -> [u8; 65] {
+        let encoded = self.key.to_encoded_point(false);
+        encoded.as_bytes().try_into().unwrap()
+    }
 }
 
 impl Write for PublicKeyInner {
