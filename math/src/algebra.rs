@@ -592,6 +592,7 @@ pub mod test_suites {
 mod test {
     use super::*;
     use crate::fields::goldilocks::F;
+    use commonware_parallel::Sequential;
     use proptest::prelude::*;
 
     proptest! {
@@ -631,7 +632,6 @@ mod test {
 
         #[test]
         fn test_msm_2(a: [F; 2], b: [F; 2]) {
-            use commonware_parallel::Sequential;
             assert_eq!(F::msm(&a, &b, &Sequential), a[0] * b[0] + a[1] * b[1]);
         }
     }

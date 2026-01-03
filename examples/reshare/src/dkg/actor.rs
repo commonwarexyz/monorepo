@@ -21,8 +21,8 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
-use commonware_parallel::Sequential;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage as RuntimeStorage,
 };
