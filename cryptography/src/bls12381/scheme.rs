@@ -87,14 +87,6 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = group::PRIVATE_KEY_LENGTH;
 }
 
-impl Span for PrivateKey {}
-
-impl Hash for PrivateKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.expose(|raw| raw.hash(state));
-    }
-}
-
 impl Ord for PrivateKey {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.raw.cmp(&other.raw)

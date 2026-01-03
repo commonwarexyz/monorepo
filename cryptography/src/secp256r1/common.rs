@@ -76,14 +76,6 @@ impl FixedSize for PrivateKeyInner {
     const SIZE: usize = PRIVATE_KEY_LENGTH;
 }
 
-impl Span for PrivateKeyInner {}
-
-impl Hash for PrivateKeyInner {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.expose(|raw| raw.hash(state));
-    }
-}
-
 impl Ord for PrivateKeyInner {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.raw.cmp(&other.raw)
@@ -242,14 +234,6 @@ macro_rules! impl_private_key_wrapper {
 
         impl commonware_codec::FixedSize for $name {
             const SIZE: usize = PRIVATE_KEY_LENGTH;
-        }
-
-        impl commonware_utils::Span for $name {}
-
-        impl core::hash::Hash for $name {
-            fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-                self.0.hash(state);
-            }
         }
 
         impl Ord for $name {
