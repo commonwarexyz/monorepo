@@ -6,6 +6,7 @@
 //!
 //! - **Array containers**: For sparse containers (fewer elements), stores the actual u16 values.
 //! - **Bitmap containers**: For dense containers (many elements), uses a traditional 8KB bitmap.
+//! - **Run containers**: For data with consecutive runs, stores (start, end) pairs.
 //!
 //! # Example
 //!
@@ -46,13 +47,22 @@ const ARRAY_TO_BITMAP_THRESHOLD: usize = 4096;
 /// Size of a bitmap container in bytes (2^16 bits = 8192 bytes).
 const BITMAP_CONTAINER_SIZE: usize = 8192;
 
+/// Maximum number of runs before a run container should convert to bitmap.
+/// Run container size: 4 bytes per run
+/// Bitmap container size: 8192 bytes
+/// Crossover: 8192 / 4 = 2048 runs
+const MAX_RUNS_BEFORE_BITMAP: usize = 2048;
+
 /// A container that stores a subset of values within a 16-bit range.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Container {
-    /// Sorted array of u16 values. Used when cardinality < ARRAY_TO_BITMAP_THRESHOLD.
+    /// Sorted array of u16 values. Used for sparse data.
     Array(Vec<u16>),
-    /// Bitmap with 2^16 bits. Used when cardinality >= ARRAY_TO_BITMAP_THRESHOLD.
+    /// Bitmap with 2^16 bits. Used for dense data.
     Bitmap(Vec<u64>),
+    /// Run-length encoded container. Each (start, end) pair represents
+    /// all values from start to end inclusive. Runs are sorted and non-overlapping.
+    Run(Vec<(u16, u16)>),
 }
 
 impl Container {
@@ -66,6 +76,10 @@ impl Container {
         match self {
             Self::Array(arr) => arr.len(),
             Self::Bitmap(bits) => bits.iter().map(|w| w.count_ones() as usize).sum(),
+            Self::Run(runs) => runs
+                .iter()
+                .map(|&(start, end)| (end - start) as usize + 1)
+                .sum(),
         }
     }
 
@@ -74,6 +88,42 @@ impl Container {
         match self {
             Self::Array(arr) => arr.is_empty(),
             Self::Bitmap(bits) => bits.iter().all(|&w| w == 0),
+            Self::Run(runs) => runs.is_empty(),
+        }
+    }
+
+    /// Returns the number of runs in a run container, or estimates runs for other types.
+    fn num_runs(&self) -> usize {
+        match self {
+            Self::Array(arr) => {
+                if arr.is_empty() {
+                    return 0;
+                }
+                let mut runs = 1;
+                for i in 1..arr.len() {
+                    if arr[i] != arr[i - 1] + 1 {
+                        runs += 1;
+                    }
+                }
+                runs
+            }
+            Self::Bitmap(bits) => {
+                let mut runs = 0;
+                let mut in_run = false;
+                for &word in bits {
+                    for bit in 0..64 {
+                        let is_set = (word & (1u64 << bit)) != 0;
+                        if is_set && !in_run {
+                            runs += 1;
+                            in_run = true;
+                        } else if !is_set {
+                            in_run = false;
+                        }
+                    }
+                }
+                runs
+            }
+            Self::Run(runs) => runs.len(),
         }
     }
 
@@ -85,6 +135,19 @@ impl Container {
                 let word_idx = value as usize / 64;
                 let bit_idx = value as usize % 64;
                 (bits[word_idx] & (1u64 << bit_idx)) != 0
+            }
+            Self::Run(runs) => {
+                // Binary search for the run that might contain this value
+                runs.binary_search_by(|&(start, end)| {
+                    if value < start {
+                        core::cmp::Ordering::Greater
+                    } else if value > end {
+                        core::cmp::Ordering::Less
+                    } else {
+                        core::cmp::Ordering::Equal
+                    }
+                })
+                .is_ok()
             }
         }
     }
@@ -107,6 +170,35 @@ impl Container {
                 bits[word_idx] |= mask;
                 !was_set
             }
+            Self::Run(runs) => {
+                // Find where this value should go
+                let pos = runs.partition_point(|&(_, end)| end < value);
+
+                // Check if value is already in a run
+                if pos < runs.len() && runs[pos].0 <= value && value <= runs[pos].1 {
+                    return false; // Already present
+                }
+
+                // Check if we can extend the previous run
+                let extend_prev = pos > 0 && runs[pos - 1].1 + 1 == value;
+                // Check if we can extend the next run
+                let extend_next = pos < runs.len() && runs[pos].0 == value + 1;
+
+                if extend_prev && extend_next {
+                    // Merge previous and next runs
+                    let new_end = runs[pos].1;
+                    runs[pos - 1].1 = new_end;
+                    runs.remove(pos);
+                } else if extend_prev {
+                    runs[pos - 1].1 = value;
+                } else if extend_next {
+                    runs[pos].0 = value;
+                } else {
+                    // Create a new single-element run
+                    runs.insert(pos, (value, value));
+                }
+                true
+            }
         }
     }
 
@@ -124,6 +216,38 @@ impl Container {
                 let was_set = (bits[word_idx] & mask) != 0;
                 bits[word_idx] &= !mask;
                 was_set
+            }
+            Self::Run(runs) => {
+                // Find the run containing this value
+                let pos = match runs.binary_search_by(|&(start, end)| {
+                    if value < start {
+                        core::cmp::Ordering::Greater
+                    } else if value > end {
+                        core::cmp::Ordering::Less
+                    } else {
+                        core::cmp::Ordering::Equal
+                    }
+                }) {
+                    Ok(pos) => pos,
+                    Err(_) => return false, // Not found
+                };
+
+                let (start, end) = runs[pos];
+                if start == end {
+                    // Single-element run, remove it
+                    runs.remove(pos);
+                } else if value == start {
+                    // Remove from start
+                    runs[pos].0 = start + 1;
+                } else if value == end {
+                    // Remove from end
+                    runs[pos].1 = end - 1;
+                } else {
+                    // Split the run
+                    runs[pos].1 = value - 1;
+                    runs.insert(pos + 1, (value + 1, end));
+                }
+                true
             }
         }
     }
@@ -164,6 +288,149 @@ impl Container {
         }
     }
 
+    /// Converts to run container if it would be more efficient.
+    fn maybe_convert_to_run(&mut self) {
+        let num_runs = self.num_runs();
+        let cardinality = self.len();
+
+        // Run is better than array when: 4 * num_runs < 2 * cardinality
+        // Run is better than bitmap when: 4 * num_runs < 8192 (i.e., num_runs < 2048)
+        let run_size = 4 * num_runs;
+        let current_size = match self {
+            Self::Array(_) => 2 * cardinality,
+            Self::Bitmap(_) => BITMAP_CONTAINER_SIZE,
+            Self::Run(_) => return, // Already a run container
+        };
+
+        if run_size < current_size && num_runs < MAX_RUNS_BEFORE_BITMAP {
+            let runs = self.to_runs();
+            *self = Self::Run(runs);
+        }
+    }
+
+    /// Converts a run container to array or bitmap if more efficient.
+    fn maybe_convert_from_run(&mut self) {
+        if let Self::Run(runs) = self {
+            let num_runs = runs.len();
+            let cardinality: usize = runs
+                .iter()
+                .map(|&(start, end)| (end - start) as usize + 1)
+                .sum();
+
+            let run_size = 4 * num_runs;
+            let array_size = 2 * cardinality;
+            let bitmap_size = BITMAP_CONTAINER_SIZE;
+
+            if array_size <= run_size && array_size < bitmap_size {
+                // Convert to array
+                let mut arr = Vec::with_capacity(cardinality);
+                for &(start, end) in runs.iter() {
+                    for v in start..=end {
+                        arr.push(v);
+                    }
+                }
+                *self = Self::Array(arr);
+            } else if bitmap_size < run_size {
+                // Convert to bitmap
+                let mut bits = vec![0u64; BITMAP_CONTAINER_SIZE / 8];
+                for &(start, end) in runs.iter() {
+                    for v in start..=end {
+                        let word_idx = v as usize / 64;
+                        let bit_idx = v as usize % 64;
+                        bits[word_idx] |= 1u64 << bit_idx;
+                    }
+                }
+                *self = Self::Bitmap(bits);
+            }
+        }
+    }
+
+    /// Converts the container to a run representation.
+    fn to_runs(&self) -> Vec<(u16, u16)> {
+        match self {
+            Self::Array(arr) => {
+                if arr.is_empty() {
+                    return Vec::new();
+                }
+                let mut runs = Vec::new();
+                let mut run_start = arr[0];
+                let mut run_end = arr[0];
+                for &v in arr.iter().skip(1) {
+                    if v == run_end + 1 {
+                        run_end = v;
+                    } else {
+                        runs.push((run_start, run_end));
+                        run_start = v;
+                        run_end = v;
+                    }
+                }
+                runs.push((run_start, run_end));
+                runs
+            }
+            Self::Bitmap(bits) => {
+                let mut runs = Vec::new();
+                let mut run_start: Option<u16> = None;
+                let mut run_end: u16 = 0;
+
+                for (word_idx, &word) in bits.iter().enumerate() {
+                    for bit_idx in 0..64 {
+                        let value = (word_idx * 64 + bit_idx) as u16;
+                        let is_set = (word & (1u64 << bit_idx)) != 0;
+
+                        if is_set {
+                            match run_start {
+                                None => {
+                                    run_start = Some(value);
+                                    run_end = value;
+                                }
+                                Some(_) if value == run_end + 1 => {
+                                    run_end = value;
+                                }
+                                Some(start) => {
+                                    runs.push((start, run_end));
+                                    run_start = Some(value);
+                                    run_end = value;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(start) = run_start {
+                    runs.push((start, run_end));
+                }
+                runs
+            }
+            Self::Run(runs) => runs.clone(),
+        }
+    }
+
+    /// Converts this container to a bitmap.
+    fn to_bitmap(&self) -> Vec<u64> {
+        match self {
+            Self::Array(arr) => {
+                let mut bits = vec![0u64; BITMAP_CONTAINER_SIZE / 8];
+                for &value in arr {
+                    let word_idx = value as usize / 64;
+                    let bit_idx = value as usize % 64;
+                    bits[word_idx] |= 1u64 << bit_idx;
+                }
+                bits
+            }
+            Self::Bitmap(bits) => bits.clone(),
+            Self::Run(runs) => {
+                let mut bits = vec![0u64; BITMAP_CONTAINER_SIZE / 8];
+                for &(start, end) in runs {
+                    for v in start..=end {
+                        let word_idx = v as usize / 64;
+                        let bit_idx = v as usize % 64;
+                        bits[word_idx] |= 1u64 << bit_idx;
+                    }
+                }
+                bits
+            }
+        }
+    }
+
     /// Returns an iterator over all values in this container.
     fn iter(&self) -> ContainerIter<'_> {
         match self {
@@ -173,12 +440,18 @@ impl Container {
                 word_idx: 0,
                 bit_idx: 0,
             },
+            Self::Run(runs) => ContainerIter::Run {
+                runs,
+                run_idx: 0,
+                current: 0,
+            },
         }
     }
 
     /// Creates a new container with all 2^16 bits set.
     fn new_full() -> Self {
-        Self::Bitmap(vec![u64::MAX; BITMAP_CONTAINER_SIZE / 8])
+        // A single run is most efficient for a full container
+        Self::Run(vec![(0, u16::MAX)])
     }
 
     /// Inserts all values in the range [start, end] (inclusive).
@@ -189,6 +462,13 @@ impl Container {
         }
 
         let range_size = (end - start) as usize + 1;
+
+        // For large ranges, convert to run container which handles ranges efficiently
+        if range_size > 64 && !matches!(self, Self::Run(_)) {
+            // Convert to run container for efficient range insertion
+            let runs = self.to_runs();
+            *self = Self::Run(runs);
+        }
 
         // If inserting a large range into an array, convert to bitmap first
         if let Self::Array(arr) = self {
@@ -271,6 +551,71 @@ impl Container {
 
                 inserted
             }
+            Self::Run(runs) => {
+                // Count values that will be newly inserted
+                let mut inserted = (end - start + 1) as u64;
+
+                // Find overlapping runs and count existing values
+                for &(rs, re) in runs.iter() {
+                    if rs > end || re < start {
+                        continue; // No overlap
+                    }
+                    // Calculate overlap
+                    let overlap_start = rs.max(start);
+                    let overlap_end = re.min(end);
+                    inserted -= (overlap_end - overlap_start + 1) as u64;
+                }
+
+                // Now merge the new run with existing runs
+                let mut new_runs = Vec::new();
+                let mut merged_start = start;
+                let mut merged_end = end;
+                let mut merged = false;
+
+                for &(rs, re) in runs.iter() {
+                    // Check if this run overlaps or is adjacent to our range
+                    let overlaps = !(re + 1 < start || rs > end + 1);
+
+                    if overlaps {
+                        // Extend the merged range
+                        merged_start = merged_start.min(rs);
+                        merged_end = merged_end.max(re);
+                        merged = true;
+                    } else if rs > merged_end + 1 && merged {
+                        // This run is after our merged range, output merged and continue
+                        new_runs.push((merged_start, merged_end));
+                        new_runs.push((rs, re));
+                        merged = false;
+                    } else if rs > end + 1 && !merged {
+                        // This run is after our range and we haven't merged yet
+                        new_runs.push((start, end));
+                        new_runs.push((rs, re));
+                        merged = true; // Mark as handled
+                        merged_start = rs; // Won't be used but set for safety
+                        merged_end = re;
+                    } else {
+                        new_runs.push((rs, re));
+                    }
+                }
+
+                // Handle case where we still need to add the merged run
+                if !merged || new_runs.last().is_none_or(|&(_, e)| e < merged_end) {
+                    // Remove any runs that are now part of the merged range
+                    new_runs.retain(|&(s, e)| e < merged_start || s > merged_end);
+                    // Find insertion point
+                    let pos = new_runs.partition_point(|&(_, e)| e < merged_start);
+                    new_runs.insert(pos, (merged_start, merged_end));
+                }
+
+                *runs = new_runs;
+
+                // Check if we have too many runs
+                if runs.len() >= MAX_RUNS_BEFORE_BITMAP {
+                    self.maybe_convert_from_run();
+                }
+
+                inserted
+            }
         }
     }
 
@@ -330,6 +675,37 @@ impl Container {
                 self.maybe_convert_to_array();
                 removed
             }
+            Self::Run(runs) => {
+                let mut removed = 0u64;
+                let mut new_runs = Vec::new();
+
+                for &(rs, re) in runs.iter() {
+                    if re < start || rs > end {
+                        // No overlap - keep this run
+                        new_runs.push((rs, re));
+                    } else if rs >= start && re <= end {
+                        // Entire run is removed
+                        removed += (re - rs + 1) as u64;
+                    } else if rs < start && re > end {
+                        // Range is in the middle - split the run
+                        new_runs.push((rs, start - 1));
+                        new_runs.push((end + 1, re));
+                        removed += (end - start + 1) as u64;
+                    } else if rs < start {
+                        // Overlap at the end of this run
+                        new_runs.push((rs, start - 1));
+                        removed += (re - start + 1) as u64;
+                    } else {
+                        // Overlap at the start of this run (rs <= end < re)
+                        new_runs.push((end + 1, re));
+                        removed += (end - rs + 1) as u64;
+                    }
+                }
+
+                *runs = new_runs;
+                self.maybe_convert_from_run();
+                removed
+            }
         }
     }
 }
@@ -341,6 +717,11 @@ enum ContainerIter<'a> {
         bits: &'a [u64],
         word_idx: usize,
         bit_idx: usize,
+    },
+    Run {
+        runs: &'a [(u16, u16)],
+        run_idx: usize,
+        current: u16,
     },
 }
 
@@ -368,6 +749,35 @@ impl Iterator for ContainerIter<'_> {
                 }
                 None
             }
+            ContainerIter::Run {
+                runs,
+                run_idx,
+                current,
+            } => {
+                if *run_idx >= runs.len() {
+                    return None;
+                }
+                let (start, end) = runs[*run_idx];
+                if *current == 0 && *run_idx == 0 {
+                    // First call - initialize to start of first run
+                    *current = start;
+                }
+                if *current <= end {
+                    let result = *current;
+                    if *current == end {
+                        // Move to next run
+                        *run_idx += 1;
+                        if *run_idx < runs.len() {
+                            *current = runs[*run_idx].0;
+                        }
+                    } else {
+                        *current += 1;
+                    }
+                    Some(result)
+                } else {
+                    None
+                }
+            }
         }
     }
 }
@@ -377,6 +787,7 @@ impl fmt::Debug for Container {
         match self {
             Self::Array(arr) => write!(f, "Array({} elements)", arr.len()),
             Self::Bitmap(_) => write!(f, "Bitmap({} elements)", self.len()),
+            Self::Run(runs) => write!(f, "Run({} runs, {} elements)", runs.len(), self.len()),
         }
     }
 }
@@ -651,6 +1062,7 @@ impl RoaringBitmap {
                             (word_idx * 64 + bit_idx as usize) as u16
                         })
                 }
+                Container::Run(runs) => runs.last().map(|&(_, end)| end),
             };
             low.map(|low| Self::combine(*high, low))
         })
@@ -1039,7 +1451,16 @@ fn for_each_missing_run_with_values(
 
 /// AND two containers together.
 fn and_containers(a: &Container, b: &Container) -> Container {
+    // Handle Run containers by converting to bitmap for the operation
     match (a, b) {
+        (Container::Run(_), _) => {
+            let bits_a = a.to_bitmap();
+            and_containers(&Container::Bitmap(bits_a), b)
+        }
+        (_, Container::Run(_)) => {
+            let bits_b = b.to_bitmap();
+            and_containers(a, &Container::Bitmap(bits_b))
+        }
         (Container::Array(arr_a), Container::Array(arr_b)) => {
             // Intersection of two sorted arrays
             let mut result = Vec::new();
@@ -1066,6 +1487,7 @@ fn and_containers(a: &Container, b: &Container) -> Container {
                 .collect();
             let mut container = Container::Bitmap(bits);
             container.maybe_convert_to_array();
+            container.maybe_convert_to_run();
             container
         }
         (Container::Array(arr), Container::Bitmap(bits))
@@ -1086,7 +1508,16 @@ fn and_containers(a: &Container, b: &Container) -> Container {
 
 /// OR two containers together.
 fn or_containers(a: &Container, b: &Container) -> Container {
+    // Handle Run containers by converting to bitmap for the operation
     match (a, b) {
+        (Container::Run(_), _) => {
+            let bits_a = a.to_bitmap();
+            or_containers(&Container::Bitmap(bits_a), b)
+        }
+        (_, Container::Run(_)) => {
+            let bits_b = b.to_bitmap();
+            or_containers(a, &Container::Bitmap(bits_b))
+        }
         (Container::Array(arr_a), Container::Array(arr_b)) => {
             // Union of two sorted arrays
             let mut result = Vec::with_capacity(arr_a.len() + arr_b.len());
@@ -1114,6 +1545,7 @@ fn or_containers(a: &Container, b: &Container) -> Container {
 
             let mut container = Container::Array(result);
             container.maybe_convert_to_bitmap();
+            container.maybe_convert_to_run();
             container
         }
         (Container::Bitmap(bits_a), Container::Bitmap(bits_b)) => {
@@ -1122,7 +1554,9 @@ fn or_containers(a: &Container, b: &Container) -> Container {
                 .zip(bits_b.iter())
                 .map(|(&a, &b)| a | b)
                 .collect();
-            Container::Bitmap(bits)
+            let mut container = Container::Bitmap(bits);
+            container.maybe_convert_to_run();
+            container
         }
         (Container::Array(arr), Container::Bitmap(bits))
         | (Container::Bitmap(bits), Container::Array(arr)) => {
@@ -1132,14 +1566,25 @@ fn or_containers(a: &Container, b: &Container) -> Container {
                 let bit_idx = v as usize % 64;
                 new_bits[word_idx] |= 1u64 << bit_idx;
             }
-            Container::Bitmap(new_bits)
+            let mut container = Container::Bitmap(new_bits);
+            container.maybe_convert_to_run();
+            container
         }
     }
 }
 
 /// XOR two containers together.
 fn xor_containers(a: &Container, b: &Container) -> Container {
+    // Handle Run containers by converting to bitmap for the operation
     match (a, b) {
+        (Container::Run(_), _) => {
+            let bits_a = a.to_bitmap();
+            xor_containers(&Container::Bitmap(bits_a), b)
+        }
+        (_, Container::Run(_)) => {
+            let bits_b = b.to_bitmap();
+            xor_containers(a, &Container::Bitmap(bits_b))
+        }
         (Container::Array(arr_a), Container::Array(arr_b)) => {
             // Symmetric difference of two sorted arrays
             let mut result = Vec::with_capacity(arr_a.len() + arr_b.len());
@@ -1167,6 +1612,7 @@ fn xor_containers(a: &Container, b: &Container) -> Container {
 
             let mut container = Container::Array(result);
             container.maybe_convert_to_bitmap();
+            container.maybe_convert_to_run();
             container
         }
         (Container::Bitmap(bits_a), Container::Bitmap(bits_b)) => {
@@ -1177,6 +1623,7 @@ fn xor_containers(a: &Container, b: &Container) -> Container {
                 .collect();
             let mut container = Container::Bitmap(bits);
             container.maybe_convert_to_array();
+            container.maybe_convert_to_run();
             container
         }
         (Container::Array(arr), Container::Bitmap(bits))
@@ -1189,6 +1636,7 @@ fn xor_containers(a: &Container, b: &Container) -> Container {
             }
             let mut container = Container::Bitmap(new_bits);
             container.maybe_convert_to_array();
+            container.maybe_convert_to_run();
             container
         }
     }
@@ -1281,6 +1729,7 @@ impl Extend<u64> for RoaringBitmap {
 // Container type tag for serialization
 const CONTAINER_TYPE_ARRAY: u8 = 0;
 const CONTAINER_TYPE_BITMAP: u8 = 1;
+const CONTAINER_TYPE_RUN: u8 = 2;
 
 impl Write for Container {
     fn write(&self, buf: &mut impl BufMut) {
@@ -1296,6 +1745,14 @@ impl Write for Container {
                 CONTAINER_TYPE_BITMAP.write(buf);
                 for &word in bits {
                     word.write(buf);
+                }
+            }
+            Self::Run(runs) => {
+                CONTAINER_TYPE_RUN.write(buf);
+                (runs.len() as u16).write(buf);
+                for &(start, end) in runs {
+                    start.write(buf);
+                    end.write(buf);
                 }
             }
         }
@@ -1325,6 +1782,23 @@ impl Read for Container {
                 }
                 Ok(Self::Bitmap(bits))
             }
+            CONTAINER_TYPE_RUN => {
+                let num_runs = u16::read(buf)? as usize;
+                at_least(buf, num_runs * 4)?;
+                let mut runs = Vec::with_capacity(num_runs);
+                for _ in 0..num_runs {
+                    let start = u16::read(buf)?;
+                    let end = u16::read(buf)?;
+                    if start > end {
+                        return Err(CodecError::Invalid(
+                            "Container",
+                            "Invalid run: start > end",
+                        ));
+                    }
+                    runs.push((start, end));
+                }
+                Ok(Self::Run(runs))
+            }
             _ => Err(CodecError::Invalid(
                 "Container",
                 "Invalid container type tag",
@@ -1344,6 +1818,11 @@ impl EncodeSize for Container {
             Self::Bitmap(_) => {
                 1 // type tag
                 + BITMAP_CONTAINER_SIZE // bitmap data
+            }
+            Self::Run(runs) => {
+                1 // type tag
+                + 2 // num runs
+                + runs.len() * 4 // (start, end) pairs
             }
         }
     }
@@ -2129,6 +2608,60 @@ mod tests {
     }
 
     #[test]
+    fn test_run_container_compression() {
+        let mut bitmap = RoaringBitmap::new();
+
+        // Insert a large contiguous range - should use run container
+        bitmap.insert_range(0u64..1_000_000);
+
+        // Verify the data is correct
+        assert_eq!(bitmap.len(), 1_000_000);
+        assert!(bitmap.contains(0));
+        assert!(bitmap.contains(500_000));
+        assert!(bitmap.contains(999_999));
+        assert!(!bitmap.contains(1_000_000));
+
+        // The encode size should be small due to run compression
+        // Without run containers: 1M values * 2 bytes = 2MB minimum
+        // With run containers: ~16 containers * (1 byte tag + 2 bytes num_runs + 4 bytes per run) ≈ very small
+        let encoded_size = bitmap.encode_size();
+
+        // Should be much smaller than 2MB (the array representation would be huge)
+        // Run container should bring this down to hundreds of bytes
+        assert!(
+            encoded_size < 10_000,
+            "Expected small encoded size due to run compression, got {}",
+            encoded_size
+        );
+
+        // Verify roundtrip
+        let decoded = RoaringBitmap::decode_cfg(bitmap.encode(), &1000).unwrap();
+        assert_eq!(decoded.len(), 1_000_000);
+        assert!(decoded.contains(0));
+        assert!(decoded.contains(999_999));
+    }
+
+    #[test]
+    fn test_run_container_roundtrip() {
+        let mut bitmap = RoaringBitmap::new();
+
+        // Create a bitmap with multiple runs
+        bitmap.insert_range(100u64..200);
+        bitmap.insert_range(300u64..400);
+        bitmap.insert_range(1000u64..2000);
+
+        let encoded = bitmap.encode();
+        let decoded = RoaringBitmap::decode_cfg(encoded, &1000).unwrap();
+
+        assert_eq!(decoded.len(), bitmap.len());
+        assert!(decoded.contains(100));
+        assert!(decoded.contains(199));
+        assert!(!decoded.contains(200));
+        assert!(decoded.contains(300));
+        assert!(decoded.contains(1500));
+    }
+
+    #[test]
     fn test_remove_range_basic() {
         let mut bitmap = RoaringBitmap::new();
         bitmap.insert_range(0..100);
@@ -2351,12 +2884,13 @@ mod tests {
 
         // Should have seen starts in multiple gaps
         // Gap 1: 100..200, Gap 2: 300..400
-        let in_gap1 = seen_starts.iter().any(|&v| v >= 100 && v < 200);
-        let in_gap2 = seen_starts.iter().any(|&v| v >= 300 && v < 400);
+        let in_gap1 = seen_starts.iter().any(|&v| (100..200).contains(&v));
+        let in_gap2 = seen_starts.iter().any(|&v| (300..400).contains(&v));
         assert!(in_gap1 && in_gap2, "Should randomly select from different gaps");
     }
 
     #[test]
+    #[allow(clippy::reversed_empty_ranges)] // Intentionally testing edge case
     fn test_random_missing_run_empty_range() {
         use rand::{rngs::StdRng, SeedableRng};
 
