@@ -9,6 +9,8 @@ use super::common::{
     impl_private_key_wrapper, impl_public_key_wrapper, PrivateKeyInner, PublicKeyInner, CURVE_NAME,
     PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH,
 };
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, union_unique, Array, Span};
@@ -17,13 +19,7 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use p256::{
-    ecdsa::signature::Signer,
-    elliptic_curve::scalar::IsHigh,
-};
-
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
+use p256::{ecdsa::signature::Signer, elliptic_curve::scalar::IsHigh};
 
 const SIGNATURE_LENGTH: usize = 64; // R || S
 
