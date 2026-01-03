@@ -440,1004 +440,993 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     }
 }
 
-// FIXME
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::{
-//         simplex::scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
-//         types::{Epoch, Round, View},
-//     };
-//     use commonware_cryptography::{
-//         bls12381::primitives::variant::{MinPk, MinSig},
-//         certificate::mocks::Fixture,
-//         ed25519::PublicKey,
-//         sha256::Digest as Sha256,
-//     };
-//     use commonware_utils::quorum_from_slice;
-//     use rand::{
-//         rngs::{OsRng, StdRng},
-//         SeedableRng,
-//     };
-
-//     const NAMESPACE: &[u8] = b"test";
-
-//     // Helper function to create a sample digest
-//     fn sample_digest(v: u8) -> Sha256 {
-//         Sha256::from([v; 32]) // Simple fixed digest for testing
-//     }
-
-//     // Helper to create a Notarize message for any signing scheme
-//     fn create_notarize<S: Scheme<Sha256>>(
-//         scheme: &S,
-//         round: Round,
-//         parent_view: View,
-//         payload_val: u8,
-//     ) -> Notarize<S, Sha256> {
-//         let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
-//         Notarize::sign(scheme, proposal).unwrap()
-//     }
-
-//     // Helper to create a Nullify message for any signing scheme
-//     fn create_nullify<S: Scheme<Sha256>>(scheme: &S, round: Round) -> Nullify<S> {
-//         Nullify::sign::<Sha256>(scheme, round).unwrap()
-//     }
-
-//     // Helper to create a Finalize message for any signing scheme
-//     fn create_finalize<S: Scheme<Sha256>>(
-//         scheme: &S,
-//         round: Round,
-//         parent_view: View,
-//         payload_val: u8,
-//     ) -> Finalize<S, Sha256> {
-//         let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
-//         Finalize::sign(scheme, proposal).unwrap()
-//     }
-
-//     fn add_notarize<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(123);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-
-//         let round = Round::new(Epoch::new(0), View::new(1));
-//         let notarize1 = create_notarize(&schemes[0], round, View::new(0), 1);
-//         let notarize2 = create_notarize(&schemes[1], round, View::new(0), 1);
-//         let notarize_diff = create_notarize(&schemes[2], round, View::new(0), 2);
-
-//         verifier.add(Vote::Notarize(notarize1.clone()), false);
-//         assert_eq!(verifier.notarizes.len(), 1);
-//         assert_eq!(verifier.notarizes_verified, 0);
-
-//         verifier.add(Vote::Notarize(notarize1.clone()), true);
-//         assert_eq!(verifier.notarizes.len(), 1);
-//         assert_eq!(verifier.notarizes_verified, 1);
-
-//         verifier.set_leader(notarize1.signer());
-//         assert!(verifier.leader_proposal.is_some());
-//         assert_eq!(
-//             verifier.leader_proposal.as_ref().unwrap(),
-//             &notarize1.proposal
-//         );
-//         assert_eq!(verifier.notarizes.len(), 1);
-
-//         verifier.add(Vote::Notarize(notarize2), false);
-//         assert_eq!(verifier.notarizes.len(), 2);
-
-//         verifier.add(Vote::Notarize(notarize_diff), false);
-//         assert_eq!(verifier.notarizes.len(), 2);
-
-//         let mut verifier2 = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let round2 = Round::new(Epoch::new(0), View::new(2));
-//         let notarize_non_leader = create_notarize(&schemes[1], round2, View::new(1), 3);
-//         let notarize_leader = create_notarize(&schemes[0], round2, View::new(1), 3);
-
-//         verifier2.set_leader(notarize_leader.signer());
-//         verifier2.add(Vote::Notarize(notarize_non_leader), false);
-//         assert!(verifier2.leader_proposal.is_none());
-//         assert_eq!(verifier2.notarizes.len(), 1);
-
-//         verifier2.add(Vote::Notarize(notarize_leader.clone()), false);
-//         assert!(verifier2.leader_proposal.is_some());
-//         assert_eq!(
-//             verifier2.leader_proposal.as_ref().unwrap(),
-//             &notarize_leader.proposal
-//         );
-//         assert_eq!(verifier2.notarizes.len(), 2);
-//     }
-
-//     #[test]
-//     fn test_add_notarize() {
-//         add_notarize(bls12381_threshold::fixture::<MinSig, _, _>);
-//         add_notarize(bls12381_threshold::fixture::<MinPk, _, _>);
-//         add_notarize(bls12381_multisig::fixture::<MinSig, _, _>);
-//         add_notarize(bls12381_multisig::fixture::<MinPk, _, _>);
-//         add_notarize(ed25519::fixture);
-//         add_notarize(secp256r1::fixture);
-//     }
-
-//     fn set_leader<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(124);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-
-//         let round = Round::new(Epoch::new(0), View::new(1));
-//         let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
-//         let other_notarize = create_notarize(&schemes[1], round, View::new(0), 1);
-
-//         verifier.add(Vote::Notarize(other_notarize), false);
-//         assert_eq!(verifier.notarizes.len(), 1);
-
-//         let leader = leader_notarize.signer();
-//         verifier.set_leader(leader);
-//         assert_eq!(verifier.leader, Some(leader));
-//         assert!(verifier.leader_proposal.is_none());
-//         assert_eq!(verifier.notarizes.len(), 1);
-
-//         verifier.add(Vote::Notarize(leader_notarize.clone()), false);
-//         assert!(verifier.leader_proposal.is_some());
-//         assert_eq!(
-//             verifier.leader_proposal.as_ref().unwrap(),
-//             &leader_notarize.proposal
-//         );
-//         assert_eq!(verifier.notarizes.len(), 2);
-//     }
-
-//     #[test]
-//     fn test_set_leader() {
-//         set_leader(bls12381_threshold::fixture::<MinSig, _>);
-//         set_leader(bls12381_threshold::fixture::<MinPk, _>);
-//         set_leader(bls12381_multisig::fixture::<MinSig, _>);
-//         set_leader(bls12381_multisig::fixture::<MinPk, _>);
-//         set_leader(ed25519::fixture);
-//         set_leader(secp256r1::fixture);
-//     }
-
-//     fn ready_and_verify_notarizes<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(125);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let mut rng = OsRng;
-//         let round = Round::new(Epoch::new(0), View::new(1));
-//         let notarizes: Vec<_> = schemes
-//             .iter()
-//             .map(|scheme| create_notarize(scheme, round, View::new(0), 1))
-//             .collect();
-
-//         assert!(!verifier.ready_notarizes());
-
-//         verifier.set_leader(notarizes[0].signer());
-//         verifier.add(Vote::Notarize(notarizes[0].clone()), false);
-//         // Non-batchable schemes verify immediately when pending votes exist
-//         assert_eq!(!verifier.ready_notarizes(), S::is_batchable());
-//         assert_eq!(verifier.notarizes.len(), 1);
-
-//         verifier.add(Vote::Notarize(notarizes[1].clone()), false);
-//         assert_eq!(!verifier.ready_notarizes(), S::is_batchable());
-//         verifier.add(Vote::Notarize(notarizes[2].clone()), false);
-//         assert_eq!(!verifier.ready_notarizes(), S::is_batchable());
-//         verifier.add(Vote::Notarize(notarizes[3].clone()), false);
-//         assert!(verifier.ready_notarizes());
-//         assert_eq!(verifier.notarizes.len(), 4);
-
-//         let (verified_bulk, failed_bulk) = verifier.verify_notarizes(&mut rng);
-//         assert_eq!(verified_bulk.len(), 4);
-//         assert!(failed_bulk.is_empty());
-//         assert_eq!(verifier.notarizes_verified, 4);
-//         assert!(verifier.notarizes.is_empty());
-//         assert!(!verifier.ready_notarizes());
-
-//         let mut verifier2 = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let round2 = Round::new(Epoch::new(0), View::new(2));
-//         let leader_vote = create_notarize(&schemes[0], round2, View::new(1), 10);
-//         let mut faulty_vote = create_notarize(&schemes[1], round2, View::new(1), 10);
-//         verifier2.set_leader(leader_vote.signer());
-//         verifier2.add(Vote::Notarize(leader_vote.clone()), false);
-//         faulty_vote.attestation.signer = (schemes.len() as u32) + 10;
-//         verifier2.add(Vote::Notarize(faulty_vote.clone()), false);
-
-//         for scheme in schemes.iter().skip(2).take(quorum as usize - 2) {
-//             verifier2.add(
-//                 Vote::Notarize(create_notarize(scheme, round2, View::new(1), 10)),
-//                 false,
-//             );
-//         }
-//         assert!(verifier2.ready_notarizes());
-
-//         let (verified_second, failed_second) = verifier2.verify_notarizes(&mut rng);
-//         assert!(verified_second
-//             .iter()
-//             .any(|v| matches!(v, Vote::Notarize(ref n) if n == &leader_vote)));
-//         assert_eq!(failed_second, vec![faulty_vote.signer()]);
-//     }
-
-//     #[test]
-//     fn test_ready_and_verify_notarizes() {
-//         ready_and_verify_notarizes(bls12381_threshold::fixture::<MinSig, _>);
-//         ready_and_verify_notarizes(bls12381_threshold::fixture::<MinPk, _>);
-//         ready_and_verify_notarizes(bls12381_multisig::fixture::<MinSig, _>);
-//         ready_and_verify_notarizes(bls12381_multisig::fixture::<MinPk, _>);
-//         ready_and_verify_notarizes(ed25519::fixture);
-//         ready_and_verify_notarizes(secp256r1::fixture);
-//     }
-
-//     fn add_nullify<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(127);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let round = Round::new(Epoch::new(0), View::new(1));
-//         let nullify = create_nullify(&schemes[0], round);
-
-//         verifier.add(Vote::Nullify(nullify.clone()), false);
-//         assert_eq!(verifier.nullifies.len(), 1);
-//         assert_eq!(verifier.nullifies_verified, 0);
-
-//         verifier.add(Vote::Nullify(nullify), true);
-//         assert_eq!(verifier.nullifies.len(), 1);
-//         assert_eq!(verifier.nullifies_verified, 1);
-//     }
-
-//     #[test]
-//     fn test_add_nullify() {
-//         add_nullify(bls12381_threshold::fixture::<MinSig, _>);
-//         add_nullify(bls12381_threshold::fixture::<MinPk, _>);
-//         add_nullify(bls12381_multisig::fixture::<MinSig, _>);
-//         add_nullify(bls12381_multisig::fixture::<MinPk, _>);
-//         add_nullify(ed25519::fixture);
-//         add_nullify(secp256r1::fixture);
-//     }
-
-//     fn ready_and_verify_nullifies<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(128);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let mut rng = OsRng;
-//         let round = Round::new(Epoch::new(0), View::new(1));
-//         let nullifies: Vec<_> = schemes
-//             .iter()
-//             .map(|scheme| create_nullify(scheme, round))
-//             .collect();
-
-//         verifier.add(Vote::Nullify(nullifies[0].clone()), true);
-//         assert_eq!(verifier.nullifies_verified, 1);
-
-//         verifier.add(Vote::Nullify(nullifies[1].clone()), false);
-//         // Non-batchable schemes verify immediately when pending votes exist
-//         assert_eq!(!verifier.ready_nullifies(), S::is_batchable());
-//         verifier.add(Vote::Nullify(nullifies[2].clone()), false);
-//         assert_eq!(!verifier.ready_nullifies(), S::is_batchable());
-//         verifier.add(Vote::Nullify(nullifies[3].clone()), false);
-//         assert!(verifier.ready_nullifies());
-//         assert_eq!(verifier.nullifies.len(), 3);
-
-//         let (verified, failed) = verifier.verify_nullifies(&mut rng);
-//         assert_eq!(verified.len(), 3);
-//         assert!(failed.is_empty());
-//         assert_eq!(verifier.nullifies_verified, 4);
-//         assert!(verifier.nullifies.is_empty());
-//         assert!(!verifier.ready_nullifies());
-//     }
-
-//     #[test]
-//     fn test_ready_and_verify_nullifies() {
-//         ready_and_verify_nullifies(bls12381_threshold::fixture::<MinSig, _>);
-//         ready_and_verify_nullifies(bls12381_threshold::fixture::<MinPk, _>);
-//         ready_and_verify_nullifies(bls12381_multisig::fixture::<MinSig, _>);
-//         ready_and_verify_nullifies(bls12381_multisig::fixture::<MinPk, _>);
-//         ready_and_verify_nullifies(ed25519::fixture);
-//         ready_and_verify_nullifies(secp256r1::fixture);
-//     }
-
-//     fn add_finalize<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(129);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let round = Round::new(Epoch::new(0), View::new(1));
-//         let finalize_a = create_finalize(&schemes[0], round, View::new(0), 1);
-//         let finalize_b = create_finalize(&schemes[1], round, View::new(0), 2);
-
-//         verifier.add(Vote::Finalize(finalize_b.clone()), false);
-//         assert_eq!(verifier.finalizes.len(), 1);
-//         assert_eq!(verifier.finalizes_verified, 0);
-
-//         verifier.add(Vote::Finalize(finalize_a.clone()), false);
-//         assert_eq!(verifier.finalizes.len(), 2);
-
-//         verifier.set_leader(finalize_a.signer());
-//         assert!(verifier.leader_proposal.is_none());
-//         verifier.set_leader_proposal(finalize_a.proposal.clone());
-//         assert_eq!(verifier.finalizes.len(), 1);
-//         assert_eq!(verifier.finalizes[0], finalize_a);
-//         assert_eq!(verifier.finalizes_verified, 0);
-
-//         verifier.add(Vote::Finalize(finalize_a), true);
-//         assert_eq!(verifier.finalizes.len(), 1);
-//         assert_eq!(verifier.finalizes_verified, 1);
-
-//         verifier.add(Vote::Finalize(finalize_b), false);
-//         assert_eq!(verifier.finalizes.len(), 1);
-//         assert_eq!(verifier.finalizes_verified, 1);
-//     }
-
-//     #[test]
-//     fn test_add_finalize() {
-//         add_finalize(bls12381_threshold::fixture::<MinSig, _>);
-//         add_finalize(bls12381_threshold::fixture::<MinPk, _>);
-//         add_finalize(bls12381_multisig::fixture::<MinSig, _>);
-//         add_finalize(bls12381_multisig::fixture::<MinPk, _>);
-//         add_finalize(ed25519::fixture);
-//         add_finalize(secp256r1::fixture);
-//     }
-
-//     fn ready_and_verify_finalizes<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(130);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let mut rng = OsRng;
-//         let round = Round::new(Epoch::new(0), View::new(1));
-//         let finalizes: Vec<_> = schemes
-//             .iter()
-//             .map(|scheme| create_finalize(scheme, round, View::new(0), 1))
-//             .collect();
-
-//         assert!(!verifier.ready_finalizes());
-
-//         verifier.set_leader(finalizes[0].signer());
-//         verifier.set_leader_proposal(finalizes[0].proposal.clone());
-
-//         verifier.add(Vote::Finalize(finalizes[0].clone()), true);
-//         assert_eq!(verifier.finalizes_verified, 1);
-//         assert!(verifier.finalizes.is_empty());
-
-//         verifier.add(Vote::Finalize(finalizes[1].clone()), false);
-//         // Non-batchable schemes verify immediately when pending votes exist
-//         assert_eq!(!verifier.ready_finalizes(), S::is_batchable());
-//         verifier.add(Vote::Finalize(finalizes[2].clone()), false);
-//         assert_eq!(!verifier.ready_finalizes(), S::is_batchable());
-//         verifier.add(Vote::Finalize(finalizes[3].clone()), false);
-//         assert!(verifier.ready_finalizes());
-
-//         let (verified, failed) = verifier.verify_finalizes(&mut rng);
-//         assert_eq!(verified.len(), 3);
-//         assert!(failed.is_empty());
-//         assert_eq!(verifier.finalizes_verified, 4);
-//         assert!(verifier.finalizes.is_empty());
-//         assert!(!verifier.ready_finalizes());
-//     }
-
-//     #[test]
-//     fn test_ready_and_verify_finalizes() {
-//         ready_and_verify_finalizes(bls12381_threshold::fixture::<MinSig, _>);
-//         ready_and_verify_finalizes(bls12381_threshold::fixture::<MinPk, _>);
-//         ready_and_verify_finalizes(bls12381_multisig::fixture::<MinSig, _>);
-//         ready_and_verify_finalizes(bls12381_multisig::fixture::<MinPk, _>);
-//         ready_and_verify_finalizes(ed25519::fixture);
-//         ready_and_verify_finalizes(secp256r1::fixture);
-//     }
-
-//     fn leader_proposal_filters_messages<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(201);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 3);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let round = Round::new(Epoch::new(0), View::new(1));
-//         let proposal_a = Proposal::new(round, View::new(0), sample_digest(10));
-//         let proposal_b = Proposal::new(round, View::new(0), sample_digest(20));
-
-//         let notarize_a = Notarize::sign(&schemes[0], proposal_a.clone()).unwrap();
-//         let notarize_b = Notarize::sign(&schemes[1], proposal_b.clone()).unwrap();
-//         let finalize_a = Finalize::sign(&schemes[0], proposal_a.clone()).unwrap();
-//         let finalize_b = Finalize::sign(&schemes[1], proposal_b).unwrap();
-
-//         verifier.add(Vote::Notarize(notarize_a.clone()), false);
-//         verifier.add(Vote::Notarize(notarize_b), false);
-//         verifier.add(Vote::Finalize(finalize_a), false);
-//         verifier.add(Vote::Finalize(finalize_b), false);
-
-//         assert_eq!(verifier.notarizes.len(), 2);
-//         assert_eq!(verifier.finalizes.len(), 2);
-
-//         verifier.set_leader(notarize_a.signer());
-
-//         assert_eq!(verifier.notarizes.len(), 1);
-//         assert_eq!(verifier.notarizes[0].proposal, proposal_a);
-//         assert_eq!(verifier.finalizes.len(), 1);
-//         assert_eq!(verifier.finalizes[0].proposal, proposal_a);
-//     }
-
-//     #[test]
-//     fn test_leader_proposal_filters_messages() {
-//         leader_proposal_filters_messages(bls12381_threshold::fixture::<MinSig, _>);
-//         leader_proposal_filters_messages(bls12381_threshold::fixture::<MinPk, _>);
-//         leader_proposal_filters_messages(bls12381_multisig::fixture::<MinSig, _>);
-//         leader_proposal_filters_messages(bls12381_multisig::fixture::<MinPk, _>);
-//         leader_proposal_filters_messages(ed25519::fixture);
-//         leader_proposal_filters_messages(secp256r1::fixture);
-//     }
-
-//     fn set_leader_twice_panics<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(212);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 3);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), 3);
-//         verifier.set_leader(0);
-//         verifier.set_leader(1);
-//     }
-
-//     #[test]
-//     #[should_panic(expected = "self.leader.is_none()")]
-//     fn test_set_leader_twice_panics_bls_threshold_minsig() {
-//         set_leader_twice_panics(bls12381_threshold::fixture::<MinSig, _>);
-//     }
-
-//     #[test]
-//     #[should_panic(expected = "self.leader.is_none()")]
-//     fn test_set_leader_twice_panics_bls_threshold_minpk() {
-//         set_leader_twice_panics(bls12381_threshold::fixture::<MinPk, _>);
-//     }
-
-//     #[test]
-//     #[should_panic(expected = "self.leader.is_none()")]
-//     fn test_set_leader_twice_panics_bls_multisig_minsig() {
-//         set_leader_twice_panics(bls12381_multisig::fixture::<MinSig, _>);
-//     }
-
-//     #[test]
-//     #[should_panic(expected = "self.leader.is_none()")]
-//     fn test_set_leader_twice_panics_bls_multisig_minpk() {
-//         set_leader_twice_panics(bls12381_multisig::fixture::<MinPk, _>);
-//     }
-
-//     #[test]
-//     #[should_panic(expected = "self.leader.is_none()")]
-//     fn test_set_leader_twice_panics_ed() {
-//         set_leader_twice_panics(ed25519::fixture);
-//     }
-
-//     #[test]
-//     #[should_panic(expected = "self.leader.is_none()")]
-//     fn test_set_leader_twice_panics_secp() {
-//         set_leader_twice_panics(secp256r1::fixture);
-//     }
-
-//     fn notarizes_wait_for_quorum<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(203);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let mut rng = OsRng;
-//         let round = Round::new(Epoch::new(0), View::new(1));
-//         let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
-
-//         verifier.set_leader(leader_vote.signer());
-//         verifier.add(Vote::Notarize(leader_vote), false);
-//         // Non-batchable schemes verify immediately when pending votes exist
-//         assert_eq!(
-//             !verifier.ready_notarizes(),
-//             S::is_batchable(),
-//             "Batchable schemes wait for quorum, non-batchable verify immediately"
-//         );
-
-//         for scheme in schemes.iter().skip(1).take(quorum as usize - 1) {
-//             verifier.add(
-//                 Vote::Notarize(create_notarize(scheme, round, View::new(0), 1)),
-//                 false,
-//             );
-//         }
-//         assert!(verifier.ready_notarizes(), "Should be ready at quorum");
-
-//         let (verified, _) = verifier.verify_notarizes(&mut rng);
-//         assert_eq!(verified.len(), quorum as usize);
-//         assert!(!verifier.ready_notarizes());
-//     }
-
-//     #[test]
-//     fn test_notarizes_wait_for_quorum() {
-//         notarizes_wait_for_quorum(bls12381_threshold::fixture::<MinSig, _>);
-//         notarizes_wait_for_quorum(bls12381_threshold::fixture::<MinPk, _>);
-//         notarizes_wait_for_quorum(bls12381_multisig::fixture::<MinSig, _>);
-//         notarizes_wait_for_quorum(bls12381_multisig::fixture::<MinPk, _>);
-//         notarizes_wait_for_quorum(ed25519::fixture);
-//         notarizes_wait_for_quorum(secp256r1::fixture);
-//     }
-
-//     fn ready_notarizes_without_leader<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(204);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 3);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let round = Round::new(Epoch::new(0), View::new(1));
-
-//         let notarizes: Vec<_> = schemes
-//             .iter()
-//             .take(quorum as usize)
-//             .map(|scheme| create_notarize(scheme, round, View::new(0), 1))
-//             .collect();
-
-//         for vote in notarizes.iter() {
-//             verifier.add(Vote::Notarize(vote.clone()), false);
-//         }
-
-//         assert!(
-//             !verifier.ready_notarizes(),
-//             "Should not be ready without leader/proposal set"
-//         );
-
-//         verifier.set_leader(notarizes[0].signer());
-//         assert!(
-//             verifier.ready_notarizes(),
-//             "Should be ready once leader is set"
-//         );
-//     }
-
-//     #[test]
-//     fn test_ready_notarizes_without_leader_or_proposal() {
-//         ready_notarizes_without_leader(bls12381_threshold::fixture::<MinSig, _>);
-//         ready_notarizes_without_leader(bls12381_threshold::fixture::<MinPk, _>);
-//         ready_notarizes_without_leader(bls12381_multisig::fixture::<MinSig, _>);
-//         ready_notarizes_without_leader(bls12381_multisig::fixture::<MinPk, _>);
-//         ready_notarizes_without_leader(ed25519::fixture);
-//         ready_notarizes_without_leader(secp256r1::fixture);
-//     }
-
-//     fn ready_finalizes_without_leader<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(205);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 3);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let round = Round::new(Epoch::new(0), View::new(1));
-//         let finalizes: Vec<_> = schemes
-//             .iter()
-//             .take(quorum as usize)
-//             .map(|scheme| create_finalize(scheme, round, View::new(0), 1))
-//             .collect();
-
-//         for finalize in finalizes.iter() {
-//             verifier.add(Vote::Finalize(finalize.clone()), false);
-//         }
-
-//         assert!(
-//             !verifier.ready_finalizes(),
-//             "Should not be ready without leader/proposal set"
-//         );
-
-//         verifier.set_leader(finalizes[0].signer());
-//         assert!(
-//             !verifier.ready_finalizes(),
-//             "Should not be ready without leader_proposal set"
-//         );
-//     }
-
-//     #[test]
-//     fn test_ready_finalizes_without_leader_or_proposal() {
-//         ready_finalizes_without_leader(bls12381_threshold::fixture::<MinSig, _>);
-//         ready_finalizes_without_leader(bls12381_threshold::fixture::<MinPk, _>);
-//         ready_finalizes_without_leader(bls12381_multisig::fixture::<MinSig, _>);
-//         ready_finalizes_without_leader(bls12381_multisig::fixture::<MinPk, _>);
-//         ready_finalizes_without_leader(ed25519::fixture);
-//         ready_finalizes_without_leader(secp256r1::fixture);
-//     }
-
-//     fn verify_notarizes_empty<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(206);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 3);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let round = Round::new(Epoch::new(0), View::new(1));
-//         let leader_proposal = Proposal::new(round, View::new(0), sample_digest(1));
-//         verifier.set_leader_proposal(leader_proposal);
-//         assert!(verifier.notarizes.is_empty());
-//         assert!(!verifier.ready_notarizes());
-//     }
-
-//     #[test]
-//     fn test_verify_notarizes_empty_pending_when_forced() {
-//         verify_notarizes_empty(bls12381_threshold::fixture::<MinSig, _>);
-//         verify_notarizes_empty(bls12381_threshold::fixture::<MinPk, _>);
-//         verify_notarizes_empty(bls12381_multisig::fixture::<MinSig, _>);
-//         verify_notarizes_empty(bls12381_multisig::fixture::<MinPk, _>);
-//         verify_notarizes_empty(ed25519::fixture);
-//         verify_notarizes_empty(secp256r1::fixture);
-//     }
-
-//     fn verify_nullifies_empty<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(207);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 3);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let mut rng = OsRng;
-//         assert!(verifier.nullifies.is_empty());
-//         assert!(!verifier.ready_nullifies());
-//         let (verified, failed) = verifier.verify_nullifies(&mut rng);
-//         assert!(verified.is_empty());
-//         assert!(failed.is_empty());
-//         assert_eq!(verifier.nullifies_verified, 0);
-//     }
-
-//     #[test]
-//     fn test_verify_nullifies_empty_pending() {
-//         verify_nullifies_empty(bls12381_threshold::fixture::<MinSig, _>);
-//         verify_nullifies_empty(bls12381_threshold::fixture::<MinPk, _>);
-//         verify_nullifies_empty(bls12381_multisig::fixture::<MinSig, _>);
-//         verify_nullifies_empty(bls12381_multisig::fixture::<MinPk, _>);
-//         verify_nullifies_empty(ed25519::fixture);
-//         verify_nullifies_empty(secp256r1::fixture);
-//     }
-
-//     fn verify_finalizes_empty<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(208);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 3);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let mut rng = OsRng;
-//         verifier.set_leader(0);
-//         assert!(verifier.finalizes.is_empty());
-//         assert!(!verifier.ready_finalizes());
-//         let (verified, failed) = verifier.verify_finalizes(&mut rng);
-//         assert!(verified.is_empty());
-//         assert!(failed.is_empty());
-//         assert_eq!(verifier.finalizes_verified, 0);
-//     }
-
-//     #[test]
-//     fn test_verify_finalizes_empty_pending() {
-//         verify_finalizes_empty(bls12381_threshold::fixture::<MinSig, _>);
-//         verify_finalizes_empty(bls12381_threshold::fixture::<MinPk, _>);
-//         verify_finalizes_empty(bls12381_multisig::fixture::<MinSig, _>);
-//         verify_finalizes_empty(bls12381_multisig::fixture::<MinPk, _>);
-//         verify_finalizes_empty(ed25519::fixture);
-//         verify_finalizes_empty(secp256r1::fixture);
-//     }
-
-//     fn ready_notarizes_exact_quorum<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(209);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let mut rng = OsRng;
-//         let round = Round::new(Epoch::new(0), View::new(1));
-
-//         let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
-//         verifier.set_leader(leader_vote.signer());
-//         verifier.add(Vote::Notarize(leader_vote), true);
-//         assert_eq!(verifier.notarizes_verified, 1);
-
-//         for (i, scheme) in schemes.iter().enumerate().skip(1).take(quorum as usize - 1) {
-//             let is_last = i == quorum as usize - 1;
-//             verifier.add(
-//                 Vote::Notarize(create_notarize(scheme, round, View::new(0), 1)),
-//                 false,
-//             );
-//             if is_last {
-//                 assert!(
-//                     verifier.ready_notarizes(),
-//                     "Should be ready at exact quorum"
-//                 );
-//             } else if S::is_batchable() {
-//                 // Batchable schemes wait for quorum
-//                 assert!(!verifier.ready_notarizes());
-//             } else {
-//                 // Non-batchable schemes verify immediately when pending votes exist
-//                 assert!(verifier.ready_notarizes());
-//             }
-//         }
-
-//         let (verified, failed) = verifier.verify_notarizes(&mut rng);
-//         assert_eq!(verified.len(), quorum as usize - 1);
-//         assert!(failed.is_empty());
-//         assert_eq!(verifier.notarizes_verified, quorum as usize);
-//         assert!(!verifier.ready_notarizes());
-//     }
-
-//     #[test]
-//     fn test_ready_notarizes_exact_quorum() {
-//         ready_notarizes_exact_quorum(bls12381_threshold::fixture::<MinSig, _>);
-//         ready_notarizes_exact_quorum(bls12381_threshold::fixture::<MinPk, _>);
-//         ready_notarizes_exact_quorum(bls12381_multisig::fixture::<MinSig, _>);
-//         ready_notarizes_exact_quorum(bls12381_multisig::fixture::<MinPk, _>);
-//         ready_notarizes_exact_quorum(ed25519::fixture);
-//         ready_notarizes_exact_quorum(secp256r1::fixture);
-//     }
-
-//     fn ready_nullifies_exact_quorum<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(210);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let round = Round::new(Epoch::new(0), View::new(1));
-
-//         verifier.add(Vote::Nullify(create_nullify(&schemes[0], round)), true);
-//         assert_eq!(verifier.nullifies_verified, 1);
-
-//         let pending_schemes: Vec<_> = schemes.iter().take(quorum as usize).skip(1).collect();
-//         for (i, scheme) in pending_schemes.iter().enumerate() {
-//             let is_last = i == pending_schemes.len() - 1;
-//             verifier.add(Vote::Nullify(create_nullify(scheme, round)), false);
-//             if is_last {
-//                 assert!(verifier.ready_nullifies());
-//             } else if S::is_batchable() {
-//                 // Batchable schemes wait for quorum
-//                 assert!(!verifier.ready_nullifies());
-//             } else {
-//                 // Non-batchable schemes verify immediately when pending votes exist
-//                 assert!(verifier.ready_nullifies());
-//             }
-//         }
-//     }
-
-//     #[test]
-//     fn test_ready_nullifies_exact_quorum() {
-//         ready_nullifies_exact_quorum(bls12381_threshold::fixture::<MinSig, _>);
-//         ready_nullifies_exact_quorum(bls12381_threshold::fixture::<MinPk, _>);
-//         ready_nullifies_exact_quorum(bls12381_multisig::fixture::<MinSig, _>);
-//         ready_nullifies_exact_quorum(bls12381_multisig::fixture::<MinPk, _>);
-//         ready_nullifies_exact_quorum(ed25519::fixture);
-//         ready_nullifies_exact_quorum(secp256r1::fixture);
-//     }
-
-//     fn ready_finalizes_exact_quorum<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(211);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let round = Round::new(Epoch::new(0), View::new(1));
-//         let leader_finalize = create_finalize(&schemes[0], round, View::new(0), 1);
-//         verifier.set_leader(leader_finalize.signer());
-//         verifier.set_leader_proposal(leader_finalize.proposal.clone());
-//         verifier.add(Vote::Finalize(leader_finalize), true);
-//         assert_eq!(verifier.finalizes_verified, 1);
-
-//         let pending_schemes: Vec<_> = schemes.iter().take(quorum as usize).skip(1).collect();
-//         for (i, scheme) in pending_schemes.iter().enumerate() {
-//             let is_last = i == pending_schemes.len() - 1;
-//             verifier.add(
-//                 Vote::Finalize(create_finalize(scheme, round, View::new(0), 1)),
-//                 false,
-//             );
-//             if is_last {
-//                 assert!(verifier.ready_finalizes());
-//             } else if S::is_batchable() {
-//                 // Batchable schemes wait for quorum
-//                 assert!(!verifier.ready_finalizes());
-//             } else {
-//                 // Non-batchable schemes verify immediately when pending votes exist
-//                 assert!(verifier.ready_finalizes());
-//             }
-//         }
-//     }
-
-//     #[test]
-//     fn test_ready_finalizes_exact_quorum() {
-//         ready_finalizes_exact_quorum(bls12381_threshold::fixture::<MinSig, _>);
-//         ready_finalizes_exact_quorum(bls12381_threshold::fixture::<MinPk, _>);
-//         ready_finalizes_exact_quorum(bls12381_multisig::fixture::<MinSig, _>);
-//         ready_finalizes_exact_quorum(bls12381_multisig::fixture::<MinPk, _>);
-//         ready_finalizes_exact_quorum(ed25519::fixture);
-//         ready_finalizes_exact_quorum(secp256r1::fixture);
-//     }
-
-//     fn ready_notarizes_quorum_already_met_by_verified<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(212);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         assert!(
-//             schemes.len() > quorum as usize,
-//             "test requires more validators than the quorum"
-//         );
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let round = Round::new(Epoch::new(0), View::new(1));
-
-//         // Pre-load the leader vote as if it had already been processed.
-//         let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
-//         verifier.set_leader(leader_vote.signer());
-//         verifier.add(Vote::Notarize(leader_vote), false);
-
-//         // Mark enough verified notarizes to satisfy the quorum outright.
-//         for scheme in schemes.iter().take(quorum as usize) {
-//             verifier.add(
-//                 Vote::Notarize(create_notarize(scheme, round, View::new(0), 1)),
-//                 true,
-//             );
-//         }
-//         assert_eq!(verifier.notarizes_verified, quorum as usize);
-//         assert!(
-//             !verifier.ready_notarizes(),
-//             "Should not be ready if quorum already met by verified messages"
-//         );
-
-//         // Additional pending votes must not flip readiness in this situation.
-//         let extra_vote = create_notarize(&schemes[quorum as usize], round, View::new(0), 1);
-//         verifier.add(Vote::Notarize(extra_vote), false);
-//         assert!(
-//             !verifier.ready_notarizes(),
-//             "Should not be ready if quorum already met by verified messages"
-//         );
-//     }
-
-//     #[test]
-//     fn test_ready_notarizes_quorum_already_met_by_verified() {
-//         ready_notarizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinSig, _>);
-//         ready_notarizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinPk, _>);
-//         ready_notarizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinSig, _>);
-//         ready_notarizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinPk, _>);
-//         ready_notarizes_quorum_already_met_by_verified(ed25519::fixture);
-//         ready_notarizes_quorum_already_met_by_verified(secp256r1::fixture);
-//     }
-
-//     fn ready_nullifies_quorum_already_met_by_verified<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(213);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         assert!(
-//             schemes.len() > quorum as usize,
-//             "test requires more validators than the quorum"
-//         );
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let round = Round::new(Epoch::new(0), View::new(1));
-
-//         // First mark a quorum's worth of verified nullifies.
-//         for scheme in schemes.iter().take(quorum as usize) {
-//             verifier.add(Vote::Nullify(create_nullify(scheme, round)), true);
-//         }
-//         assert_eq!(verifier.nullifies_verified, quorum as usize);
-//         assert!(
-//             !verifier.ready_nullifies(),
-//             "Should not be ready if quorum already met by verified messages"
-//         );
-
-//         // Pending messages alone cannot transition the batch to ready.
-//         let extra_nullify = create_nullify(&schemes[quorum as usize], round);
-//         verifier.add(Vote::Nullify(extra_nullify), false);
-//         assert!(
-//             !verifier.ready_nullifies(),
-//             "Should not be ready if quorum already met by verified messages"
-//         );
-//     }
-
-//     #[test]
-//     fn test_ready_nullifies_quorum_already_met_by_verified() {
-//         ready_nullifies_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinSig, _>);
-//         ready_nullifies_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinPk, _>);
-//         ready_nullifies_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinSig, _>);
-//         ready_nullifies_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinPk, _>);
-//         ready_nullifies_quorum_already_met_by_verified(ed25519::fixture);
-//         ready_nullifies_quorum_already_met_by_verified(secp256r1::fixture);
-//     }
-
-//     fn ready_finalizes_quorum_already_met_by_verified<S, F>(mut fixture: F)
-//     where
-//         S: Scheme<Sha256, PublicKey = PublicKey>,
-//         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
-//     {
-//         let mut rng = StdRng::seed_from_u64(214);
-//         let Fixture { schemes, .. } = fixture(&mut rng, 5);
-//         let quorum = quorum_from_slice(&schemes);
-//         assert!(
-//             schemes.len() > quorum as usize,
-//             "test requires more validators than the quorum"
-//         );
-//         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-//         let round = Round::new(Epoch::new(0), View::new(1));
-
-//         // Prime the leader state so the quorum is already satisfied by verified finalizes.
-//         let leader_finalize = create_finalize(&schemes[0], round, View::new(0), 1);
-//         verifier.set_leader(leader_finalize.signer());
-//         verifier.set_leader_proposal(leader_finalize.proposal);
-
-//         // Feed exactly the number of verified finalizes required to hit the quorum.
-//         for scheme in schemes.iter().take(quorum as usize) {
-//             verifier.add(
-//                 Vote::Finalize(create_finalize(scheme, round, View::new(0), 1)),
-//                 true,
-//             );
-//         }
-//         assert_eq!(verifier.finalizes_verified, quorum as usize);
-//         assert!(
-//             !verifier.ready_finalizes(),
-//             "Should not be ready if quorum already met by verified messages"
-//         );
-
-//         // Ensure additional pending finalizes do not incorrectly trigger readiness.
-//         let extra_finalize = create_finalize(&schemes[quorum as usize], round, View::new(0), 1);
-//         verifier.add(Vote::Finalize(extra_finalize), false);
-//         assert!(
-//             !verifier.ready_finalizes(),
-//             "Should not be ready if quorum already met by verified messages"
-//         );
-//     }
-
-//     #[test]
-//     fn test_ready_finalizes_quorum_already_met_by_verified() {
-//         ready_finalizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinSig, _>);
-//         ready_finalizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinPk, _>);
-//         ready_finalizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinSig, _>);
-//         ready_finalizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinPk, _>);
-//         ready_finalizes_quorum_already_met_by_verified(ed25519::fixture);
-//         ready_finalizes_quorum_already_met_by_verified(secp256r1::fixture);
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        simplex::scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
+        types::{Epoch, Round, View},
+    };
+    use commonware_cryptography::{
+        bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::mocks::Fixture,
+        ed25519::PublicKey,
+        sha256::Digest as Sha256,
+    };
+    use commonware_utils::{quorum_from_slice, test_rng};
+    use rand::rngs::StdRng;
+
+    const NAMESPACE: &[u8] = b"test";
+
+    // Helper function to create a sample digest
+    fn sample_digest(v: u8) -> Sha256 {
+        Sha256::from([v; 32]) // Simple fixed digest for testing
+    }
+
+    // Helper to create a Notarize message for any signing scheme
+    fn create_notarize<S: Scheme<Sha256>>(
+        scheme: &S,
+        round: Round,
+        parent_view: View,
+        payload_val: u8,
+    ) -> Notarize<S, Sha256> {
+        let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
+        Notarize::sign(scheme, proposal).unwrap()
+    }
+
+    // Helper to create a Nullify message for any signing scheme
+    fn create_nullify<S: Scheme<Sha256>>(scheme: &S, round: Round) -> Nullify<S> {
+        Nullify::sign::<Sha256>(scheme, round).unwrap()
+    }
+
+    // Helper to create a Finalize message for any signing scheme
+    fn create_finalize<S: Scheme<Sha256>>(
+        scheme: &S,
+        round: Round,
+        parent_view: View,
+        payload_val: u8,
+    ) -> Finalize<S, Sha256> {
+        let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
+        Finalize::sign(scheme, proposal).unwrap()
+    }
+
+    fn add_notarize<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let notarize1 = create_notarize(&schemes[0], round, View::new(0), 1);
+        let notarize2 = create_notarize(&schemes[1], round, View::new(0), 1);
+        let notarize_diff = create_notarize(&schemes[2], round, View::new(0), 2);
+
+        verifier.add(Vote::Notarize(notarize1.clone()), false);
+        assert_eq!(verifier.notarizes.len(), 1);
+        assert_eq!(verifier.notarizes_verified, 0);
+
+        verifier.add(Vote::Notarize(notarize1.clone()), true);
+        assert_eq!(verifier.notarizes.len(), 1);
+        assert_eq!(verifier.notarizes_verified, 1);
+
+        verifier.set_leader(notarize1.signer());
+        assert!(verifier.leader_proposal.is_some());
+        assert_eq!(
+            verifier.leader_proposal.as_ref().unwrap(),
+            &notarize1.proposal
+        );
+        assert_eq!(verifier.notarizes.len(), 1);
+
+        verifier.add(Vote::Notarize(notarize2), false);
+        assert_eq!(verifier.notarizes.len(), 2);
+
+        verifier.add(Vote::Notarize(notarize_diff), false);
+        assert_eq!(verifier.notarizes.len(), 2);
+
+        let mut verifier2 = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round2 = Round::new(Epoch::new(0), View::new(2));
+        let notarize_non_leader = create_notarize(&schemes[1], round2, View::new(1), 3);
+        let notarize_leader = create_notarize(&schemes[0], round2, View::new(1), 3);
+
+        verifier2.set_leader(notarize_leader.signer());
+        verifier2.add(Vote::Notarize(notarize_non_leader), false);
+        assert!(verifier2.leader_proposal.is_none());
+        assert_eq!(verifier2.notarizes.len(), 1);
+
+        verifier2.add(Vote::Notarize(notarize_leader.clone()), false);
+        assert!(verifier2.leader_proposal.is_some());
+        assert_eq!(
+            verifier2.leader_proposal.as_ref().unwrap(),
+            &notarize_leader.proposal
+        );
+        assert_eq!(verifier2.notarizes.len(), 2);
+    }
+
+    #[test]
+    fn test_add_notarize() {
+        add_notarize(bls12381_threshold::fixture::<MinSig, _>);
+        add_notarize(bls12381_threshold::fixture::<MinPk, _>);
+        add_notarize(bls12381_multisig::fixture::<MinSig, _>);
+        add_notarize(bls12381_multisig::fixture::<MinPk, _>);
+        add_notarize(ed25519::fixture);
+        add_notarize(secp256r1::fixture);
+    }
+
+    fn set_leader<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
+        let other_notarize = create_notarize(&schemes[1], round, View::new(0), 1);
+
+        verifier.add(Vote::Notarize(other_notarize), false);
+        assert_eq!(verifier.notarizes.len(), 1);
+
+        let leader = leader_notarize.signer();
+        verifier.set_leader(leader);
+        assert_eq!(verifier.leader, Some(leader));
+        assert!(verifier.leader_proposal.is_none());
+        assert_eq!(verifier.notarizes.len(), 1);
+
+        verifier.add(Vote::Notarize(leader_notarize.clone()), false);
+        assert!(verifier.leader_proposal.is_some());
+        assert_eq!(
+            verifier.leader_proposal.as_ref().unwrap(),
+            &leader_notarize.proposal
+        );
+        assert_eq!(verifier.notarizes.len(), 2);
+    }
+
+    #[test]
+    fn test_set_leader() {
+        set_leader(bls12381_threshold::fixture::<MinSig, _>);
+        set_leader(bls12381_threshold::fixture::<MinPk, _>);
+        set_leader(bls12381_multisig::fixture::<MinSig, _>);
+        set_leader(bls12381_multisig::fixture::<MinPk, _>);
+        set_leader(ed25519::fixture);
+        set_leader(secp256r1::fixture);
+    }
+
+    fn ready_and_verify_notarizes<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let notarizes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| create_notarize(scheme, round, View::new(0), 1))
+            .collect();
+
+        assert!(!verifier.ready_notarizes());
+
+        verifier.set_leader(notarizes[0].signer());
+        verifier.add(Vote::Notarize(notarizes[0].clone()), false);
+        // Non-batchable schemes verify immediately when pending votes exist
+        assert_eq!(!verifier.ready_notarizes(), S::is_batchable());
+        assert_eq!(verifier.notarizes.len(), 1);
+
+        verifier.add(Vote::Notarize(notarizes[1].clone()), false);
+        assert_eq!(!verifier.ready_notarizes(), S::is_batchable());
+        verifier.add(Vote::Notarize(notarizes[2].clone()), false);
+        assert_eq!(!verifier.ready_notarizes(), S::is_batchable());
+        verifier.add(Vote::Notarize(notarizes[3].clone()), false);
+        assert!(verifier.ready_notarizes());
+        assert_eq!(verifier.notarizes.len(), 4);
+
+        let (verified_bulk, failed_bulk) = verifier.verify_notarizes(&mut rng);
+        assert_eq!(verified_bulk.len(), 4);
+        assert!(failed_bulk.is_empty());
+        assert_eq!(verifier.notarizes_verified, 4);
+        assert!(verifier.notarizes.is_empty());
+        assert!(!verifier.ready_notarizes());
+
+        let mut verifier2 = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round2 = Round::new(Epoch::new(0), View::new(2));
+        let leader_vote = create_notarize(&schemes[0], round2, View::new(1), 10);
+        let mut faulty_vote = create_notarize(&schemes[1], round2, View::new(1), 10);
+        verifier2.set_leader(leader_vote.signer());
+        verifier2.add(Vote::Notarize(leader_vote.clone()), false);
+        faulty_vote.attestation.signer = (schemes.len() as u32) + 10;
+        verifier2.add(Vote::Notarize(faulty_vote.clone()), false);
+
+        for scheme in schemes.iter().skip(2).take(quorum as usize - 2) {
+            verifier2.add(
+                Vote::Notarize(create_notarize(scheme, round2, View::new(1), 10)),
+                false,
+            );
+        }
+        assert!(verifier2.ready_notarizes());
+
+        let (verified_second, failed_second) = verifier2.verify_notarizes(&mut rng);
+        assert!(verified_second
+            .iter()
+            .any(|v| matches!(v, Vote::Notarize(ref n) if n == &leader_vote)));
+        assert_eq!(failed_second, vec![faulty_vote.signer()]);
+    }
+
+    #[test]
+    fn test_ready_and_verify_notarizes() {
+        ready_and_verify_notarizes(bls12381_threshold::fixture::<MinSig, _>);
+        ready_and_verify_notarizes(bls12381_threshold::fixture::<MinPk, _>);
+        ready_and_verify_notarizes(bls12381_multisig::fixture::<MinSig, _>);
+        ready_and_verify_notarizes(bls12381_multisig::fixture::<MinPk, _>);
+        ready_and_verify_notarizes(ed25519::fixture);
+        ready_and_verify_notarizes(secp256r1::fixture);
+    }
+
+    fn add_nullify<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let nullify = create_nullify(&schemes[0], round);
+
+        verifier.add(Vote::Nullify(nullify.clone()), false);
+        assert_eq!(verifier.nullifies.len(), 1);
+        assert_eq!(verifier.nullifies_verified, 0);
+
+        verifier.add(Vote::Nullify(nullify), true);
+        assert_eq!(verifier.nullifies.len(), 1);
+        assert_eq!(verifier.nullifies_verified, 1);
+    }
+
+    #[test]
+    fn test_add_nullify() {
+        add_nullify(bls12381_threshold::fixture::<MinSig, _>);
+        add_nullify(bls12381_threshold::fixture::<MinPk, _>);
+        add_nullify(bls12381_multisig::fixture::<MinSig, _>);
+        add_nullify(bls12381_multisig::fixture::<MinPk, _>);
+        add_nullify(ed25519::fixture);
+        add_nullify(secp256r1::fixture);
+    }
+
+    fn ready_and_verify_nullifies<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let nullifies: Vec<_> = schemes
+            .iter()
+            .map(|scheme| create_nullify(scheme, round))
+            .collect();
+
+        verifier.add(Vote::Nullify(nullifies[0].clone()), true);
+        assert_eq!(verifier.nullifies_verified, 1);
+
+        verifier.add(Vote::Nullify(nullifies[1].clone()), false);
+        // Non-batchable schemes verify immediately when pending votes exist
+        assert_eq!(!verifier.ready_nullifies(), S::is_batchable());
+        verifier.add(Vote::Nullify(nullifies[2].clone()), false);
+        assert_eq!(!verifier.ready_nullifies(), S::is_batchable());
+        verifier.add(Vote::Nullify(nullifies[3].clone()), false);
+        assert!(verifier.ready_nullifies());
+        assert_eq!(verifier.nullifies.len(), 3);
+
+        let (verified, failed) = verifier.verify_nullifies(&mut rng);
+        assert_eq!(verified.len(), 3);
+        assert!(failed.is_empty());
+        assert_eq!(verifier.nullifies_verified, 4);
+        assert!(verifier.nullifies.is_empty());
+        assert!(!verifier.ready_nullifies());
+    }
+
+    #[test]
+    fn test_ready_and_verify_nullifies() {
+        ready_and_verify_nullifies(bls12381_threshold::fixture::<MinSig, _>);
+        ready_and_verify_nullifies(bls12381_threshold::fixture::<MinPk, _>);
+        ready_and_verify_nullifies(bls12381_multisig::fixture::<MinSig, _>);
+        ready_and_verify_nullifies(bls12381_multisig::fixture::<MinPk, _>);
+        ready_and_verify_nullifies(ed25519::fixture);
+        ready_and_verify_nullifies(secp256r1::fixture);
+    }
+
+    fn add_finalize<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let finalize_a = create_finalize(&schemes[0], round, View::new(0), 1);
+        let finalize_b = create_finalize(&schemes[1], round, View::new(0), 2);
+
+        verifier.add(Vote::Finalize(finalize_b.clone()), false);
+        assert_eq!(verifier.finalizes.len(), 1);
+        assert_eq!(verifier.finalizes_verified, 0);
+
+        verifier.add(Vote::Finalize(finalize_a.clone()), false);
+        assert_eq!(verifier.finalizes.len(), 2);
+
+        verifier.set_leader(finalize_a.signer());
+        assert!(verifier.leader_proposal.is_none());
+        verifier.set_leader_proposal(finalize_a.proposal.clone());
+        assert_eq!(verifier.finalizes.len(), 1);
+        assert_eq!(verifier.finalizes[0], finalize_a);
+        assert_eq!(verifier.finalizes_verified, 0);
+
+        verifier.add(Vote::Finalize(finalize_a), true);
+        assert_eq!(verifier.finalizes.len(), 1);
+        assert_eq!(verifier.finalizes_verified, 1);
+
+        verifier.add(Vote::Finalize(finalize_b), false);
+        assert_eq!(verifier.finalizes.len(), 1);
+        assert_eq!(verifier.finalizes_verified, 1);
+    }
+
+    #[test]
+    fn test_add_finalize() {
+        add_finalize(bls12381_threshold::fixture::<MinSig, _>);
+        add_finalize(bls12381_threshold::fixture::<MinPk, _>);
+        add_finalize(bls12381_multisig::fixture::<MinSig, _>);
+        add_finalize(bls12381_multisig::fixture::<MinPk, _>);
+        add_finalize(ed25519::fixture);
+        add_finalize(secp256r1::fixture);
+    }
+
+    fn ready_and_verify_finalizes<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let finalizes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| create_finalize(scheme, round, View::new(0), 1))
+            .collect();
+
+        assert!(!verifier.ready_finalizes());
+
+        verifier.set_leader(finalizes[0].signer());
+        verifier.set_leader_proposal(finalizes[0].proposal.clone());
+
+        verifier.add(Vote::Finalize(finalizes[0].clone()), true);
+        assert_eq!(verifier.finalizes_verified, 1);
+        assert!(verifier.finalizes.is_empty());
+
+        verifier.add(Vote::Finalize(finalizes[1].clone()), false);
+        // Non-batchable schemes verify immediately when pending votes exist
+        assert_eq!(!verifier.ready_finalizes(), S::is_batchable());
+        verifier.add(Vote::Finalize(finalizes[2].clone()), false);
+        assert_eq!(!verifier.ready_finalizes(), S::is_batchable());
+        verifier.add(Vote::Finalize(finalizes[3].clone()), false);
+        assert!(verifier.ready_finalizes());
+
+        let (verified, failed) = verifier.verify_finalizes(&mut rng);
+        assert_eq!(verified.len(), 3);
+        assert!(failed.is_empty());
+        assert_eq!(verifier.finalizes_verified, 4);
+        assert!(verifier.finalizes.is_empty());
+        assert!(!verifier.ready_finalizes());
+    }
+
+    #[test]
+    fn test_ready_and_verify_finalizes() {
+        ready_and_verify_finalizes(bls12381_threshold::fixture::<MinSig, _>);
+        ready_and_verify_finalizes(bls12381_threshold::fixture::<MinPk, _>);
+        ready_and_verify_finalizes(bls12381_multisig::fixture::<MinSig, _>);
+        ready_and_verify_finalizes(bls12381_multisig::fixture::<MinPk, _>);
+        ready_and_verify_finalizes(ed25519::fixture);
+        ready_and_verify_finalizes(secp256r1::fixture);
+    }
+
+    fn leader_proposal_filters_messages<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let proposal_a = Proposal::new(round, View::new(0), sample_digest(10));
+        let proposal_b = Proposal::new(round, View::new(0), sample_digest(20));
+
+        let notarize_a = Notarize::sign(&schemes[0], proposal_a.clone()).unwrap();
+        let notarize_b = Notarize::sign(&schemes[1], proposal_b.clone()).unwrap();
+        let finalize_a = Finalize::sign(&schemes[0], proposal_a.clone()).unwrap();
+        let finalize_b = Finalize::sign(&schemes[1], proposal_b).unwrap();
+
+        verifier.add(Vote::Notarize(notarize_a.clone()), false);
+        verifier.add(Vote::Notarize(notarize_b), false);
+        verifier.add(Vote::Finalize(finalize_a), false);
+        verifier.add(Vote::Finalize(finalize_b), false);
+
+        assert_eq!(verifier.notarizes.len(), 2);
+        assert_eq!(verifier.finalizes.len(), 2);
+
+        verifier.set_leader(notarize_a.signer());
+
+        assert_eq!(verifier.notarizes.len(), 1);
+        assert_eq!(verifier.notarizes[0].proposal, proposal_a);
+        assert_eq!(verifier.finalizes.len(), 1);
+        assert_eq!(verifier.finalizes[0].proposal, proposal_a);
+    }
+
+    #[test]
+    fn test_leader_proposal_filters_messages() {
+        leader_proposal_filters_messages(bls12381_threshold::fixture::<MinSig, _>);
+        leader_proposal_filters_messages(bls12381_threshold::fixture::<MinPk, _>);
+        leader_proposal_filters_messages(bls12381_multisig::fixture::<MinSig, _>);
+        leader_proposal_filters_messages(bls12381_multisig::fixture::<MinPk, _>);
+        leader_proposal_filters_messages(ed25519::fixture);
+        leader_proposal_filters_messages(secp256r1::fixture);
+    }
+
+    fn set_leader_twice_panics<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), 3);
+        verifier.set_leader(0);
+        verifier.set_leader(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "self.leader.is_none()")]
+    fn test_set_leader_twice_panics_bls_threshold_minsig() {
+        set_leader_twice_panics(bls12381_threshold::fixture::<MinSig, _>);
+    }
+
+    #[test]
+    #[should_panic(expected = "self.leader.is_none()")]
+    fn test_set_leader_twice_panics_bls_threshold_minpk() {
+        set_leader_twice_panics(bls12381_threshold::fixture::<MinPk, _>);
+    }
+
+    #[test]
+    #[should_panic(expected = "self.leader.is_none()")]
+    fn test_set_leader_twice_panics_bls_multisig_minsig() {
+        set_leader_twice_panics(bls12381_multisig::fixture::<MinSig, _>);
+    }
+
+    #[test]
+    #[should_panic(expected = "self.leader.is_none()")]
+    fn test_set_leader_twice_panics_bls_multisig_minpk() {
+        set_leader_twice_panics(bls12381_multisig::fixture::<MinPk, _>);
+    }
+
+    #[test]
+    #[should_panic(expected = "self.leader.is_none()")]
+    fn test_set_leader_twice_panics_ed() {
+        set_leader_twice_panics(ed25519::fixture);
+    }
+
+    #[test]
+    #[should_panic(expected = "self.leader.is_none()")]
+    fn test_set_leader_twice_panics_secp() {
+        set_leader_twice_panics(secp256r1::fixture);
+    }
+
+    fn notarizes_wait_for_quorum<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
+
+        verifier.set_leader(leader_vote.signer());
+        verifier.add(Vote::Notarize(leader_vote), false);
+        // Non-batchable schemes verify immediately when pending votes exist
+        assert_eq!(
+            !verifier.ready_notarizes(),
+            S::is_batchable(),
+            "Batchable schemes wait for quorum, non-batchable verify immediately"
+        );
+
+        for scheme in schemes.iter().skip(1).take(quorum as usize - 1) {
+            verifier.add(
+                Vote::Notarize(create_notarize(scheme, round, View::new(0), 1)),
+                false,
+            );
+        }
+        assert!(verifier.ready_notarizes(), "Should be ready at quorum");
+
+        let (verified, _) = verifier.verify_notarizes(&mut rng);
+        assert_eq!(verified.len(), quorum as usize);
+        assert!(!verifier.ready_notarizes());
+    }
+
+    #[test]
+    fn test_notarizes_wait_for_quorum() {
+        notarizes_wait_for_quorum(bls12381_threshold::fixture::<MinSig, _>);
+        notarizes_wait_for_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        notarizes_wait_for_quorum(bls12381_multisig::fixture::<MinSig, _>);
+        notarizes_wait_for_quorum(bls12381_multisig::fixture::<MinPk, _>);
+        notarizes_wait_for_quorum(ed25519::fixture);
+        notarizes_wait_for_quorum(secp256r1::fixture);
+    }
+
+    fn ready_notarizes_without_leader<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+
+        let notarizes: Vec<_> = schemes
+            .iter()
+            .take(quorum as usize)
+            .map(|scheme| create_notarize(scheme, round, View::new(0), 1))
+            .collect();
+
+        for vote in notarizes.iter() {
+            verifier.add(Vote::Notarize(vote.clone()), false);
+        }
+
+        assert!(
+            !verifier.ready_notarizes(),
+            "Should not be ready without leader/proposal set"
+        );
+
+        verifier.set_leader(notarizes[0].signer());
+        assert!(
+            verifier.ready_notarizes(),
+            "Should be ready once leader is set"
+        );
+    }
+
+    #[test]
+    fn test_ready_notarizes_without_leader_or_proposal() {
+        ready_notarizes_without_leader(bls12381_threshold::fixture::<MinSig, _>);
+        ready_notarizes_without_leader(bls12381_threshold::fixture::<MinPk, _>);
+        ready_notarizes_without_leader(bls12381_multisig::fixture::<MinSig, _>);
+        ready_notarizes_without_leader(bls12381_multisig::fixture::<MinPk, _>);
+        ready_notarizes_without_leader(ed25519::fixture);
+        ready_notarizes_without_leader(secp256r1::fixture);
+    }
+
+    fn ready_finalizes_without_leader<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let finalizes: Vec<_> = schemes
+            .iter()
+            .take(quorum as usize)
+            .map(|scheme| create_finalize(scheme, round, View::new(0), 1))
+            .collect();
+
+        for finalize in finalizes.iter() {
+            verifier.add(Vote::Finalize(finalize.clone()), false);
+        }
+
+        assert!(
+            !verifier.ready_finalizes(),
+            "Should not be ready without leader/proposal set"
+        );
+
+        verifier.set_leader(finalizes[0].signer());
+        assert!(
+            !verifier.ready_finalizes(),
+            "Should not be ready without leader_proposal set"
+        );
+    }
+
+    #[test]
+    fn test_ready_finalizes_without_leader_or_proposal() {
+        ready_finalizes_without_leader(bls12381_threshold::fixture::<MinSig, _>);
+        ready_finalizes_without_leader(bls12381_threshold::fixture::<MinPk, _>);
+        ready_finalizes_without_leader(bls12381_multisig::fixture::<MinSig, _>);
+        ready_finalizes_without_leader(bls12381_multisig::fixture::<MinPk, _>);
+        ready_finalizes_without_leader(ed25519::fixture);
+        ready_finalizes_without_leader(secp256r1::fixture);
+    }
+
+    fn verify_notarizes_empty<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let leader_proposal = Proposal::new(round, View::new(0), sample_digest(1));
+        verifier.set_leader_proposal(leader_proposal);
+        assert!(verifier.notarizes.is_empty());
+        assert!(!verifier.ready_notarizes());
+    }
+
+    #[test]
+    fn test_verify_notarizes_empty_pending_when_forced() {
+        verify_notarizes_empty(bls12381_threshold::fixture::<MinSig, _>);
+        verify_notarizes_empty(bls12381_threshold::fixture::<MinPk, _>);
+        verify_notarizes_empty(bls12381_multisig::fixture::<MinSig, _>);
+        verify_notarizes_empty(bls12381_multisig::fixture::<MinPk, _>);
+        verify_notarizes_empty(ed25519::fixture);
+        verify_notarizes_empty(secp256r1::fixture);
+    }
+
+    fn verify_nullifies_empty<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        assert!(verifier.nullifies.is_empty());
+        assert!(!verifier.ready_nullifies());
+        let (verified, failed) = verifier.verify_nullifies(&mut rng);
+        assert!(verified.is_empty());
+        assert!(failed.is_empty());
+        assert_eq!(verifier.nullifies_verified, 0);
+    }
+
+    #[test]
+    fn test_verify_nullifies_empty_pending() {
+        verify_nullifies_empty(bls12381_threshold::fixture::<MinSig, _>);
+        verify_nullifies_empty(bls12381_threshold::fixture::<MinPk, _>);
+        verify_nullifies_empty(bls12381_multisig::fixture::<MinSig, _>);
+        verify_nullifies_empty(bls12381_multisig::fixture::<MinPk, _>);
+        verify_nullifies_empty(ed25519::fixture);
+        verify_nullifies_empty(secp256r1::fixture);
+    }
+
+    fn verify_finalizes_empty<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        verifier.set_leader(0);
+        assert!(verifier.finalizes.is_empty());
+        assert!(!verifier.ready_finalizes());
+        let (verified, failed) = verifier.verify_finalizes(&mut rng);
+        assert!(verified.is_empty());
+        assert!(failed.is_empty());
+        assert_eq!(verifier.finalizes_verified, 0);
+    }
+
+    #[test]
+    fn test_verify_finalizes_empty_pending() {
+        verify_finalizes_empty(bls12381_threshold::fixture::<MinSig, _>);
+        verify_finalizes_empty(bls12381_threshold::fixture::<MinPk, _>);
+        verify_finalizes_empty(bls12381_multisig::fixture::<MinSig, _>);
+        verify_finalizes_empty(bls12381_multisig::fixture::<MinPk, _>);
+        verify_finalizes_empty(ed25519::fixture);
+        verify_finalizes_empty(secp256r1::fixture);
+    }
+
+    fn ready_notarizes_exact_quorum<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+
+        let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
+        verifier.set_leader(leader_vote.signer());
+        verifier.add(Vote::Notarize(leader_vote), true);
+        assert_eq!(verifier.notarizes_verified, 1);
+
+        for (i, scheme) in schemes.iter().enumerate().skip(1).take(quorum as usize - 1) {
+            let is_last = i == quorum as usize - 1;
+            verifier.add(
+                Vote::Notarize(create_notarize(scheme, round, View::new(0), 1)),
+                false,
+            );
+            if is_last {
+                assert!(
+                    verifier.ready_notarizes(),
+                    "Should be ready at exact quorum"
+                );
+            } else if S::is_batchable() {
+                // Batchable schemes wait for quorum
+                assert!(!verifier.ready_notarizes());
+            } else {
+                // Non-batchable schemes verify immediately when pending votes exist
+                assert!(verifier.ready_notarizes());
+            }
+        }
+
+        let (verified, failed) = verifier.verify_notarizes(&mut rng);
+        assert_eq!(verified.len(), quorum as usize - 1);
+        assert!(failed.is_empty());
+        assert_eq!(verifier.notarizes_verified, quorum as usize);
+        assert!(!verifier.ready_notarizes());
+    }
+
+    #[test]
+    fn test_ready_notarizes_exact_quorum() {
+        ready_notarizes_exact_quorum(bls12381_threshold::fixture::<MinSig, _>);
+        ready_notarizes_exact_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        ready_notarizes_exact_quorum(bls12381_multisig::fixture::<MinSig, _>);
+        ready_notarizes_exact_quorum(bls12381_multisig::fixture::<MinPk, _>);
+        ready_notarizes_exact_quorum(ed25519::fixture);
+        ready_notarizes_exact_quorum(secp256r1::fixture);
+    }
+
+    fn ready_nullifies_exact_quorum<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+
+        verifier.add(Vote::Nullify(create_nullify(&schemes[0], round)), true);
+        assert_eq!(verifier.nullifies_verified, 1);
+
+        let pending_schemes: Vec<_> = schemes.iter().take(quorum as usize).skip(1).collect();
+        for (i, scheme) in pending_schemes.iter().enumerate() {
+            let is_last = i == pending_schemes.len() - 1;
+            verifier.add(Vote::Nullify(create_nullify(scheme, round)), false);
+            if is_last {
+                assert!(verifier.ready_nullifies());
+            } else if S::is_batchable() {
+                // Batchable schemes wait for quorum
+                assert!(!verifier.ready_nullifies());
+            } else {
+                // Non-batchable schemes verify immediately when pending votes exist
+                assert!(verifier.ready_nullifies());
+            }
+        }
+    }
+
+    #[test]
+    fn test_ready_nullifies_exact_quorum() {
+        ready_nullifies_exact_quorum(bls12381_threshold::fixture::<MinSig, _>);
+        ready_nullifies_exact_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        ready_nullifies_exact_quorum(bls12381_multisig::fixture::<MinSig, _>);
+        ready_nullifies_exact_quorum(bls12381_multisig::fixture::<MinPk, _>);
+        ready_nullifies_exact_quorum(ed25519::fixture);
+        ready_nullifies_exact_quorum(secp256r1::fixture);
+    }
+
+    fn ready_finalizes_exact_quorum<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let leader_finalize = create_finalize(&schemes[0], round, View::new(0), 1);
+        verifier.set_leader(leader_finalize.signer());
+        verifier.set_leader_proposal(leader_finalize.proposal.clone());
+        verifier.add(Vote::Finalize(leader_finalize), true);
+        assert_eq!(verifier.finalizes_verified, 1);
+
+        let pending_schemes: Vec<_> = schemes.iter().take(quorum as usize).skip(1).collect();
+        for (i, scheme) in pending_schemes.iter().enumerate() {
+            let is_last = i == pending_schemes.len() - 1;
+            verifier.add(
+                Vote::Finalize(create_finalize(scheme, round, View::new(0), 1)),
+                false,
+            );
+            if is_last {
+                assert!(verifier.ready_finalizes());
+            } else if S::is_batchable() {
+                // Batchable schemes wait for quorum
+                assert!(!verifier.ready_finalizes());
+            } else {
+                // Non-batchable schemes verify immediately when pending votes exist
+                assert!(verifier.ready_finalizes());
+            }
+        }
+    }
+
+    #[test]
+    fn test_ready_finalizes_exact_quorum() {
+        ready_finalizes_exact_quorum(bls12381_threshold::fixture::<MinSig, _>);
+        ready_finalizes_exact_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        ready_finalizes_exact_quorum(bls12381_multisig::fixture::<MinSig, _>);
+        ready_finalizes_exact_quorum(bls12381_multisig::fixture::<MinPk, _>);
+        ready_finalizes_exact_quorum(ed25519::fixture);
+        ready_finalizes_exact_quorum(secp256r1::fixture);
+    }
+
+    fn ready_notarizes_quorum_already_met_by_verified<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        assert!(
+            schemes.len() > quorum as usize,
+            "test requires more validators than the quorum"
+        );
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+
+        // Pre-load the leader vote as if it had already been processed.
+        let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
+        verifier.set_leader(leader_vote.signer());
+        verifier.add(Vote::Notarize(leader_vote), false);
+
+        // Mark enough verified notarizes to satisfy the quorum outright.
+        for scheme in schemes.iter().take(quorum as usize) {
+            verifier.add(
+                Vote::Notarize(create_notarize(scheme, round, View::new(0), 1)),
+                true,
+            );
+        }
+        assert_eq!(verifier.notarizes_verified, quorum as usize);
+        assert!(
+            !verifier.ready_notarizes(),
+            "Should not be ready if quorum already met by verified messages"
+        );
+
+        // Additional pending votes must not flip readiness in this situation.
+        let extra_vote = create_notarize(&schemes[quorum as usize], round, View::new(0), 1);
+        verifier.add(Vote::Notarize(extra_vote), false);
+        assert!(
+            !verifier.ready_notarizes(),
+            "Should not be ready if quorum already met by verified messages"
+        );
+    }
+
+    #[test]
+    fn test_ready_notarizes_quorum_already_met_by_verified() {
+        ready_notarizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinSig, _>);
+        ready_notarizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinPk, _>);
+        ready_notarizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinSig, _>);
+        ready_notarizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinPk, _>);
+        ready_notarizes_quorum_already_met_by_verified(ed25519::fixture);
+        ready_notarizes_quorum_already_met_by_verified(secp256r1::fixture);
+    }
+
+    fn ready_nullifies_quorum_already_met_by_verified<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        assert!(
+            schemes.len() > quorum as usize,
+            "test requires more validators than the quorum"
+        );
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+
+        // First mark a quorum's worth of verified nullifies.
+        for scheme in schemes.iter().take(quorum as usize) {
+            verifier.add(Vote::Nullify(create_nullify(scheme, round)), true);
+        }
+        assert_eq!(verifier.nullifies_verified, quorum as usize);
+        assert!(
+            !verifier.ready_nullifies(),
+            "Should not be ready if quorum already met by verified messages"
+        );
+
+        // Pending messages alone cannot transition the batch to ready.
+        let extra_nullify = create_nullify(&schemes[quorum as usize], round);
+        verifier.add(Vote::Nullify(extra_nullify), false);
+        assert!(
+            !verifier.ready_nullifies(),
+            "Should not be ready if quorum already met by verified messages"
+        );
+    }
+
+    #[test]
+    fn test_ready_nullifies_quorum_already_met_by_verified() {
+        ready_nullifies_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinSig, _>);
+        ready_nullifies_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinPk, _>);
+        ready_nullifies_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinSig, _>);
+        ready_nullifies_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinPk, _>);
+        ready_nullifies_quorum_already_met_by_verified(ed25519::fixture);
+        ready_nullifies_quorum_already_met_by_verified(secp256r1::fixture);
+    }
+
+    fn ready_finalizes_quorum_already_met_by_verified<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let quorum = quorum_from_slice(&schemes);
+        assert!(
+            schemes.len() > quorum as usize,
+            "test requires more validators than the quorum"
+        );
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        let round = Round::new(Epoch::new(0), View::new(1));
+
+        // Prime the leader state so the quorum is already satisfied by verified finalizes.
+        let leader_finalize = create_finalize(&schemes[0], round, View::new(0), 1);
+        verifier.set_leader(leader_finalize.signer());
+        verifier.set_leader_proposal(leader_finalize.proposal);
+
+        // Feed exactly the number of verified finalizes required to hit the quorum.
+        for scheme in schemes.iter().take(quorum as usize) {
+            verifier.add(
+                Vote::Finalize(create_finalize(scheme, round, View::new(0), 1)),
+                true,
+            );
+        }
+        assert_eq!(verifier.finalizes_verified, quorum as usize);
+        assert!(
+            !verifier.ready_finalizes(),
+            "Should not be ready if quorum already met by verified messages"
+        );
+
+        // Ensure additional pending finalizes do not incorrectly trigger readiness.
+        let extra_finalize = create_finalize(&schemes[quorum as usize], round, View::new(0), 1);
+        verifier.add(Vote::Finalize(extra_finalize), false);
+        assert!(
+            !verifier.ready_finalizes(),
+            "Should not be ready if quorum already met by verified messages"
+        );
+    }
+
+    #[test]
+    fn test_ready_finalizes_quorum_already_met_by_verified() {
+        ready_finalizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinSig, _>);
+        ready_finalizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinPk, _>);
+        ready_finalizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinSig, _>);
+        ready_finalizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinPk, _>);
+        ready_finalizes_quorum_already_met_by_verified(ed25519::fixture);
+        ready_finalizes_quorum_already_met_by_verified(secp256r1::fixture);
+    }
+}
