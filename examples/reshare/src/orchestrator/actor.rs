@@ -24,7 +24,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{vec::NonEmptyVec, NZUsize};
 use futures::{channel::mpsc, StreamExt};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
 use tracing::{debug, info, warn};
 
@@ -57,7 +57,7 @@ where
 
 pub struct Actor<E, B, V, C, H, A, S, L>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
@@ -85,7 +85,7 @@ where
 
 impl<E, B, V, C, H, A, S, L> Actor<E, B, V, C, H, A, S, L>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,

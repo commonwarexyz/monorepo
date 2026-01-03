@@ -13,6 +13,10 @@
 //!   setup required, and widely supported. Certificates contain individual signatures from each
 //!   signer.
 //!
+//! - [`secp256r1`]: Attributable signatures with individual verification. HSM-friendly, no trusted
+//!   setup required, and widely supported by hardware security modules. Unlike ed25519, does not
+//!   benefit from batch verification. Certificates contain individual signatures from each signer.
+//!
 //! - [`bls12381_multisig`]: Attributable signatures with aggregated verification. Signatures
 //!   can be aggregated into a single multi-signature for compact certificates while preserving
 //!   attribution (signer indices are stored alongside the aggregated signature).
@@ -26,10 +30,10 @@
 //! Signing schemes differ in whether per-participant activities can be used as evidence of
 //! either liveness or of committing a fault:
 //!
-//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`]): Individual signatures can be
-//!   presented to some third party as evidence of either liveness or of committing a fault.
-//!   Certificates contain signer indices alongside individual signatures, enabling secure
-//!   per-participant activity tracking and conflict detection.
+//! - **Attributable Schemes** ([`ed25519`], [`secp256r1`], [`bls12381_multisig`]): Individual
+//!   signatures can be presented to some third party as evidence of either liveness or of
+//!   committing a fault.  Certificates contain signer indices alongside individual signatures,
+//!   enabling secure per-participant activity tracking and conflict detection.
 //!
 //! - **Non-Attributable Schemes** ([`bls12381_threshold`]): Individual signatures cannot be
 //!   presented to some third party as evidence of either liveness or of committing a fault
@@ -57,7 +61,8 @@ pub use crate::{
     bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
     ed25519::certificate as ed25519,
     impl_certificate_bls12381_multisig, impl_certificate_bls12381_threshold,
-    impl_certificate_ed25519,
+    impl_certificate_ed25519, impl_certificate_secp256r1,
+    secp256r1::certificate as secp256r1,
 };
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
@@ -66,7 +71,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{varint::UInt, Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::{bitmap::BitMap, ordered::Set};
 use core::{fmt::Debug, hash::Hash};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 
@@ -183,12 +188,16 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     ) -> Option<Attestation<Self>>;
 
     /// Verifies a single attestation against the participant material managed by the scheme.
-    fn verify_attestation<D: Digest>(
+    fn verify_attestation<R, D>(
         &self,
+        rng: &mut R,
         namespace: &[u8],
         subject: Self::Subject<'_, D>,
         attestation: &Attestation<Self>,
-    ) -> bool;
+    ) -> bool
+    where
+        R: CryptoRngCore,
+        D: Digest;
 
     /// Batch-verifies attestations and separates valid attestations from signer indices that failed
     /// verification.
@@ -196,20 +205,20 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Callers must not include duplicate attestations from the same signer.
     fn verify_attestations<R, D, I>(
         &self,
-        _rng: &mut R,
+        rng: &mut R,
         namespace: &[u8],
         subject: Self::Subject<'_, D>,
         attestations: I,
     ) -> Verification<Self>
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
     {
         let mut invalid = BTreeSet::new();
 
         let verified = attestations.into_iter().filter_map(|attestation| {
-            if self.verify_attestation(namespace, subject.clone(), &attestation) {
+            if self.verify_attestation(&mut *rng, namespace, subject.clone(), &attestation) {
                 Some(attestation)
             } else {
                 invalid.insert(attestation.signer);
@@ -228,7 +237,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         I: IntoIterator<Item = Attestation<Self>>;
 
     /// Verifies a certificate that was recovered or received from the network.
-    fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
+    fn verify_certificate<R: CryptoRngCore, D: Digest>(
         &self,
         rng: &mut R,
         namespace: &[u8],
@@ -244,7 +253,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         certificates: I,
     ) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
     {
@@ -262,6 +271,16 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Schemes where individual signatures can be safely reported as fault evidence should
     /// return `true`.
     fn is_attributable() -> bool;
+
+    /// Returns whether this scheme benefits from batch verification.
+    ///
+    /// Schemes that benefit from batch verification (like [`ed25519`], [`bls12381_multisig`]
+    /// and [`bls12381_threshold`]) should return `true`, allowing callers to optimize by
+    /// deferring verification until multiple signatures are available.
+    ///
+    /// Schemes that don't benefit from batch verification (like [`secp256r1`]) should
+    /// return `false`, indicating that eager per-signature verification is preferred.
+    fn is_batchable() -> bool;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;

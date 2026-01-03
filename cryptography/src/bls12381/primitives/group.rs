@@ -213,12 +213,13 @@ pub type Private = Scalar;
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
+    /// Generate a non-zero scalar from the randomly populated buffer.
     fn from_bytes(mut ikm: [u8; 64]) -> Self {
-        // Generate a scalar from the randomly populated buffer
+        let mut sc = blst_scalar::default();
         let mut ret = blst_fr::default();
         // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
         unsafe {
-            let mut sc = blst_scalar::default();
+            // blst_keygen loops until a non-zero value is produced (in accordance with IETF BLS KeyGen 4+).
             blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
             blst_fr_from_scalar(&mut ret, &sc);
         }
@@ -274,7 +275,6 @@ impl Scalar {
     pub(crate) fn from_u64(i: u64) -> Self {
         // Create a new scalar
         let mut ret = blst_fr::default();
-
         let buffer = [i, 0, 0, 0];
 
         // SAFETY: blst_fr_from_uint64 reads exactly 4 u64 values from the buffer.
@@ -483,8 +483,8 @@ impl Field for Scalar {
 }
 
 impl Random for Scalar {
+    /// Returns a random non-zero scalar.
     fn random(mut rng: impl CryptoRngCore) -> Self {
-        // Generate a random 64 byte buffer
         let mut ikm = [0u8; 64];
         rng.fill_bytes(&mut ikm);
         Self::from_bytes(ikm)
@@ -1127,8 +1127,8 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::test_suites;
+    use commonware_utils::test_rng;
     use proptest::prelude::*;
-    use rand::prelude::*;
     use std::collections::{BTreeSet, HashMap};
 
     impl Arbitrary for Scalar {
@@ -1196,7 +1196,7 @@ mod tests {
     #[test]
     fn basic_group() {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
-        let s = Scalar::random(&mut thread_rng());
+        let s = Scalar::random(&mut test_rng());
         let mut s2 = s.clone();
         s2.double();
 
@@ -1211,7 +1211,7 @@ mod tests {
 
     #[test]
     fn test_scalar_codec() {
-        let original = Scalar::random(&mut thread_rng());
+        let original = Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), Scalar::SIZE);
         let decoded = Scalar::decode(&mut encoded).unwrap();
@@ -1220,7 +1220,7 @@ mod tests {
 
     #[test]
     fn test_g1_codec() {
-        let original = G1::generator() * &Scalar::random(&mut thread_rng());
+        let original = G1::generator() * &Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G1::SIZE);
         let decoded = G1::decode(&mut encoded).unwrap();
@@ -1229,7 +1229,7 @@ mod tests {
 
     #[test]
     fn test_g2_codec() {
-        let original = G2::generator() * &Scalar::random(&mut thread_rng());
+        let original = G2::generator() * &Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G2::SIZE);
         let decoded = G2::decode(&mut encoded).unwrap();
@@ -1253,7 +1253,7 @@ mod tests {
 
     #[test]
     fn test_g1_msm() {
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
         let n = 10; // Number of points/scalars
 
         // Case 1: Random points and scalars
@@ -1345,7 +1345,7 @@ mod tests {
 
     #[test]
     fn test_g2_msm() {
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
         let n = 10; // Number of points/scalars
 
         // Case 1: Random points and scalars
@@ -1438,7 +1438,7 @@ mod tests {
     #[test]
     fn test_trait_implementations() {
         // Generate a set of unique items to test.
-        let mut rng = thread_rng();
+        let mut rng = test_rng();
         const NUM_ITEMS: usize = 10;
         let mut scalar_set = BTreeSet::new();
         let mut g1_set = BTreeSet::new();

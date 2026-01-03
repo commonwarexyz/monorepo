@@ -57,7 +57,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> TipManager<C, S, D> {
 mod tests {
     use super::*;
     use crate::ordered_broadcast::{
-        scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
         types::Chunk,
     };
     use commonware_cryptography::{
@@ -68,17 +68,9 @@ mod tests {
         Hasher as _, Signer as _,
     };
     use commonware_math::algebra::Random;
+    use commonware_utils::test_rng;
     use rand::{rngs::StdRng, SeedableRng};
     use std::panic::catch_unwind;
-
-    /// Generate a fixture using the provided generator function.
-    fn setup<S, F>(num_validators: u32, fixture: F) -> Fixture<S>
-    where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
-    {
-        let mut rng = StdRng::seed_from_u64(0);
-        fixture(&mut rng, num_validators)
-    }
 
     /// Creates a node for testing with a given scheme.
     fn create_node<S: Scheme<PublicKey, Sha256Digest>>(
@@ -116,7 +108,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node = create_node(&fixture, 0, 1, "payload");
         let key = node.chunk.sequencer.clone();
@@ -130,6 +122,7 @@ mod tests {
     #[test]
     fn test_put_new_tip() {
         put_new_tip(ed25519::fixture);
+        put_new_tip(secp256r1::fixture);
         put_new_tip(bls12381_multisig::fixture::<MinPk, _>);
         put_new_tip(bls12381_multisig::fixture::<MinSig, _>);
         put_new_tip(bls12381_threshold::fixture::<MinPk, _>);
@@ -141,7 +134,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node = create_node(&fixture, 0, 1, "payload");
         let key = node.chunk.sequencer.clone();
@@ -156,6 +149,7 @@ mod tests {
     #[test]
     fn test_put_same_height_same_payload() {
         put_same_height_same_payload(ed25519::fixture);
+        put_same_height_same_payload(secp256r1::fixture);
         put_same_height_same_payload(bls12381_multisig::fixture::<MinPk, _>);
         put_same_height_same_payload(bls12381_multisig::fixture::<MinSig, _>);
         put_same_height_same_payload(bls12381_threshold::fixture::<MinPk, _>);
@@ -167,7 +161,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node1 = create_node(&fixture, 0, 1, "payload1");
         let key = node1.chunk.sequencer.clone();
@@ -183,6 +177,7 @@ mod tests {
     #[test]
     fn test_put_higher_tip() {
         put_higher_tip(ed25519::fixture);
+        put_higher_tip(secp256r1::fixture);
         put_higher_tip(bls12381_multisig::fixture::<MinPk, _>);
         put_higher_tip(bls12381_multisig::fixture::<MinSig, _>);
         put_higher_tip(bls12381_threshold::fixture::<MinPk, _>);
@@ -194,7 +189,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node1 = create_node(&fixture, 0, 2, "payload");
         assert!(manager.put(&node1));
@@ -205,6 +200,7 @@ mod tests {
     #[test]
     fn test_put_lower_tip_panics() {
         assert!(catch_unwind(|| put_lower_tip_panics(ed25519::fixture)).is_err());
+        assert!(catch_unwind(|| put_lower_tip_panics(secp256r1::fixture)).is_err());
         assert!(
             catch_unwind(|| put_lower_tip_panics(bls12381_multisig::fixture::<MinPk, _>)).is_err()
         );
@@ -225,7 +221,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node1 = create_node(&fixture, 0, 1, "payload1");
         assert!(manager.put(&node1));
@@ -237,6 +233,9 @@ mod tests {
     fn test_put_same_height_different_payload_panics() {
         assert!(
             catch_unwind(|| put_same_height_different_payload_panics(ed25519::fixture)).is_err()
+        );
+        assert!(
+            catch_unwind(|| put_same_height_different_payload_panics(secp256r1::fixture)).is_err()
         );
         assert!(catch_unwind(|| put_same_height_different_payload_panics(
             bls12381_multisig::fixture::<MinPk, _>
@@ -268,6 +267,7 @@ mod tests {
     #[test]
     fn test_get_nonexistent() {
         get_nonexistent::<ed25519::Scheme>();
+        get_nonexistent::<secp256r1::Scheme<PublicKey>>();
         get_nonexistent::<bls12381_multisig::Scheme<PublicKey, MinPk>>();
         get_nonexistent::<bls12381_multisig::Scheme<PublicKey, MinSig>>();
         get_nonexistent::<bls12381_threshold::Scheme<PublicKey, MinPk>>();
@@ -279,7 +279,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node1 = create_node(&fixture, 0, 1, "payload1");
         let node2 = create_node(&fixture, 1, 2, "payload2");
@@ -297,6 +297,7 @@ mod tests {
     #[test]
     fn test_multiple_sequencers() {
         multiple_sequencers(ed25519::fixture);
+        multiple_sequencers(secp256r1::fixture);
         multiple_sequencers(bls12381_multisig::fixture::<MinPk, _>);
         multiple_sequencers(bls12381_multisig::fixture::<MinSig, _>);
         multiple_sequencers(bls12381_threshold::fixture::<MinPk, _>);
@@ -308,7 +309,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
 
         // Insert tip with height 1.
@@ -347,6 +348,7 @@ mod tests {
     #[test]
     fn test_put_multiple_updates() {
         put_multiple_updates(ed25519::fixture);
+        put_multiple_updates(secp256r1::fixture);
         put_multiple_updates(bls12381_multisig::fixture::<MinPk, _>);
         put_multiple_updates(bls12381_multisig::fixture::<MinSig, _>);
         put_multiple_updates(bls12381_threshold::fixture::<MinPk, _>);

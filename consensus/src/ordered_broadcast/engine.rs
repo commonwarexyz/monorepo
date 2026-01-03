@@ -44,7 +44,7 @@ use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
 };
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -62,7 +62,7 @@ struct Verify<C: PublicKey, D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
+    E: Clock + Spawner + CryptoRngCore + Storage + Metrics,
     C: Signer,
     S: SequencersProvider<PublicKey = C::PublicKey>,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
@@ -198,7 +198,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
+        E: Clock + Spawner + CryptoRngCore + Storage + Metrics,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
@@ -897,7 +897,7 @@ impl<
     /// Returns the chunk, epoch, and vote if the ack is valid.
     /// Returns an error if the ack is invalid.
     fn validate_ack(
-        &self,
+        &mut self,
         ack: &Ack<C::PublicKey, P::Scheme, D>,
         sender: &<P::Scheme as Scheme>::PublicKey,
     ) -> Result<(), Error> {
@@ -946,7 +946,7 @@ impl<
         }
 
         // Validate the vote signature
-        if !ack.verify(&self.namespace, scheme.as_ref()) {
+        if !ack.verify(&mut self.context, &self.namespace, scheme.as_ref()) {
             return Err(Error::InvalidAckSignature);
         }
 

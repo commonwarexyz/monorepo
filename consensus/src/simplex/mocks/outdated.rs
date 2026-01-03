@@ -12,7 +12,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::debug;
 
@@ -22,7 +22,7 @@ pub struct Config<S: Scheme> {
     pub view_delta: ViewDelta,
 }
 
-pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
+pub struct Outdated<E: Clock + CryptoRngCore + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
 
@@ -36,7 +36,7 @@ pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> 
 
 impl<E, S, H> Outdated<E, S, H>
 where
-    E: Clock + Rng + CryptoRng + Spawner,
+    E: Clock + CryptoRngCore + Spawner,
     S: scheme::Scheme<H::Digest>,
     H: Hasher,
 {

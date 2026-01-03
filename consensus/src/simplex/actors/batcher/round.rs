@@ -12,7 +12,7 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_utils::ordered::{Quorum, Set};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use tracing::warn;
 
 /// Per-view state for vote accumulation and certificate tracking.
@@ -301,7 +301,7 @@ impl<
         Some(proposal)
     }
 
-    pub const fn ready_notarizes(&self) -> bool {
+    pub fn ready_notarizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_notarization() {
             return false;
@@ -309,7 +309,7 @@ impl<
         self.verifier.ready_notarizes()
     }
 
-    pub fn verify_notarizes<E: Rng + CryptoRng>(
+    pub fn verify_notarizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
         namespace: &[u8],
@@ -317,7 +317,7 @@ impl<
         self.verifier.verify_notarizes(rng, namespace)
     }
 
-    pub const fn ready_nullifies(&self) -> bool {
+    pub fn ready_nullifies(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_nullification() {
             return false;
@@ -325,7 +325,7 @@ impl<
         self.verifier.ready_nullifies()
     }
 
-    pub fn verify_nullifies<E: Rng + CryptoRng>(
+    pub fn verify_nullifies<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
         namespace: &[u8],
@@ -333,7 +333,7 @@ impl<
         self.verifier.verify_nullifies(rng, namespace)
     }
 
-    pub const fn ready_finalizes(&self) -> bool {
+    pub fn ready_finalizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_finalization() {
             return false;
@@ -341,7 +341,7 @@ impl<
         self.verifier.ready_finalizes()
     }
 
-    pub fn verify_finalizes<E: Rng + CryptoRng>(
+    pub fn verify_finalizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
         namespace: &[u8],
