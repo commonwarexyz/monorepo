@@ -66,6 +66,7 @@ anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
 async-lock = "3.4.0"
 aws-config = "1.8.10"
+aws-lc-rs = "1.15.2"
 aws-sdk-ec2 = "1.187.0"
 axum = "0.8.1"
 blake3 = { version = "1.8.2", default-features = false }
