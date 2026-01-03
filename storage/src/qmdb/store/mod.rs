@@ -14,10 +14,9 @@
 //! 1. **Initialization**: Create with [Store::init] using a [Config]
 //! 2. **Insertion**: Use [Store::update] to assign a value to a given key
 //! 3. **Deletions**: Use [Store::delete] to remove a key's value
-//! 4. **Persistence**: Call [Store::commit] to make changes durable
+//! 4. **Persistence**: Call [Store::commit] or [Store::sync] to make changes durable
 //! 5. **Queries**: Use [Store::get] to retrieve current values
-//! 6. **Cleanup**: Call [Store::close] to shutdown gracefully or [Store::destroy] to remove all
-//!    data
+//! 6. **Cleanup**: Call [Store::destroy] to remove all data
 //!
 //! # Pruning
 //!
@@ -89,6 +88,7 @@ use crate::{
         variable::{Config as JournalConfig, Journal},
         MutableContiguous as _,
     },
+    kv,
     mmr::{Location, Proof},
     qmdb::{
         any::{
@@ -112,7 +112,6 @@ use tracing::{debug, warn};
 mod batch;
 #[cfg(test)]
 pub use batch::tests as batch_tests;
-pub use batch::{Batch, Batchable, Getter};
 
 /// Configuration for initializing a [Store] database.
 #[derive(Clone)]
@@ -538,12 +537,6 @@ where
         Ok(())
     }
 
-    /// Close the db. Operations that have not been committed will be lost or rolled back on
-    /// restart.
-    pub async fn close(self) -> Result<(), Error> {
-        self.log.close().await.map_err(Into::into)
-    }
-
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
@@ -562,15 +555,21 @@ where
     }
 }
 
-impl<E, K, V, T> crate::store::StorePersistable for Store<E, K, V, T>
+impl<E, K, V, T> crate::Persistable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     T: Translator,
 {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -604,7 +603,7 @@ where
     }
 }
 
-impl<E, K, V, T> crate::store::Store for Store<E, K, V, T>
+impl<E, K, V, T> kv::Gettable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -620,7 +619,7 @@ where
     }
 }
 
-impl<E, K, V, T> crate::store::StoreMut for Store<E, K, V, T>
+impl<E, K, V, T> kv::Updatable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -632,7 +631,7 @@ where
     }
 }
 
-impl<E, K, V, T> crate::store::StoreDeletable for Store<E, K, V, T>
+impl<E, K, V, T> kv::Deletable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -644,7 +643,7 @@ where
     }
 }
 
-impl<E, K, V, T> Batchable for Store<E, K, V, T>
+impl<E, K, V, T> kv::Batchable for Store<E, K, V, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -656,7 +655,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{qmdb::store::batch_tests, store::StoreMut as _, translator::TwoCap};
+    use crate::{kv::Updatable as _, qmdb::store::batch_tests, translator::TwoCap};
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
         Hasher as _,
@@ -704,7 +703,8 @@ mod test {
             let d1 = Digest::random(&mut context);
             let v1 = vec![1, 2, 3];
             db.update(d1, v1).await.unwrap();
-            db.close().await.unwrap();
+            db.sync().await.unwrap();
+            drop(db);
             let mut db = create_test_store(context.clone()).await;
             assert_eq!(db.op_count(), 1);
 
@@ -867,7 +867,7 @@ mod test {
             assert_eq!(iter.count(), 1);
 
             store.commit(None).await.unwrap();
-            store.close().await.unwrap();
+            drop(store);
 
             // Re-open the store, prune it, then ensure it replays the log correctly.
             let mut store = create_test_store(ctx.with_label("store")).await;
@@ -913,7 +913,7 @@ mod test {
             assert_eq!(store.get(&k2).await.unwrap().unwrap(), v2);
 
             store.commit(None).await.unwrap();
-            store.close().await.unwrap();
+            drop(store);
 
             // Re-open the store to ensure it builds the snapshot for the conflicting
             // keys correctly.
@@ -1093,8 +1093,8 @@ mod test {
             let db = create_test_store(context.with_label("store")).await;
             assert_eq!(db.op_count(), op_count);
 
-            // Close and reopen the store to ensure the final commit is preserved.
-            db.close().await.unwrap();
+            // Reopen the store to ensure the final commit is preserved.
+            drop(db);
             let mut db = create_test_store(context.with_label("store")).await;
             assert_eq!(db.op_count(), op_count);
 

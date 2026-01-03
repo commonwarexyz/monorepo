@@ -48,7 +48,7 @@ use futures::{
 };
 use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     future::Future,
@@ -102,7 +102,7 @@ struct BlockSubscription<B: Block> {
 /// behind.
 pub struct Actor<E, B, P, FC, FB, ES, A = Exact>
 where
-    E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
+    E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
@@ -160,7 +160,7 @@ where
 
 impl<E, B, P, FC, FB, ES, A> Actor<E, B, P, FC, FB, ES, A>
 where
-    E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
+    E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
@@ -497,19 +497,19 @@ where
                         Message::SetFloor { height } => {
                             if let Some(stored_height) = self.application_metadata.get(&LATEST_KEY) {
                                 if *stored_height >= height {
-                                    warn!(height, existing = stored_height, "sync floor not updated, lower than existing");
+                                    warn!(height, existing = stored_height, "floor not updated, lower than existing");
                                     continue;
                                 }
                             }
 
                             // Update the processed height
                             if let Err(err) = self.set_processed_height(height, &mut resolver).await {
-                                error!(?err, height, "failed to update sync floor");
+                                error!(?err, height, "failed to update floor");
                                 return;
                             }
 
                             // Drop the pending acknowledgement, if one exists. We must do this to prevent
-                            // an in-process block from being processed that is below the new sync floor
+                            // an in-process block from being processed that is below the new floor
                             // updating `last_processed_height`.
                             self.pending_ack = None.into();
 
@@ -1037,7 +1037,7 @@ where
         self.last_processed_height = height;
         let _ = self.processed_height.try_set(self.last_processed_height);
 
-        // Cancel any existing requests below the new sync floor.
+        // Cancel any existing requests below the new floor.
         resolver
             .retain(Request::<B>::Finalized { height }.predicate())
             .await;

@@ -23,7 +23,7 @@ use crate::{
     Reporter,
 };
 use commonware_cryptography::{certificate, Digest};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
 ///
@@ -32,7 +32,7 @@ use rand::{CryptoRng, Rng};
 /// all activities are cryptographically valid before reporting.
 #[derive(Clone)]
 pub struct AttributableReporter<
-    E: Clone + Rng + CryptoRng + Send + 'static,
+    E: Clone + CryptoRngCore + Send + 'static,
     S: certificate::Scheme,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
@@ -48,7 +48,7 @@ pub struct AttributableReporter<
 }
 
 impl<
-        E: Clone + Rng + CryptoRng + Send + 'static,
+        E: Clone + CryptoRngCore + Send + 'static,
         S: certificate::Scheme,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
@@ -66,7 +66,7 @@ impl<
 }
 
 impl<
-        E: Clone + Rng + CryptoRng + Send + 'static,
+        E: Clone + CryptoRngCore + Send + 'static,
         S: Scheme<D>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
@@ -82,7 +82,7 @@ impl<
         }
 
         // Filter based on scheme attributability
-        if !self.scheme.is_attributable() {
+        if !S::is_attributable() {
             match activity {
                 Activity::Notarize(_)
                 | Activity::Nullify(_)
@@ -119,6 +119,7 @@ mod tests {
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk,
         certificate::{self, mocks::Fixture, Scheme as _},
+        ed25519::PublicKey as Ed25519PublicKey,
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
@@ -177,7 +178,10 @@ mod tests {
             ..
         } = ed25519::fixture(b"wrong-namespace", &mut rng, 4);
 
-        assert!(verifier.is_attributable(), "Ed25519 must be attributable");
+        assert!(
+            ed25519::Scheme::is_attributable(),
+            "Ed25519 must be attributable"
+        );
 
         let mock = MockReporter::new();
         let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);
@@ -213,7 +217,10 @@ mod tests {
             ..
         } = ed25519::fixture(b"wrong-namespace", &mut rng, 4);
 
-        assert!(verifier.is_attributable(), "Ed25519 must be attributable");
+        assert!(
+            ed25519::Scheme::is_attributable(),
+            "Ed25519 must be attributable"
+        );
 
         let mock = MockReporter::new();
         let mut reporter = AttributableReporter::new(
@@ -253,7 +260,7 @@ mod tests {
         } = bls12381_threshold::fixture::<MinPk, _>(NAMESPACE, &mut rng, 4);
 
         assert!(
-            !verifier.is_attributable(),
+            !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
             "BLS threshold must be non-attributable"
         );
 
@@ -300,7 +307,7 @@ mod tests {
         } = bls12381_threshold::fixture::<MinPk, _>(NAMESPACE, &mut rng, 4);
 
         assert!(
-            !verifier.is_attributable(),
+            !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
             "BLS threshold must be non-attributable"
         );
 
@@ -335,7 +342,10 @@ mod tests {
             schemes, verifier, ..
         } = ed25519::fixture(NAMESPACE, &mut rng, 4);
 
-        assert!(verifier.is_attributable(), "Ed25519 must be attributable");
+        assert!(
+            ed25519::Scheme::is_attributable(),
+            "Ed25519 must be attributable"
+        );
 
         let mock = MockReporter::new();
         let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);

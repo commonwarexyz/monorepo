@@ -11,7 +11,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::union;
 use futures::channel::oneshot;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::hash::Hash;
 
 /// Error that may be encountered when interacting with `aggregation`.
@@ -177,11 +177,12 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     ///
     /// Returns `true` if the attestation is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
-    pub fn verify(&self, scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<D>(&self.item, &self.attestation)
+        scheme.verify_attestation::<_, D>(rng, &self.item, &self.attestation)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -325,7 +326,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Verifies the recovered certificate for the item.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(rng, &self.item, &self.certificate)
@@ -449,7 +450,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme};
+    use crate::aggregation::scheme::{
+        bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme,
+    };
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
@@ -457,21 +460,12 @@ mod tests {
         certificate::mocks::Fixture,
         Hasher, Sha256,
     };
-    use commonware_utils::ordered::Quorum;
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{ordered::Quorum, test_rng};
+    use rand::rngs::StdRng;
 
     const NAMESPACE: &[u8] = b"test";
 
     type Sha256Digest = <Sha256 as Hasher>::Digest;
-
-    /// Generate a fixture using the provided generator function.
-    fn setup<S, F>(n: u32, fixture: F) -> Fixture<S>
-    where
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
-    {
-        let mut rng = StdRng::seed_from_u64(0);
-        fixture(NAMESPACE, &mut rng, n)
-    }
 
     #[test]
     fn test_ack_namespace() {
@@ -485,7 +479,8 @@ mod tests {
         S: Scheme<Sha256Digest>,
         F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(NAMESPACE, &mut rng, 4);
         let schemes = &fixture.schemes;
         let item = Item {
             index: 100,
@@ -505,7 +500,7 @@ mod tests {
         // Verify the restored ack
         assert_eq!(restored_ack.item, item);
         assert_eq!(restored_ack.epoch, Epoch::new(1));
-        assert!(restored_ack.verify(&schemes[0]));
+        assert!(restored_ack.verify(&mut rng, &schemes[0]));
 
         // Test TipAck codec
         let tip_ack = TipAck {
@@ -539,7 +534,6 @@ mod tests {
             .collect();
 
         let certificate = Certificate::from_acks(&schemes[0], &acks).unwrap();
-        let mut rng = StdRng::seed_from_u64(0);
         assert!(certificate.verify(&mut rng, &schemes[0]));
 
         let activity_certified = Activity::Certified(certificate.clone());
@@ -568,6 +562,7 @@ mod tests {
     #[test]
     fn test_codec() {
         codec(ed25519::fixture);
+        codec(secp256r1::fixture);
         codec(bls12381_multisig::fixture::<MinPk, _>);
         codec(bls12381_multisig::fixture::<MinSig, _>);
         codec(bls12381_threshold::fixture::<MinPk, _>);
@@ -579,7 +574,7 @@ mod tests {
         S: Scheme<Sha256Digest>,
         F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(NAMESPACE, &mut test_rng(), 4);
         let mut buf = BytesMut::new();
         3u8.write(&mut buf); // Invalid discriminant
 
@@ -597,6 +592,7 @@ mod tests {
     #[test]
     fn test_activity_invalid_enum() {
         activity_invalid_enum(ed25519::fixture);
+        activity_invalid_enum(secp256r1::fixture);
         activity_invalid_enum(bls12381_multisig::fixture::<MinPk, _>);
         activity_invalid_enum(bls12381_multisig::fixture::<MinSig, _>);
         activity_invalid_enum(bls12381_threshold::fixture::<MinPk, _>);

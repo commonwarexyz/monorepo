@@ -1,5 +1,9 @@
 use crate::{
-    journal::contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
+    journal::{
+        contiguous::{Contiguous, MutableContiguous},
+        Error as JournalError,
+    },
+    kv::{self, Batchable},
     mmr::{
         mem::{Dirty, State},
         Location,
@@ -11,9 +15,9 @@ use crate::{
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
         operation::{Committable as _, Operation as OperationTrait},
-        store::Batchable,
         update_key, update_known_loc, Error, Index,
     },
+    Persistable,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
@@ -24,8 +28,10 @@ use futures::future::try_join_all;
 use std::collections::BTreeMap;
 
 pub mod fixed;
-pub mod sync;
 pub mod variable;
+
+#[cfg(test)]
+pub(crate) mod sync_tests;
 
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
 
@@ -271,7 +277,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::Store for Db<E, C, I, H, Update<K, V>>
+    > kv::Gettable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -291,7 +297,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreMut for Db<E, C, I, H, Update<K, V>>
+    > kv::Updatable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -307,7 +313,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreDeletable for Db<E, C, I, H, Update<K, V>>
+    > kv::Deletable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -320,15 +326,21 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: PersistableContiguous<Item = Operation<K, V>>,
+        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StorePersistable for Db<E, C, I, H, Update<K, V>>
+    > Persistable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -340,7 +352,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: PersistableContiguous<Item = Operation<K, V>>,
+        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
         I: Index<Value = Location>,
         H: Hasher,
     > CleanAny for Db<E, C, I, H, Update<K, V>>
@@ -363,10 +375,6 @@ where
 
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -599,9 +607,10 @@ pub(super) mod test {
         assert_eq!(db.op_count(), Location::new_unchecked(1957));
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
 
-        // Close & reopen and ensure state matches.
+        // Drop & reopen and ensure state matches.
         let root = db.root();
-        db.close().await.unwrap();
+        db.sync().await.unwrap();
+        drop(db);
         let db = reopen_db(context.clone()).await;
         assert_eq!(root, db.root());
         assert_eq!(db.op_count(), Location::new_unchecked(1957));
@@ -710,6 +719,7 @@ pub(super) mod test {
         db.commit(None).await.unwrap();
         assert_eq!(db.op_count(), 14);
         let root = db.root();
+        drop(db);
         let db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 14);
         assert_eq!(db.root(), root);
@@ -944,7 +954,7 @@ pub(super) mod test {
         assert!(db.get(&k).await.unwrap().is_none());
 
         let root = db.root();
-        db.close().await.unwrap();
+        drop(db);
         let db = reopen_db(context.clone()).await;
         assert_eq!(root, db.root());
         assert_eq!(db.get_metadata().await.unwrap(), None);

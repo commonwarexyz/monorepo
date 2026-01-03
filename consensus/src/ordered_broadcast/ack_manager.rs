@@ -151,7 +151,7 @@ mod tests {
     use super::*;
     use crate::ordered_broadcast::{
         mocks,
-        scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
         types::Chunk,
     };
     use commonware_cryptography::{
@@ -160,8 +160,11 @@ mod tests {
         ed25519::PublicKey,
         Hasher, Sha256,
     };
+    use commonware_utils::test_rng;
     use helpers::Sha256Digest;
     use rand::{rngs::StdRng, SeedableRng as _};
+
+    const NAMESPACE: &[u8] = b"1234";
 
     /// Aggregated helper functions to reduce duplication in tests.
     mod helpers {
@@ -170,8 +173,6 @@ mod tests {
         use commonware_cryptography::Hasher;
 
         pub type Sha256Digest = <Sha256 as Hasher>::Digest;
-
-        const NAMESPACE: &[u8] = b"1234";
 
         /// Create an Ack by signing with the provided scheme.
         pub fn create_ack<S>(
@@ -233,15 +234,6 @@ mod tests {
             }
             certificate
         }
-
-        /// Generate a fixture using the provided generator function.
-        pub fn setup<S, F>(num_validators: u32, fixture: F) -> Fixture<S>
-        where
-            F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
-        {
-            let mut rng = StdRng::seed_from_u64(0);
-            fixture(NAMESPACE, &mut rng, num_validators)
-        }
     }
 
     /// Different payloads for the same chunk produce distinct certificates.
@@ -252,7 +244,7 @@ mod tests {
     {
         // Use 8 validators so quorum is 6
         let num_validators = 8;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(NAMESPACE, &mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let height = 10;
@@ -287,6 +279,7 @@ mod tests {
     #[test]
     fn test_chunk_different_payloads() {
         chunk_different_payloads(ed25519::fixture);
+        chunk_different_payloads(secp256r1::fixture);
         chunk_different_payloads(bls12381_multisig::fixture::<MinPk, _>);
         chunk_different_payloads(bls12381_multisig::fixture::<MinSig, _>);
         chunk_different_payloads(bls12381_threshold::fixture::<MinPk, _>);
@@ -300,7 +293,7 @@ mod tests {
         F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(NAMESPACE, &mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(10);
@@ -333,6 +326,7 @@ mod tests {
     #[test]
     fn test_sequencer_different_heights() {
         sequencer_different_heights(ed25519::fixture);
+        sequencer_different_heights(secp256r1::fixture);
         sequencer_different_heights(bls12381_multisig::fixture::<MinPk, _>);
         sequencer_different_heights(bls12381_multisig::fixture::<MinSig, _>);
         sequencer_different_heights(bls12381_threshold::fixture::<MinPk, _>);
@@ -346,7 +340,7 @@ mod tests {
         F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(NAMESPACE, &mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(10);
@@ -381,6 +375,7 @@ mod tests {
     #[test]
     fn test_sequencer_contiguous_heights() {
         sequencer_contiguous_heights(ed25519::fixture);
+        sequencer_contiguous_heights(secp256r1::fixture);
         sequencer_contiguous_heights(bls12381_multisig::fixture::<MinPk, _>);
         sequencer_contiguous_heights(bls12381_multisig::fixture::<MinSig, _>);
         sequencer_contiguous_heights(bls12381_threshold::fixture::<MinPk, _>);
@@ -394,7 +389,7 @@ mod tests {
         F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(NAMESPACE, &mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let height = 30;
@@ -427,6 +422,7 @@ mod tests {
     #[test]
     fn test_chunk_different_epochs() {
         chunk_different_epochs(ed25519::fixture);
+        chunk_different_epochs(secp256r1::fixture);
         chunk_different_epochs(bls12381_multisig::fixture::<MinPk, _>);
         chunk_different_epochs(bls12381_multisig::fixture::<MinSig, _>);
         chunk_different_epochs(bls12381_threshold::fixture::<MinPk, _>);
@@ -440,7 +436,7 @@ mod tests {
         F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(NAMESPACE, &mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let epoch = Epoch::new(99);
         let sequencer = fixture.participants[1].clone();
@@ -467,6 +463,7 @@ mod tests {
     #[test]
     fn test_add_certificate() {
         add_certificate(ed25519::fixture);
+        add_certificate(secp256r1::fixture);
         add_certificate(bls12381_multisig::fixture::<MinPk, _>);
         add_certificate(bls12381_multisig::fixture::<MinSig, _>);
         add_certificate(bls12381_threshold::fixture::<MinPk, _>);
@@ -480,7 +477,7 @@ mod tests {
         F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(NAMESPACE, &mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
@@ -495,6 +492,7 @@ mod tests {
     #[test]
     fn test_duplicate_attestation_submission() {
         duplicate_attestation_submission(ed25519::fixture);
+        duplicate_attestation_submission(secp256r1::fixture);
         duplicate_attestation_submission(bls12381_multisig::fixture::<MinPk, _>);
         duplicate_attestation_submission(bls12381_multisig::fixture::<MinSig, _>);
         duplicate_attestation_submission(bls12381_threshold::fixture::<MinPk, _>);
@@ -508,7 +506,7 @@ mod tests {
         F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(NAMESPACE, &mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
@@ -532,6 +530,7 @@ mod tests {
     #[test]
     fn test_subsequent_acks_after_certificate_reached() {
         subsequent_acks_after_certificate_reached(ed25519::fixture);
+        subsequent_acks_after_certificate_reached(secp256r1::fixture);
         subsequent_acks_after_certificate_reached(bls12381_multisig::fixture::<MinPk, _>);
         subsequent_acks_after_certificate_reached(bls12381_multisig::fixture::<MinSig, _>);
         subsequent_acks_after_certificate_reached(bls12381_threshold::fixture::<MinPk, _>);
@@ -545,7 +544,7 @@ mod tests {
         F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(NAMESPACE, &mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
 
         let sequencer1 = fixture.participants[1].clone();
@@ -571,6 +570,7 @@ mod tests {
     #[test]
     fn test_multiple_sequencers() {
         multiple_sequencers(ed25519::fixture);
+        multiple_sequencers(secp256r1::fixture);
         multiple_sequencers(bls12381_multisig::fixture::<MinPk, _>);
         multiple_sequencers(bls12381_multisig::fixture::<MinSig, _>);
         multiple_sequencers(bls12381_threshold::fixture::<MinPk, _>);
@@ -584,7 +584,7 @@ mod tests {
         F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(NAMESPACE, &mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
@@ -601,6 +601,7 @@ mod tests {
     #[test]
     fn test_incomplete_quorum() {
         incomplete_quorum(ed25519::fixture);
+        incomplete_quorum(secp256r1::fixture);
         incomplete_quorum(bls12381_multisig::fixture::<MinPk, _>);
         incomplete_quorum(bls12381_multisig::fixture::<MinSig, _>);
         incomplete_quorum(bls12381_threshold::fixture::<MinPk, _>);
@@ -617,7 +618,7 @@ mod tests {
         // We'll have validators [0-13] vote for payload1 and [6-19] vote for payload2
         // This gives us overlapping sets but each reaches quorum
         let num_validators = 20;
-        let fixture = helpers::setup(num_validators, fixture);
+        let fixture = fixture(NAMESPACE, &mut test_rng(), num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
@@ -658,6 +659,7 @@ mod tests {
     #[test]
     fn test_interleaved_payloads() {
         interleaved_payloads(ed25519::fixture);
+        interleaved_payloads(secp256r1::fixture);
         interleaved_payloads(bls12381_multisig::fixture::<MinPk, _>);
         interleaved_payloads(bls12381_multisig::fixture::<MinSig, _>);
         interleaved_payloads(bls12381_threshold::fixture::<MinPk, _>);

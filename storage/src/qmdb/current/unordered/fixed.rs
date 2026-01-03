@@ -8,6 +8,7 @@
 
 use crate::{
     bitmap::{CleanBitMap, DirtyBitMap},
+    kv::{self, Batchable},
     mmr::{
         mem::{Clean, Dirty, State},
         Location, Proof, StandardHasher,
@@ -25,7 +26,7 @@ use crate::{
             proof::{OperationProof, RangeProof},
             root, FixedConfig as Config,
         },
-        store::{Batchable, CleanStore, DirtyStore, LogStore},
+        store::{CleanStore, DirtyStore, LogStore},
         Error,
     },
     translator::Translator,
@@ -364,12 +365,6 @@ impl<
         self.any.prune(prune_loc).await
     }
 
-    /// Close the db. Operations that have not been committed will be lost or rolled back on
-    /// restart.
-    pub async fn close(self) -> Result<(), Error> {
-        self.any.close().await
-    }
-
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
@@ -514,7 +509,7 @@ impl<
         T: Translator,
         const N: usize,
         S: State<DigestOf<H>>,
-    > crate::store::Store for Db<E, K, V, H, T, N, S>
+    > kv::Gettable for Db<E, K, V, H, T, N, S>
 {
     type Key = K;
     type Value = V;
@@ -532,7 +527,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreMut for Db<E, K, V, H, T, N, Dirty>
+    > kv::Updatable for Db<E, K, V, H, T, N, Dirty>
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
@@ -546,7 +541,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreDeletable for Db<E, K, V, H, T, N, Dirty>
+    > kv::Deletable for Db<E, K, V, H, T, N, Dirty>
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
@@ -663,10 +658,6 @@ impl<
         self.prune(prune_loc).await
     }
 
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
-    }
-
     async fn destroy(self) -> Result<(), Error> {
         self.destroy().await
     }
@@ -759,7 +750,7 @@ pub mod test {
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
             let root0 = db.root();
-            db.close().await.unwrap();
+            drop(db);
             let db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 1);
             assert!(db.get_metadata().await.unwrap().is_none());
@@ -779,7 +770,7 @@ pub mod test {
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 1 move + 1 initial commit.
             let root1 = db.root();
             assert!(root1 != root0);
-            db.close().await.unwrap();
+            drop(db);
             let db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 1 moves + 1 initial commit.
             assert!(db.get_metadata().await.unwrap().is_none());
@@ -804,10 +795,11 @@ pub mod test {
             // Repeated delete of same key should fail.
             let mut db = db.into_dirty();
             assert!(!db.delete(k1).await.unwrap());
-            let db = db.merkleize().await.unwrap();
+            let mut db = db.merkleize().await.unwrap();
+            db.sync().await.unwrap();
 
-            // Confirm close/re-open preserves state.
-            db.close().await.unwrap();
+            // Confirm re-open preserves state.
+            drop(db);
             let db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 6); // 1 update, 2 commits, 1 move, 1 delete + 1 initial commit.
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
@@ -875,9 +867,10 @@ pub mod test {
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
             assert_eq!(db.any.snapshot.items(), 857);
 
-            // Close & reopen the db, making sure the re-opened db has exactly the same state.
+            // Drop & reopen the db, making sure it has exactly the same state.
             let root = db.root();
-            db.close().await.unwrap();
+            db.sync().await.unwrap();
+            drop(db);
             let db = open_db(context.clone(), "build_big").await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), 1957);
@@ -965,6 +958,7 @@ pub mod test {
                 &proof,
                 &root,
             ));
+
             // Old value will not verify against new proof.
             assert!(!CleanCurrentTest::verify_key_value_proof(
                 hasher.inner(),
@@ -996,6 +990,7 @@ pub mod test {
                 &[proof_inactive.chunk],
                 &root,
             ));
+
             // But this proof should *not* verify as a key value proof, since verification will see
             // that the operation is inactive.
             assert!(!CleanCurrentTest::verify_key_value_proof(
@@ -1100,8 +1095,25 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "range_proofs";
             let mut hasher = StandardHasher::<Sha256>::new();
-            let db = open_db(context.clone(), partition).await.into_dirty();
-            let db = apply_random_ops(200, true, context.next_u64(), db)
+            let db = open_db(context.clone(), partition).await;
+            let root = db.root();
+
+            // Empty range proof should not crash or verify, since even an empty db has a single
+            // commit op.
+            let proof = RangeProof {
+                proof: Proof::default(),
+                partial_chunk_digest: None,
+            };
+            assert!(!CleanCurrentTest::verify_range_proof(
+                hasher.inner(),
+                &proof,
+                Location::new_unchecked(0),
+                &[],
+                &[],
+                &root,
+            ));
+
+            let db = apply_random_ops(200, true, context.next_u64(), db.into_dirty())
                 .await
                 .unwrap();
             let root = db.root();
@@ -1129,6 +1141,17 @@ pub mod test {
                     ),
                     "failed to verify range at start_loc {start_loc}",
                 );
+                // Proof should not verify if we include extra chunks.
+                let mut chunks_with_extra = chunks.clone();
+                chunks_with_extra.push(chunks[chunks.len() - 1]);
+                assert!(!CleanCurrentTest::verify_range_proof(
+                    hasher.inner(),
+                    &proof,
+                    loc,
+                    &ops,
+                    &chunks_with_extra,
+                    &root,
+                ));
             }
 
             db.destroy().await.unwrap();
@@ -1222,16 +1245,18 @@ pub mod test {
             let partition = "build_random";
             let rng_seed = context.next_u64();
             let db = open_db(context.clone(), partition).await.into_dirty();
-            let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
+            let mut db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
+            db.sync().await.unwrap();
 
-            // Close the db, then replay its operations with a bitmap.
+            // Drop and reopen the db
             let root = db.root();
-            // Create a bitmap based on the current db's pruned/inactive state.
-            db.close().await.unwrap();
 
+            drop(db);
             let db = open_db(context, partition).await;
+
+            // Ensure the root matches
             assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
@@ -1408,9 +1433,8 @@ pub mod test {
             // Verify they generate the same roots
             assert_eq!(root_no_pruning, root_pruning);
 
-            // Close both databases
-            db_no_pruning.close().await.unwrap();
-            db_pruning.close().await.unwrap();
+            drop(db_no_pruning);
+            drop(db_pruning);
 
             // Restart both databases
             let db_no_pruning = CleanCurrentTest::init(context.clone(), db_config_no_pruning)

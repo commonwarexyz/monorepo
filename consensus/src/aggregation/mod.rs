@@ -19,6 +19,9 @@
 //! - [`ed25519`][scheme::ed25519]: Attributable signatures with individual verification.
 //!   HSM-friendly, no trusted setup required. Certificates contain individual signatures.
 //!
+//! - [`secp256r1`][scheme::secp256r1]: Attributable signatures with individual verification.
+//!   HSM-friendly, no trusted setup required. Certificates contain individual signatures.
+//!
 //! - [`bls12381_multisig`][scheme::bls12381_multisig]: Attributable signatures with aggregated
 //!   verification. Produces compact certificates while preserving signer attribution.
 //!
@@ -84,7 +87,7 @@ cfg_if::cfg_if! {
 mod tests {
     use super::{mocks, Config, Engine};
     use crate::{
-        aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
+        aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
         types::{Epoch, EpochDelta},
     };
     use commonware_cryptography::{
@@ -100,9 +103,9 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{NZUsize, NonZeroDuration};
+    use commonware_utils::{test_rng, NZUsize, NonZeroDuration};
     use futures::{channel::oneshot, future::join_all};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, Rng};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU32, NonZeroUsize},
@@ -343,6 +346,7 @@ mod tests {
         all_online(bls12381_multisig::fixture::<MinPk, _>);
         all_online(bls12381_multisig::fixture::<MinSig, _>);
         all_online(ed25519::fixture);
+        all_online(secp256r1::fixture);
     }
 
     /// Test consensus resilience to Byzantine behavior.
@@ -383,6 +387,7 @@ mod tests {
         byzantine_proposer(bls12381_multisig::fixture::<MinPk, _>);
         byzantine_proposer(bls12381_multisig::fixture::<MinSig, _>);
         byzantine_proposer(ed25519::fixture);
+        byzantine_proposer(secp256r1::fixture);
     }
 
     fn unclean_byzantine_shutdown<S, F>(fixture: F)
@@ -402,7 +407,7 @@ mod tests {
         let mut prev_checkpoint = None;
 
         // Generate fixture once (persists across restarts)
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = test_rng();
         let fixture = fixture(TEST_NAMESPACE, &mut rng, num_validators);
 
         // Continue until shared reporter reaches target or max shutdowns exceeded
@@ -539,6 +544,7 @@ mod tests {
         unclean_byzantine_shutdown(bls12381_multisig::fixture::<MinPk, _>);
         unclean_byzantine_shutdown(bls12381_multisig::fixture::<MinSig, _>);
         unclean_byzantine_shutdown(ed25519::fixture);
+        unclean_byzantine_shutdown(secp256r1::fixture);
     }
 
     fn unclean_shutdown_with_unsigned_index<S, F>(fixture: F)
@@ -553,7 +559,7 @@ mod tests {
         let target_index = 100;
 
         // Generate fixture once (persists across restarts)
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = test_rng();
         let fixture = fixture(TEST_NAMESPACE, &mut rng, num_validators);
 
         // First run: let validators skip signing at skip_index and reach beyond it
@@ -731,6 +737,7 @@ mod tests {
         unclean_shutdown_with_unsigned_index(bls12381_multisig::fixture::<MinPk, _>);
         unclean_shutdown_with_unsigned_index(bls12381_multisig::fixture::<MinSig, _>);
         unclean_shutdown_with_unsigned_index(ed25519::fixture);
+        unclean_shutdown_with_unsigned_index(secp256r1::fixture);
     }
 
     fn slow_and_lossy_links<S, F>(fixture: F, seed: u64) -> String
@@ -782,6 +789,7 @@ mod tests {
         slow_and_lossy_links(bls12381_multisig::fixture::<MinPk, _>, 0);
         slow_and_lossy_links(bls12381_multisig::fixture::<MinSig, _>, 0);
         slow_and_lossy_links(ed25519::fixture, 0);
+        slow_and_lossy_links(secp256r1::fixture, 0);
     }
 
     #[test_group("slow")]
@@ -819,12 +827,18 @@ mod tests {
             let ed_state_2 = slow_and_lossy_links(ed25519::fixture, seed);
             assert_eq!(ed_state_1, ed_state_2);
 
+            // Test secp256r1
+            let secp_state_1 = slow_and_lossy_links(secp256r1::fixture, seed);
+            let secp_state_2 = slow_and_lossy_links(secp256r1::fixture, seed);
+            assert_eq!(secp_state_1, secp_state_2);
+
             let states = [
                 ("threshold-minpk", ts_pk_state_1),
                 ("threshold-minsig", ts_sig_state_1),
                 ("multisig-minpk", ms_pk_state_1),
                 ("multisig-minsig", ms_sig_state_1),
                 ("ed25519", ed_state_1),
+                ("secp256r1", secp_state_1),
             ];
 
             // Sanity check that different types can't be identical
@@ -879,6 +893,7 @@ mod tests {
         one_offline(bls12381_multisig::fixture::<MinPk, _>);
         one_offline(bls12381_multisig::fixture::<MinSig, _>);
         one_offline(ed25519::fixture);
+        one_offline(secp256r1::fixture);
     }
 
     /// Test consensus recovery after a network partition.
@@ -943,6 +958,7 @@ mod tests {
         network_partition(bls12381_multisig::fixture::<MinPk, _>);
         network_partition(bls12381_multisig::fixture::<MinSig, _>);
         network_partition(ed25519::fixture);
+        network_partition(secp256r1::fixture);
     }
 
     /// Test insufficient validator participation (below quorum).
@@ -1053,5 +1069,6 @@ mod tests {
         insufficient_validators(bls12381_multisig::fixture::<MinPk, _>);
         insufficient_validators(bls12381_multisig::fixture::<MinSig, _>);
         insufficient_validators(ed25519::fixture);
+        insufficient_validators(secp256r1::fixture);
     }
 }

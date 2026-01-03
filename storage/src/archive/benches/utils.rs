@@ -171,13 +171,6 @@ impl ArchiveTrait for Archive {
         }
     }
 
-    async fn close(self) -> Result<(), commonware_storage::archive::Error> {
-        match self {
-            Self::Immutable(a) => a.close().await,
-            Self::Prunable(a) => a.close().await,
-        }
-    }
-
     async fn destroy(self) -> Result<(), commonware_storage::archive::Error> {
         match self {
             Self::Immutable(a) => a.destroy().await,

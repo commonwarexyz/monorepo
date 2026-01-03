@@ -5,10 +5,9 @@
 //! Signing schemes differ in whether per-validator activities can be used as evidence of either
 //! liveness or of committing a fault:
 //!
-//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`]): Individual signatures can be presented
-//!   to some third party as evidence of either liveness or of committing a fault. Certificates contain signer
-//!   indices alongside individual signatures, enabling secure per-validator activity tracking and
-//!   conflict detection.
+//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`], [`secp256r1`]): Individual signatures can be
+//!   presented to some third party as evidence of either liveness or of committing a fault. Certificates contain signer
+//!   indices alongside individual signatures, enabling secure per-validator activity tracking and conflict detection.
 //!
 //! - **Non-Attributable schemes** ([`bls12381_threshold`]): Individual signatures cannot be presented
 //!   to some third party as evidence of either liveness or of committing a fault because they can be forged
@@ -17,7 +16,7 @@
 //!   Because peer connections are authenticated, evidence can be used locally (as it must be sent by said participant)
 //!   but can't be used by an external observer.
 //!
-//! The [`certificate::Scheme::is_attributable()`] method signals whether evidence can be safely
+//! The [`certificate::Scheme::is_attributable()`] associated function signals whether evidence can be safely
 //! exposed. For applications only interested in collecting evidence for liveness/faults, use [`reporter::AttributableReporter`]
 //! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). If
 //! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
@@ -31,6 +30,7 @@ use commonware_utils::union;
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
+pub mod secp256r1;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod reporter;

@@ -1,6 +1,10 @@
 use crate::{
     index::{Cursor as _, Ordered as Index},
-    journal::contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
+    journal::{
+        contiguous::{Contiguous, MutableContiguous},
+        Error as JournalError,
+    },
+    kv::{self, Batchable},
     mmr::{
         mem::{Dirty, State},
         Location,
@@ -12,9 +16,9 @@ use crate::{
         },
         delete_known_loc,
         operation::Operation as OperationTrait,
-        store::Batchable,
         update_known_loc, Error,
     },
+    Persistable,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
@@ -797,15 +801,21 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: PersistableContiguous<Item = Operation<K, V>>,
+        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StorePersistable for Db<E, C, I, H, Update<K, V>>
+    > Persistable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -820,7 +830,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::Store for Db<E, C, I, H, Update<K, V>>
+    > kv::Gettable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -840,7 +850,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreMut for Db<E, C, I, H, Update<K, V>>
+    > kv::Updatable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -856,7 +866,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreDeletable for Db<E, C, I, H, Update<K, V>>
+    > kv::Deletable for Db<E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -869,7 +879,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: PersistableContiguous<Item = Operation<K, V>>,
+        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
         I: Index<Value = Location>,
         H: Hasher,
     > CleanAny for Db<E, C, I, H, Update<K, V>>
@@ -892,10 +902,6 @@ where
 
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -993,6 +999,7 @@ where
 mod test {
     use super::*;
     use crate::{
+        kv::{Deletable as _, Updatable as _},
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
             store::{DirtyStore as _, LogStore as _},

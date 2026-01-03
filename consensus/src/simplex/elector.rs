@@ -183,7 +183,7 @@ impl Random {
 impl<P, V> Config<bls12381_threshold::Scheme<P, V>> for Random
 where
     P: PublicKey,
-    V: Variant + Send + Sync + 'static,
+    V: Variant,
 {
     type Elector = RandomElector<bls12381_threshold::Scheme<P, V>>;
 
@@ -209,7 +209,7 @@ impl<P, V> Elector<bls12381_threshold::Scheme<P, V>>
     for RandomElector<bls12381_threshold::Scheme<P, V>>
 where
     P: PublicKey,
-    V: Variant + Send + Sync + 'static,
+    V: Variant,
 {
     fn elect(&self, round: Round, certificate: Option<&bls12381_threshold::Signature<V>>) -> u32 {
         Random::select_leader::<V>(round, self.n, certificate.map(|c| c.seed_signature))
