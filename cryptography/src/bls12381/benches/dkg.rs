@@ -7,11 +7,13 @@ use commonware_cryptography::{
     Signer as _,
 };
 use commonware_math::algebra::Random;
+use commonware_parallel::{Parallel, Sequential};
 use commonware_utils::{ordered::Set, quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, hint::black_box};
+use rayon::ThreadPoolBuilder;
+use std::{collections::BTreeMap, hint::black_box, sync::Arc};
 
 type V = MinSig;
 
@@ -111,10 +113,10 @@ impl Bench {
 cfg_if::cfg_if! {
     if #[cfg(full_bench)] {
         const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50, 100, 250, 500];
-        const CONCURRENCY: &[usize] = &[1, 4, 8];
+        const CONCURRENCY: &[usize] = &[1, 8];
     } else {
         const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50];
-        const CONCURRENCY: &[usize] = &[1];
+        const CONCURRENCY: &[usize] = &[1, 8];
     }
 }
 
@@ -129,6 +131,12 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
         let t = quorum(n);
         let bench = Bench::new(&mut rng, reshare, n);
         for &concurrency in CONCURRENCY {
+            let pool = Arc::new(
+                ThreadPoolBuilder::new()
+                    .num_threads(concurrency)
+                    .build()
+                    .unwrap(),
+            );
             c.bench_function(
                 &format!(
                     "{}{}/n={} t={} conc={}",
@@ -136,13 +144,19 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
                     suffix,
                     n,
                     t,
-                    concurrency
+                    concurrency,
                 ),
                 |b| {
                     b.iter_batched(
                         || bench.pre_finalize(),
                         |(player, logs)| {
-                            black_box(player.finalize(logs, concurrency).unwrap());
+                            if concurrency > 1 {
+                                black_box(
+                                    player.finalize(logs, &Parallel::new(pool.clone())).unwrap(),
+                                );
+                            } else {
+                                black_box(player.finalize(logs, &Sequential).unwrap());
+                            }
                         },
                         BatchSize::SmallInput,
                     );

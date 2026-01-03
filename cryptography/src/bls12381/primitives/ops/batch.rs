@@ -21,6 +21,7 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_math::algebra::{Additive, Random, Space};
+use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 
 /// Verifies multiple signatures over the same message from different public keys,
@@ -114,16 +115,17 @@ where
 /// This function assumes a group check was already performed on `public` and each `signature`.
 /// Duplicate messages are safe because random scalar weights ensure each (message, signature)
 /// pair is verified independently.
-pub fn verify_same_signer<'a, R, V, I>(
+pub fn verify_same_signer<'a, R, V, I, S>(
     rng: &mut R,
     public: &V::Public,
     entries: I,
-    concurrency: usize,
+    strategy: &S,
 ) -> Result<(), Error>
 where
     R: CryptoRngCore,
     V: Variant,
     I: IntoIterator<Item = &'a (&'a [u8], &'a [u8], V::Signature)>,
+    S: Strategy,
 {
     let entries: Vec<_> = entries.into_iter().collect();
 
@@ -144,8 +146,8 @@ where
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
 
     // Compute weighted sums using MSM
-    let weighted_hm = V::Signature::msm(&hms, &scalars, concurrency);
-    let weighted_sig = V::Signature::msm(&sigs, &scalars, concurrency);
+    let weighted_hm = V::Signature::msm(&hms, &scalars, strategy);
+    let weighted_sig = V::Signature::msm(&sigs, &scalars, strategy);
 
     // Verify: e(pk, weighted_hm) == e(weighted_sig, G)
     V::verify(public, &weighted_hm, &weighted_sig)
@@ -159,7 +161,10 @@ mod tests {
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
     use commonware_math::algebra::{CryptoGroup, Random};
+    use commonware_parallel::{Parallel, Sequential};
     use commonware_utils::test_rng;
+    use rayon::ThreadPoolBuilder;
+    use std::sync::Arc;
 
     fn verify_same_signer_correct<V: Variant>() {
         let mut rng = test_rng();
@@ -175,11 +180,13 @@ mod tests {
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(&private, ns, msg)))
             .collect();
 
-        verify_same_signer::<_, V, _>(&mut rng, &public, &entries, 1)
+        verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &Sequential)
             .expect("valid signatures should be accepted");
 
-        verify_same_signer::<_, V, _>(&mut rng, &public, &entries, 4)
-            .expect("valid signatures should be accepted with parallelism");
+        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(4).build().unwrap());
+        let parallel = Parallel::new(pool);
+        verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &parallel)
+            .expect("valid signatures should be accepted with parallel strategy");
     }
 
     #[test]
@@ -205,7 +212,7 @@ mod tests {
         let random_scalar = Scalar::random(&mut rng);
         entries[1].2 += &(V::Signature::generator() * &random_scalar);
 
-        let result = verify_same_signer::<_, V, _>(&mut rng, &public, &entries, 1);
+        let result = verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &Sequential);
         assert!(result.is_err(), "corrupted signature should be rejected");
     }
 
@@ -261,7 +268,8 @@ mod tests {
             (namespace, msg1, forged_sig1),
             (namespace, msg2, forged_sig2),
         ];
-        let result = verify_same_signer::<_, V, _>(&mut rng, &public, &forged_entries, 1);
+        let result =
+            verify_same_signer::<_, V, _, _>(&mut rng, &public, &forged_entries, &Sequential);
         assert!(
             result.is_err(),
             "batch verification should reject forged signatures"
@@ -270,7 +278,7 @@ mod tests {
         // Batch verification accepts valid signatures
         let valid_entries: Vec<(&[u8], &[u8], _)> =
             vec![(namespace, msg1, sig1), (namespace, msg2, sig2)];
-        verify_same_signer::<_, V, _>(&mut rng, &public, &valid_entries, 1)
+        verify_same_signer::<_, V, _, _>(&mut rng, &public, &valid_entries, &Sequential)
             .expect("batch verification should accept valid signatures");
     }
 

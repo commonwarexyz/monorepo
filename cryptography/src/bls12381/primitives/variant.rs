@@ -18,6 +18,7 @@ use commonware_codec::{
     varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
 use commonware_math::algebra::{HashToGroup, Random as _, Space};
+use commonware_parallel::Strategy;
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
@@ -58,11 +59,12 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     ) -> Result<(), Error>;
 
     /// Verify a batch of signatures from the provided public keys and pre-hashed messages.
-    fn batch_verify<R: CryptoRngCore>(
+    fn batch_verify<R: CryptoRngCore, S: Strategy>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
+        strategy: &S,
     ) -> Result<(), Error>;
 
     /// Compute the pairing `e(G1, G2) -> GT`.
@@ -144,11 +146,12 @@ impl Variant for MinPk {
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify<R: CryptoRngCore>(
+    fn batch_verify<R: CryptoRngCore, S: Strategy>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
+        strategy: &S,
     ) -> Result<(), Error> {
         // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());
@@ -163,7 +166,7 @@ impl Variant for MinPk {
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
-        let s_agg = G2::msm(signatures, &scalars, 1);
+        let s_agg = G2::msm(signatures, &scalars, strategy);
 
         // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);
@@ -290,11 +293,12 @@ impl Variant for MinSig {
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify<R: CryptoRngCore>(
+    fn batch_verify<R: CryptoRngCore, S: Strategy>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
+        strategy: &S,
     ) -> Result<(), Error> {
         // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());
@@ -309,7 +313,7 @@ impl Variant for MinSig {
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
-        let s_agg = G1::msm(signatures, &scalars, 1);
+        let s_agg = G1::msm(signatures, &scalars, strategy);
 
         // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);
@@ -410,7 +414,10 @@ mod tests {
     use super::*;
     use crate::bls12381::primitives::{group::Scalar, ops};
     use commonware_math::algebra::{CryptoGroup, Random};
+    use commonware_parallel::{Parallel, Sequential};
     use commonware_utils::test_rng;
+    use rayon::ThreadPoolBuilder;
+    use std::sync::Arc;
 
     fn batch_verify_correct<V: Variant>() {
         let mut rng = test_rng();
@@ -435,8 +442,20 @@ mod tests {
             &[public1, public2, public3],
             &[hm1, hm2, hm3],
             &[sig1, sig2, sig3],
+            &Sequential,
         )
         .expect("valid batch should pass");
+
+        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(4).build().unwrap());
+        let parallel = Parallel::new(pool);
+        V::batch_verify(
+            &mut rng,
+            &[public1, public2, public3],
+            &[hm1, hm2, hm3],
+            &[sig1, sig2, sig3],
+            &parallel,
+        )
+        .expect("valid batch should pass with parallel strategy");
     }
 
     #[test]
@@ -487,6 +506,7 @@ mod tests {
             &[public1, public2],
             &[hm1, hm2],
             &[forged_sig1, forged_sig2],
+            &Sequential,
         );
         assert!(
             result.is_err(),
@@ -494,8 +514,14 @@ mod tests {
         );
 
         // Valid signatures should still pass
-        V::batch_verify(&mut rng, &[public1, public2], &[hm1, hm2], &[sig1, sig2])
-            .expect("valid signatures should pass batch_verify");
+        V::batch_verify(
+            &mut rng,
+            &[public1, public2],
+            &[hm1, hm2],
+            &[sig1, sig2],
+            &Sequential,
+        )
+        .expect("valid signatures should pass batch_verify");
     }
 
     #[test]
