@@ -4051,11 +4051,9 @@ mod tests {
         run_1k::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    #[cfg(not(coverage))]
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_secp256r1() {
-        // TODO(#2681): for reasons that we don't know yet, this test times out under coverage collection
         run_1k::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
