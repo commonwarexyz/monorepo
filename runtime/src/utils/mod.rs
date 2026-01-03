@@ -91,9 +91,8 @@ pub fn create_pool<S: Spawner + Metrics>(
     context: S,
     concurrency: usize,
 ) -> Result<ThreadPool, ThreadPoolBuildError> {
-    let pool = ThreadPoolBuilder::new()
+    let mut builder = ThreadPoolBuilder::new()
         .num_threads(concurrency)
-        .use_current_thread()
         .spawn_handler(move |thread| {
             // Tasks spawned in a thread pool are expected to run longer than any single
             // task and thus should be provisioned as a dedicated thread.
@@ -102,10 +101,13 @@ pub fn create_pool<S: Spawner + Metrics>(
                 .dedicated()
                 .spawn(move |_| async move { thread.run() });
             Ok(())
-        })
-        .build()?;
+        });
 
-    Ok(Arc::new(pool))
+    if rayon::current_thread_index().is_none() {
+        builder = builder.use_current_thread();
+    }
+
+    builder.build().map(Arc::new)
 }
 
 /// Async reader–writer lock.
