@@ -1597,10 +1597,6 @@ mod tests {
 
         let ack = Ack::sign(&fixture.schemes[0], chunk, epoch).expect("Should sign ack");
         assert!(ack.verify(&mut rng, &fixture.verifier));
-
-        // FIXME
-        // // Test that verification fails with wrong namespace
-        // assert!(!ack.verify(&mut rng, b"wrong", &fixture.verifier));
     }
 
     #[test]
