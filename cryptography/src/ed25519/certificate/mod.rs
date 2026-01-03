@@ -676,7 +676,6 @@ mod tests {
     impl_certificate_ed25519!(TestSubject<'a>);
 
     fn setup_signers(rng: &mut impl CryptoRngCore, n: u32) -> (Vec<Scheme>, Scheme) {
-
         let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::random(&mut *rng)).collect();
         let participants: Set<PublicKey> = private_keys
             .iter()
@@ -696,7 +695,6 @@ mod tests {
 
     #[test]
     fn test_is_attributable() {
-
         assert!(Generic::is_attributable());
         assert!(Scheme::is_attributable());
     }
@@ -704,7 +702,6 @@ mod tests {
     #[test]
     #[cfg(feature = "std")]
     fn test_is_batchable() {
-
         assert!(Generic::is_batchable());
         assert!(Scheme::is_batchable());
     }
@@ -712,14 +709,12 @@ mod tests {
     #[test]
     #[cfg(not(feature = "std"))]
     fn test_is_not_batchable() {
-
         assert!(!Generic::is_batchable());
         assert!(!Scheme::is_batchable());
     }
 
     #[test]
     fn test_sign_vote_roundtrip() {
-
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
         let scheme = &schemes[0];
@@ -737,7 +732,6 @@ mod tests {
 
     #[test]
     fn test_verifier_cannot_sign() {
-
         let mut rng = test_rng();
         let (_, verifier) = setup_signers(&mut rng, 4);
         assert!(verifier
@@ -747,7 +741,6 @@ mod tests {
 
     #[test]
     fn test_verify_attestations_filters_invalid() {
-
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 5);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -761,7 +754,6 @@ mod tests {
             })
             .collect();
 
-        let mut rng = test_rng();
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
@@ -799,7 +791,6 @@ mod tests {
 
     #[test]
     fn test_assemble_certificate() {
-
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -853,7 +844,6 @@ mod tests {
 
     #[test]
     fn test_verify_certificate() {
-
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -869,7 +859,6 @@ mod tests {
 
         let certificate = schemes[0].assemble(attestations).unwrap();
 
-        let mut rng = test_rng();
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             NAMESPACE,
@@ -880,7 +869,6 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_detects_corruption() {
-
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -917,7 +905,6 @@ mod tests {
 
     #[test]
     fn test_certificate_codec_roundtrip() {
-
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -939,7 +926,6 @@ mod tests {
 
     #[test]
     fn test_certificate_rejects_sub_quorum() {
-
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
         let sub_quorum = 2; // Less than quorum (3)
@@ -958,7 +944,6 @@ mod tests {
 
     #[test]
     fn test_certificate_rejects_invalid_signer() {
-
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -980,7 +965,6 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_sub_quorum() {
-
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
         let participants_len = schemes.len();
@@ -1012,7 +996,6 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_mismatched_signature_count() {
-
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
 
@@ -1040,7 +1023,6 @@ mod tests {
 
     #[test]
     fn test_verify_certificates_batch() {
-
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -1065,13 +1047,11 @@ mod tests {
             .zip(&certificates)
             .map(|(msg, cert)| (TestSubject { message: msg }, cert));
 
-        let mut rng = test_rng();
         assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter));
     }
 
     #[test]
     fn test_verify_certificates_batch_detects_failure() {
-
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -1099,7 +1079,6 @@ mod tests {
             .zip(&certificates)
             .map(|(msg, cert)| (TestSubject { message: msg }, cert));
 
-        let mut rng = test_rng();
         assert!(
             !verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter)
         );
@@ -1108,7 +1087,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "duplicate signer index")]
     fn test_assemble_certificate_rejects_duplicate_signers() {
-
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
 
@@ -1130,7 +1108,6 @@ mod tests {
 
     #[test]
     fn test_scheme_clone_and_verifier() {
-
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
         let participants = schemes[0].participants().clone();
@@ -1156,7 +1133,6 @@ mod tests {
 
     #[test]
     fn test_certificate_decode_validation() {
-
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
         let participants_len = schemes.len();
@@ -1206,7 +1182,6 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_unknown_signer() {
-
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
         let participants_len = schemes.len();
@@ -1240,7 +1215,6 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_invalid_certificate_signers_size() {
-
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
         let participants_len = schemes.len();
@@ -1279,7 +1253,6 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_signers_size_mismatch() {
-
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
         let participants_len = schemes.len();

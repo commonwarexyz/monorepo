@@ -607,7 +607,6 @@ mod tests {
         Scheme<ed25519::PublicKey, V>,
         Sharing<V>,
     ) {
-
         // Generate identity keys (ed25519)
         let identity_keys: Vec<_> = (0..n)
             .map(|_| Ed25519PrivateKey::random(&mut *rng))
@@ -633,7 +632,6 @@ mod tests {
     }
 
     fn test_sign_vote_roundtrip<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
         let scheme = &schemes[0];
@@ -656,7 +654,6 @@ mod tests {
     }
 
     fn test_verifier_cannot_sign<V: Variant>() {
-
         let mut rng = test_rng();
         let (_, verifier, _) = setup_signers::<V>(&mut rng, 4);
         assert!(verifier
@@ -671,7 +668,6 @@ mod tests {
     }
 
     fn test_verify_attestations_filters_invalid<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 5);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -685,7 +681,6 @@ mod tests {
             })
             .collect();
 
-        let mut rng = test_rng();
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
@@ -727,7 +722,6 @@ mod tests {
     }
 
     fn test_assemble_certificate<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -759,7 +753,6 @@ mod tests {
     }
 
     fn test_verify_certificate<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -790,7 +783,6 @@ mod tests {
     }
 
     fn test_verify_certificate_detects_corruption<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -831,7 +823,6 @@ mod tests {
     }
 
     fn test_certificate_codec_roundtrip<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -858,7 +849,6 @@ mod tests {
     }
 
     fn test_certificate_rejects_sub_quorum<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
         let sub_quorum = 2; // Less than quorum (3)
@@ -882,7 +872,6 @@ mod tests {
     }
 
     fn test_verify_certificates_batch<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -907,7 +896,6 @@ mod tests {
             .zip(&certificates)
             .map(|(msg, cert)| (TestSubject { message: msg }, cert));
 
-        let mut rng = test_rng();
         assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter));
     }
 
@@ -918,7 +906,6 @@ mod tests {
     }
 
     fn test_verify_certificates_batch_detects_failure<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -946,7 +933,6 @@ mod tests {
             .zip(&certificates)
             .map(|(msg, cert)| (TestSubject { message: msg }, cert));
 
-        let mut rng = test_rng();
         assert!(
             !verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter)
         );
@@ -959,7 +945,6 @@ mod tests {
     }
 
     fn test_certificate_verifier<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, _, polynomial) = setup_signers::<V>(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -1001,7 +986,6 @@ mod tests {
 
     #[test]
     fn test_is_not_attributable() {
-
         assert!(!Generic::<ed25519::PublicKey, MinPk>::is_attributable());
         assert!(!Scheme::<ed25519::PublicKey, MinPk>::is_attributable());
         assert!(!Generic::<ed25519::PublicKey, MinSig>::is_attributable());
@@ -1010,7 +994,6 @@ mod tests {
 
     #[test]
     fn test_is_batchable() {
-
         assert!(Generic::<ed25519::PublicKey, MinPk>::is_batchable());
         assert!(Scheme::<ed25519::PublicKey, MinPk>::is_batchable());
         assert!(Generic::<ed25519::PublicKey, MinSig>::is_batchable());
@@ -1018,7 +1001,6 @@ mod tests {
     }
 
     fn test_verifier_accepts_votes<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(&mut rng, 4);
 
@@ -1040,7 +1022,6 @@ mod tests {
     }
 
     fn test_scheme_clone_and_verifier<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(&mut rng, 4);
 
@@ -1069,7 +1050,6 @@ mod tests {
     }
 
     fn certificate_verifier_panics_on_vote<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
         let certificate_verifier =
@@ -1101,7 +1081,6 @@ mod tests {
     }
 
     fn signer_shares_must_match_participant_indices<V: Variant>() {
-
         let mut rng = test_rng();
 
         // Generate identity keys (ed25519)
@@ -1143,7 +1122,6 @@ mod tests {
     }
 
     fn signer_polynomial_threshold_must_equal_quorum<V: Variant>() {
-
         let mut rng = test_rng();
         let participants = make_participants(&mut rng, 5);
         // Create a polynomial with threshold 4, but quorum of 5 participants is 4
@@ -1167,7 +1145,6 @@ mod tests {
     }
 
     fn verifier_polynomial_threshold_must_equal_quorum<V: Variant>() {
-
         let mut rng = test_rng();
         let participants = make_participants(&mut rng, 5);
         // Create a polynomial with threshold 2, but quorum of 5 participants is 4
@@ -1189,7 +1166,6 @@ mod tests {
     }
 
     fn certificate_decode_rejects_length_mismatch<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
         let quorum = quorum(schemes.len() as u32) as usize;
@@ -1216,7 +1192,6 @@ mod tests {
     }
 
     fn sign_vote_partial_matches_share<V: Variant>() {
-
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
         let scheme = &schemes[0];

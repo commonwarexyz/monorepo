@@ -495,7 +495,10 @@ mod tests {
     // Use the macro to generate the test scheme
     impl_certificate_secp256r1!(TestSubject<'a>);
 
-    fn setup_signers(rng: &mut impl CryptoRngCore, n: u32) -> (Vec<Scheme<PublicKey>>, Scheme<PublicKey>) {
+    fn setup_signers(
+        rng: &mut impl CryptoRngCore,
+        n: u32,
+    ) -> (Vec<Scheme<PublicKey>>, Scheme<PublicKey>) {
         let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::random(&mut *rng)).collect();
 
         // For tests, use secp256r1 keys as both identity and signing keys
@@ -865,11 +868,7 @@ mod tests {
             .zip(&certificates)
             .map(|(msg, cert)| (TestSubject { message: msg }, cert));
 
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
-            &mut rng,
-            NAMESPACE,
-            certs_iter
-        ));
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter));
     }
 
     #[test]
@@ -901,11 +900,9 @@ mod tests {
             .zip(&certificates)
             .map(|(msg, cert)| (TestSubject { message: msg }, cert));
 
-        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
-            &mut rng,
-            NAMESPACE,
-            certs_iter
-        ));
+        assert!(
+            !verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter)
+        );
     }
 
     #[test]
