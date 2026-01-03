@@ -269,8 +269,7 @@ mod tests {
     #[test]
     fn test_get_nonexistent() {
         get_nonexistent::<ed25519::Scheme>();
-        // FIXME
-        // get_nonexistent::<secp256r1::Scheme<PublicKey>>();
+        get_nonexistent::<secp256r1::Scheme<PublicKey>>();
         get_nonexistent::<bls12381_multisig::Scheme<PublicKey, MinPk>>();
         get_nonexistent::<bls12381_multisig::Scheme<PublicKey, MinSig>>();
         get_nonexistent::<bls12381_threshold::Scheme<PublicKey, MinPk>>();

@@ -60,11 +60,9 @@
 pub use crate::{
     bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
     ed25519::certificate as ed25519,
-    impl_certificate_bls12381_multisig,
-    impl_certificate_bls12381_threshold,
-    impl_certificate_ed25519, // impl_certificate_secp256r1,
-                              // secp256r1::certificate as secp256r1,
-                              // FIXME
+    impl_certificate_bls12381_multisig, impl_certificate_bls12381_threshold,
+    impl_certificate_ed25519, impl_certificate_secp256r1,
+    secp256r1::certificate as secp256r1,
 };
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]

@@ -33,8 +33,7 @@
 //! assert_eq!(signature.recover_signer(namespace, msg).unwrap(), signer.public_key());
 //! ```
 
-// FIXME
-// pub mod certificate;
+pub mod certificate;
 mod common;
 pub mod recoverable;
 pub mod standard;

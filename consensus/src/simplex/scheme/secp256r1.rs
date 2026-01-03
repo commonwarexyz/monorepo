@@ -10,9 +10,6 @@
 //! waiting to batch them.
 
 use crate::simplex::{scheme::Namespace, types::Subject};
-// use commonware_cryptography::impl_certificate_secp256r1;
-use commonware_cryptography::impl_certificate_ed25519;
+use commonware_cryptography::impl_certificate_secp256r1;
 
-// FIXME
-// impl_certificate_secp256r1!(Subject<'a, D>);
-impl_certificate_ed25519!(Subject<'a, D>, Namespace);
+impl_certificate_secp256r1!(Subject<'a, D>, Namespace);

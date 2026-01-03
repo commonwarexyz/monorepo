@@ -39,7 +39,7 @@ use std::collections::BTreeSet;
 /// a verifier (with evaluated public polynomial), or an external verifier that
 /// only checks recovered certificates.
 #[derive(Clone, Debug)]
-pub enum Generic<P: PublicKey, V: Variant, N> {
+pub enum Generic<P: PublicKey, V: Variant, N: Namespace> {
     Signer {
         /// Participants in the committee.
         participants: Set<P>,

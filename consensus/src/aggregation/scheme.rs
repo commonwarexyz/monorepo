@@ -75,10 +75,7 @@ pub mod secp256r1 {
     //! evidence of liveness or faults.
 
     use crate::aggregation::types::{Item, Namespace};
-    use commonware_cryptography::impl_certificate_ed25519;
-    // use commonware_cryptography::impl_certificate_secp256r1;
+    use commonware_cryptography::impl_certificate_secp256r1;
 
-    // FIXME
-    impl_certificate_ed25519!(&'a Item<D>, Namespace);
-    // impl_certificate_secp256r1!(&'a Item<D>);
+    impl_certificate_secp256r1!(&'a Item<D>, Namespace);
 }

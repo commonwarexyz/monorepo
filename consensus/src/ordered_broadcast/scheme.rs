@@ -85,10 +85,7 @@ pub mod secp256r1 {
     //! per-validator activity tracking and fault detection.
 
     use crate::ordered_broadcast::types::{AckNamespace, AckSubject};
-    // use commonware_cryptography::impl_certificate_secp256r1;
-    use commonware_cryptography::{ed25519, impl_certificate_ed25519};
+    use commonware_cryptography::impl_certificate_secp256r1;
 
-    // FIXME
-    impl_certificate_ed25519!(AckSubject<'a, ed25519::PublicKey, D>, AckNamespace);
-    // impl_certificate_secp256r1!(AckSubject<'a, P, D>);
+    impl_certificate_secp256r1!(AckSubject<'a, P, D>, AckNamespace);
 }

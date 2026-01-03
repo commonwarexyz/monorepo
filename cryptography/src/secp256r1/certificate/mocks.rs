@@ -12,10 +12,11 @@ use rand::{CryptoRng, RngCore};
 
 /// Builds ed25519 identities and matching Secp256r1 signing schemes.
 pub fn fixture<S, R>(
+    namespace: &[u8],
     rng: &mut R,
     n: u32,
-    signer: impl Fn(BiMap<ed25519::PublicKey, PublicKey>, PrivateKey) -> Option<S>,
-    verifier: impl Fn(BiMap<ed25519::PublicKey, PublicKey>) -> S,
+    signer: impl Fn(&[u8], BiMap<ed25519::PublicKey, PublicKey>, PrivateKey) -> Option<S>,
+    verifier: impl Fn(&[u8], BiMap<ed25519::PublicKey, PublicKey>) -> S,
 ) -> Fixture<S>
 where
     R: RngCore + CryptoRng,
@@ -47,9 +48,11 @@ where
 
     let schemes = secp_privates
         .into_iter()
-        .map(|sk| signer(signers.clone(), sk).expect("scheme signer must be a participant"))
+        .map(|sk| {
+            signer(namespace, signers.clone(), sk).expect("scheme signer must be a participant")
+        })
         .collect();
-    let verifier = verifier(signers);
+    let verifier = verifier(namespace, signers);
 
     Fixture {
         participants: participants_vec,

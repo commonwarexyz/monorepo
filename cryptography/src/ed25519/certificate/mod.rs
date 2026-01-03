@@ -30,7 +30,7 @@ use std::collections::BTreeSet;
 /// context types. It can be reused across different protocols (simplex, aggregation, etc.)
 /// by wrapping it with protocol-specific trait implementations via the macro.
 #[derive(Clone, Debug)]
-pub struct Generic<N> {
+pub struct Generic<N: Namespace> {
     /// Participants in the committee.
     pub participants: Set<PublicKey>,
     /// Key used for generating signatures.
