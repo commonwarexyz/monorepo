@@ -397,6 +397,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 break;
             }
             let (peer, _) = self.blocked.pop().unwrap();
+            debug!(?peer, "unblocked peer");
 
             // Update knowledge bitmaps
             if let Some(record) = self.peers.get(&peer) {

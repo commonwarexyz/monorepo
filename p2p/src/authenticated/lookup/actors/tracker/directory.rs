@@ -315,7 +315,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             if blocked_until > now {
                 break;
             }
-            self.blocked.pop();
+            let (peer, _) = self.blocked.pop().unwrap();
+            debug!(?peer, "unblocked peer");
             any_unblocked = true;
         }
         let _ = self.metrics.blocked.try_set(self.blocked.len());
