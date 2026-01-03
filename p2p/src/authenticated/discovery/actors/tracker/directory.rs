@@ -480,7 +480,7 @@ mod tests {
     use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox};
     use commonware_cryptography::{secp256r1::standard::PrivateKey, Signer};
     use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_utils::NZU32;
+    use commonware_utils::{bitmap::BitMap, NZU32};
     use std::net::SocketAddr;
 
     const NAMESPACE: &[u8] = b"test";
@@ -1108,6 +1108,219 @@ mod tests {
             assert!(
                 directory.eligible(&peer_pk),
                 "Peer should be eligible after unblock"
+            );
+        });
+    }
+
+    #[test]
+    fn test_blocked_peer_info_not_sharable() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let peer_signer = PrivateKey::from_seed(1);
+        let peer_pk = peer_signer.public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: 3,
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+
+            // Add peer to a set
+            let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
+            directory.add_set(0, peer_set);
+
+            // Update with peer info
+            let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
+            directory.update_peers(vec![peer_info]);
+
+            // Reserve and connect to make peer Active (so info would be sharable)
+            let reservation = directory.dial(&peer_pk);
+            assert!(reservation.is_some(), "Should be able to dial peer");
+            directory.connect(&peer_pk, true);
+
+            // Verify info is sharable when connected
+            assert!(
+                directory.info(&peer_pk).is_some(),
+                "Connected peer's info should be sharable"
+            );
+
+            // Block the peer - this should trigger disconnect (making status Inert)
+            directory.block(&peer_pk);
+
+            // Release the reservation to simulate the connection being killed
+            directory.release(Metadata::Dialer(
+                peer_pk.clone(),
+                Ingress::Socket(test_socket()),
+            ));
+
+            // Now info should NOT be sharable (peer is Inert after block/disconnect)
+            assert!(
+                directory.info(&peer_pk).is_none(),
+                "Blocked peer's info should not be sharable after disconnect"
+            );
+
+            // Advance time and unblock
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            // Info still not sharable because peer is not connected
+            assert!(
+                directory.info(&peer_pk).is_none(),
+                "Unblocked but disconnected peer's info should not be sharable"
+            );
+        });
+    }
+
+    #[test]
+    fn test_bootstrapper_remains_persistent_after_blocking() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let bootstrapper_pk = PrivateKey::from_seed(1).public_key();
+        let bootstrapper_ingress = Ingress::Socket(SocketAddr::from(([1, 2, 3, 4], 8080)));
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: 3,
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            // Initialize with a bootstrapper
+            let mut directory = Directory::init(
+                context.clone(),
+                vec![(bootstrapper_pk.clone(), bootstrapper_ingress)],
+                my_info,
+                config,
+                releaser,
+            );
+
+            // Verify bootstrapper is not deletable (because it's persistent)
+            let record = directory.peers.get(&bootstrapper_pk).unwrap();
+            assert!(
+                !record.deletable(),
+                "Bootstrapper should not be deletable (persistent)"
+            );
+
+            // Block the bootstrapper
+            directory.block(&bootstrapper_pk);
+            assert!(
+                directory.blocked.contains(&bootstrapper_pk),
+                "Bootstrapper should be blocked"
+            );
+
+            // Verify bootstrapper is STILL not deletable after blocking
+            // (blocking should NOT change persistence)
+            let record = directory.peers.get(&bootstrapper_pk).unwrap();
+            assert!(
+                !record.deletable(),
+                "Bootstrapper should still not be deletable after blocking"
+            );
+
+            // Advance time and unblock
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            // Verify bootstrapper is still not deletable after unblock
+            let record = directory.peers.get(&bootstrapper_pk).unwrap();
+            assert!(
+                !record.deletable(),
+                "Bootstrapper should remain not deletable after unblock"
+            );
+        });
+    }
+
+    #[test]
+    fn test_infos_excludes_blocked_peers() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let peer_signer_1 = PrivateKey::from_seed(1);
+        let peer_pk_1 = peer_signer_1.public_key();
+        let peer_signer_2 = PrivateKey::from_seed(2);
+        let peer_pk_2 = peer_signer_2.public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: 3,
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+
+            // Add both peers to a set
+            let peer_set: OrderedSet<_> = [peer_pk_1.clone(), peer_pk_2.clone()]
+                .into_iter()
+                .try_collect()
+                .unwrap();
+            directory.add_set(0, peer_set);
+
+            // Update with peer info for both (use timestamp 0 to pass the epoch_millis filter)
+            let peer_info_1 = types::Info::sign(&peer_signer_1, NAMESPACE, test_socket(), 0);
+            let peer_info_2 = types::Info::sign(
+                &peer_signer_2,
+                NAMESPACE,
+                SocketAddr::from(([9, 9, 9, 9], 9090)),
+                0,
+            );
+            directory.update_peers(vec![peer_info_1, peer_info_2]);
+
+            // Connect both peers to make them Active (sharable)
+            let reservation_1 = directory.dial(&peer_pk_1);
+            assert!(reservation_1.is_some());
+            directory.connect(&peer_pk_1, true);
+
+            let reservation_2 = directory.dial(&peer_pk_2);
+            assert!(reservation_2.is_some());
+            directory.connect(&peer_pk_2, true);
+
+            // Create a bit vector requesting info for both peers (bits = false means "want info")
+            let bit_vec = types::BitVec {
+                index: 0,
+                bits: BitMap::zeroes(2),
+            };
+
+            // Both peers' info should be returned
+            let infos = directory.infos(bit_vec.clone()).unwrap();
+            assert_eq!(infos.len(), 2, "Should have info for both peers");
+
+            // Block peer 1 and release their connection
+            directory.block(&peer_pk_1);
+            directory.release(Metadata::Dialer(
+                peer_pk_1.clone(),
+                Ingress::Socket(test_socket()),
+            ));
+
+            // Now only peer 2's info should be returned (peer 1 is Inert after disconnect)
+            let infos = directory.infos(bit_vec).unwrap();
+            assert_eq!(
+                infos.len(),
+                1,
+                "Should only have info for unblocked connected peer"
+            );
+            assert_eq!(
+                infos[0].public_key, peer_pk_2,
+                "Returned info should be for peer 2"
             );
         });
     }
