@@ -301,13 +301,13 @@ mod implementation {
             // In soft-mlock mode (tests/benchmarks), we continue even if mlock fails.
             // The memory will still be protected via mprotect, just not pinned in RAM.
             if unsafe { libc::mlock(ptr as *const libc::c_void, size) } != 0 {
+                // SAFETY: ptr points to valid T, drop then zeroize before freeing
+                //         ptr and size match the mmap above
                 #[cfg(not(any(test, feature = "soft-mlock")))]
-                {
-                    // SAFETY: ptr points to valid T, drop then zeroize before freeing
-                    unsafe { core::ptr::drop_in_place(ptr) };
-                    unsafe { super::zeroize_ptr(ptr) };
-                    // SAFETY: ptr and size match the mmap above
-                    unsafe { libc::munmap(ptr as *mut libc::c_void, size) };
+                unsafe {
+                    core::ptr::drop_in_place(ptr);
+                    super::zeroize_ptr(ptr);
+                    libc::munmap(ptr as *mut libc::c_void, size);
                     return Err("mlock failed: memory limit exceeded. Try increasing with `ulimit -l` or check /etc/security/limits.conf");
                 }
             }
