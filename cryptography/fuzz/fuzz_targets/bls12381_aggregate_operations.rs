@@ -137,8 +137,9 @@ fn fuzz(op: FuzzOperation) {
             if !public_keys.is_empty() {
                 let agg_pk = aggregate::combine_public_keys::<MinPk, _>(&public_keys);
                 let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
-                let _ =
-                    aggregate::verify_same_message::<MinPk>(&agg_pk, &namespace, &message, &agg_sig);
+                let _ = aggregate::verify_same_message::<MinPk>(
+                    &agg_pk, &namespace, &message, &agg_sig,
+                );
             }
         }
 
@@ -172,7 +173,8 @@ fn fuzz(op: FuzzOperation) {
                 let combined_msg =
                     aggregate::combine_messages::<MinPk, _>(&messages_refs, concurrency);
                 let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
-                let _ = aggregate::verify_same_signer::<MinPk>(&public_key, &combined_msg, &agg_sig);
+                let _ =
+                    aggregate::verify_same_signer::<MinPk>(&public_key, &combined_msg, &agg_sig);
             }
         }
 
@@ -191,7 +193,8 @@ fn fuzz(op: FuzzOperation) {
                 let combined_msg =
                     aggregate::combine_messages::<MinSig, _>(&messages_refs, concurrency);
                 let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
-                let _ = aggregate::verify_same_signer::<MinSig>(&public_key, &combined_msg, &agg_sig);
+                let _ =
+                    aggregate::verify_same_signer::<MinSig>(&public_key, &combined_msg, &agg_sig);
             }
         }
     }

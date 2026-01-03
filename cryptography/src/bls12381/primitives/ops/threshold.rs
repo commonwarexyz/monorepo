@@ -518,8 +518,14 @@ mod tests {
         entries_swapped[0].2 = entries_swapped[1].2.clone();
         entries_swapped[1].2 = temp_sig;
         assert!(
-            batch_verify_same_signer::<_, V, _>(&mut rng, &public, signer.index, &entries_swapped, 1,)
-                .is_err(),
+            batch_verify_same_signer::<_, V, _>(
+                &mut rng,
+                &public,
+                signer.index,
+                &entries_swapped,
+                1,
+            )
+            .is_err(),
             "Verification with swapped signatures should fail"
         );
 
@@ -756,8 +762,9 @@ mod tests {
             .collect();
 
         sharing.precompute_partial_publics();
-        let result =
-            batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
+        let result = batch_verify_same_message::<_, MinSig, _>(
+            &mut rng, &sharing, namespace, msg, &partials,
+        );
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(
@@ -794,8 +801,9 @@ mod tests {
             .collect();
         sharing.precompute_partial_publics();
 
-        let result =
-            batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
+        let result = batch_verify_same_message::<_, MinSig, _>(
+            &mut rng, &sharing, namespace, msg, &partials,
+        );
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(
@@ -832,8 +840,9 @@ mod tests {
         partials[0].index = 100;
 
         sharing.precompute_partial_publics();
-        let result =
-            batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
+        let result = batch_verify_same_message::<_, MinSig, _>(
+            &mut rng, &sharing, namespace, msg, &partials,
+        );
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(
@@ -882,8 +891,9 @@ mod tests {
             .map(|s| sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        let result =
-            batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
+        let result = batch_verify_same_message::<_, MinSig, _>(
+            &mut rng, &sharing, namespace, msg, &partials,
+        );
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(invalid_sigs.len(), 1);
@@ -910,8 +920,9 @@ mod tests {
             .map(|s| sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        let result =
-            batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
+        let result = batch_verify_same_message::<_, MinSig, _>(
+            &mut rng, &sharing, namespace, msg, &partials,
+        );
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(invalid_sigs.len(), 1);
@@ -1121,8 +1132,13 @@ mod tests {
             (namespace, msg1, forged_partial1),
             (namespace, msg2, forged_partial2),
         ];
-        let result =
-            batch_verify_same_signer::<_, V, _>(&mut rng, &sharing, signer.index, &forged_entries, 1);
+        let result = batch_verify_same_signer::<_, V, _>(
+            &mut rng,
+            &sharing,
+            signer.index,
+            &forged_entries,
+            1,
+        );
         assert!(
             result.is_err(),
             "secure function should reject forged partial signatures"
