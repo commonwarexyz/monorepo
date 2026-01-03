@@ -114,8 +114,6 @@ where
 /// This function assumes a group check was already performed on `public` and each `signature`.
 /// Duplicate messages are safe because random scalar weights ensure each (message, signature)
 /// pair is verified independently.
-///
-/// It is not safe to provide an aggregate public key.
 pub fn verify_same_signer<'a, R, V, I>(
     rng: &mut R,
     public: &V::Public,
