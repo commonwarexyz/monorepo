@@ -274,13 +274,12 @@ impl Container {
             if cardinality < ARRAY_TO_BITMAP_THRESHOLD {
                 let mut arr = Vec::with_capacity(cardinality);
                 for (word_idx, &word) in bits.iter().enumerate() {
-                    if word == 0 {
-                        continue;
-                    }
-                    for bit_idx in 0..64 {
-                        if (word & (1u64 << bit_idx)) != 0 {
-                            arr.push((word_idx * 64 + bit_idx) as u16);
-                        }
+                    let mut w = word;
+                    let base = (word_idx * 64) as u16;
+                    while w != 0 {
+                        let bit_idx = w.trailing_zeros() as u16;
+                        arr.push(base + bit_idx);
+                        w &= w - 1; // Clear lowest set bit
                     }
                 }
                 *self = Self::Array(arr);
@@ -1582,14 +1581,11 @@ fn and_containers(a: &Container, b: &Container) -> Container {
             Container::Array(result)
         }
         (Container::Bitmap(bits_a), Container::Bitmap(bits_b)) => {
-            let bits: Vec<u64> = bits_a
-                .iter()
-                .zip(bits_b.iter())
-                .map(|(&a, &b)| a & b)
-                .collect();
-            let mut container = Container::Bitmap(bits);
-            container.maybe_convert_to_array();
-            container
+            let mut bits = vec![0u64; BITMAP_CONTAINER_SIZE / 8];
+            for i in 0..bits.len() {
+                bits[i] = bits_a[i] & bits_b[i];
+            }
+            Container::Bitmap(bits)
         }
         (Container::Array(arr), Container::Bitmap(bits))
         | (Container::Bitmap(bits), Container::Array(arr)) => {
@@ -1711,14 +1707,11 @@ fn xor_containers(a: &Container, b: &Container) -> Container {
             container
         }
         (Container::Bitmap(bits_a), Container::Bitmap(bits_b)) => {
-            let bits: Vec<u64> = bits_a
-                .iter()
-                .zip(bits_b.iter())
-                .map(|(&a, &b)| a ^ b)
-                .collect();
-            let mut container = Container::Bitmap(bits);
-            container.maybe_convert_to_array();
-            container
+            let mut bits = vec![0u64; BITMAP_CONTAINER_SIZE / 8];
+            for i in 0..bits.len() {
+                bits[i] = bits_a[i] ^ bits_b[i];
+            }
+            Container::Bitmap(bits)
         }
         (Container::Array(arr), Container::Bitmap(bits))
         | (Container::Bitmap(bits), Container::Array(arr)) => {
@@ -1728,9 +1721,7 @@ fn xor_containers(a: &Container, b: &Container) -> Container {
                 let bit_idx = v as usize % 64;
                 new_bits[word_idx] ^= 1u64 << bit_idx;
             }
-            let mut container = Container::Bitmap(new_bits);
-            container.maybe_convert_to_array();
-            container
+            Container::Bitmap(new_bits)
         }
     }
 }
