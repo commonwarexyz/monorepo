@@ -13,6 +13,10 @@
 //!   setup required, and widely supported. Certificates contain individual signatures from each
 //!   signer.
 //!
+//! - [`secp256r1`]: Attributable signatures with individual verification. HSM-friendly, no trusted
+//!   setup required, and widely supported by hardware security modules. Unlike ed25519, does not
+//!   benefit from batch verification. Certificates contain individual signatures from each signer.
+//!
 //! - [`bls12381_multisig`]: Attributable signatures with aggregated verification. Signatures
 //!   can be aggregated into a single multi-signature for compact certificates while preserving
 //!   attribution (signer indices are stored alongside the aggregated signature).
@@ -26,10 +30,10 @@
 //! Signing schemes differ in whether per-participant activities can be used as evidence of
 //! either liveness or of committing a fault:
 //!
-//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`]): Individual signatures can be
-//!   presented to some third party as evidence of either liveness or of committing a fault.
-//!   Certificates contain signer indices alongside individual signatures, enabling secure
-//!   per-participant activity tracking and conflict detection.
+//! - **Attributable Schemes** ([`ed25519`], [`secp256r1`], [`bls12381_multisig`]): Individual
+//!   signatures can be presented to some third party as evidence of either liveness or of
+//!   committing a fault.  Certificates contain signer indices alongside individual signatures,
+//!   enabling secure per-participant activity tracking and conflict detection.
 //!
 //! - **Non-Attributable Schemes** ([`bls12381_threshold`]): Individual signatures cannot be
 //!   presented to some third party as evidence of either liveness or of committing a fault
@@ -57,7 +61,8 @@ pub use crate::{
     bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
     ed25519::certificate as ed25519,
     impl_certificate_bls12381_multisig, impl_certificate_bls12381_threshold,
-    impl_certificate_ed25519,
+    impl_certificate_ed25519, impl_certificate_secp256r1,
+    secp256r1::certificate as secp256r1,
 };
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
@@ -273,7 +278,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// and [`bls12381_threshold`]) should return `true`, allowing callers to optimize by
     /// deferring verification until multiple signatures are available.
     ///
-    /// Schemes that don't benefit from batch verification (like `secp256r1`) should
+    /// Schemes that don't benefit from batch verification (like [`secp256r1`]) should
     /// return `false`, indicating that eager per-signature verification is preferred.
     fn is_batchable() -> bool;
 
