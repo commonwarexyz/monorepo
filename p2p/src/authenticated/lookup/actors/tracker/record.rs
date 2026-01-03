@@ -93,9 +93,6 @@ impl Record {
     /// Attempt to reserve the peer for connection.
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
-    ///
-    /// Note: Blocked status is checked by the Directory via blocked::Queue,
-    /// not by this method.
     pub const fn reserve(&mut self) -> bool {
         if matches!(self.address, Address::Myself) {
             return false;
@@ -143,9 +140,6 @@ impl Record {
     /// - It is not ourselves
     /// - We are not already connected or reserved
     /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
-    ///
-    /// Note: Blocked status is checked by the Directory via blocked::Queue,
-    /// not by this method.
     pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         if self.status != Status::Inert {
             return false;
@@ -163,9 +157,6 @@ impl Record {
     /// - The peer is eligible (in a peer set, not ourselves)
     /// - The source IP matches the expected egress IP for this peer (if not bypass_ip_check)
     /// - We are not already connected or reserved
-    ///
-    /// Note: Blocked status is checked by the Directory via blocked::Queue,
-    /// not by this method.
     pub fn acceptable(&self, source_ip: IpAddr, bypass_ip_check: bool) -> bool {
         if !self.eligible() || self.status != Status::Inert {
             return false;
@@ -211,9 +202,6 @@ impl Record {
     /// A peer is eligible if:
     /// - It is not ourselves
     /// - It is part of at least one peer set (or is persistent)
-    ///
-    /// Note: Blocked status is checked by the Directory via blocked::Queue,
-    /// not by this method.
     pub const fn eligible(&self) -> bool {
         match &self.address {
             Address::Myself => false,
