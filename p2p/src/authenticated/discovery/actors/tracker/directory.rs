@@ -225,11 +225,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 self.metrics.tracked.inc();
                 Record::unknown()
             });
-            // If peer is blocked (from before they were removed), mark the new record
-            // so bootstrappers become deletable
-            if self.blocked.is_blocked(peer) {
-                assert!(record.block());
-            }
             record.increment();
             set.update(peer, !record.want(self.dial_fail_limit));
         }
@@ -295,13 +290,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// when they are added to a peer set via `add_set`.
     pub fn block(&mut self, peer: &C) {
         // Already blocked in queue
-        if self.blocked.is_blocked(peer) {
+        if self.blocked.contains(peer) {
             return;
         }
 
-        // If record exists, attempt to block it (returns false for Myself)
-        if let Some(record) = self.peers.get_mut(peer) {
-            if !record.block() {
+        // If record exists, check if it's blockable (not Myself)
+        if let Some(record) = self.peers.get(peer) {
+            if !record.is_blockable() {
                 return;
             }
         }
@@ -372,7 +367,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// A peer is eligible if it is in a peer set (or is persistent), not blocked, and not ourselves.
     pub fn eligible(&self, peer: &C) -> bool {
-        !self.blocked.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.eligible())
+        !self.blocked.contains(peer) && self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have an ingress.
@@ -382,7 +377,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .peers
             .iter()
             .filter(|&(peer, r)| {
-                !self.blocked.is_blocked(peer) && r.dialable(self.allow_private_ips, self.allow_dns)
+                !self.blocked.contains(peer) && r.dialable(self.allow_private_ips, self.allow_dns)
             })
             .map(|(peer, _)| peer.clone())
             .collect();
@@ -392,7 +387,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns true if this peer is acceptable (can accept an incoming connection from them).
     pub fn acceptable(&self, peer: &C) -> bool {
-        !self.blocked.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.acceptable())
+        !self.blocked.contains(peer) && self.peers.get(peer).is_some_and(|r| r.acceptable())
     }
 
     /// Unblock all peers whose block has expired and update the knowledge bitmap.
@@ -603,7 +598,7 @@ mod tests {
                 "Peer should be in peers after add_set"
             );
             assert!(
-                directory.blocked.is_blocked(&unknown_pk),
+                directory.blocked.contains(&unknown_pk),
                 "Peer should be blocked after add_set"
             );
 

@@ -58,7 +58,7 @@ impl<K: Eq + Hash + Clone> Queue<K> {
     }
 
     /// Returns `true` if the peer is currently blocked.
-    pub fn is_blocked(&self, peer: &K) -> bool {
+    pub fn contains(&self, peer: &K) -> bool {
         self.blocked.contains_key(peer)
     }
 
@@ -110,14 +110,14 @@ mod tests {
     }
 
     #[test]
-    fn test_block_and_is_blocked() {
+    fn test_block_and_contains() {
         let mut queue = Queue::new();
         let peer = "peer1";
         let until = now() + Duration::from_secs(100);
 
-        assert!(!queue.is_blocked(&peer));
+        assert!(!queue.contains(&peer));
         assert!(queue.block(peer, until));
-        assert!(queue.is_blocked(&peer));
+        assert!(queue.contains(&peer));
         assert_eq!(queue.len(), 1);
 
         // Blocking again returns false
@@ -151,21 +151,21 @@ mod tests {
         // Nothing expired yet
         let unblocked = queue.unblock_expired(now());
         assert!(unblocked.is_empty());
-        assert!(queue.is_blocked(&peer1));
-        assert!(queue.is_blocked(&peer2));
+        assert!(queue.contains(&peer1));
+        assert!(queue.contains(&peer2));
         assert_eq!(queue.len(), 2);
 
         // Only peer1 expired
         let unblocked = queue.unblock_expired(until1 + Duration::from_secs(1));
         assert_eq!(unblocked, vec![peer1]);
-        assert!(!queue.is_blocked(&peer1));
-        assert!(queue.is_blocked(&peer2));
+        assert!(!queue.contains(&peer1));
+        assert!(queue.contains(&peer2));
         assert_eq!(queue.len(), 1);
 
         // peer2 expired
         let unblocked = queue.unblock_expired(until2 + Duration::from_secs(1));
         assert_eq!(unblocked, vec![peer2]);
-        assert!(!queue.is_blocked(&peer2));
+        assert!(!queue.contains(&peer2));
         assert_eq!(queue.len(), 0);
     }
 
@@ -201,6 +201,6 @@ mod tests {
 
         // Calling unblock_expired before expiration should not affect the block
         queue.unblock_expired(now());
-        assert!(queue.is_blocked(&peer));
+        assert!(queue.contains(&peer));
     }
 }
