@@ -151,11 +151,18 @@ where
     batch::verify_messages::<_, V, _>(rng, &public, &combined, concurrency)
 }
 
-/// Verify a list of [PartialSignature]s using batch verification with repeated
-/// bisection to find invalid signatures (if any exist).
+/// Verify a list of [PartialSignature]s over the same message from different signers,
+/// ensuring each individual signature is valid (see [`batch`] for more details on how
+/// this works).
 ///
-/// Randomness ensures batch verification returns the same result as checking each signature
-/// individually.
+/// Returns the indices of any invalid signatures found.
+///
+/// # Performance
+///
+/// Uses bisection to identify which signatures are invalid. In the worst case, this can require
+/// more verifications than checking each signature individually. If an invalid signer is detected,
+/// consider blocking them from participating in future batches to better amortize the cost of this
+/// search.
 fn batch_verify_public_keys_bisect<'a, R, V>(
     rng: &mut R,
     pending: &[(V::Public, &'a PartialSignature<V>)],

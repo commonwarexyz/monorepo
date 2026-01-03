@@ -26,8 +26,14 @@ use rand_core::CryptoRngCore;
 /// Verifies multiple signatures over the same message from different public keys,
 /// ensuring each individual signature is valid.
 ///
-/// Returns the indices of any invalid signatures found. Uses bisection internally
-/// to efficiently identify which signatures are invalid.
+/// Returns the indices of any invalid signatures found.
+///
+/// # Performance
+///
+/// Uses bisection to identify which signatures are invalid. In the worst case, this can require
+/// more verifications than checking each signature individually. If an invalid signer is detected,
+/// consider blocking them from participating in future batches to better amortize the cost of this
+/// search.
 ///
 /// # Warning
 ///
@@ -106,8 +112,10 @@ where
 /// # Warning
 ///
 /// This function assumes a group check was already performed on `public` and each `signature`.
-/// It is not safe to provide an aggregate public key. Duplicate messages are safe because
-/// random scalar weights ensure each (message, signature) pair is verified independently.
+/// Duplicate messages are safe because random scalar weights ensure each (message, signature)
+/// pair is verified independently.
+///
+/// It is not safe to provide an aggregate public key.
 pub fn verify_messages<'a, R, V, I>(
     rng: &mut R,
     public: &V::Public,
