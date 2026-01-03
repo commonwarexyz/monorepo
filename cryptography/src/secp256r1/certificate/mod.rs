@@ -384,12 +384,17 @@ mod macros {
                     self.generic.sign::<_, D>(namespace, subject)
                 }
 
-                fn verify_attestation<D: $crate::Digest>(
+                fn verify_attestation<R, D>(
                     &self,
+                    _rng: &mut R,
                     namespace: &[u8],
                     subject: Self::Subject<'_, D>,
                     attestation: &$crate::certificate::Attestation<Self>,
-                ) -> bool {
+                ) -> bool
+                where
+                    R: rand_core::CryptoRngCore,
+                    D: $crate::Digest,
+                {
                     self.generic
                         .verify_attestation::<_, D>(namespace, subject, attestation)
                 }
@@ -402,7 +407,7 @@ mod macros {
                     attestations: I,
                 ) -> $crate::certificate::Verification<Self>
                 where
-                    R: rand::Rng + rand::CryptoRng,
+                    R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
@@ -421,7 +426,7 @@ mod macros {
                     self.generic.assemble(attestations)
                 }
 
-                fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: $crate::Digest>(
+                fn verify_certificate<R: rand_core::CryptoRngCore, D: $crate::Digest>(
                     &self,
                     rng: &mut R,
                     namespace: &[u8],
@@ -469,8 +474,8 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
-    use commonware_utils::{ordered::BiMap, quorum, TryCollect};
-    use rand::{rngs::StdRng, thread_rng, SeedableRng};
+    use commonware_utils::{ordered::BiMap, quorum, test_rng, TryCollect};
+    use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test-secp256r1";
     const MESSAGE: &[u8] = b"test message";
@@ -534,7 +539,8 @@ mod tests {
         let attestation = scheme
             .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
             .unwrap();
-        assert!(scheme.verify_attestation::<Sha256Digest>(
+        assert!(scheme.verify_attestation::<_, Sha256Digest>(
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &attestation
@@ -551,6 +557,7 @@ mod tests {
 
     #[test]
     fn test_verify_attestations_filters_invalid() {
+        let mut rng = test_rng();
         let (schemes, _) = setup_signers(5, 44);
         let quorum = quorum(schemes.len() as u32) as usize;
 
@@ -563,7 +570,6 @@ mod tests {
             })
             .collect();
 
-        let mut rng = StdRng::seed_from_u64(45);
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             NAMESPACE,
@@ -653,7 +659,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate() {
-        let (schemes, verifier) = setup_signers(4, 48);
+        let (schemes, verifier) = setup_signers(4, 49);
         let quorum = quorum(schemes.len() as u32) as usize;
 
         let attestations: Vec<_> = schemes
@@ -667,9 +673,8 @@ mod tests {
 
         let certificate = schemes[0].assemble(attestations).unwrap();
 
-        let mut rng = StdRng::seed_from_u64(49);
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut rng,
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -678,7 +683,8 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_detects_corruption() {
-        let (schemes, verifier) = setup_signers(4, 50);
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers(4, 49);
         let quorum = quorum(schemes.len() as u32) as usize;
 
         let attestations: Vec<_> = schemes
@@ -694,7 +700,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -704,7 +710,7 @@ mod tests {
         let mut corrupted = certificate;
         corrupted.signatures[0] = corrupted.signatures[1].clone();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &corrupted
@@ -713,7 +719,7 @@ mod tests {
 
     #[test]
     fn test_certificate_codec_roundtrip() {
-        let (schemes, _) = setup_signers(4, 51);
+        let (schemes, _) = setup_signers(4, 49);
         let quorum = quorum(schemes.len() as u32) as usize;
 
         let attestations: Vec<_> = schemes
@@ -733,7 +739,7 @@ mod tests {
 
     #[test]
     fn test_certificate_rejects_sub_quorum() {
-        let (schemes, _) = setup_signers(4, 52);
+        let (schemes, _) = setup_signers(4, 49);
         let sub_quorum = 2; // Less than quorum (3)
 
         let attestations: Vec<_> = schemes
@@ -750,7 +756,7 @@ mod tests {
 
     #[test]
     fn test_certificate_rejects_invalid_signer() {
-        let (schemes, _) = setup_signers(4, 53);
+        let (schemes, _) = setup_signers(4, 49);
         let quorum = quorum(schemes.len() as u32) as usize;
 
         let mut attestations: Vec<_> = schemes
@@ -770,7 +776,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_sub_quorum() {
-        let (schemes, verifier) = setup_signers(4, 54);
+        let (schemes, verifier) = setup_signers(4, 49);
         let participants_len = schemes.len();
 
         let attestations: Vec<_> = schemes
@@ -791,7 +797,7 @@ mod tests {
         certificate.signatures.pop();
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -800,7 +806,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_mismatched_signature_count() {
-        let (schemes, verifier) = setup_signers(4, 55);
+        let (schemes, verifier) = setup_signers(4, 49);
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -817,7 +823,7 @@ mod tests {
         certificate.signatures.pop();
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
@@ -826,7 +832,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificates_batch() {
-        let (schemes, verifier) = setup_signers(4, 56);
+        let (schemes, verifier) = setup_signers(4, 49);
         let quorum = quorum(schemes.len() as u32) as usize;
 
         let messages = [b"msg1".as_slice(), b"msg2".as_slice(), b"msg3".as_slice()];
@@ -849,13 +855,16 @@ mod tests {
             .zip(&certificates)
             .map(|(msg, cert)| (TestSubject { message: msg }, cert));
 
-        let mut rng = StdRng::seed_from_u64(57);
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter));
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut test_rng(),
+            NAMESPACE,
+            certs_iter
+        ));
     }
 
     #[test]
     fn test_verify_certificates_batch_detects_failure() {
-        let (schemes, verifier) = setup_signers(4, 58);
+        let (schemes, verifier) = setup_signers(4, 49);
         let quorum = quorum(schemes.len() as u32) as usize;
 
         let messages = [b"msg1".as_slice(), b"msg2".as_slice()];
@@ -881,16 +890,17 @@ mod tests {
             .zip(&certificates)
             .map(|(msg, cert)| (TestSubject { message: msg }, cert));
 
-        let mut rng = StdRng::seed_from_u64(59);
-        assert!(
-            !verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter)
-        );
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut test_rng(),
+            NAMESPACE,
+            certs_iter
+        ));
     }
 
     #[test]
     #[should_panic(expected = "duplicate signer index")]
     fn test_assemble_certificate_rejects_duplicate_signers() {
-        let (schemes, _) = setup_signers(4, 60);
+        let (schemes, _) = setup_signers(4, 49);
 
         let mut attestations: Vec<_> = schemes
             .iter()
@@ -910,7 +920,7 @@ mod tests {
 
     #[test]
     fn test_scheme_clone_and_verifier() {
-        let (schemes, _) = setup_signers(4, 61);
+        let (schemes, _) = setup_signers(4, 49);
         let participants = schemes[0].generic.participants.clone();
 
         // Clone a signer
@@ -934,7 +944,7 @@ mod tests {
 
     #[test]
     fn test_certificate_decode_validation() {
-        let (schemes, _) = setup_signers(4, 62);
+        let (schemes, _) = setup_signers(4, 49);
         let participants_len = schemes.len();
 
         let attestations: Vec<_> = schemes
@@ -982,7 +992,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_unknown_signer() {
-        let (schemes, verifier) = setup_signers(4, 63);
+        let (schemes, verifier) = setup_signers(4, 49);
         let participants_len = schemes.len();
 
         let attestations: Vec<_> = schemes
@@ -1005,7 +1015,7 @@ mod tests {
             .push(certificate.signatures[0].clone());
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,
@@ -1014,7 +1024,8 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_invalid_certificate_signers_size() {
-        let (schemes, verifier) = setup_signers(4, 64);
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers(4, 49);
         let participants_len = schemes.len();
 
         let attestations: Vec<_> = schemes
@@ -1030,7 +1041,7 @@ mod tests {
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,
@@ -1042,7 +1053,7 @@ mod tests {
 
         // Certificate verification should fail due to size mismatch
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut rng,
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate,
@@ -1051,7 +1062,7 @@ mod tests {
 
     #[test]
     fn test_verify_certificate_rejects_signers_size_mismatch() {
-        let (schemes, verifier) = setup_signers(4, 65);
+        let (schemes, verifier) = setup_signers(4, 49);
         let participants_len = schemes.len();
 
         let attestations: Vec<_> = schemes
@@ -1073,7 +1084,7 @@ mod tests {
             .push(certificate.signatures[0].clone());
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-            &mut thread_rng(),
+            &mut test_rng(),
             NAMESPACE,
             TestSubject { message: MESSAGE },
             &certificate
