@@ -136,9 +136,6 @@ impl<C: PublicKey> Record<C> {
     /// Attempt to reserve the peer for connection.
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
-    ///
-    /// Note: Blocked status is checked by the Directory via blocked::Queue,
-    /// not by this method.
     pub const fn reserve(&mut self) -> bool {
         if matches!(self.address, Address::Myself(_)) {
             return false;
@@ -242,9 +239,6 @@ impl<C: PublicKey> Record<C> {
 
     /// Get the peer information if it is sharable. The information is considered sharable if it is
     /// known and we are connected to the peer.
-    ///
-    /// Note: Blocked status is checked by the Directory via blocked::Queue,
-    /// not by this method.
     pub fn sharable(&self) -> Option<Info<C>> {
         match &self.address {
             Address::Unknown => None,
@@ -267,9 +261,6 @@ impl<C: PublicKey> Record<C> {
     /// - Returns `true` for addresses for which we don't have peer info.
     /// - Returns `true` for addresses for which we do have peer info if-and-only-if we have failed to
     ///   dial at least `min_fails` times.
-    ///
-    /// Note: Blocked status is checked by the Directory via blocked::Queue,
-    /// not by this method.
     pub fn want(&self, min_fails: usize) -> bool {
         match self.address {
             Address::Myself(_) => false,
@@ -288,9 +279,6 @@ impl<C: PublicKey> Record<C> {
     /// A peer is eligible if:
     /// - It is not ourselves
     /// - It is part of at least one peer set (or is persistent, e.g., bootstrapper)
-    ///
-    /// Note: Blocked status is checked by the Directory via blocked::Queue,
-    /// not by this method.
     pub const fn eligible(&self) -> bool {
         match self.address {
             Address::Myself(_) => false,
