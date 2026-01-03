@@ -173,7 +173,7 @@ where
     R: CryptoRngCore,
     V: Variant,
 {
-    // Convert to the format expected by verify_multiple_public_keys
+    // Convert to the format expected by verify_same_message
     let entries: Vec<(V::Public, V::Signature)> = pending
         .iter()
         .map(|(pk, partial)| (*pk, partial.value))
