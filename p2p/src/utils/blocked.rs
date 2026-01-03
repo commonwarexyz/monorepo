@@ -20,13 +20,19 @@ pub struct Queue<K> {
     queue: VecDeque<(SystemTime, K)>,
 }
 
-impl<K: Eq + Hash + Clone> Queue<K> {
-    /// Create a new empty block queue.
-    pub fn new() -> Self {
+impl<K: Eq + Hash + Clone> Default for Queue<K> {
+    fn default() -> Self {
         Self {
             blocked: HashMap::new(),
             queue: VecDeque::new(),
         }
+    }
+}
+
+impl<K: Eq + Hash + Clone> Queue<K> {
+    /// Create a new empty block queue.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Block a peer until the given time.
@@ -41,8 +47,18 @@ impl<K: Eq + Hash + Clone> Queue<K> {
         true
     }
 
+    /// Returns the number of currently blocked peers.
+    pub fn len(&self) -> usize {
+        self.blocked.len()
+    }
+
+    /// Returns `true` if no peers are currently blocked.
+    pub fn is_empty(&self) -> bool {
+        self.blocked.is_empty()
+    }
+
     /// Returns `true` if the peer is currently blocked.
-    pub fn is_blocked(&self, peer: &K) -> bool {
+    pub fn contains(&self, peer: &K) -> bool {
         self.blocked.contains_key(peer)
     }
 
@@ -76,12 +92,6 @@ impl<K: Eq + Hash + Clone> Queue<K> {
     }
 }
 
-impl<K: Eq + Hash + Clone> Default for Queue<K> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Sleep until the next deadline, or wait forever if none.
 pub async fn wait_for<E: Clock>(context: &E, deadline: Option<SystemTime>) {
     match deadline {
@@ -100,17 +110,19 @@ mod tests {
     }
 
     #[test]
-    fn test_block_and_is_blocked() {
+    fn test_block_and_contains() {
         let mut queue = Queue::new();
         let peer = "peer1";
         let until = now() + Duration::from_secs(100);
 
-        assert!(!queue.is_blocked(&peer));
+        assert!(!queue.contains(&peer));
         assert!(queue.block(peer, until));
-        assert!(queue.is_blocked(&peer));
+        assert!(queue.contains(&peer));
+        assert_eq!(queue.len(), 1);
 
         // Blocking again returns false
         assert!(!queue.block(peer, until));
+        assert_eq!(queue.len(), 1);
     }
 
     #[test]
@@ -134,28 +146,32 @@ mod tests {
 
         queue.block(peer1, until1);
         queue.block(peer2, until2);
+        assert_eq!(queue.len(), 2);
 
         // Nothing expired yet
         let unblocked = queue.unblock_expired(now());
         assert!(unblocked.is_empty());
-        assert!(queue.is_blocked(&peer1));
-        assert!(queue.is_blocked(&peer2));
+        assert!(queue.contains(&peer1));
+        assert!(queue.contains(&peer2));
+        assert_eq!(queue.len(), 2);
 
         // Only peer1 expired
         let unblocked = queue.unblock_expired(until1 + Duration::from_secs(1));
         assert_eq!(unblocked, vec![peer1]);
-        assert!(!queue.is_blocked(&peer1));
-        assert!(queue.is_blocked(&peer2));
+        assert!(!queue.contains(&peer1));
+        assert!(queue.contains(&peer2));
+        assert_eq!(queue.len(), 1);
 
         // peer2 expired
         let unblocked = queue.unblock_expired(until2 + Duration::from_secs(1));
         assert_eq!(unblocked, vec![peer2]);
-        assert!(!queue.is_blocked(&peer2));
+        assert!(!queue.contains(&peer2));
+        assert_eq!(queue.len(), 0);
     }
 
     #[test]
     fn test_next_deadline() {
-        let mut queue = Queue::<&str>::new();
+        let mut queue: Queue<&str> = Queue::new();
 
         assert!(queue.next_deadline().is_none());
 
@@ -185,6 +201,6 @@ mod tests {
 
         // Calling unblock_expired before expiration should not affect the block
         queue.unblock_expired(now());
-        assert!(queue.is_blocked(&peer));
+        assert!(queue.contains(&peer));
     }
 }
