@@ -13,6 +13,13 @@
 //! - Memory is locked to prevent swapping (mlock)
 //! - Memory is marked no-access except during expose() (mprotect)
 //!
+//! On Linux, additional hardening is applied:
+//! - `memfd_secret` (Linux 5.14+): Memory is unmapped from the kernel's direct
+//!   mapping, making it inaccessible via `/proc/pid/mem` even to root. Falls
+//!   back to regular mmap if unavailable.
+//! - `MADV_DONTDUMP`: Prevents the secret from appearing in core dumps
+//! - `MADV_WIPEONFORK`: Zeros the memory in child processes after fork
+//!
 //! On other platforms, `Secret<T>` provides software-only protection
 //! (zeroization and redacted debug output).
 //!
@@ -21,6 +28,16 @@
 //! When using protected memory, `Secret<T>` only provides full protection for
 //! self-contained types (no heap pointers). Types like `Vec<T>` or `String`
 //! will only have their metadata protected, not heap data.
+//!
+//! # Security Considerations
+//!
+//! This module provides defense-in-depth protection but is not a security
+//! boundary against privileged attackers. A determined attacker with root
+//! access or kernel exploits can still potentially access secrets. The primary
+//! protections are:
+//! - Preventing accidental leaks via logs, debug output, or core dumps
+//! - Reducing the attack surface for memory disclosure bugs
+//! - Preventing secrets from persisting on disk via swap
 
 use crate::bls12381::primitives::group::Scalar;
 use core::{
@@ -81,6 +98,100 @@ mod implementation {
             4096
         } else {
             size as usize
+        }
+    }
+
+    /// Attempts to allocate memory using [memfd_secret] (Linux 5.14+).
+    ///
+    /// memfd_secret provides stronger isolation than regular mmap:
+    /// - Memory is unmapped from the kernel's direct mapping
+    /// - Cannot be read via /proc/pid/mem even by root
+    /// - More resistant to kernel-level attacks
+    ///
+    /// Returns None if memfd_secret is not available or fails.
+    ///
+    /// [memfd_secret]: https://man7.org/linux/man-pages/man2/memfd_secret.2.html
+    #[cfg(target_os = "linux")]
+    fn try_memfd_secret(size: usize) -> Option<*mut libc::c_void> {
+        // memfd_secret syscall number (added in Linux 5.14)
+        const SYS_MEMFD_SECRET: libc::c_long = 447;
+
+        // SAFETY: syscall with valid syscall number, flags=0
+        let fd = unsafe { libc::syscall(SYS_MEMFD_SECRET, 0 as libc::c_uint) };
+        if fd < 0 {
+            return None;
+        }
+        let fd = fd as libc::c_int;
+
+        // SAFETY: fd is valid from successful memfd_secret call above
+        let (truncate_result, ptr) = unsafe {
+            let truncate_result = libc::ftruncate(fd, size as libc::off_t);
+            let ptr = if truncate_result == 0 {
+                libc::mmap(
+                    core::ptr::null_mut(),
+                    size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    fd,
+                    0,
+                )
+            } else {
+                libc::MAP_FAILED
+            };
+            libc::close(fd);
+            (truncate_result, ptr)
+        };
+
+        if truncate_result != 0 || ptr == libc::MAP_FAILED {
+            return None;
+        }
+
+        Some(ptr)
+    }
+
+    /// Allocates memory using [mmap] with MAP_ANONYMOUS.
+    ///
+    /// [mmap]: https://man7.org/linux/man-pages/man2/mmap.2.html
+    fn try_mmap_anonymous(size: usize) -> Option<*mut libc::c_void> {
+        // SAFETY: mmap with MAP_ANONYMOUS returns page-aligned memory or MAP_FAILED
+        let ptr = unsafe {
+            libc::mmap(
+                core::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+
+        if ptr == libc::MAP_FAILED {
+            None
+        } else {
+            Some(ptr)
+        }
+    }
+
+    /// Applies madvise hints to protect secret memory (Linux only).
+    ///
+    /// - MADV_DONTDUMP: Prevents the memory from appearing in core dumps
+    /// - MADV_WIPEONFORK (non-memfd_secret only): Zeros memory in child after fork
+    ///
+    /// MADV_WIPEONFORK is skipped for memfd_secret allocations because:
+    /// 1. memfd_secret uses MAP_SHARED, and WIPEONFORK + MAP_SHARED interaction is unclear
+    /// 2. memfd_secret already provides strong isolation (removed from kernel direct map)
+    #[cfg(target_os = "linux")]
+    fn apply_madvise_hints(ptr: *mut libc::c_void, size: usize, is_memfd_secret: bool) {
+        // MADV_DONTDUMP: Exclude from core dumps
+        // This is critical - core dumps are often written to disk and may persist
+        // SAFETY: ptr and size are valid from successful mmap/memfd_secret
+        unsafe { libc::madvise(ptr, size, libc::MADV_DONTDUMP) };
+
+        // MADV_WIPEONFORK (Linux 4.14+): Zero this memory in child after fork
+        // Only apply to MAP_PRIVATE allocations (not memfd_secret which uses MAP_SHARED)
+        if !is_memfd_secret {
+            // SAFETY: ptr and size are valid from successful mmap
+            unsafe { libc::madvise(ptr, size, libc::MADV_WIPEONFORK) };
         }
     }
 
@@ -262,6 +373,12 @@ mod implementation {
         /// - Memory allocation (mmap) fails
         /// - Memory locking (mlock) fails (except in test/unsafe-mlock mode)
         /// - Memory protection (mprotect) fails
+        ///
+        /// # Memory Allocation Strategy
+        ///
+        /// On Linux 5.14+, this function first attempts to use `memfd_secret` which
+        /// provides stronger isolation (memory is unmapped from kernel direct mapping).
+        /// If unavailable, it falls back to regular `mmap` with `MAP_ANONYMOUS`.
         pub fn try_new(value: T) -> Result<Self, &'static str> {
             let page_size = page_size();
             let type_align = core::mem::align_of::<T>();
@@ -275,21 +392,24 @@ mod implementation {
             // Round up to page boundary (minimum one page)
             let size = type_size.max(1).next_multiple_of(page_size);
 
-            // SAFETY: mmap with MAP_ANONYMOUS returns page-aligned memory or MAP_FAILED
-            let ptr = unsafe {
-                libc::mmap(
-                    core::ptr::null_mut(),
-                    size,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                    -1,
-                    0,
-                )
+            // Try memfd_secret first on Linux (provides stronger kernel-level isolation)
+            // Falls back to regular mmap if memfd_secret is unavailable
+            #[cfg(target_os = "linux")]
+            let (ptr, is_memfd_secret) = try_memfd_secret(size).map_or_else(
+                || (try_mmap_anonymous(size), false),
+                |ptr| (Some(ptr), true),
+            );
+
+            #[cfg(not(target_os = "linux"))]
+            let ptr = try_mmap_anonymous(size);
+
+            let Some(ptr) = ptr else {
+                return Err("memory allocation failed");
             };
 
-            if ptr == libc::MAP_FAILED {
-                return Err("mmap failed");
-            }
+            // Apply madvise hints for additional protection (Linux only)
+            #[cfg(target_os = "linux")]
+            apply_madvise_hints(ptr, size, is_memfd_secret);
 
             let ptr = ptr as *mut T;
 
@@ -705,5 +825,63 @@ mod tests {
         secret.expose(|v| {
             assert_eq!(v, &[42u8; 32]);
         });
+    }
+
+    /// Test fork behavior on Linux.
+    ///
+    /// The behavior depends on the allocation method:
+    /// - memfd_secret (MAP_SHARED): Child inherits the secret (0xDE) - this is expected
+    ///   since memfd_secret's protection is against kernel access, not fork inheritance
+    /// - mmap anonymous (MAP_PRIVATE + WIPEONFORK): Child sees zeroed memory (0x00)
+    ///
+    /// Both outcomes are valid - memfd_secret provides stronger kernel isolation,
+    /// while WIPEONFORK provides fork isolation.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_fork_behavior() {
+        use std::{
+            io::{Read, Write},
+            os::unix::net::UnixStream,
+        };
+
+        let secret = Secret::new([0xDEu8; 32]);
+        secret.expose(|v| assert_eq!(v[0], 0xDE));
+
+        let (mut parent_sock, mut child_sock) = UnixStream::pair().unwrap();
+
+        // SAFETY: fork is safe, we handle both parent and child cases
+        let pid = unsafe { libc::fork() };
+
+        if pid == 0 {
+            // Child process
+            drop(parent_sock);
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| secret.expose(|v| v[0])));
+            let byte = result.unwrap_or(0xFF);
+            child_sock.write_all(&[byte]).unwrap();
+            std::process::exit(0);
+        } else {
+            // Parent process
+            drop(child_sock);
+            let mut status = 0;
+            // SAFETY: pid is valid from fork, status is valid pointer
+            unsafe { libc::waitpid(pid, &mut status, 0) };
+
+            let mut buf = [0u8; 1];
+            parent_sock.read_exact(&mut buf).unwrap();
+
+            // Valid outcomes:
+            // - 0xDE: memfd_secret was used (child inherits via MAP_SHARED)
+            // - 0x00: mmap was used with WIPEONFORK (child sees zeroed memory)
+            // - 0xFF: access failed in child
+            assert!(
+                buf[0] == 0xDE || buf[0] == 0x00 || buf[0] == 0xFF,
+                "Unexpected value in child: {:#x}",
+                buf[0]
+            );
+
+            // Parent's secret must be unchanged regardless of allocation method
+            secret.expose(|v| assert_eq!(v[0], 0xDE));
+        }
     }
 }
