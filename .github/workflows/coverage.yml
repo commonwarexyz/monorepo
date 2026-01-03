@@ -52,31 +52,7 @@ jobs:
       with:
         tool: cargo-llvm-cov@0.6.19,cargo-nextest@0.9.104
     - name: Generate coverage report
-      run: |
-        # We use RUSTC_WORKSPACE_WRAPPER instead of cargo-llvm-cov's default RUSTFLAGS approach
-        # to only instrument workspace crates, not dependencies. This is necessary because:
-        #
-        # 1. cargo-llvm-cov uses RUSTFLAGS to add -C instrument-coverage to ALL crates
-        # 2. Pure-Rust crypto libraries like p256 (secp256r1) have tight loops that become
-        #    extremely slow when instrumented (the coverage runtime is called on every iteration)
-        # 3. Dependencies are excluded from the coverage REPORT by default, but they're still
-        #    INSTRUMENTED, causing unnecessary runtime overhead
-        # 4. RUSTC_WORKSPACE_WRAPPER only applies to workspace crates, so dependencies compile
-        #    normally (fast) while workspace crates get coverage instrumentation
-        #
-        # We can't use "cargo llvm-cov nextest" directly because it ignores RUSTC_WORKSPACE_WRAPPER
-        # and always uses RUSTFLAGS. Instead, we:
-        # 1. Get cargo-llvm-cov's environment (LLVM_PROFILE_FILE paths, etc.) via show-env
-        # 2. Unset RUSTFLAGS to prevent dependency instrumentation
-        # 3. Set RUSTC_WORKSPACE_WRAPPER to our script that adds coverage flags
-        # 4. Run nextest directly (instrumented binaries write profraw files to LLVM_PROFILE_FILE)
-        # 5. Use cargo-llvm-cov report to generate the coverage report from profraw files
-        eval "$(cargo llvm-cov show-env --export-prefix)"
-        unset RUSTFLAGS
-        export RUSTC_WORKSPACE_WRAPPER="$PWD/.github/scripts/rustc-coverage-wrapper.sh"
-
-        cargo nextest run --workspace --partition hash:${{ matrix.partition }}/8 --profile all
-        cargo llvm-cov report --lcov --output-path lcov-${{ matrix.partition }}.info
+      run: cargo llvm-cov nextest --workspace --lcov --output-path lcov-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/8 --profile all
     - name: Store coverage report
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:
