@@ -193,10 +193,7 @@ fn ntt_matrix<const FORWARD: bool>(matrix: &mut Matrix) {
                     // Since index_b > index_a and both are valid row indices,
                     // we can split at the start of row_b
                     let (first, second) = matrix.data.split_at_mut(start_b);
-                    (
-                        &mut first[start_a..start_a + cols],
-                        &mut second[..cols],
-                    )
+                    (&mut first[start_a..start_a + cols], &mut second[..cols])
                 };
 
                 intrinsics::butterfly::<FORWARD>(row_a, row_b, w_j);

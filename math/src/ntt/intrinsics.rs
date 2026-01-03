@@ -12,7 +12,8 @@
 
 use crate::fields::goldilocks::F;
 
-/// The Goldilocks prime P = 2^64 - 2^32 + 1
+// Goldilocks prime P = 2^64 - 2^32 + 1.
+// Duplicated here to avoid cross-module const evaluation in intrinsics.
 const P: u64 = u64::wrapping_neg(1 << 32) + 1;
 
 /// Perform butterfly operations on slices.
@@ -58,47 +59,37 @@ fn butterfly_scalar<const FORWARD: bool>(a: &mut [F], b: &mut [F], w: F) {
     }
 }
 
-// ARM64 NEON implementation
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod aarch64_neon {
     use super::*;
     use core::arch::aarch64::*;
 
-    /// Number of field elements processed per NEON iteration.
-    /// We process 2 elements at a time using 128-bit registers.
-    const LANE_COUNT: usize = 2;
-
     /// Perform butterfly using NEON intrinsics.
     #[inline]
     pub fn butterfly<const FORWARD: bool>(a: &mut [F], b: &mut [F], w: F) {
         let len = a.len();
+        let chunks = len / 2; // Process 2 elements per iteration (uint64x2_t)
 
-        // Process pairs of elements with NEON
-        let chunks = len / LANE_COUNT;
         if chunks > 0 {
-            // SAFETY: F is repr(transparent) over u64, so &[F] can be reinterpreted as &[u64]
-            let a_ptr = a.as_mut_ptr() as *mut u64;
-            let b_ptr = b.as_mut_ptr() as *mut u64;
-            let w_raw = field_to_raw(w);
+            // SAFETY: F is #[repr(transparent)] over u64, so &mut [F] has the same
+            // layout as &mut [u64]. The pointers are valid for `chunks * 2` elements.
+            let a_ptr = a.as_mut_ptr().cast::<u64>();
+            let b_ptr = b.as_mut_ptr().cast::<u64>();
 
-            // SAFETY: Pointers are valid and aligned, chunks is computed correctly
+            // SAFETY: F is #[repr(transparent)] over u64
+            let w_raw: u64 = unsafe { core::mem::transmute(w) };
+
+            // SAFETY: Pointers are valid and properly aligned for u64 access.
             unsafe {
                 butterfly_neon::<FORWARD>(a_ptr, b_ptr, w_raw, chunks);
             }
         }
 
         // Handle remainder with scalar code
-        let processed = chunks * LANE_COUNT;
+        let processed = chunks * 2;
         if processed < len {
             super::butterfly_scalar::<FORWARD>(&mut a[processed..], &mut b[processed..], w);
         }
-    }
-
-    /// Extract raw u64 value from field element.
-    #[inline(always)]
-    fn field_to_raw(f: F) -> u64 {
-        // SAFETY: F is repr(transparent) over u64
-        unsafe { core::mem::transmute(f) }
     }
 
     /// NEON butterfly implementation.
@@ -107,16 +98,11 @@ mod aarch64_neon {
     /// - `a` and `b` must point to valid memory for at least `chunks * 2` u64 elements
     /// - Pointers must be properly aligned for u64 access
     #[target_feature(enable = "neon")]
-    unsafe fn butterfly_neon<const FORWARD: bool>(
-        a: *mut u64,
-        b: *mut u64,
-        w: u64,
-        chunks: usize,
-    ) {
+    unsafe fn butterfly_neon<const FORWARD: bool>(a: *mut u64, b: *mut u64, w: u64, chunks: usize) {
         let w_vec = vdupq_n_u64(w);
 
         for i in 0..chunks {
-            let offset = i * LANE_COUNT;
+            let offset = i * 2;
 
             let a_vec = vld1q_u64(a.add(offset));
             let b_vec = vld1q_u64(b.add(offset));
@@ -124,17 +110,15 @@ mod aarch64_neon {
             let (new_a, new_b) = if FORWARD {
                 // Forward: (a + w*b, a - w*b)
                 let wb_vec = goldilocks_mul_vec(w_vec, b_vec);
-                let sum_vec = goldilocks_add_vec(a_vec, wb_vec);
-                let diff_vec = goldilocks_sub_vec(a_vec, wb_vec);
-                (sum_vec, diff_vec)
+                let sum = goldilocks_add_vec(a_vec, wb_vec);
+                let diff = goldilocks_sub_vec(a_vec, wb_vec);
+                (sum, diff)
             } else {
                 // Inverse: ((a + b)/2, (a - b)*w/2)
-                let sum_vec = goldilocks_add_vec(a_vec, b_vec);
-                let diff_vec = goldilocks_sub_vec(a_vec, b_vec);
-                let diff_w_vec = goldilocks_mul_vec(diff_vec, w_vec);
-                let sum_div2 = goldilocks_div2_vec(sum_vec);
-                let diff_w_div2 = goldilocks_div2_vec(diff_w_vec);
-                (sum_div2, diff_w_div2)
+                let sum = goldilocks_add_vec(a_vec, b_vec);
+                let diff = goldilocks_sub_vec(a_vec, b_vec);
+                let diff_w = goldilocks_mul_vec(diff, w_vec);
+                (goldilocks_div2_vec(sum), goldilocks_div2_vec(diff_w))
             };
 
             vst1q_u64(a.add(offset), new_a);
@@ -143,197 +127,154 @@ mod aarch64_neon {
     }
 
     /// Vectorized Goldilocks addition: (a + b) mod P
+    ///
+    /// Both inputs must be < P. Output is < P.
     #[inline(always)]
     unsafe fn goldilocks_add_vec(a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
-        // addition = a + b (wrapping)
-        let addition = vaddq_u64(a, b);
-
-        // Check for overflow: if addition < a, overflow occurred
-        let overflow = vcltq_u64(addition, a);
-
-        // subtraction = addition - P (wrapping)
         let p_vec = vdupq_n_u64(P);
-        let subtraction = vsubq_u64(addition, p_vec);
 
-        // Check for underflow: if subtraction > addition, underflow occurred
-        let underflow = vcgtq_u64(subtraction, addition);
+        // Compute a + b (wrapping). If this overflows, the true sum is (result + 2^64).
+        let sum = vaddq_u64(a, b);
+        let overflow = vcltq_u64(sum, a); // All 1s if overflow, all 0s otherwise
 
-        // Use original (addition) if: !overflow AND underflow
-        // Otherwise use subtraction
-        let not_overflow = not_u64(overflow);
-        let use_original = vandq_u64(underflow, not_overflow);
+        // Compute sum - P (wrapping). If sum < P, this underflows.
+        let reduced = vsubq_u64(sum, p_vec);
+        let underflow = vcgtq_u64(reduced, sum); // All 1s if underflow (sum < P)
 
-        // Select: use addition if use_original, else subtraction
-        vbslq_u64(use_original, addition, subtraction)
-    }
-
-    /// Bitwise NOT for uint64x2_t (NEON doesn't have vmvnq_u64)
-    #[inline(always)]
-    unsafe fn not_u64(a: uint64x2_t) -> uint64x2_t {
-        let as_u8 = vreinterpretq_u8_u64(a);
-        let not_u8 = vmvnq_u8(as_u8);
-        vreinterpretq_u64_u8(not_u8)
+        // Use original sum if: no overflow AND sum < P (underflow in reduction)
+        // Otherwise use the reduced value.
+        let use_sum = vandq_u64(underflow, vmvnq_u8_as_u64(overflow));
+        vbslq_u64(use_sum, sum, reduced)
     }
 
     /// Vectorized Goldilocks subtraction: (a - b) mod P
+    ///
+    /// Both inputs must be < P. Output is < P.
     #[inline(always)]
     unsafe fn goldilocks_sub_vec(a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
-        // subtraction = a - b (wrapping)
-        let subtraction = vsubq_u64(a, b);
+        let p_vec = vdupq_n_u64(P);
 
-        // Check for underflow: if a < b, underflow occurred
+        // Compute a - b (wrapping). If a < b, this underflows.
+        let diff = vsubq_u64(a, b);
         let underflow = vcltq_u64(a, b);
 
-        // If underflow, add P back
-        let p_vec = vdupq_n_u64(P);
-        let corrected = vaddq_u64(subtraction, p_vec);
-
-        // Select: use corrected if underflow, else subtraction
-        vbslq_u64(underflow, corrected, subtraction)
+        // If underflow, add P back to get the correct result.
+        let corrected = vaddq_u64(diff, p_vec);
+        vbslq_u64(underflow, corrected, diff)
     }
 
     /// Vectorized Goldilocks multiplication: (a * b) mod P
     ///
-    /// Decomposes 64-bit multiplication into 32-bit parts using the Goldilocks
-    /// reduction formula.
+    /// Decomposes 64x64->128 bit multiplication into 32x32->64 bit products,
+    /// then applies Goldilocks reduction.
     #[inline(always)]
     unsafe fn goldilocks_mul_vec(a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
-        // Split into 32-bit halves
-        // a = a_lo + a_hi * 2^32
-        // b = b_lo + b_hi * 2^32
-        let mask32 = vdupq_n_u64(0xFFFFFFFF);
+        // Split into 32-bit halves: x = x_lo + x_hi * 2^32
+        let mask32 = vdupq_n_u64(0xFFFF_FFFF);
         let a_lo = vandq_u64(a, mask32);
         let a_hi = vshrq_n_u64(a, 32);
         let b_lo = vandq_u64(b, mask32);
         let b_hi = vshrq_n_u64(b, 32);
 
-        // Compute the four 32x32->64 products
-        // P0 = a_lo * b_lo (bits 0-63 of result)
-        // P1 = a_lo * b_hi (bits 32-95 of result)
-        // P2 = a_hi * b_lo (bits 32-95 of result)
-        // P3 = a_hi * b_hi (bits 64-127 of result)
-
-        // Extract as 32-bit vectors for vmull
+        // Compute four 32x32->64 products:
+        // result = a_lo*b_lo + (a_lo*b_hi + a_hi*b_lo)*2^32 + a_hi*b_hi*2^64
         let a_lo_32 = vmovn_u64(a_lo);
         let a_hi_32 = vmovn_u64(a_hi);
         let b_lo_32 = vmovn_u64(b_lo);
         let b_hi_32 = vmovn_u64(b_hi);
 
-        let p0 = vmull_u32(a_lo_32, b_lo_32);
-        let p1 = vmull_u32(a_lo_32, b_hi_32);
-        let p2 = vmull_u32(a_hi_32, b_lo_32);
-        let p3 = vmull_u32(a_hi_32, b_hi_32);
+        let p0 = vmull_u32(a_lo_32, b_lo_32); // bits 0-63
+        let p1 = vmull_u32(a_lo_32, b_hi_32); // bits 32-95
+        let p2 = vmull_u32(a_hi_32, b_lo_32); // bits 32-95
+        let p3 = vmull_u32(a_hi_32, b_hi_32); // bits 64-127
 
-        // Combine: result = p0 + (p1 + p2) << 32 + p3 << 64
-        // We need to handle carries carefully.
-
-        // mid = p1 + p2
+        // Combine middle products: mid = p1 + p2
         let mid = vaddq_u64(p1, p2);
-
-        // Split mid into low and high 32 bits (for the shift)
         let mid_lo = vshlq_n_u64(vandq_u64(mid, mask32), 32);
         let mid_hi = vshrq_n_u64(mid, 32);
+        let mid_carry = vshrq_n_u64(vcltq_u64(mid, p1), 63); // 1 if overflow, else 0
 
-        // Carry from p1 + p2 overflow (if mid < p1)
-        let mid_carry = vcltq_u64(mid, p1);
-        let mid_carry_val =
-            vandq_u64(vreinterpretq_u64_s64(vreinterpretq_s64_u64(mid_carry)), vdupq_n_u64(1));
-
-        // lo = p0 + mid_lo
+        // Low 64 bits: lo = p0 + mid_lo
         let lo = vaddq_u64(p0, mid_lo);
-        let lo_carry = vcltq_u64(lo, p0);
-        let lo_carry_val =
-            vandq_u64(vreinterpretq_u64_s64(vreinterpretq_s64_u64(lo_carry)), vdupq_n_u64(1));
+        let lo_carry = vshrq_n_u64(vcltq_u64(lo, p0), 63);
 
-        // hi = p3 + mid_hi + lo_carry + (mid_carry << 32)
+        // High 64 bits: hi = p3 + mid_hi + lo_carry + mid_carry*2^32
         let hi = vaddq_u64(p3, mid_hi);
-        let hi = vaddq_u64(hi, lo_carry_val);
-        let hi = vaddq_u64(hi, vshlq_n_u64(mid_carry_val, 32));
+        let hi = vaddq_u64(hi, lo_carry);
+        let hi = vaddq_u64(hi, vshlq_n_u64(mid_carry, 32));
 
-        // Now reduce: lo + hi * 2^64 mod P
-        // Using: 2^64 = 2^32 - 1 mod P and 2^96 = -1 mod P
-        // x = c * 2^96 + b * 2^64 + a
-        // x = b * (2^32 - 1) + (a - c) mod P
         goldilocks_reduce_128_vec(lo, hi)
     }
 
-    /// Reduce a 128-bit value (lo + hi * 2^64) modulo P.
+    /// Reduce 128-bit value (lo + hi * 2^64) mod P.
     ///
-    /// Uses the Goldilocks reduction formula:
+    /// Uses Goldilocks identities:
     /// - 2^64 = 2^32 - 1 (mod P)
     /// - 2^96 = -1 (mod P)
     ///
-    /// So if x = c * 2^96 + b * 2^64 + a, then:
-    /// x = b * (2^32 - 1) + (a - c) mod P
+    /// For x = c*2^96 + b*2^64 + a (where b = hi[31:0], c = hi[63:32], a = lo):
+    /// x = a + b*(2^32 - 1) - c (mod P)
     #[inline(always)]
     unsafe fn goldilocks_reduce_128_vec(lo: uint64x2_t, hi: uint64x2_t) -> uint64x2_t {
-        let mask32 = vdupq_n_u64(0xFFFFFFFF);
+        let mask32 = vdupq_n_u64(0xFFFF_FFFF);
+        let p_vec = vdupq_n_u64(P);
 
-        // a = lo (low 64 bits)
-        // b = hi & 0xFFFFFFFF (bits 64-95)
-        // c = hi >> 32 (bits 96-127)
         let a = lo;
-        let b = vandq_u64(hi, mask32);
-        let c = vshrq_n_u64(hi, 32);
+        let b = vandq_u64(hi, mask32); // bits 64-95
+        let c = vshrq_n_u64(hi, 32); // bits 96-127
 
-        // b_term = (b << 32) - b = b * (2^32 - 1)
-        let b_shifted = vshlq_n_u64(b, 32);
-        let b_term = vsubq_u64(b_shifted, b);
+        // b_term = b * (2^32 - 1) = (b << 32) - b
+        let b_term = vsubq_u64(vshlq_n_u64(b, 32), b);
 
-        // result = a - c + b_term
-        // We need to handle underflow in (a - c) carefully
-
-        // First: a - c (may underflow)
+        // Compute a - c, handling underflow
         let a_minus_c = vsubq_u64(a, c);
         let underflow = vcltq_u64(a, c);
-        let p_vec = vdupq_n_u64(P);
-        let a_minus_c_corrected = vaddq_u64(
-            a_minus_c,
-            vandq_u64(vreinterpretq_u64_s64(vreinterpretq_s64_u64(underflow)), p_vec),
-        );
+        // Add P back if underflow: mask is all 1s or all 0s, AND with P gives P or 0
+        let correction = vandq_u64(underflow, p_vec);
+        let a_minus_c = vaddq_u64(a_minus_c, correction);
 
-        // Then add b_term
-        goldilocks_add_vec(a_minus_c_corrected, b_term)
+        // Final result: (a - c) + b_term, with reduction
+        goldilocks_add_vec(a_minus_c, b_term)
     }
 
     /// Vectorized Goldilocks division by 2.
+    ///
+    /// For field element x: returns x/2 = x * 2^(-1) mod P.
+    /// If x is even, this is just x >> 1.
+    /// If x is odd, this is (x + P) >> 1 (since P is odd, x + P is even).
     #[inline(always)]
     unsafe fn goldilocks_div2_vec(a: uint64x2_t) -> uint64x2_t {
-        // If a is even, just shift right by 1
-        // If a is odd, add P first (making it even), then shift
-        // Note: adding P can overflow, so we need to handle the carry
-
         let one = vdupq_n_u64(1);
         let p_vec = vdupq_n_u64(P);
         let high_bit = vdupq_n_u64(1u64 << 63);
 
-        // Check if odd (low bit set)
-        let is_odd = vandq_u64(a, one);
-        let is_odd_mask = vceqq_u64(is_odd, one);
+        // Check if odd
+        let is_odd = vceqq_u64(vandq_u64(a, one), one);
 
-        // For odd: (a + P) >> 1, handling overflow
-        // If a + P overflows (i.e., if a_plus_p < a), we need to set the high bit
+        // For odd values: (a + P) >> 1, handling potential overflow
         let a_plus_p = vaddq_u64(a, p_vec);
         let overflow = vcltq_u64(a_plus_p, a);
 
-        // If overflow occurred, the result is (high_bit) | (a_plus_p >> 1)
-        // Otherwise, the result is just a_plus_p >> 1
-        let a_plus_p_shifted = vshrq_n_u64(a_plus_p, 1);
-        let overflow_correction = vandq_u64(overflow, high_bit);
-        let odd_result = vorrq_u64(a_plus_p_shifted, overflow_correction);
+        // If overflow, set high bit in result
+        let shifted = vshrq_n_u64(a_plus_p, 1);
+        let odd_result = vorrq_u64(shifted, vandq_u64(overflow, high_bit));
 
-        // For even: just shift
+        // For even values: just shift
         let even_result = vshrq_n_u64(a, 1);
 
-        // Select based on oddness
-        vbslq_u64(is_odd_mask, odd_result, even_result)
+        vbslq_u64(is_odd, odd_result, even_result)
+    }
+
+    /// Bitwise NOT for uint64x2_t via reinterpret to u8.
+    #[inline(always)]
+    unsafe fn vmvnq_u8_as_u64(a: uint64x2_t) -> uint64x2_t {
+        vreinterpretq_u64_u8(vmvnq_u8(vreinterpretq_u8_u64(a)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::algebra::Ring as _;
 
     #[test]
     fn test_butterfly_forward_scalar() {
@@ -383,7 +324,6 @@ mod tests {
 
     #[test]
     fn test_butterfly_roundtrip() {
-        // Forward then inverse should be identity
         let w = F::from(7u64);
         let w_inv = w.inv();
 
@@ -456,12 +396,43 @@ mod tests {
 
         #[test]
         fn test_neon_with_large_values() {
-            // Test with values close to P to stress reduction
-            let p_minus_1 = F::from(u64::MAX);
-            let w = F::from(0xABCDEF0123456789u64);
+            // Test with values near P to stress reduction
+            let large = F::from(u64::MAX);
+            let w = F::from(0xABCD_EF01_2345_6789u64);
 
-            let mut a = vec![p_minus_1; 4];
-            let mut b = vec![p_minus_1; 4];
+            let mut a = vec![large; 4];
+            let mut b = vec![large; 4];
+            let mut a_scalar = a.clone();
+            let mut b_scalar = b.clone();
+
+            butterfly::<true>(&mut a, &mut b, w);
+            butterfly_scalar::<true>(&mut a_scalar, &mut b_scalar, w);
+
+            assert_eq!(a, a_scalar);
+            assert_eq!(b, b_scalar);
+        }
+
+        #[test]
+        fn test_neon_with_zeros() {
+            let w = F::from(12345u64);
+            let mut a = vec![F::from(0u64); 4];
+            let mut b = vec![F::from(0u64); 4];
+            let mut a_scalar = a.clone();
+            let mut b_scalar = b.clone();
+
+            butterfly::<true>(&mut a, &mut b, w);
+            butterfly_scalar::<true>(&mut a_scalar, &mut b_scalar, w);
+
+            assert_eq!(a, a_scalar);
+            assert_eq!(b, b_scalar);
+        }
+
+        #[test]
+        fn test_neon_odd_length() {
+            // Test with odd-length slices to exercise remainder handling
+            let w = F::from(42u64);
+            let mut a = vec![F::from(1u64), F::from(2u64), F::from(3u64)];
+            let mut b = vec![F::from(4u64), F::from(5u64), F::from(6u64)];
             let mut a_scalar = a.clone();
             let mut b_scalar = b.clone();
 

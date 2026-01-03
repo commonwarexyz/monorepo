@@ -12,6 +12,7 @@ const P: u64 = u64::wrapping_neg(1 << 32) + 1;
 
 /// An element of the [Goldilocks field](https://xn--2-umb.com/22/goldilocks/).
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct F(u64);
 
 impl FixedSize for F {
