@@ -1,4 +1,3 @@
-use crate::Message;
 use arbitrary::Unstructured;
 use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::{
@@ -60,6 +59,8 @@ pub fn arbitrary_vec_g2(
     (0..len).map(|_| arbitrary_g2(u)).collect()
 }
 
+pub type Message = (Vec<u8>, Vec<u8>);
+
 #[allow(unused)]
 pub fn arbitrary_messages(
     u: &mut Unstructured,
@@ -67,12 +68,7 @@ pub fn arbitrary_messages(
     max: usize,
 ) -> Result<Vec<Message>, arbitrary::Error> {
     (0..u.int_in_range(min..=max)?)
-        .map(|_| {
-            Ok((
-                arbitrary_optional_bytes(u, 50)?,
-                arbitrary_bytes(u, 0, 100)?,
-            ))
-        })
+        .map(|_| Ok((arbitrary_bytes(u, 0, 50)?, arbitrary_bytes(u, 0, 100)?)))
         .collect()
 }
 

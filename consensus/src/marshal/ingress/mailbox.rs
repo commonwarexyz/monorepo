@@ -125,18 +125,17 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// The verified block.
         block: B,
     },
-    /// A request to set the sync floor.
+    /// Sets the sync starting point (advances if higher than current).
     ///
-    /// The sync floor is the latest block that the application has processed. Marshal
-    /// will not attempt to sync blocks below this height nor deliver blocks below
-    /// this height to the application.
+    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data at or
+    /// below the floor is pruned.
     ///
-    /// This sets the sync floor only if the provided height is higher than the
-    /// previously recorded floor.
+    /// To prune data without affecting the sync starting point (say at some trailing depth
+    /// from tip), prune the finalized stores directly.
     ///
-    /// The default sync floor is height 0.
+    /// The default floor is 0.
     SetFloor {
-        /// The candidate sync floor height.
+        /// The candidate floor height.
         height: u64,
     },
 
@@ -330,13 +329,15 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         }
     }
 
-    /// A request to set the sync floor (conditionally advances if higher).
+    /// Sets the sync starting point (advances if higher than current).
     ///
-    /// The sync floor is the latest block that the application has processed. Marshal
-    /// will not attempt to sync blocks below this height nor deliver blocks below
-    /// this height to the application.
+    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data at or
+    /// below the floor is pruned.
     ///
-    /// The default sync floor is height 0.
+    /// To prune data without affecting the sync starting point (say at some trailing depth
+    /// from tip), prune the finalized stores directly.
+    ///
+    /// The default floor is 0.
     pub async fn set_floor(&mut self, height: u64) {
         if self
             .sender
@@ -344,7 +345,7 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
             .await
             .is_err()
         {
-            error!("failed to send set sync floor message to actor: receiver dropped");
+            error!("failed to send set floor message to actor: receiver dropped");
         }
     }
 }

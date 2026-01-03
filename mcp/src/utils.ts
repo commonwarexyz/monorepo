@@ -130,6 +130,142 @@ export function parseCrateInfo(
 }
 
 /**
+ * Represents a snippet of consecutive lines with content.
+ */
+export interface Snippet {
+  start: number; // First line index (0-based)
+  end: number; // One past last line index (exclusive)
+  score: number; // Cumulative score of all lines
+}
+
+/**
+ * Build snippets using a rolling window approach.
+ * Creates a window centered on each line with a positive score,
+ * allowing overlapping windows that will be filtered later.
+ * Only stores metadata (line span + score), not the actual text.
+ */
+export function buildSnippets(lineScores: number[], windowSize: number = 7): Snippet[] {
+  const snippets: Snippet[] = [];
+  const halfWindow = Math.floor(windowSize / 2);
+  const totalLines = lineScores.length;
+
+  for (let lineNum = 0; lineNum < totalLines; lineNum++) {
+    // Only create windows centered on lines with matches
+    if (lineScores[lineNum] <= 0) {
+      continue;
+    }
+
+    // Create window centered on this line
+    const start = Math.max(0, lineNum - halfWindow);
+    const end = Math.min(totalLines, lineNum + halfWindow + 1);
+
+    // Calculate total score for this window
+    let totalScore = 0;
+    for (let i = start; i < end; i++) {
+      totalScore += lineScores[i];
+    }
+
+    snippets.push({ start, end, score: totalScore });
+  }
+
+  return snippets;
+}
+
+/**
+ * Check if a candidate snippet has majority overlap with a selected snippet.
+ * Returns true if more than half of the candidate snippet's lines overlap
+ * with the selected snippet.
+ */
+export function hasMajorityOverlap(
+  candidateStart: number,
+  candidateEnd: number,
+  selectedStart: number,
+  selectedEnd: number
+): boolean {
+  const overlapStart = Math.max(candidateStart, selectedStart);
+  const overlapEnd = Math.min(candidateEnd, selectedEnd);
+  const overlapCount = Math.max(0, overlapEnd - overlapStart);
+  const candidateSize = candidateEnd - candidateStart;
+  return overlapCount > candidateSize / 2;
+}
+
+/**
+ * Select top snippets while filtering out those with majority overlap.
+ * Skips snippets with a score of 0.
+ */
+export function selectTopSnippets(
+  snippets: Snippet[],
+  maxSnippets: number
+): Array<{ start: number; end: number }> {
+  // Sort by score descending, filter out zero-score snippets
+  const sorted = [...snippets].filter((s) => s.score > 0).sort((a, b) => b.score - a.score);
+
+  const selected: Array<{ start: number; end: number }> = [];
+
+  for (const snippet of sorted) {
+    if (selected.length >= maxSnippets) {
+      break;
+    }
+
+    const { start, end } = snippet;
+
+    // Check for majority overlap with already selected snippets
+    let hasOverlap = false;
+    for (const sel of selected) {
+      if (hasMajorityOverlap(start, end, sel.start, sel.end)) {
+        hasOverlap = true;
+        break;
+      }
+    }
+
+    if (!hasOverlap) {
+      selected.push({ start, end });
+    }
+  }
+
+  return selected;
+}
+
+/**
+ * Format a snippet as a string with line numbers.
+ * Line numbers are 0-indexed to match formatWithLineNumbers.
+ */
+export function formatSnippet(lines: string[], start: number, end: number): string {
+  return lines
+    .slice(start, end)
+    .map((l, idx) => `${start + idx}: ${l}`)
+    .join("\n");
+}
+
+/**
+ * Format file content with line numbers.
+ * Line numbers are 0-indexed to match search_code output.
+ * If startLine/endLine are provided, only that range is returned.
+ */
+export function formatWithLineNumbers(
+  content: string,
+  startLine?: number,
+  endLine?: number
+): string {
+  const lines = content.split("\n");
+
+  // Determine range (0-indexed, inclusive)
+  const start = startLine !== undefined ? Math.max(0, startLine) : 0;
+  const end = endLine !== undefined ? Math.min(lines.length - 1, endLine) : lines.length - 1;
+
+  // Validate range
+  if (start > end || start >= lines.length) {
+    return "";
+  }
+
+  // Extract and format lines (inclusive range)
+  return lines
+    .slice(start, end + 1)
+    .map((line, idx) => `${start + idx}: ${line}`)
+    .join("\n");
+}
+
+/**
  * Build a file tree string from a list of file paths.
  * Groups files by directory and formats as an indented tree.
  */

@@ -68,7 +68,7 @@ fn bench_get(c: &mut Criterion) {
             let keys = builder.start(|ctx| async move {
                 let mut a = Archive::init(ctx, variant, compression).await;
                 let keys = append_random(&mut a, ITEMS).await;
-                a.close().await.unwrap();
+                a.sync().await.unwrap();
                 keys
             });
 

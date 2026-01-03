@@ -12,7 +12,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::{ordered::Set, union};
 use futures::channel::oneshot;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     hash::{Hash, Hasher},
     sync::Arc,
@@ -451,7 +451,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         provider: &impl Provider<Scope = Epoch, Scheme = S>,
     ) -> Result<Option<Chunk<P, D>>, Error>
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         S: scheme::Scheme<P, D>,
     {
         // Verify chunk
@@ -706,8 +706,9 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     /// using the provided scheme.
     ///
     /// Returns true if the attestation is valid, false otherwise.
-    pub fn verify(&self, namespace: &[u8], scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
@@ -715,7 +716,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_attestation::<D>(&ack_namespace, ctx, &self.attestation)
+        scheme.verify_attestation::<_, D>(rng, &ack_namespace, ctx, &self.attestation)
     }
 
     /// Generate a new Ack by signing with the provided scheme.
@@ -987,7 +988,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
     /// Returns true if the signature is valid, false otherwise.
     pub fn verify<R>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         S: scheme::Scheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
@@ -1049,7 +1050,7 @@ mod tests {
     use super::*;
     use crate::ordered_broadcast::{
         mocks::Provider,
-        scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
     };
     use commonware_codec::{DecodeExt as _, Encode, Read};
     use commonware_cryptography::{
@@ -1059,7 +1060,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Signer,
     };
-    use commonware_utils::quorum;
+    use commonware_utils::{quorum, test_rng};
     use rand::{rngs::StdRng, SeedableRng};
     use std::panic::catch_unwind;
 
@@ -1073,15 +1074,6 @@ mod tests {
     // Helper function to create a sample Ed25519 private key
     fn sample_scheme(v: u64) -> PrivateKey {
         PrivateKey::from_seed(v)
-    }
-
-    /// Generate a fixture using the provided generator function.
-    fn setup<S, F>(n: u32, fixture: F) -> Fixture<S>
-    where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
-    {
-        let mut rng = StdRng::seed_from_u64(0);
-        fixture(&mut rng, n)
     }
 
     /// Generate a fixture using the provided generator function with a specific seed.
@@ -1108,7 +1100,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let chunk = Chunk::new(fixture.participants[0].clone(), 0, sample_digest(1));
         let epoch = Epoch::new(5);
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
@@ -1143,6 +1135,7 @@ mod tests {
     #[test]
     fn test_parent_encode_decode() {
         parent_encode_decode(ed25519::fixture);
+        parent_encode_decode(secp256r1::fixture);
         parent_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         parent_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         parent_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -1154,7 +1147,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let ed_scheme = sample_scheme(0);
         let public_key = ed_scheme.public_key();
         let chunk_namespace = chunk_namespace(NAMESPACE);
@@ -1221,6 +1214,7 @@ mod tests {
     #[test]
     fn test_node_encode_decode() {
         node_encode_decode(ed25519::fixture);
+        node_encode_decode(secp256r1::fixture);
         node_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         node_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         node_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -1232,7 +1226,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
 
         // Create a provider that returns the verifier for any epoch.
         // This simulates the normal case where the scheme is available.
@@ -1322,6 +1316,7 @@ mod tests {
     #[test]
     fn test_node_read_staged() {
         node_read_staged(ed25519::fixture);
+        node_read_staged(secp256r1::fixture);
         node_read_staged(bls12381_multisig::fixture::<MinPk, _>);
         node_read_staged(bls12381_multisig::fixture::<MinSig, _>);
         node_read_staged(bls12381_threshold::fixture::<MinPk, _>);
@@ -1333,7 +1328,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let chunk = Chunk::new(fixture.participants[0].clone(), 42, sample_digest(1));
         let epoch = Epoch::new(5);
 
@@ -1362,6 +1357,7 @@ mod tests {
     #[test]
     fn test_ack_encode_decode() {
         ack_encode_decode(ed25519::fixture);
+        ack_encode_decode(secp256r1::fixture);
         ack_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         ack_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         ack_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -1373,7 +1369,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let chunk_namespace = chunk_namespace(NAMESPACE);
@@ -1424,7 +1421,6 @@ mod tests {
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk.clone(), epoch, certificate);
 
         // Verify lock
-        let mut rng = StdRng::seed_from_u64(0);
         assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Test activity with the lock
@@ -1446,6 +1442,7 @@ mod tests {
     #[test]
     fn test_activity_encode_decode() {
         activity_encode_decode(ed25519::fixture);
+        activity_encode_decode(secp256r1::fixture);
         activity_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         activity_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         activity_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -1479,7 +1476,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
@@ -1515,13 +1513,13 @@ mod tests {
         assert_eq!(decoded.epoch, lock.epoch);
 
         // Verify the signature in the decoded lock
-        let mut rng = StdRng::seed_from_u64(0);
         assert!(decoded.verify(&mut rng, NAMESPACE, &fixture.verifier));
     }
 
     #[test]
     fn test_lock_encode_decode() {
         lock_encode_decode(ed25519::fixture);
+        lock_encode_decode(secp256r1::fixture);
         lock_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         lock_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         lock_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -1533,7 +1531,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let mut scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
@@ -1546,7 +1545,6 @@ mod tests {
             sample_digest(1),
             None,
         );
-        let mut rng = StdRng::seed_from_u64(0);
         let provider = ConstantProvider::new(fixture.verifier.clone());
         let result = node.verify(&mut rng, NAMESPACE, &provider);
         assert!(result.is_ok());
@@ -1594,6 +1592,7 @@ mod tests {
     #[test]
     fn test_node_sign_verify() {
         node_sign_verify(ed25519::fixture);
+        node_sign_verify(secp256r1::fixture);
         node_sign_verify(bls12381_multisig::fixture::<MinPk, _>);
         node_sign_verify(bls12381_multisig::fixture::<MinSig, _>);
         node_sign_verify(bls12381_threshold::fixture::<MinPk, _>);
@@ -1605,21 +1604,23 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
 
         let ack = Ack::sign(NAMESPACE, &fixture.schemes[0], chunk, epoch).expect("Should sign ack");
-        assert!(ack.verify(NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Test that verification fails with wrong namespace
-        assert!(!ack.verify(b"wrong", &fixture.verifier));
+        assert!(!ack.verify(&mut rng, b"wrong", &fixture.verifier));
     }
 
     #[test]
     fn test_ack_sign_verify() {
         ack_sign_verify(ed25519::fixture);
+        ack_sign_verify(secp256r1::fixture);
         ack_sign_verify(bls12381_multisig::fixture::<MinPk, _>);
         ack_sign_verify(bls12381_multisig::fixture::<MinSig, _>);
         ack_sign_verify(bls12381_threshold::fixture::<MinPk, _>);
@@ -1631,7 +1632,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
@@ -1660,13 +1662,13 @@ mod tests {
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk, epoch, certificate);
 
         // Verify lock
-        let mut rng = StdRng::seed_from_u64(0);
         assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
     }
 
     #[test]
     fn test_certificate_assembly() {
         certificate_assembly(ed25519::fixture);
+        certificate_assembly(secp256r1::fixture);
         certificate_assembly(bls12381_multisig::fixture::<MinPk, _>);
         certificate_assembly(bls12381_multisig::fixture::<MinSig, _>);
         certificate_assembly(bls12381_threshold::fixture::<MinPk, _>);
@@ -1678,7 +1680,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
@@ -1705,7 +1708,6 @@ mod tests {
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk, epoch, certificate);
 
         // Verify lock
-        let mut rng = StdRng::seed_from_u64(0);
         assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Test that verification fails with wrong namespace
@@ -1715,6 +1717,7 @@ mod tests {
     #[test]
     fn test_lock_verify() {
         lock_verify(ed25519::fixture);
+        lock_verify(secp256r1::fixture);
         lock_verify(bls12381_multisig::fixture::<MinPk, _>);
         lock_verify(bls12381_multisig::fixture::<MinSig, _>);
         lock_verify(bls12381_threshold::fixture::<MinPk, _>);
@@ -1744,7 +1747,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
 
@@ -1760,7 +1764,6 @@ mod tests {
         let node = Node::<PublicKey, S, Sha256Digest>::new(chunk.clone(), signature, None);
 
         // Verification should succeed
-        let mut rng = StdRng::seed_from_u64(0);
         let provider = ConstantProvider::new(fixture.verifier);
         assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
 
@@ -1778,6 +1781,7 @@ mod tests {
     #[test]
     fn test_node_verify_invalid_signature() {
         node_verify_invalid_signature(ed25519::fixture);
+        node_verify_invalid_signature(secp256r1::fixture);
         node_verify_invalid_signature(bls12381_multisig::fixture::<MinPk, _>);
         node_verify_invalid_signature(bls12381_multisig::fixture::<MinSig, _>);
         node_verify_invalid_signature(bls12381_threshold::fixture::<MinPk, _>);
@@ -1789,7 +1793,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
@@ -1830,7 +1835,6 @@ mod tests {
         );
 
         // Verification should succeed
-        let mut rng = StdRng::seed_from_u64(0);
         let provider = ConstantProvider::new(fixture.verifier.clone());
         assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
 
@@ -1873,6 +1877,7 @@ mod tests {
     #[test]
     fn test_node_verify_invalid_parent_signature() {
         node_verify_invalid_parent_signature(ed25519::fixture);
+        node_verify_invalid_parent_signature(secp256r1::fixture);
         node_verify_invalid_parent_signature(bls12381_multisig::fixture::<MinPk, _>);
         node_verify_invalid_parent_signature(bls12381_multisig::fixture::<MinSig, _>);
         node_verify_invalid_parent_signature(bls12381_threshold::fixture::<MinPk, _>);
@@ -1884,7 +1889,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1900,7 +1906,7 @@ mod tests {
         .expect("Should sign ack");
 
         // Verification should succeed
-        assert!(ack.verify(NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Create an ack with tampered signature by signing with a different scheme
         let ctx = AckSubject {
@@ -1916,12 +1922,13 @@ mod tests {
         let invalid_ack = Ack::<PublicKey, S, Sha256Digest>::new(chunk, epoch, tampered_vote);
 
         // Verification should fail because the signer index doesn't match the signature
-        assert!(!invalid_ack.verify(NAMESPACE, &fixture.verifier));
+        assert!(!invalid_ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
     }
 
     #[test]
     fn test_ack_verify_invalid_signature() {
         ack_verify_invalid_signature(ed25519::fixture);
+        ack_verify_invalid_signature(secp256r1::fixture);
         ack_verify_invalid_signature(bls12381_multisig::fixture::<MinPk, _>);
         ack_verify_invalid_signature(bls12381_multisig::fixture::<MinSig, _>);
         ack_verify_invalid_signature(bls12381_threshold::fixture::<MinPk, _>);
@@ -1933,6 +1940,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: Fn(&mut StdRng, u32) -> Fixture<S>,
     {
+        let mut rng = test_rng();
         let fixture = setup_seeded(4, 0, &f);
         let wrong_fixture = setup_seeded(4, 1, &f);
         // Create a chunk and ack
@@ -1946,15 +1954,16 @@ mod tests {
                 .expect("Should sign ack");
 
         // Verification should succeed with correct verifier
-        assert!(ack.verify(NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Verification should fail with wrong verifier
-        assert!(!ack.verify(NAMESPACE, &wrong_fixture.verifier));
+        assert!(!ack.verify(&mut rng, NAMESPACE, &wrong_fixture.verifier));
     }
 
     #[test]
     fn test_ack_verify_wrong_validator() {
         ack_verify_wrong_validator(ed25519::fixture);
+        ack_verify_wrong_validator(secp256r1::fixture);
         ack_verify_wrong_validator(bls12381_multisig::fixture::<MinPk, _>);
         ack_verify_wrong_validator(bls12381_multisig::fixture::<MinSig, _>);
         ack_verify_wrong_validator(bls12381_threshold::fixture::<MinPk, _>);
@@ -1966,6 +1975,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: Fn(&mut StdRng, u32) -> Fixture<S>,
     {
+        let mut rng = test_rng();
         let fixture = setup_seeded(4, 0, &f);
         let wrong_fixture = setup_seeded(4, 1, &f);
         let public_key = sample_scheme(0).public_key();
@@ -1994,7 +2004,6 @@ mod tests {
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk.clone(), epoch, certificate);
 
         // Verification should succeed
-        let mut rng = StdRng::seed_from_u64(0);
         assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
 
         // Generate certificate with the wrong keys
@@ -2023,6 +2032,7 @@ mod tests {
     #[test]
     fn test_lock_verify_invalid_signature() {
         lock_verify_invalid_signature(ed25519::fixture);
+        lock_verify_invalid_signature(secp256r1::fixture);
         lock_verify_invalid_signature(bls12381_multisig::fixture::<MinPk, _>);
         lock_verify_invalid_signature(bls12381_multisig::fixture::<MinSig, _>);
         lock_verify_invalid_signature(bls12381_threshold::fixture::<MinPk, _>);
@@ -2070,7 +2080,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         // Try to create a node with height 0 and a parent
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
@@ -2113,6 +2124,7 @@ mod tests {
     #[test]
     fn test_node_genesis_with_parent_fails() {
         node_genesis_with_parent_fails(ed25519::fixture);
+        node_genesis_with_parent_fails(secp256r1::fixture);
         node_genesis_with_parent_fails(bls12381_multisig::fixture::<MinPk, _>);
         node_genesis_with_parent_fails(bls12381_multisig::fixture::<MinSig, _>);
         node_genesis_with_parent_fails(bls12381_threshold::fixture::<MinPk, _>);
@@ -2124,7 +2136,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         // Try to create a non-genesis node without a parent
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 1, sample_digest(1)); // Height > 0
@@ -2144,6 +2157,7 @@ mod tests {
     #[test]
     fn test_node_non_genesis_without_parent_fails() {
         node_non_genesis_without_parent_fails(ed25519::fixture);
+        node_non_genesis_without_parent_fails(secp256r1::fixture);
         node_non_genesis_without_parent_fails(bls12381_multisig::fixture::<MinPk, _>);
         node_non_genesis_without_parent_fails(bls12381_multisig::fixture::<MinSig, _>);
         node_non_genesis_without_parent_fails(bls12381_threshold::fixture::<MinPk, _>);
@@ -2155,7 +2169,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
 
         // Try to create a genesis node (height 0) with a parent - should panic in Node::new
         let public_key = sample_scheme(0).public_key();
@@ -2196,6 +2211,7 @@ mod tests {
     #[test]
     fn test_node_genesis_with_parent_panics() {
         assert!(catch_unwind(|| node_genesis_with_parent_panics(ed25519::fixture)).is_err());
+        assert!(catch_unwind(|| node_genesis_with_parent_panics(secp256r1::fixture)).is_err());
         assert!(catch_unwind(|| node_genesis_with_parent_panics(
             bls12381_multisig::fixture::<MinPk, _>
         ))
@@ -2219,7 +2235,8 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
 
         // Try to create a non-genesis node (height > 0) without a parent - should panic on decode
         let public_key = sample_scheme(0).public_key();
@@ -2237,6 +2254,9 @@ mod tests {
     #[test]
     fn test_node_non_genesis_without_parent_panics() {
         assert!(catch_unwind(|| node_non_genesis_without_parent_panics(ed25519::fixture)).is_err());
+        assert!(
+            catch_unwind(|| node_non_genesis_without_parent_panics(secp256r1::fixture)).is_err()
+        );
         assert!(catch_unwind(|| node_non_genesis_without_parent_panics(
             bls12381_multisig::fixture::<MinPk, _>
         ))

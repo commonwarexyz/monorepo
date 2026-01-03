@@ -11,7 +11,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::hint::black_box;
 
-fn benchmark_threshold_signature_recover(c: &mut Criterion) {
+fn benchmark_threshold_recover(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
     let namespace = b"benchmark";
     let msg = b"hello";
@@ -32,10 +32,8 @@ fn benchmark_threshold_signature_recover(c: &mut Criterion) {
                             .values()
                             .iter()
                             .map(|s| {
-                                primitives::ops::partial_sign_message::<MinSig>(
-                                    s,
-                                    Some(namespace),
-                                    msg,
+                                primitives::ops::threshold::sign_message::<MinSig>(
+                                    s, namespace, msg,
                                 )
                             })
                             .collect::<Vec<_>>(),
@@ -43,7 +41,7 @@ fn benchmark_threshold_signature_recover(c: &mut Criterion) {
                 },
                 |(public, partials)| {
                     black_box(
-                        primitives::ops::threshold_signature_recover::<MinSig, _>(
+                        primitives::ops::threshold::recover::<MinSig, _>(
                             public.public(),
                             &partials,
                         )
@@ -56,4 +54,4 @@ fn benchmark_threshold_signature_recover(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmark_threshold_signature_recover);
+criterion_group!(benches, benchmark_threshold_recover);

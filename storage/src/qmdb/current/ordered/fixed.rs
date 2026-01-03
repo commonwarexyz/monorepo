@@ -9,6 +9,7 @@
 
 use crate::{
     bitmap::{CleanBitMap, DirtyBitMap},
+    kv::{self, Batchable},
     mmr::{
         grafting::Storage as GraftingStorage,
         mem::{Clean, Dirty, State},
@@ -25,7 +26,7 @@ use crate::{
             proof::{OperationProof, RangeProof},
             root, FixedConfig as Config,
         },
-        store::{Batchable, CleanStore, DirtyStore, LogStore},
+        store::{CleanStore, DirtyStore, LogStore},
         Error,
     },
     translator::Translator,
@@ -383,11 +384,6 @@ impl<
         })
     }
 
-    /// Close the db. Operations that have not been committed will be lost.
-    pub async fn close(self) -> Result<(), Error> {
-        self.any.close().await
-    }
-
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
@@ -647,7 +643,7 @@ impl<
         T: Translator,
         const N: usize,
         S: State<DigestOf<H>>,
-    > crate::store::Store for Db<E, K, V, H, T, N, S>
+    > kv::Gettable for Db<E, K, V, H, T, N, S>
 {
     type Key = K;
     type Value = V;
@@ -665,7 +661,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreMut for Db<E, K, V, H, T, N, Dirty>
+    > kv::Updatable for Db<E, K, V, H, T, N, Dirty>
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
@@ -679,7 +675,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreDeletable for Db<E, K, V, H, T, N, Dirty>
+    > kv::Deletable for Db<E, K, V, H, T, N, Dirty>
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
@@ -796,10 +792,6 @@ impl<
         self.prune(prune_loc).await
     }
 
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
-    }
-
     async fn destroy(self) -> Result<(), Error> {
         self.destroy().await
     }
@@ -892,7 +884,7 @@ pub mod test {
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
             let root0 = db.root();
-            db.close().await.unwrap();
+            drop(db);
             let db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 1);
             assert!(db.get_metadata().await.unwrap().is_none());
@@ -910,7 +902,8 @@ pub mod test {
             assert!(db.get_metadata().await.unwrap().is_none());
             let root1 = db.root();
             assert!(root1 != root0);
-            db.close().await.unwrap();
+
+            drop(db);
             let db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root1);
@@ -929,7 +922,8 @@ pub mod test {
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(5));
             let root2 = db.root();
-            db.close().await.unwrap();
+
+            drop(db);
             let db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 6);
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
@@ -1002,9 +996,9 @@ pub mod test {
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(3383));
             assert_eq!(db.any.snapshot.items(), 857);
 
-            // Close & reopen the db, making sure the re-opened db has exactly the same state.
+            // Reopen the db, making sure it has exactly the same state.
             let root = db.root();
-            db.close().await.unwrap();
+            drop(db);
             let db = open_db(context.clone(), "build_big").await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), 4241);
@@ -1402,16 +1396,17 @@ pub mod test {
             let partition = "build_random";
             let rng_seed = context.next_u64();
             let db = open_db(context.clone(), partition).await.into_dirty();
-            let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
+            let mut db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
+            db.sync().await.unwrap();
 
-            // Close the db, then replay its operations with a bitmap.
+            // Drop and reopen the db
             let root = db.root();
-            // Create a bitmap based on the current db's pruned/inactive state.
-            db.close().await.unwrap();
-
+            drop(db);
             let db = open_db(context, partition).await;
+
+            // Ensure the root matches
             assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
@@ -1588,9 +1583,8 @@ pub mod test {
             // Verify they generate the same roots
             assert_eq!(root_no_pruning, root_pruning);
 
-            // Close both databases
-            db_no_pruning.close().await.unwrap();
-            db_pruning.close().await.unwrap();
+            drop(db_no_pruning);
+            drop(db_pruning);
 
             // Restart both databases
             let db_no_pruning = CleanCurrentTest::init(context.clone(), db_config_no_pruning)

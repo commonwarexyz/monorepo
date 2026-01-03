@@ -46,7 +46,7 @@ pub trait UnlimitedSender: Clone + Send + Sync + 'static {
     type PublicKey: PublicKey;
 
     /// Error that can occur when sending a message.
-    type Error: Debug + StdError + Send + Sync;
+    type Error: Debug + StdError + Send + Sync + 'static;
 
     /// Sends a message to a set of recipients.
     ///
@@ -107,7 +107,7 @@ pub trait CheckedSender: Send {
     type PublicKey: PublicKey;
 
     /// Error that can occur when sending a message.
-    type Error: Debug + StdError + Send + Sync;
+    type Error: Debug + StdError + Send + Sync + 'static;
 
     /// Sends a message to the pre-checked recipients.
     ///

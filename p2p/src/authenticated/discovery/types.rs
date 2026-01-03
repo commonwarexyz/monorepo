@@ -389,14 +389,13 @@ mod tests {
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_utils::hostname;
+    use commonware_utils::{hostname, test_rng};
     use std::{net::SocketAddr, time::Duration};
 
     const NAMESPACE: &[u8] = b"test";
 
-    fn signed_peer_info() -> Info<PublicKey> {
-        let mut rng = rand::thread_rng();
-        let c = PrivateKey::random(&mut rng);
+    fn signed_peer_info(rng: &mut impl rand_core::CryptoRngCore) -> Info<PublicKey> {
+        let c = PrivateKey::random(rng);
         Info {
             ingress: Ingress::Socket(SocketAddr::from(([127, 0, 0, 1], 8080))),
             timestamp: 1234567890,
@@ -417,7 +416,12 @@ mod tests {
 
     #[test]
     fn test_signed_peer_info_codec() {
-        let original = vec![signed_peer_info(), signed_peer_info(), signed_peer_info()];
+        let mut rng = test_rng();
+        let original = vec![
+            signed_peer_info(&mut rng),
+            signed_peer_info(&mut rng),
+            signed_peer_info(&mut rng),
+        ];
         let encoded = original.encode();
         let decoded =
             Vec::<Info<PublicKey>>::decode_cfg(encoded, &(RangeCfg::new(3..=3), ())).unwrap();
@@ -439,6 +443,8 @@ mod tests {
 
     #[test]
     fn test_payload_codec() {
+        let mut rng = test_rng();
+
         // Config for the codec
         let cfg = PayloadConfig {
             max_bit_vec: 1024,
@@ -447,7 +453,7 @@ mod tests {
         };
 
         // Test Greeting
-        let original = signed_peer_info();
+        let original = signed_peer_info(&mut rng);
         let encoded = Payload::Greeting(original.clone()).encode();
         let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<PublicKey>::Greeting(info)) => info,
@@ -471,7 +477,7 @@ mod tests {
         assert_eq!(original, decoded);
 
         // Test Peers
-        let original = vec![signed_peer_info(), signed_peer_info()];
+        let original = vec![signed_peer_info(&mut rng), signed_peer_info(&mut rng)];
         let encoded = Payload::Peers(original.clone()).encode();
         let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<PublicKey>::Peers(p)) => p,
@@ -528,12 +534,13 @@ mod tests {
 
     #[test]
     fn test_payload_peers_respects_limit() {
+        let mut rng = test_rng();
         let cfg = PayloadConfig {
             max_bit_vec: 1024,
             max_peers: 1,
             max_data_length: 32,
         };
-        let peers = vec![signed_peer_info(), signed_peer_info()];
+        let peers = vec![signed_peer_info(&mut rng), signed_peer_info(&mut rng)];
         let encoded = Payload::Peers(peers).encode();
         let err = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
         assert!(matches!(err, CodecError::InvalidLength(2)));

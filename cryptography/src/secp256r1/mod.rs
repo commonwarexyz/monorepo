@@ -14,7 +14,7 @@
 //! let mut signer = secp256r1::standard::PrivateKey::random(&mut OsRng);
 //!
 //! // Create a message to sign
-//! let namespace = &b"demo"[..];
+//! let namespace = b"demo";
 //! let msg = b"hello, world!";
 //!
 //! // Sign the message
@@ -33,6 +33,7 @@
 //! assert_eq!(signature.recover_signer(namespace, msg).unwrap(), signer.public_key());
 //! ```
 
+pub mod certificate;
 mod common;
 pub mod recoverable;
 pub mod standard;

@@ -353,7 +353,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
 
     /// Get the public polynomial associated with this output.
     ///
-    /// This is useful for verifying partial signatures, with [crate::bls12381::primitives::ops::partial_verify_message].
+    /// This is useful for verifying partial signatures, with [crate::bls12381::primitives::ops::threshold::verify_message].
     pub const fn public(&self) -> &Sharing<V> {
         &self.public
     }
@@ -1582,18 +1582,15 @@ mod test_plan {
     use super::*;
     use crate::{
         bls12381::primitives::{
-            ops::{
-                partial_sign_message, partial_verify_message, threshold_signature_recover,
-                verify_message,
-            },
+            ops::{self, threshold},
             variant::Variant,
         },
         ed25519, PublicKey,
     };
+    use ::core::num::NonZeroI32;
     use anyhow::anyhow;
     use bytes::BytesMut;
     use commonware_utils::{max_faults, quorum, TryCollect};
-    use core::num::NonZeroI32;
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;
 
@@ -1904,7 +1901,7 @@ mod test_plan {
 
                 // Create round info
                 let info = Info::new(
-                    &[],
+                    b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
                     i_round as u64,
                     previous_output.clone(),
                     Default::default(),
@@ -2212,14 +2209,14 @@ mod test_plan {
 
                 // Generate and verify threshold signature
                 let test_message = format!("test message round {i_round}").into_bytes();
-                let namespace = Some(&b"test"[..]);
+                let namespace = b"test";
 
                 let mut partial_sigs = Vec::new();
                 for &i_player in &round.players {
                     let share = &shares[&keys[i_player as usize].public_key()];
-                    let partial_sig = partial_sign_message::<V>(share, namespace, &test_message);
+                    let partial_sig = threshold::sign_message::<V>(share, namespace, &test_message);
 
-                    partial_verify_message::<V>(
+                    threshold::verify_message::<V>(
                         &observer_output.public,
                         namespace,
                         &test_message,
@@ -2231,14 +2228,14 @@ mod test_plan {
                 }
 
                 let threshold = observer_output.quorum();
-                let threshold_sig = threshold_signature_recover::<V, _>(
+                let threshold_sig = threshold::recover::<V, _>(
                     &observer_output.public,
                     &partial_sigs[0..threshold as usize],
                 )
                 .expect("Should recover threshold signature");
 
                 // Verify against the saved public key
-                verify_message::<V>(
+                ops::verify_message::<V>(
                     threshold_public_key.as_ref().unwrap(),
                     namespace,
                     &test_message,
@@ -2536,7 +2533,7 @@ mod test {
         let sk = ed25519::PrivateKey::from_seed(0);
         let pk = sk.public_key();
         let info = Info::<MinPk, _>::new(
-            &[],
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
             0,
             None,
             Default::default(),

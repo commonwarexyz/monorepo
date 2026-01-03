@@ -2,7 +2,7 @@ use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 
-fn benchmark_aggregate_verify_multiple_public_keys(c: &mut Criterion) {
+fn benchmark_aggregate_verify_same_message(c: &mut Criterion) {
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
     thread_rng().fill(&mut msg);
@@ -14,22 +14,19 @@ fn benchmark_aggregate_verify_multiple_public_keys(c: &mut Criterion) {
                     let mut signatures = Vec::with_capacity(n);
                     for _ in 0..n {
                         let (private, public) = ops::keypair::<_, MinSig>(&mut thread_rng());
-                        let signature =
-                            ops::sign_message::<MinSig>(&private, Some(namespace), &msg);
+                        let signature = ops::sign_message::<MinSig>(&private, namespace, &msg);
                         public_keys.push(public);
                         signatures.push(signature);
                     }
                     (
                         public_keys,
-                        ops::aggregate_signatures::<MinSig, _>(&signatures),
+                        ops::aggregate::combine_signatures::<MinSig, _>(&signatures),
                     )
                 },
                 |(public_keys, signature)| {
-                    ops::aggregate_verify_multiple_public_keys::<MinSig, _>(
-                        &public_keys,
-                        Some(namespace),
-                        &msg,
-                        &signature,
+                    let public = ops::aggregate::combine_public_keys::<MinSig, _>(&public_keys);
+                    ops::aggregate::verify_same_message::<MinSig>(
+                        &public, namespace, &msg, &signature,
                     )
                     .unwrap();
                 },
@@ -42,5 +39,5 @@ fn benchmark_aggregate_verify_multiple_public_keys(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_aggregate_verify_multiple_public_keys
+    targets = benchmark_aggregate_verify_same_message
 }
