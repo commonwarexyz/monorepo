@@ -1,10 +1,10 @@
-use commonware_cryptography::{ed25519, BatchVerifier, Signer as _};
+use commonware_cryptography::{bls12381, BatchVerifier as _, Signer as _};
 use commonware_math::algebra::Random;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
 
-fn benchmark_batch_verify_multiple_messages(c: &mut Criterion) {
+fn benchmark_scheme_batch_verify_same_signer(c: &mut Criterion) {
     let namespace = b"namespace";
     for n_messages in [1, 10, 100, 1000, 10000].into_iter() {
         let mut msgs = Vec::with_capacity(n_messages);
@@ -16,8 +16,8 @@ fn benchmark_batch_verify_multiple_messages(c: &mut Criterion) {
         c.bench_function(&format!("{}/msgs={}", module_path!(), n_messages), |b| {
             b.iter_batched(
                 || {
-                    let mut batch = ed25519::Batch::new();
-                    let signer = ed25519::PrivateKey::random(&mut thread_rng());
+                    let mut batch = bls12381::Batch::new();
+                    let signer = bls12381::PrivateKey::random(&mut thread_rng());
                     for msg in msgs.iter() {
                         let sig = signer.sign(namespace, msg);
                         assert!(batch.add(namespace, msg, &signer.public_key(), &sig));
@@ -33,8 +33,8 @@ fn benchmark_batch_verify_multiple_messages(c: &mut Criterion) {
     }
 }
 
-criterion_group! {
+criterion_group!(
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_batch_verify_multiple_messages
-}
+    targets = benchmark_scheme_batch_verify_same_signer
+);

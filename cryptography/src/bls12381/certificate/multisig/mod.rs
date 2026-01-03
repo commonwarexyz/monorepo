@@ -159,7 +159,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         // Verify attestations and return any invalid ones.
         let (namespace, message) = subject.namespace_and_message(namespace);
         let invalid_indices =
-            batch::verify_public_keys::<_, V>(rng, namespace.as_ref(), message.as_ref(), &entries);
+            batch::verify_same_message::<_, V>(rng, namespace.as_ref(), message.as_ref(), &entries);
 
         // Mark invalid attestations.
         for idx in invalid_indices {
@@ -238,7 +238,7 @@ impl<P: PublicKey, V: Variant> Generic<P, V> {
         // Verify the aggregate signature.
         let (namespace, message) = subject.namespace_and_message(namespace);
         let agg_public = aggregate::combine_public_keys::<V, _>(&publics);
-        aggregate::verify_public_keys::<V>(
+        aggregate::verify_same_message::<V>(
             &agg_public,
             namespace.as_ref(),
             message.as_ref(),

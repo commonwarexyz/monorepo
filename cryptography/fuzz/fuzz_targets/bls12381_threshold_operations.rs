@@ -41,23 +41,23 @@ enum FuzzOperation {
         namespace: Vec<u8>,
         partial: PartialSignature<MinSig>,
     },
-    BatchVerifyMessagesMinPk {
+    BatchVerifySameSignerMinPk {
         public: Sharing<MinPk>,
         index: u32,
         entries: Vec<(Vec<u8>, Vec<u8>, G2)>,
     },
-    BatchVerifyMessagesMinSig {
+    BatchVerifySameSignerMinSig {
         public: Sharing<MinSig>,
         index: u32,
         entries: Vec<(Vec<u8>, Vec<u8>, G1)>,
     },
-    BatchVerifyPublicKeysMinPk {
+    BatchVerifySameMessageMinPk {
         public: Sharing<MinPk>,
         namespace: Vec<u8>,
         message: Vec<u8>,
         partials: Vec<(u32, G2)>,
     },
-    BatchVerifyPublicKeysMinSig {
+    BatchVerifySameMessageMinSig {
         public: Sharing<MinSig>,
         namespace: Vec<u8>,
         message: Vec<u8>,
@@ -139,7 +139,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                     .zip(partials)
                     .map(|((ns, msg), sig)| (ns, msg, sig))
                     .collect();
-                Ok(FuzzOperation::BatchVerifyMessagesMinPk {
+                Ok(FuzzOperation::BatchVerifySameSignerMinPk {
                     public: u.arbitrary()?,
                     index: u.int_in_range(1..=100)?,
                     entries,
@@ -153,19 +153,19 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                     .zip(partials)
                     .map(|((ns, msg), sig)| (ns, msg, sig))
                     .collect();
-                Ok(FuzzOperation::BatchVerifyMessagesMinSig {
+                Ok(FuzzOperation::BatchVerifySameSignerMinSig {
                     public: u.arbitrary()?,
                     index: u.int_in_range(1..=100)?,
                     entries,
                 })
             }
-            6 => Ok(FuzzOperation::BatchVerifyPublicKeysMinPk {
+            6 => Ok(FuzzOperation::BatchVerifySameMessageMinPk {
                 public: u.arbitrary()?,
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 partials: arbitrary_vec_indexed_g2(u, 0, 10)?,
             }),
-            7 => Ok(FuzzOperation::BatchVerifyPublicKeysMinSig {
+            7 => Ok(FuzzOperation::BatchVerifySameMessageMinSig {
                 public: u.arbitrary()?,
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
@@ -263,7 +263,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::BatchVerifyMessagesMinPk {
+        FuzzOperation::BatchVerifySameSignerMinPk {
             public,
             index,
             entries,
@@ -283,7 +283,7 @@ fn fuzz(op: FuzzOperation) {
                         )
                     })
                     .collect();
-                let _ = threshold::batch_verify_messages::<_, MinPk, _>(
+                let _ = threshold::batch_verify_same_signer::<_, MinPk, _>(
                     &mut thread_rng(),
                     &public,
                     index,
@@ -293,7 +293,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::BatchVerifyMessagesMinSig {
+        FuzzOperation::BatchVerifySameSignerMinSig {
             public,
             index,
             entries,
@@ -313,7 +313,7 @@ fn fuzz(op: FuzzOperation) {
                         )
                     })
                     .collect();
-                let _ = threshold::batch_verify_messages::<_, MinSig, _>(
+                let _ = threshold::batch_verify_same_signer::<_, MinSig, _>(
                     &mut thread_rng(),
                     &public,
                     index,
@@ -323,7 +323,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::BatchVerifyPublicKeysMinPk {
+        FuzzOperation::BatchVerifySameMessageMinPk {
             public,
             namespace,
             message,
@@ -337,7 +337,7 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
-                let _ = threshold::batch_verify_public_keys::<_, MinPk, _>(
+                let _ = threshold::batch_verify_same_message::<_, MinPk, _>(
                     &mut thread_rng(),
                     &public,
                     &namespace,
@@ -347,7 +347,7 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::BatchVerifyPublicKeysMinSig {
+        FuzzOperation::BatchVerifySameMessageMinSig {
             public,
             namespace,
             message,
@@ -361,7 +361,7 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
-                let _ = threshold::batch_verify_public_keys::<_, MinSig, _>(
+                let _ = threshold::batch_verify_same_message::<_, MinSig, _>(
                     &mut thread_rng(),
                     &public,
                     &namespace,
