@@ -9,6 +9,8 @@ use commonware_utils::bitmap::{BitMap, DEFAULT_CHUNK_SIZE};
 use core::ops::{Index, IndexMut};
 use rand_core::CryptoRngCore;
 
+mod intrinsics;
+
 /// Reverse the first `bit_width` bits of `i`.
 ///
 /// Any bits beyond that width will be erased.
@@ -132,6 +134,73 @@ fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
                         matrix[(index_b, k)] = ((a - b) * w_j).div_2();
                     }
                 }
+                w_j = w_j * w;
+            }
+            i += 2 * skip;
+        }
+    }
+}
+
+/// Specialized NTT for Matrix that uses platform intrinsics for the butterfly.
+///
+/// This operates directly on the Matrix's contiguous storage, allowing
+/// vectorized butterfly operations across columns.
+fn ntt_matrix<const FORWARD: bool>(matrix: &mut Matrix) {
+    let rows = matrix.rows;
+    let cols = matrix.cols;
+
+    let lg_rows = rows.ilog2() as usize;
+    assert_eq!(1 << lg_rows, rows, "rows should be a power of 2");
+
+    let w = {
+        let w = F::root_of_unity(lg_rows as u8).expect("too many rows to perform NTT");
+        if FORWARD {
+            w
+        } else {
+            w.exp(&[(1 << lg_rows) - 1])
+        }
+    };
+
+    let stages = {
+        let mut out = vec![(0usize, F::zero()); lg_rows];
+        let mut w_i = w;
+        for i in (0..lg_rows).rev() {
+            out[i] = (i, w_i);
+            w_i = w_i * w_i;
+        }
+        if !FORWARD {
+            out.reverse();
+        }
+        out
+    };
+
+    for (stage, w) in stages.into_iter() {
+        let skip = 1 << stage;
+        let mut i = 0;
+        while i < rows {
+            let mut w_j = F::one();
+            for j in 0..skip {
+                let index_a = i + j;
+                let index_b = index_a + skip;
+
+                // Get mutable slices to both rows
+                // SAFETY: index_a != index_b (since skip >= 1), so we can safely
+                // get mutable references to both rows simultaneously by splitting
+                // the underlying data slice.
+                let (row_a, row_b) = {
+                    let start_a = cols * index_a;
+                    let start_b = cols * index_b;
+                    // Since index_b > index_a and both are valid row indices,
+                    // we can split at the start of row_b
+                    let (first, second) = matrix.data.split_at_mut(start_b);
+                    (
+                        &mut first[start_a..start_a + cols],
+                        &mut second[..cols],
+                    )
+                };
+
+                intrinsics::butterfly::<FORWARD>(row_a, row_b, w_j);
+
                 w_j = w_j * w;
             }
             i += 2 * skip;
@@ -287,7 +356,7 @@ impl Matrix {
     }
 
     fn ntt<const FORWARD: bool>(&mut self) {
-        ntt::<FORWARD, Self>(self.rows, self.cols, self)
+        ntt_matrix::<FORWARD>(self)
     }
 
     pub const fn rows(&self) -> usize {
