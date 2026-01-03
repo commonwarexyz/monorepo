@@ -23,15 +23,19 @@ fn benchmark_insert_sequential(c: &mut Criterion) {
             });
         });
 
-        group.bench_with_input(BenchmarkId::new("roaring-rs", count), &count, |b, &count| {
-            b.iter(|| {
-                let mut bitmap = ExtBitmap::new();
-                for i in 0..count {
-                    bitmap.insert(i as u32);
-                }
-                black_box(bitmap)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("roaring-rs", count),
+            &count,
+            |b, &count| {
+                b.iter(|| {
+                    let mut bitmap = ExtBitmap::new();
+                    for i in 0..count {
+                        bitmap.insert(i as u32);
+                    }
+                    black_box(bitmap)
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -56,15 +60,19 @@ fn benchmark_insert_random(c: &mut Criterion) {
             });
         });
 
-        group.bench_with_input(BenchmarkId::new("roaring-rs", count), &values, |b, values| {
-            b.iter(|| {
-                let mut bitmap = ExtBitmap::new();
-                for &v in values {
-                    bitmap.insert(v);
-                }
-                black_box(bitmap)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("roaring-rs", count),
+            &values,
+            |b, values| {
+                b.iter(|| {
+                    let mut bitmap = ExtBitmap::new();
+                    for &v in values {
+                        bitmap.insert(v);
+                    }
+                    black_box(bitmap)
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -83,13 +91,17 @@ fn benchmark_insert_range(c: &mut Criterion) {
             });
         });
 
-        group.bench_with_input(BenchmarkId::new("roaring-rs", count), &count, |b, &count| {
-            b.iter(|| {
-                let mut bitmap = ExtBitmap::new();
-                bitmap.insert_range(0..count as u32);
-                black_box(bitmap)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("roaring-rs", count),
+            &count,
+            |b, &count| {
+                b.iter(|| {
+                    let mut bitmap = ExtBitmap::new();
+                    bitmap.insert_range(0..count as u32);
+                    black_box(bitmap)
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -195,7 +207,9 @@ fn benchmark_union(c: &mut Criterion) {
 
         // Create two bitmaps with overlapping values
         let values_a: Vec<u32> = (0..count).map(|_| rng.gen_range(0..500_000)).collect();
-        let values_b: Vec<u32> = (0..count).map(|_| rng.gen_range(250_000..750_000)).collect();
+        let values_b: Vec<u32> = (0..count)
+            .map(|_| rng.gen_range(250_000..750_000))
+            .collect();
 
         let mut our_a = OurBitmap::new();
         let mut our_b = OurBitmap::new();
@@ -243,7 +257,9 @@ fn benchmark_intersection(c: &mut Criterion) {
         let mut rng = StdRng::seed_from_u64(SEED);
 
         let values_a: Vec<u32> = (0..count).map(|_| rng.gen_range(0..500_000)).collect();
-        let values_b: Vec<u32> = (0..count).map(|_| rng.gen_range(250_000..750_000)).collect();
+        let values_b: Vec<u32> = (0..count)
+            .map(|_| rng.gen_range(250_000..750_000))
+            .collect();
 
         let mut our_a = OurBitmap::new();
         let mut our_b = OurBitmap::new();
