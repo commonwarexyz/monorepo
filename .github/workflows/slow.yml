@@ -83,7 +83,7 @@ jobs:
       matrix:
         include:
           - package: commonware-cryptography
-            cargo_flags: "--features commonware-cryptography/soft-mlock"
+            cargo_flags: "--features commonware-cryptography/unsafe-mlock"
           - package: commonware-storage
             cargo_flags: ""
           - package: commonware-storage

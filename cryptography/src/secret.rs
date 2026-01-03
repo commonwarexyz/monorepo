@@ -260,7 +260,7 @@ mod implementation {
         /// Returns an error if:
         /// - `T` requires alignment greater than the system page size
         /// - Memory allocation (mmap) fails
-        /// - Memory locking (mlock) fails (except in test/soft-mlock mode)
+        /// - Memory locking (mlock) fails (except in test/unsafe-mlock mode)
         /// - Memory protection (mprotect) fails
         pub fn try_new(value: T) -> Result<Self, &'static str> {
             let page_size = page_size();
@@ -298,12 +298,12 @@ mod implementation {
             unsafe { core::ptr::write(ptr, value) };
 
             // SAFETY: ptr points to valid mmap'd memory of size `size`
-            // In soft-mlock mode (tests/benchmarks), we continue even if mlock fails.
+            // In unsafe-mlock mode (tests/benchmarks), we continue even if mlock fails.
             // The memory will still be protected via mprotect, just not pinned in RAM.
             if unsafe { libc::mlock(ptr as *const libc::c_void, size) } != 0 {
                 // SAFETY: ptr points to valid T, drop then zeroize before freeing
                 //         ptr and size match the mmap above
-                #[cfg(not(any(test, feature = "soft-mlock")))]
+                #[cfg(not(any(test, feature = "unsafe-mlock")))]
                 unsafe {
                     core::ptr::drop_in_place(ptr);
                     super::zeroize_ptr(ptr);

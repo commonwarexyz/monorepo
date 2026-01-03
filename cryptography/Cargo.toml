@@ -59,7 +59,7 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = [ "std" ]
-soft-mlock = []
+unsafe-mlock = []
 parallel = [ "blake3/rayon", "rayon", "std" ]
 mocks = [ "std" ]
 arbitrary = [
@@ -98,19 +98,19 @@ std = [
 name = "bls12381"
 harness = false
 path = "src/bls12381/benches/bench.rs"
-required-features = ["soft-mlock"]
+required-features = ["unsafe-mlock"]
 
 [[bench]]
 name = "ed25519"
 harness = false
 path = "src/ed25519/benches/bench.rs"
-required-features = ["soft-mlock"]
+required-features = ["unsafe-mlock"]
 
 [[bench]]
 name = "secp256r1"
 harness = false
 path = "src/secp256r1/benches/bench.rs"
-required-features = ["soft-mlock"]
+required-features = ["unsafe-mlock"]
 
 [[bench]]
 name = "sha256"
