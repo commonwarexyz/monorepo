@@ -216,8 +216,7 @@ fn benchmark_union(c: &mut Criterion) {
             &(&our_a, &our_b),
             |b, &(a, b_map)| {
                 b.iter(|| {
-                    let mut result = a.clone();
-                    result.or(b_map);
+                    let result = a.union(b_map);
                     black_box(result)
                 });
             },
@@ -226,9 +225,9 @@ fn benchmark_union(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("roaring-rs", count),
             &(&ext_a, &ext_b),
-            |b, (a, b_map)| {
+            |b, &(a, b_map)| {
                 b.iter(|| {
-                    let result = (*a).clone() | (*b_map).clone();
+                    let result = a | b_map;
                     black_box(result)
                 });
             },
@@ -265,8 +264,7 @@ fn benchmark_intersection(c: &mut Criterion) {
             &(&our_a, &our_b),
             |b, &(a, b_map)| {
                 b.iter(|| {
-                    let mut result = a.clone();
-                    result.and(b_map);
+                    let result = a.intersection(b_map);
                     black_box(result)
                 });
             },
@@ -275,9 +273,9 @@ fn benchmark_intersection(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("roaring-rs", count),
             &(&ext_a, &ext_b),
-            |b, (a, b_map)| {
+            |b, &(a, b_map)| {
                 b.iter(|| {
-                    let result = (*a).clone() & (*b_map).clone();
+                    let result = a & b_map;
                     black_box(result)
                 });
             },

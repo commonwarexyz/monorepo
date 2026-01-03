@@ -1210,24 +1210,126 @@ impl RoaringBitmap {
     }
 
     /// Returns the intersection of two bitmaps as a new bitmap.
+    ///
+    /// This is more efficient than `clone().and()` as it only allocates containers
+    /// that will be in the result.
     pub fn intersection(&self, other: &Self) -> Self {
-        let mut result = self.clone();
-        result.and(other);
-        result
+        let mut result = Vec::new();
+        let mut self_idx = 0;
+        let mut other_idx = 0;
+
+        while self_idx < self.containers.len() && other_idx < other.containers.len() {
+            let (self_high, self_container) = &self.containers[self_idx];
+            let (other_high, other_container) = &other.containers[other_idx];
+
+            match self_high.cmp(other_high) {
+                core::cmp::Ordering::Less => self_idx += 1,
+                core::cmp::Ordering::Greater => other_idx += 1,
+                core::cmp::Ordering::Equal => {
+                    let new_container = and_containers(self_container, other_container);
+                    if !new_container.is_empty() {
+                        result.push((*self_high, new_container));
+                    }
+                    self_idx += 1;
+                    other_idx += 1;
+                }
+            }
+        }
+
+        Self { containers: result }
     }
 
     /// Returns the union of two bitmaps as a new bitmap.
+    ///
+    /// This is more efficient than `clone().or()` as it avoids unnecessary
+    /// container clones during the merge.
     pub fn union(&self, other: &Self) -> Self {
-        let mut result = self.clone();
-        result.or(other);
-        result
+        let mut result = Vec::with_capacity(self.containers.len() + other.containers.len());
+        let mut self_idx = 0;
+        let mut other_idx = 0;
+
+        while self_idx < self.containers.len() || other_idx < other.containers.len() {
+            let self_item = self.containers.get(self_idx);
+            let other_item = other.containers.get(other_idx);
+
+            match (self_item, other_item) {
+                (Some((self_high, self_container)), Some((other_high, other_container))) => {
+                    match self_high.cmp(other_high) {
+                        core::cmp::Ordering::Less => {
+                            result.push((*self_high, self_container.clone()));
+                            self_idx += 1;
+                        }
+                        core::cmp::Ordering::Greater => {
+                            result.push((*other_high, other_container.clone()));
+                            other_idx += 1;
+                        }
+                        core::cmp::Ordering::Equal => {
+                            let new_container = or_containers(self_container, other_container);
+                            result.push((*self_high, new_container));
+                            self_idx += 1;
+                            other_idx += 1;
+                        }
+                    }
+                }
+                (Some((high, container)), None) => {
+                    result.push((*high, container.clone()));
+                    self_idx += 1;
+                }
+                (None, Some((high, container))) => {
+                    result.push((*high, container.clone()));
+                    other_idx += 1;
+                }
+                (None, None) => break,
+            }
+        }
+
+        Self { containers: result }
     }
 
     /// Returns the symmetric difference of two bitmaps as a new bitmap.
     pub fn symmetric_difference(&self, other: &Self) -> Self {
-        let mut result = self.clone();
-        result.xor(other);
-        result
+        let mut result = Vec::with_capacity(self.containers.len() + other.containers.len());
+        let mut self_idx = 0;
+        let mut other_idx = 0;
+
+        while self_idx < self.containers.len() || other_idx < other.containers.len() {
+            let self_item = self.containers.get(self_idx);
+            let other_item = other.containers.get(other_idx);
+
+            match (self_item, other_item) {
+                (Some((self_high, self_container)), Some((other_high, other_container))) => {
+                    match self_high.cmp(other_high) {
+                        core::cmp::Ordering::Less => {
+                            result.push((*self_high, self_container.clone()));
+                            self_idx += 1;
+                        }
+                        core::cmp::Ordering::Greater => {
+                            result.push((*other_high, other_container.clone()));
+                            other_idx += 1;
+                        }
+                        core::cmp::Ordering::Equal => {
+                            let new_container = xor_containers(self_container, other_container);
+                            if !new_container.is_empty() {
+                                result.push((*self_high, new_container));
+                            }
+                            self_idx += 1;
+                            other_idx += 1;
+                        }
+                    }
+                }
+                (Some((high, container)), None) => {
+                    result.push((*high, container.clone()));
+                    self_idx += 1;
+                }
+                (None, Some((high, container))) => {
+                    result.push((*high, container.clone()));
+                    other_idx += 1;
+                }
+                (None, None) => break,
+            }
+        }
+
+        Self { containers: result }
     }
 
     /// Returns a random contiguous run of values that are in `other` but not in `self`.
@@ -1487,7 +1589,6 @@ fn and_containers(a: &Container, b: &Container) -> Container {
                 .collect();
             let mut container = Container::Bitmap(bits);
             container.maybe_convert_to_array();
-            container.maybe_convert_to_run();
             container
         }
         (Container::Array(arr), Container::Bitmap(bits))
@@ -1545,7 +1646,6 @@ fn or_containers(a: &Container, b: &Container) -> Container {
 
             let mut container = Container::Array(result);
             container.maybe_convert_to_bitmap();
-            container.maybe_convert_to_run();
             container
         }
         (Container::Bitmap(bits_a), Container::Bitmap(bits_b)) => {
@@ -1554,9 +1654,7 @@ fn or_containers(a: &Container, b: &Container) -> Container {
                 .zip(bits_b.iter())
                 .map(|(&a, &b)| a | b)
                 .collect();
-            let mut container = Container::Bitmap(bits);
-            container.maybe_convert_to_run();
-            container
+            Container::Bitmap(bits)
         }
         (Container::Array(arr), Container::Bitmap(bits))
         | (Container::Bitmap(bits), Container::Array(arr)) => {
@@ -1566,9 +1664,7 @@ fn or_containers(a: &Container, b: &Container) -> Container {
                 let bit_idx = v as usize % 64;
                 new_bits[word_idx] |= 1u64 << bit_idx;
             }
-            let mut container = Container::Bitmap(new_bits);
-            container.maybe_convert_to_run();
-            container
+            Container::Bitmap(new_bits)
         }
     }
 }
@@ -1612,7 +1708,6 @@ fn xor_containers(a: &Container, b: &Container) -> Container {
 
             let mut container = Container::Array(result);
             container.maybe_convert_to_bitmap();
-            container.maybe_convert_to_run();
             container
         }
         (Container::Bitmap(bits_a), Container::Bitmap(bits_b)) => {
@@ -1623,7 +1718,6 @@ fn xor_containers(a: &Container, b: &Container) -> Container {
                 .collect();
             let mut container = Container::Bitmap(bits);
             container.maybe_convert_to_array();
-            container.maybe_convert_to_run();
             container
         }
         (Container::Array(arr), Container::Bitmap(bits))
@@ -1636,7 +1730,6 @@ fn xor_containers(a: &Container, b: &Container) -> Container {
             }
             let mut container = Container::Bitmap(new_bits);
             container.maybe_convert_to_array();
-            container.maybe_convert_to_run();
             container
         }
     }
