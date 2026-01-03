@@ -299,55 +299,68 @@ impl crate::BatchVerifier<PublicKey> for Batch {
             return true;
         }
 
-        // For batch verification, we check:
-        // sum(z_i * u1_i) * G + sum(z_i * u2_i * P_i) - sum(z_i * R_i) = O
-        //
-        // This is equivalent to:
-        // sum(z_i * u1_i) * G + sum(z_i * u2_i * P_i) = sum(z_i * R_i)
+        let n = self.items.len();
 
-        let mut agg_u1 = Scalar::ZERO;
-        let mut agg_point = ProjectivePoint::IDENTITY;
+        // Phase 1: Validate signatures, collect s values, compute hashes, recover R points
+        let mut s_values = Vec::with_capacity(n);
+        let mut e_values = Vec::with_capacity(n);
+        let mut r_scalars = Vec::with_capacity(n);
+        let mut r_points = Vec::with_capacity(n);
+        let mut pk_points = Vec::with_capacity(n);
 
-        for (public_key, signature, payload) in self.items {
+        for (public_key, signature, payload) in &self.items {
             // Reject malleable signatures (high-s)
             if signature.signature.s().is_high().into() {
                 return false;
             }
-            // Generate random coefficient
-            let z = Scalar::random(&mut *rng);
 
             // Hash the message to get e
-            let e_bytes: [u8; 32] = Sha256::digest(&payload).into();
+            let e_bytes: [u8; 32] = Sha256::digest(payload).into();
             let e = <Scalar as Reduce<U256>>::reduce_bytes(&e_bytes.into());
 
-            // Get r and s from signature (r() returns NonZeroScalar which derefs to Scalar)
+            // Get r and s from signature
             let r_scalar: Scalar = *signature.signature.r();
             let s: Scalar = *signature.signature.s();
 
-            // Compute w = s^-1
-            let w = s.invert();
-            if w.is_none().into() {
-                return false;
-            }
-            let w = w.unwrap();
-
-            // Compute u1 = e * w, u2 = r * w
-            let u1 = e * w;
-            let u2 = r_scalar * w;
-
-            // Recover R from signature using the raw signature bytes
+            // Recover R point
             let r_point = match recover_r_point(&signature.raw, signature.recovery_id) {
                 Some(p) => p,
                 None => return false,
             };
 
+            s_values.push(s);
+            e_values.push(e);
+            r_scalars.push(r_scalar);
+            r_points.push(r_point);
+            pk_points.push(ProjectivePoint::from(*public_key.0.key.as_affine()));
+        }
+
+        // Phase 2: Batch invert all s values using Montgomery's trick
+        // This converts n inversions into 1 inversion + 3(n-1) multiplications
+        let s_inverses = match batch_invert(&s_values) {
+            Some(inv) => inv,
+            None => return false,
+        };
+
+        // Phase 3: Accumulate the batch verification equation
+        // sum(z_i * u1_i) * G + sum(z_i * u2_i * P_i) - sum(z_i * R_i) = O
+        let mut agg_u1 = Scalar::ZERO;
+        let mut agg_point = ProjectivePoint::IDENTITY;
+
+        for i in 0..n {
+            let z = Scalar::random(&mut *rng);
+            let w = s_inverses[i];
+
+            // u1 = e * w, u2 = r * w
+            let u1 = e_values[i] * w;
+            let u2 = r_scalars[i] * w;
+
             // Accumulate: z * u1 for the generator term
             agg_u1 += z * u1;
 
             // Accumulate: z * u2 * P - z * R
-            let pk_point = public_key.0.key.as_affine();
-            agg_point += ProjectivePoint::from(*pk_point) * (z * u2);
-            agg_point -= r_point * z;
+            agg_point += pk_points[i] * (z * u2);
+            agg_point -= r_points[i] * z;
         }
 
         // Final check: agg_u1 * G + agg_point = O
@@ -357,6 +370,46 @@ impl crate::BatchVerifier<PublicKey> for Batch {
 
         lhs == rhs
     }
+}
+
+/// Batch invert scalars using Montgomery's trick.
+///
+/// Given n scalars to invert, this computes all inverses using only 1 field
+/// inversion plus 3(n-1) field multiplications, instead of n inversions.
+///
+/// Returns `None` if any scalar is zero (non-invertible).
+fn batch_invert(scalars: &[Scalar]) -> Option<Vec<Scalar>> {
+    if scalars.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let n = scalars.len();
+
+    // Step 1: Compute prefix products
+    // products[i] = scalars[0] * scalars[1] * ... * scalars[i]
+    let mut products = Vec::with_capacity(n);
+    products.push(scalars[0]);
+    for i in 1..n {
+        products.push(products[i - 1] * scalars[i]);
+    }
+
+    // Step 2: Invert the final product (single inversion)
+    let final_inv = products[n - 1].invert();
+    if final_inv.is_none().into() {
+        return None;
+    }
+    let mut acc = final_inv.unwrap();
+
+    // Step 3: Compute individual inverses by "unwinding" the product chain
+    // scalars[i]^-1 = products[i-1] * acc, then update acc = acc * scalars[i]
+    let mut inverses = vec![Scalar::ZERO; n];
+    for i in (1..n).rev() {
+        inverses[i] = products[i - 1] * acc;
+        acc *= scalars[i];
+    }
+    inverses[0] = acc;
+
+    Some(inverses)
 }
 
 /// P-256 curve order n.
@@ -1055,6 +1108,35 @@ mod tests {
             !batch.verify(&mut rand::thread_rng()),
             "batch verification must reject cancelling forgeries"
         );
+    }
+
+    #[test]
+    fn test_batch_invert() {
+        let scalars: Vec<Scalar> = (1..=10)
+            .map(|i| Scalar::random(&mut rand::thread_rng()) + Scalar::from(i as u64))
+            .collect();
+
+        let inverses = batch_invert(&scalars).expect("all scalars should be invertible");
+
+        for (s, inv) in scalars.iter().zip(inverses.iter()) {
+            let product = *s * *inv;
+            assert_eq!(product, Scalar::ONE, "s * s^-1 should equal 1");
+        }
+    }
+
+    #[test]
+    fn test_batch_invert_empty() {
+        let scalars: Vec<Scalar> = vec![];
+        let inverses = batch_invert(&scalars).expect("empty input should succeed");
+        assert!(inverses.is_empty());
+    }
+
+    #[test]
+    fn test_batch_invert_single() {
+        let s = Scalar::random(&mut rand::thread_rng()) + Scalar::ONE;
+        let inverses = batch_invert(&[s]).expect("single scalar should be invertible");
+        assert_eq!(inverses.len(), 1);
+        assert_eq!(s * inverses[0], Scalar::ONE);
     }
 
     #[cfg(feature = "arbitrary")]
