@@ -122,7 +122,7 @@ pub fn verify_proof_of_possession<V: Variant>(
 /// This function assumes a group check was already performed on each `signature`.
 /// Duplicate messages are safe because random scalar weights ensure each
 /// (message, signature) pair is verified independently.
-pub fn batch_verify_messages<'a, R, V, I>(
+pub fn batch_verify_same_signer<'a, R, V, I>(
     rng: &mut R,
     sharing: &Sharing<V>,
     index: u32,
@@ -148,7 +148,7 @@ where
 
     let public = sharing.partial_public(index)?;
 
-    batch::verify_messages::<_, V, _>(rng, &public, &combined, concurrency)
+    batch::verify_same_signer::<_, V, _>(rng, &public, &combined, concurrency)
 }
 
 /// Verify a list of [PartialSignature]s over the same message from different signers,
@@ -163,7 +163,7 @@ where
 /// more verifications than checking each signature individually. If an invalid signer is detected,
 /// consider blocking them from participating in future batches to better amortize the cost of this
 /// search.
-fn batch_verify_public_keys_bisect<'a, R, V>(
+fn batch_verify_same_message_bisect<'a, R, V>(
     rng: &mut R,
     pending: &[(V::Public, &'a PartialSignature<V>)],
     namespace: &[u8],
@@ -180,7 +180,7 @@ where
         .collect();
 
     // Use the generic verification function
-    let invalid_indices = batch::verify_public_keys::<_, V>(rng, namespace, message, &entries);
+    let invalid_indices = batch::verify_same_message::<_, V>(rng, namespace, message, &entries);
 
     // Map indices back to PartialSignature references
     invalid_indices
@@ -200,7 +200,7 @@ where
 /// This function assumes a group check was already performed on each `signature`.
 /// Duplicate signers are safe because random scalar weights ensure each
 /// (public key, signature) pair is verified independently.
-pub fn batch_verify_public_keys<'a, R, V, I>(
+pub fn batch_verify_same_message<'a, R, V, I>(
     rng: &mut R,
     sharing: &Sharing<V>,
     namespace: &[u8],
@@ -223,7 +223,7 @@ where
     }
 
     // Find any invalid partial signatures
-    let bad = batch_verify_public_keys_bisect::<_, V>(rng, pending.as_slice(), namespace, message);
+    let bad = batch_verify_same_message_bisect::<_, V>(rng, pending.as_slice(), namespace, message);
     invalid.extend(bad);
 
     if invalid.is_empty() {
@@ -475,7 +475,7 @@ mod tests {
         threshold_message::<MinSig>();
     }
 
-    fn batch_verify_messages_correct<V: Variant>() {
+    fn batch_verify_same_signer_correct<V: Variant>() {
         let mut rng = test_rng();
         let n = 5;
         let (public, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
@@ -487,7 +487,7 @@ mod tests {
             .iter()
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
             .collect();
-        batch_verify_messages::<_, V, _>(&mut rng, &public, signer.index, &entries, 1)
+        batch_verify_same_signer::<_, V, _>(&mut rng, &public, signer.index, &entries, 1)
             .expect("Verification with namespaced messages should succeed");
 
         let messages_alt_ns: &[(&[u8], &[u8])] =
@@ -496,7 +496,7 @@ mod tests {
             .iter()
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
             .collect();
-        batch_verify_messages::<_, V, _>(&mut rng, &public, signer.index, &entries_alt_ns, 1)
+        batch_verify_same_signer::<_, V, _>(&mut rng, &public, signer.index, &entries_alt_ns, 1)
             .expect("Verification with alternate namespace messages should succeed");
 
         let messages_mixed: &[(&[u8], &[u8])] =
@@ -505,11 +505,11 @@ mod tests {
             .iter()
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
             .collect();
-        batch_verify_messages::<_, V, _>(&mut rng, &public, signer.index, &entries_mixed, 1)
+        batch_verify_same_signer::<_, V, _>(&mut rng, &public, signer.index, &entries_mixed, 1)
             .expect("Verification with mixed namespaces should succeed");
 
         assert!(matches!(
-            batch_verify_messages::<_, V, _>(&mut rng, &public, 1, &entries, 1),
+            batch_verify_same_signer::<_, V, _>(&mut rng, &public, 1, &entries, 1),
             Err(Error::InvalidSignature)
         ));
 
@@ -518,7 +518,7 @@ mod tests {
         entries_swapped[0].2 = entries_swapped[1].2.clone();
         entries_swapped[1].2 = temp_sig;
         assert!(
-            batch_verify_messages::<_, V, _>(&mut rng, &public, signer.index, &entries_swapped, 1,)
+            batch_verify_same_signer::<_, V, _>(&mut rng, &public, signer.index, &entries_swapped, 1,)
                 .is_err(),
             "Verification with swapped signatures should fail"
         );
@@ -528,7 +528,7 @@ mod tests {
         let mut entries_mixed_signers = entries;
         entries_mixed_signers[0].2 = partial2;
         assert!(matches!(
-            batch_verify_messages::<_, V, _>(
+            batch_verify_same_signer::<_, V, _>(
                 &mut rng,
                 &public,
                 signer.index,
@@ -540,9 +540,9 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_verify_messages() {
-        batch_verify_messages_correct::<MinPk>();
-        batch_verify_messages_correct::<MinSig>();
+    fn test_batch_verify_same_signer() {
+        batch_verify_same_signer_correct::<MinPk>();
+        batch_verify_same_signer_correct::<MinSig>();
     }
 
     fn recover_with_weights_correct<V: Variant>() {
@@ -720,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_verify_public_keys() {
+    fn test_batch_verify_same_message() {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, shares) =
@@ -734,12 +734,12 @@ mod tests {
             .collect();
         sharing.precompute_partial_publics();
 
-        batch_verify_public_keys::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials)
+        batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials)
             .expect("all signatures should be valid");
     }
 
     #[test]
-    fn test_batch_verify_public_keys_one_invalid() {
+    fn test_batch_verify_same_message_one_invalid() {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, mut shares) =
@@ -757,7 +757,7 @@ mod tests {
 
         sharing.precompute_partial_publics();
         let result =
-            batch_verify_public_keys::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
+            batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(
@@ -775,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_verify_public_keys_many_invalid() {
+    fn test_batch_verify_same_message_many_invalid() {
         let mut rng = test_rng();
         let n = 6;
         let (sharing, mut shares) =
@@ -795,7 +795,7 @@ mod tests {
         sharing.precompute_partial_publics();
 
         let result =
-            batch_verify_public_keys::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
+            batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(
@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_verify_public_keys_out_of_range() {
+    fn test_batch_verify_same_message_out_of_range() {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, shares) =
@@ -833,7 +833,7 @@ mod tests {
 
         sharing.precompute_partial_publics();
         let result =
-            batch_verify_public_keys::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
+            batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(
@@ -851,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_verify_public_keys_single() {
+    fn test_batch_verify_same_message_single() {
         let mut rng = test_rng();
         let (sharing, shares) =
             dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(1));
@@ -863,12 +863,12 @@ mod tests {
             .map(|s| sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        batch_verify_public_keys::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials)
+        batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials)
             .expect("signature should be valid");
     }
 
     #[test]
-    fn test_batch_verify_public_keys_single_invalid() {
+    fn test_batch_verify_same_message_single_invalid() {
         let mut rng = test_rng();
         let (sharing, mut shares) =
             dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(1));
@@ -883,7 +883,7 @@ mod tests {
             .collect();
 
         let result =
-            batch_verify_public_keys::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
+            batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(invalid_sigs.len(), 1);
@@ -894,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_verify_public_keys_last_invalid() {
+    fn test_batch_verify_same_message_last_invalid() {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, mut shares) =
@@ -911,7 +911,7 @@ mod tests {
             .collect();
 
         let result =
-            batch_verify_public_keys::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
+            batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials);
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(invalid_sigs.len(), 1);
@@ -995,7 +995,7 @@ mod tests {
         threshold_derive_missing_partials::<MinSig>();
     }
 
-    fn batch_verify_public_keys_rejects_malleability<V: Variant>() {
+    fn batch_verify_same_message_rejects_malleability<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(12345);
         let n = 5;
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
@@ -1043,7 +1043,7 @@ mod tests {
             .expect("vulnerable naive verification accepts forged aggregate");
 
         let forged_partials = [forged_partial1, forged_partial2];
-        let result = batch_verify_public_keys::<_, V, _>(
+        let result = batch_verify_same_message::<_, V, _>(
             &mut rng,
             &sharing,
             namespace,
@@ -1056,17 +1056,17 @@ mod tests {
         );
 
         let valid_partials = [partial1, partial2];
-        batch_verify_public_keys::<_, V, _>(&mut rng, &sharing, namespace, msg, &valid_partials)
+        batch_verify_same_message::<_, V, _>(&mut rng, &sharing, namespace, msg, &valid_partials)
             .expect("secure function should accept valid partial signatures");
     }
 
     #[test]
-    fn test_batch_verify_public_keys_rejects_malleability() {
-        batch_verify_public_keys_rejects_malleability::<MinPk>();
-        batch_verify_public_keys_rejects_malleability::<MinSig>();
+    fn test_batch_verify_same_message_rejects_malleability() {
+        batch_verify_same_message_rejects_malleability::<MinPk>();
+        batch_verify_same_message_rejects_malleability::<MinSig>();
     }
 
-    fn batch_verify_messages_rejects_malleability<V: Variant>() {
+    fn batch_verify_same_signer_rejects_malleability<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(54321);
         let n = 5;
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
@@ -1122,20 +1122,20 @@ mod tests {
             (namespace, msg2, forged_partial2),
         ];
         let result =
-            batch_verify_messages::<_, V, _>(&mut rng, &sharing, signer.index, &forged_entries, 1);
+            batch_verify_same_signer::<_, V, _>(&mut rng, &sharing, signer.index, &forged_entries, 1);
         assert!(
             result.is_err(),
             "secure function should reject forged partial signatures"
         );
 
         let valid_entries = vec![(namespace, msg1, partial1), (namespace, msg2, partial2)];
-        batch_verify_messages::<_, V, _>(&mut rng, &sharing, signer.index, &valid_entries, 1)
+        batch_verify_same_signer::<_, V, _>(&mut rng, &sharing, signer.index, &valid_entries, 1)
             .expect("secure function should accept valid partial signatures");
     }
 
     #[test]
-    fn test_batch_verify_messages_rejects_malleability() {
-        batch_verify_messages_rejects_malleability::<MinPk>();
-        batch_verify_messages_rejects_malleability::<MinSig>();
+    fn test_batch_verify_same_signer_rejects_malleability() {
+        batch_verify_same_signer_rejects_malleability::<MinPk>();
+        batch_verify_same_signer_rejects_malleability::<MinSig>();
     }
 }

@@ -293,7 +293,7 @@ where
 /// This function assumes the caller has performed a group check and collected a proof-of-possession
 /// for all provided `public`. This function assumes a group check was already performed on the
 /// `signature`. It is not safe to provide duplicate public keys.
-pub fn verify_public_keys<V: Variant>(
+pub fn verify_same_message<V: Variant>(
     public: &PublicKey<V>,
     namespace: &[u8],
     message: &[u8],
@@ -316,7 +316,7 @@ pub fn verify_public_keys<V: Variant>(
 /// # Warning
 ///
 /// This function assumes a group check was already performed on `public` and `signature`.
-pub fn verify_messages<V: Variant>(
+pub fn verify_same_signer<V: Variant>(
     public: &V::Public,
     message: &Message<V>,
     signature: &Signature<V>,
@@ -339,7 +339,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_utils::{test_rng, union_unique};
 
-    fn blst_aggregate_verify_public_keys<'a, V, I>(
+    fn blst_aggregate_verify_same_message<'a, V, I>(
         public: I,
         message: &[u8],
         signature: &Signature<V>,
@@ -380,7 +380,7 @@ mod tests {
         }
     }
 
-    fn aggregate_verify_public_keys_correct<V: Variant>() {
+    fn aggregate_verify_same_message_correct<V: Variant>() {
         let mut rng = test_rng();
         let (private1, public1) = keypair::<_, V>(&mut rng);
         let (private2, public2) = keypair::<_, V>(&mut rng);
@@ -396,21 +396,21 @@ mod tests {
         let aggregate_pk = aggregate::combine_public_keys::<V, _>(&pks);
         let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
 
-        verify_public_keys::<V>(&aggregate_pk, namespace, message, &aggregate_sig)
+        verify_same_message::<V>(&aggregate_pk, namespace, message, &aggregate_sig)
             .expect("Aggregated signature should be valid");
 
         let payload = union_unique(namespace, message);
-        blst_aggregate_verify_public_keys::<V, _>(&pks, &payload, &aggregate_sig)
+        blst_aggregate_verify_same_message::<V, _>(&pks, &payload, &aggregate_sig)
             .expect("Aggregated signature should be valid");
     }
 
     #[test]
-    fn test_aggregate_verify_public_keys() {
-        aggregate_verify_public_keys_correct::<MinPk>();
-        aggregate_verify_public_keys_correct::<MinSig>();
+    fn test_aggregate_verify_same_message() {
+        aggregate_verify_same_message_correct::<MinPk>();
+        aggregate_verify_same_message_correct::<MinSig>();
     }
 
-    fn aggregate_verify_wrong_public_keys<V: Variant>() {
+    fn aggregate_verify_same_message_wrong_public_keys<V: Variant>() {
         let mut rng = test_rng();
         let (private1, public1) = keypair::<_, V>(&mut rng);
         let (private2, public2) = keypair::<_, V>(&mut rng);
@@ -427,17 +427,17 @@ mod tests {
         let wrong_aggregate_pk = aggregate::combine_public_keys::<V, _>(&wrong_pks);
         let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
         let result =
-            verify_public_keys::<V>(&wrong_aggregate_pk, namespace, message, &aggregate_sig);
+            verify_same_message::<V>(&wrong_aggregate_pk, namespace, message, &aggregate_sig);
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
     #[test]
-    fn test_aggregate_verify_wrong_public_keys() {
-        aggregate_verify_wrong_public_keys::<MinPk>();
-        aggregate_verify_wrong_public_keys::<MinSig>();
+    fn test_aggregate_verify_same_message_wrong_public_keys() {
+        aggregate_verify_same_message_wrong_public_keys::<MinPk>();
+        aggregate_verify_same_message_wrong_public_keys::<MinSig>();
     }
 
-    fn aggregate_verify_wrong_public_key_count<V: Variant>() {
+    fn aggregate_verify_same_message_wrong_public_key_count<V: Variant>() {
         let mut rng = test_rng();
         let (private1, public1) = keypair::<_, V>(&mut rng);
         let (private2, public2) = keypair::<_, V>(&mut rng);
@@ -453,17 +453,17 @@ mod tests {
         let wrong_aggregate_pk = aggregate::combine_public_keys::<V, _>(&wrong_pks);
         let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
         let result =
-            verify_public_keys::<V>(&wrong_aggregate_pk, namespace, message, &aggregate_sig);
+            verify_same_message::<V>(&wrong_aggregate_pk, namespace, message, &aggregate_sig);
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
     #[test]
-    fn test_aggregate_verify_wrong_public_key_count() {
-        aggregate_verify_wrong_public_key_count::<MinPk>();
-        aggregate_verify_wrong_public_key_count::<MinSig>();
+    fn test_aggregate_verify_same_message_wrong_public_key_count() {
+        aggregate_verify_same_message_wrong_public_key_count::<MinPk>();
+        aggregate_verify_same_message_wrong_public_key_count::<MinSig>();
     }
 
-    fn blst_aggregate_verify_messages<'a, V, I>(
+    fn blst_aggregate_verify_same_signer<'a, V, I>(
         public: &V::Public,
         msgs: I,
         signature: &Signature<V>,
@@ -499,7 +499,7 @@ mod tests {
         }
     }
 
-    fn aggregate_verify_messages_correct<V: Variant>() {
+    fn aggregate_verify_same_signer_correct<V: Variant>() {
         let (private, public) = keypair::<_, V>(&mut test_rng());
         let namespace = b"test";
         let messages: Vec<(&[u8], &[u8])> = vec![
@@ -515,11 +515,11 @@ mod tests {
         let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
 
         let combined_msg = aggregate::combine_messages::<V, _>(&messages, 1);
-        aggregate::verify_messages::<V>(&public, &combined_msg, &aggregate_sig)
+        aggregate::verify_same_signer::<V>(&public, &combined_msg, &aggregate_sig)
             .expect("Aggregated signature should be valid");
 
         let combined_msg_parallel = aggregate::combine_messages::<V, _>(&messages, 4);
-        aggregate::verify_messages::<V>(&public, &combined_msg_parallel, &aggregate_sig)
+        aggregate::verify_same_signer::<V>(&public, &combined_msg_parallel, &aggregate_sig)
             .expect("Aggregated signature should be valid with parallelism");
 
         let payload_msgs: Vec<_> = messages
@@ -527,14 +527,14 @@ mod tests {
             .map(|(ns, msg)| union_unique(ns, msg))
             .collect();
         let payload_refs: Vec<&[u8]> = payload_msgs.iter().map(|p| p.as_ref()).collect();
-        blst_aggregate_verify_messages::<V, _>(&public, payload_refs, &aggregate_sig)
+        blst_aggregate_verify_same_signer::<V, _>(&public, payload_refs, &aggregate_sig)
             .expect("blst should also accept aggregated signature");
     }
 
     #[test]
-    fn test_aggregate_verify_messages_correct() {
-        aggregate_verify_messages_correct::<MinPk>();
-        aggregate_verify_messages_correct::<MinSig>();
+    fn test_aggregate_verify_same_signer_correct() {
+        aggregate_verify_same_signer_correct::<MinPk>();
+        aggregate_verify_same_signer_correct::<MinSig>();
     }
 
     #[cfg(feature = "arbitrary")]
