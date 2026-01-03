@@ -5,7 +5,6 @@ use commonware_cryptography::PublicKey;
 use commonware_utils::ordered::Set;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 
-pub mod blocked;
 pub mod codec;
 pub mod limited;
 pub mod mux;

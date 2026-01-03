@@ -2,7 +2,6 @@ use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::{
     authenticated::lookup::{actors::tracker::ingress::Releaser, metrics},
     types::Address,
-    utils::blocked,
     Ingress,
 };
 use commonware_cryptography::PublicKey;
@@ -12,7 +11,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     ordered::{Map, Set},
-    IpAddrExt, TryCollect,
+    IpAddrExt, PrioritySet, TryCollect,
 };
 use rand::Rng;
 use std::{
@@ -75,7 +74,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
 
     /// Tracks blocked peers and their unblock time. This is the source of truth for
     /// whether a peer is blocked, persisting even if the peer record is deleted.
-    blocked: blocked::Queue<C>,
+    blocked: PrioritySet<C, SystemTime>,
 
     // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
@@ -109,7 +108,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
-            blocked: blocked::Queue::new(),
+            blocked: PrioritySet::new(),
             releaser,
             metrics,
         }
@@ -240,7 +239,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         let blocked_until = self.context.current() + self.block_duration;
-        self.blocked.block(peer.clone(), blocked_until);
+        self.blocked.put(peer.clone(), blocked_until);
         let _ = self.metrics.blocked.try_set(self.blocked.len());
     }
 
@@ -311,20 +310,33 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Returns `true` if any peers were unblocked.
     pub fn unblock_expired(&mut self) -> bool {
         let now = self.context.current();
-        let unblocked = self.blocked.unblock_expired(now);
-        if !unblocked.is_empty() {
-            let _ = self.metrics.blocked.try_set(self.blocked.len());
-            true
-        } else {
-            false
+        let mut any_unblocked = false;
+        while let Some((_, &blocked_until)) = self.blocked.peek() {
+            if blocked_until > now {
+                break;
+            }
+            self.blocked.pop();
+            any_unblocked = true;
+        }
+        let _ = self.metrics.blocked.try_set(self.blocked.len());
+
+        any_unblocked
+    }
+
+    /// Waits until the next blocked peer should be unblocked.
+    ///
+    /// If no peers are blocked, this will never complete.
+    pub async fn wait_for_unblock(&self) {
+        match self.blocked.peek() {
+            Some((_, &time)) => self.context.sleep_until(time).await,
+            None => futures::future::pending().await,
         }
     }
 
-    /// Get the next unblock deadline (earliest blocked_until time).
-    ///
-    /// Returns `None` if no peers are currently blocked.
-    pub fn next_unblock_deadline(&self) -> Option<SystemTime> {
-        self.blocked.next_deadline()
+    /// Returns the number of currently blocked peers.
+    #[cfg(test)]
+    pub fn blocked(&self) -> usize {
+        self.blocked.len()
     }
 
     // --------- Helpers ----------
@@ -951,9 +963,8 @@ mod tests {
                 "Blocked peer should not be listenable"
             );
 
-            // Verify next_unblock_deadline is set
-            let deadline = directory.next_unblock_deadline();
-            assert!(deadline.is_some(), "Should have an unblock deadline");
+            // Verify peer is blocked
+            assert_eq!(directory.blocked(), 1, "Should have one blocked peer");
 
             // unblock_expired should return false before expiry
             assert!(
@@ -973,11 +984,8 @@ mod tests {
                 "Unblocked peer should be listenable"
             );
 
-            // Verify next_unblock_deadline is now None
-            assert!(
-                directory.next_unblock_deadline().is_none(),
-                "No more blocked peers, no deadline"
-            );
+            // Verify no more blocked peers
+            assert_eq!(directory.blocked(), 0, "No more blocked peers");
         });
     }
 
@@ -1143,11 +1151,8 @@ mod tests {
                 "Blocking myself should not increment metric"
             );
 
-            // No unblock deadline should be set
-            assert!(
-                directory.next_unblock_deadline().is_none(),
-                "No deadline since nothing was blocked"
-            );
+            // No peers should be blocked
+            assert_eq!(directory.blocked(), 0, "No peers should be blocked");
 
             // Advance time past block duration
             context.sleep(block_duration + Duration::from_secs(1)).await;
@@ -1188,11 +1193,8 @@ mod tests {
                 "Blocking nonexistent peer should increment metric"
             );
 
-            // Unblock deadline should be set
-            assert!(
-                directory.next_unblock_deadline().is_some(),
-                "Deadline should be set for blocked peer"
-            );
+            // Peer should be blocked
+            assert_eq!(directory.blocked(), 1, "One peer should be blocked");
 
             // Peer should not be in peers yet
             assert!(

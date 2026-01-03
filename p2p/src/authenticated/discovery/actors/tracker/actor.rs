@@ -3,15 +3,12 @@ use super::{
     ingress::{Message, Oracle},
     Config,
 };
-use crate::{
-    authenticated::{
-        discovery::{
-            actors::tracker::ingress::Releaser,
-            types::{self, Info, InfoVerifier},
-        },
-        mailbox::UnboundedMailbox,
+use crate::authenticated::{
+    discovery::{
+        actors::tracker::ingress::Releaser,
+        types::{self, Info, InfoVerifier},
     },
-    utils::blocked,
+    mailbox::UnboundedMailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
@@ -134,7 +131,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             on_stopped => {
                 debug!("context shutdown, stopping tracker");
             },
-            _ = blocked::wait_for(&self.context, self.directory.next_unblock_deadline()) => {
+            _ = self.directory.wait_for_unblock() => {
                 self.directory.unblock_expired();
             },
             msg = self.receiver.next() => {
