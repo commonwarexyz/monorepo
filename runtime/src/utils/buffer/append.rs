@@ -7,6 +7,12 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 /// A [Blob] wrapper that supports appending new data that is both read and write cached, and
 /// provides buffer-pool managed read caching of older data.
+///
+/// # Concurrent Access
+///
+/// This implementation allows readers to proceed while flush I/O is in progress, as long as
+/// they are reading from the write buffer or the pool cache. Readers that need to access data
+/// from the underlying blob (cache miss) will wait for any in-progress write to complete.
 #[derive(Clone)]
 pub struct Append<B: Blob> {
     /// The underlying blob being wrapped.
@@ -28,6 +34,14 @@ pub struct Append<B: Blob> {
     /// - The range of bytes in this buffer never overlaps with any page buffered by `pool`. (See
     ///   the warning in [Self::resize] for one uncommon exception.)
     buffer: Arc<RwLock<(Buffer, u64)>>,
+
+    /// Coordinates reads and writes to the underlying blob.
+    ///
+    /// Writers acquire this as a write lock before writing to the blob. Readers acquire it as a
+    /// read lock only on cache miss, before reading from the blob. This ensures that if a page is
+    /// evicted from the cache during a write, readers will wait for the write to complete before
+    /// reading from the blob.
+    blob_io: Arc<RwLock<()>>,
 }
 
 impl<B: Blob> Append<B> {
@@ -62,6 +76,7 @@ impl<B: Blob> Append<B> {
             id: pool_ref.next_id().await,
             pool_ref,
             buffer: Arc::new(RwLock::new((buffer, size))),
+            blob_io: Arc::new(RwLock::new(())),
         })
     }
 
@@ -71,7 +86,8 @@ impl<B: Blob> Append<B> {
         let buf = buf.into();
 
         // Acquire a write lock on the buffer and blob_size.
-        let (buffer, blob_size) = &mut *self.buffer.write().await;
+        let mut guard = self.buffer.write().await;
+        let (buffer, _blob_size) = &mut *guard;
 
         // Ensure the write doesn't overflow.
         buffer
@@ -81,7 +97,7 @@ impl<B: Blob> Append<B> {
 
         if buffer.append(buf.as_ref()) {
             // Buffer is over capacity, flush it to the underlying blob.
-            return self.flush(buffer, blob_size).await;
+            return self.flush_internal(guard).await;
         }
 
         Ok(())
@@ -97,7 +113,15 @@ impl<B: Blob> Append<B> {
 
     /// Flush the append buffer to the underlying blob, caching each page worth of written data in
     /// the buffer pool.
-    async fn flush(&self, buffer: &mut Buffer, blob_size: &mut u64) -> Result<(), Error> {
+    ///
+    /// This method acquires `blob_io` write lock before releasing the buffer lock, ensuring readers
+    /// that need blob access will wait for the write to complete.
+    async fn flush_internal(
+        &self,
+        mut guard: crate::RwLockWriteGuard<'_, (Buffer, u64)>,
+    ) -> Result<(), Error> {
+        let (buffer, blob_size) = &mut *guard;
+
         // Take the buffered data, if any.
         let Some((mut buf, offset)) = buffer.take() else {
             return Ok(());
@@ -105,7 +129,7 @@ impl<B: Blob> Append<B> {
 
         // Insert the flushed data into the buffer pool. This step isn't just to ensure recently
         // written data remains cached for future reads, but is in fact required to purge
-        // potentially stale cache data which might result from the edge the case of rewinding a
+        // potentially stale cache data which might result from the edge case of rewinding a
         // blob across a page boundary.
         let remaining = self.pool_ref.cache(self.id, &buf, offset).await;
 
@@ -128,8 +152,27 @@ impl<B: Blob> Append<B> {
             buf.drain(0..new_data_start);
         }
         let new_data_len = buf.len() as u64;
-        self.blob.write_at(buf, *blob_size).await?;
-        *blob_size += new_data_len;
+        let write_offset = *blob_size;
+
+        // Acquire blob_io write lock BEFORE releasing buffer lock.
+        // This ensures no reader can access the blob until the write completes.
+        let blob_io_guard = self.blob_io.write().await;
+
+        // Now release buffer lock - readers can check the buffer but will block on blob_io
+        // if they have a cache miss.
+        drop(guard);
+
+        // Perform the write while holding only blob_io lock.
+        self.blob.write_at(buf, write_offset).await?;
+
+        // Update blob_size after successful write.
+        {
+            let (_, blob_size) = &mut *self.buffer.write().await;
+            *blob_size = write_offset + new_data_len;
+        }
+
+        // Release blob_io lock - readers can now access the blob.
+        drop(blob_io_guard);
 
         Ok(())
     }
@@ -155,7 +198,8 @@ impl<B: Blob> Blob for Append<B> {
             .ok_or(Error::OffsetOverflow)?;
 
         // Acquire a read lock on the buffer.
-        let (buffer, _) = &*self.buffer.read().await;
+        let guard = self.buffer.read().await;
+        let (buffer, _) = &*guard;
 
         // If the data required is beyond the size of the blob, return an error.
         if end_offset > buffer.size() {
@@ -164,11 +208,29 @@ impl<B: Blob> Blob for Append<B> {
 
         // Extract any bytes from the buffer that overlap with the requested range.
         let remaining = buffer.extract(buf.as_mut(), offset);
+
+        // Release buffer lock before potential I/O.
+        drop(guard);
+
         if remaining == 0 {
             return Ok(buf);
         }
 
-        // If there are bytes remaining to be read, use the buffer pool to get them.
+        // Fast path: try to read from pool cache without acquiring blob_io lock.
+        // This allows concurrent reads even while a flush is in progress.
+        if self
+            .pool_ref
+            .try_read_cached(self.id, &mut buf.as_mut()[..remaining], offset)
+            .await
+        {
+            return Ok(buf);
+        }
+
+        // Slow path: cache miss, acquire blob_io lock to ensure any in-flight write completes
+        // before we read from the blob.
+        let _blob_io_guard = self.blob_io.read().await;
+
+        // Read from pool/blob.
         self.pool_ref
             .read(&self.blob, self.id, &mut buf.as_mut()[..remaining], offset)
             .await?;
@@ -184,10 +246,14 @@ impl<B: Blob> Blob for Append<B> {
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        // Flush any buffered data. When flush_internal returns, the write_at has completed
+        // and data is in the OS buffer.
         {
-            let (buffer, blob_size) = &mut *self.buffer.write().await;
-            self.flush(buffer, blob_size).await?;
+            let guard = self.buffer.write().await;
+            self.flush_internal(guard).await?;
         }
+        // Sync the OS buffer to disk. This is safe to call without holding blob_io because
+        // flush_internal awaits write_at completion before returning.
         self.blob.sync().await
     }
 
@@ -199,12 +265,17 @@ impl<B: Blob> Blob for Append<B> {
         // always updated should the blob grow back to the point where we have new data for the same
         // page, if any old data hasn't expired naturally by then.
 
-        // Acquire a write lock on the buffer.
-        let (buffer, blob_size) = &mut *self.buffer.write().await;
+        // Flush any buffered bytes first.
+        {
+            let guard = self.buffer.write().await;
+            self.flush_internal(guard).await?;
+        }
 
-        // Flush any buffered bytes to the underlying blob. (Note that a fancier implementation
-        // might avoid flushing those bytes that are backed up over by the next step, if any.)
-        self.flush(buffer, blob_size).await?;
+        // Acquire blob_io write lock to prevent concurrent reads during resize.
+        let _blob_io_guard = self.blob_io.write().await;
+
+        // Acquire buffer lock to update sizes.
+        let (buffer, blob_size) = &mut *self.buffer.write().await;
 
         // Resize the underlying blob.
         self.blob.resize(size).await?;
