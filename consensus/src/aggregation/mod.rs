@@ -103,9 +103,9 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{NZUsize, NonZeroDuration};
+    use commonware_utils::{test_rng, NZUsize, NonZeroDuration};
     use futures::{channel::oneshot, future::join_all};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, Rng};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU32, NonZeroUsize},
@@ -413,7 +413,7 @@ mod tests {
         let mut prev_checkpoint = None;
 
         // Generate fixture once (persists across restarts)
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = test_rng();
         let fixture = fixture(&mut rng, num_validators);
 
         // Continue until shared reporter reaches target or max shutdowns exceeded
@@ -568,7 +568,7 @@ mod tests {
         let namespace = b"my testing namespace";
 
         // Generate fixture once (persists across restarts)
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = test_rng();
         let fixture = fixture(&mut rng, num_validators);
 
         // First run: let validators skip signing at skip_index and reach beyond it

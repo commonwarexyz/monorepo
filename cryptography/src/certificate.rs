@@ -71,7 +71,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{varint::UInt, Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::{bitmap::BitMap, ordered::Set};
 use core::{fmt::Debug, hash::Hash};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 
@@ -188,12 +188,16 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     ) -> Option<Attestation<Self>>;
 
     /// Verifies a single attestation against the participant material managed by the scheme.
-    fn verify_attestation<D: Digest>(
+    fn verify_attestation<R, D>(
         &self,
+        rng: &mut R,
         namespace: &[u8],
         subject: Self::Subject<'_, D>,
         attestation: &Attestation<Self>,
-    ) -> bool;
+    ) -> bool
+    where
+        R: CryptoRngCore,
+        D: Digest;
 
     /// Batch-verifies attestations and separates valid attestations from signer indices that failed
     /// verification.
@@ -201,20 +205,20 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Callers must not include duplicate attestations from the same signer.
     fn verify_attestations<R, D, I>(
         &self,
-        _rng: &mut R,
+        rng: &mut R,
         namespace: &[u8],
         subject: Self::Subject<'_, D>,
         attestations: I,
     ) -> Verification<Self>
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
     {
         let mut invalid = BTreeSet::new();
 
         let verified = attestations.into_iter().filter_map(|attestation| {
-            if self.verify_attestation(namespace, subject.clone(), &attestation) {
+            if self.verify_attestation(&mut *rng, namespace, subject.clone(), &attestation) {
                 Some(attestation)
             } else {
                 invalid.insert(attestation.signer);
@@ -233,7 +237,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         I: IntoIterator<Item = Attestation<Self>>;
 
     /// Verifies a certificate that was recovered or received from the network.
-    fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
+    fn verify_certificate<R: CryptoRngCore, D: Digest>(
         &self,
         rng: &mut R,
         namespace: &[u8],
@@ -249,7 +253,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         certificates: I,
     ) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
     {

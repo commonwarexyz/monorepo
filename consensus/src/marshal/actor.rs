@@ -48,7 +48,7 @@ use futures::{
 };
 use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     future::Future,
@@ -102,7 +102,7 @@ struct BlockSubscription<B: Block> {
 /// behind.
 pub struct Actor<E, B, P, FC, FB, ES, A = Exact>
 where
-    E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
+    E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
@@ -162,7 +162,7 @@ where
 
 impl<E, B, P, FC, FB, ES, A> Actor<E, B, P, FC, FB, ES, A>
 where
-    E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
+    E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,

@@ -3,7 +3,7 @@ use crate::simplex::{
     types::{Attributable, Finalize, Notarize, Nullify, Proposal, Subject, Vote},
 };
 use commonware_cryptography::{certificate::Verification, Digest};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 
 /// `Verifier` is a utility for tracking and verifying consensus messages.
 ///
@@ -195,7 +195,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// A tuple containing:
     /// * A `Vec<Vote<S, D>>` of successfully verified [Vote::Notarize] messages.
     /// * A `Vec<u32>` of signer indices for whom verification failed.
-    pub fn verify_notarizes<R: Rng + CryptoRng>(
+    pub fn verify_notarizes<R: CryptoRngCore>(
         &mut self,
         rng: &mut R,
         namespace: &[u8],
@@ -290,7 +290,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// A tuple containing:
     /// * A `Vec<Vote<S, D>>` of successfully verified [Vote::Nullify] messages.
     /// * A `Vec<u32>` of signer indices for whom verification failed.
-    pub fn verify_nullifies<R: Rng + CryptoRng>(
+    pub fn verify_nullifies<R: CryptoRngCore>(
         &mut self,
         rng: &mut R,
         namespace: &[u8],
@@ -367,7 +367,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// A tuple containing:
     /// * A `Vec<Vote<S, D>>` of successfully verified [Vote::Finalize] messages.
     /// * A `Vec<u32>` of signer indices for whom verification failed.
-    pub fn verify_finalizes<R: Rng + CryptoRng>(
+    pub fn verify_finalizes<R: CryptoRngCore>(
         &mut self,
         rng: &mut R,
         namespace: &[u8],

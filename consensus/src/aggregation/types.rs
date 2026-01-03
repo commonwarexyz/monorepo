@@ -11,7 +11,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::union;
 use futures::channel::oneshot;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::hash::Hash;
 
 /// Error that may be encountered when interacting with `aggregation`.
@@ -158,11 +158,12 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     ///
     /// Returns `true` if the attestation is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<D>(namespace, &self.item, &self.attestation)
+        scheme.verify_attestation::<_, D>(rng, namespace, &self.item, &self.attestation)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -306,7 +307,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Verifies the recovered certificate for the item.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(rng, namespace, &self.item, &self.certificate)
@@ -440,21 +441,12 @@ mod tests {
         certificate::mocks::Fixture,
         Hasher, Sha256,
     };
-    use commonware_utils::ordered::Quorum;
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{ordered::Quorum, test_rng};
+    use rand::rngs::StdRng;
 
     const NAMESPACE: &[u8] = b"test";
 
     type Sha256Digest = <Sha256 as Hasher>::Digest;
-
-    /// Generate a fixture using the provided generator function.
-    fn setup<S, F>(n: u32, fixture: F) -> Fixture<S>
-    where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
-    {
-        let mut rng = StdRng::seed_from_u64(0);
-        fixture(&mut rng, n)
-    }
 
     #[test]
     fn test_ack_namespace() {
@@ -468,7 +460,8 @@ mod tests {
         S: Scheme<Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, 4);
         let schemes = &fixture.schemes;
         let item = Item {
             index: 100,
@@ -488,7 +481,7 @@ mod tests {
         // Verify the restored ack
         assert_eq!(restored_ack.item, item);
         assert_eq!(restored_ack.epoch, Epoch::new(1));
-        assert!(restored_ack.verify(&schemes[0], NAMESPACE));
+        assert!(restored_ack.verify(&mut rng, &schemes[0], NAMESPACE));
 
         // Test TipAck codec
         let tip_ack = TipAck {
@@ -522,7 +515,6 @@ mod tests {
             .collect();
 
         let certificate = Certificate::from_acks(&schemes[0], &acks).unwrap();
-        let mut rng = StdRng::seed_from_u64(0);
         assert!(certificate.verify(&mut rng, &schemes[0], NAMESPACE));
 
         let activity_certified = Activity::Certified(certificate.clone());
@@ -563,7 +555,7 @@ mod tests {
         S: Scheme<Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut buf = BytesMut::new();
         3u8.write(&mut buf); // Invalid discriminant
 

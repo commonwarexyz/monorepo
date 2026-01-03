@@ -68,17 +68,9 @@ mod tests {
         Hasher as _, Signer as _,
     };
     use commonware_math::algebra::Random;
+    use commonware_utils::test_rng;
     use rand::{rngs::StdRng, SeedableRng};
     use std::panic::catch_unwind;
-
-    /// Generate a fixture using the provided generator function.
-    fn setup<S, F>(num_validators: u32, fixture: F) -> Fixture<S>
-    where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
-    {
-        let mut rng = StdRng::seed_from_u64(0);
-        fixture(&mut rng, num_validators)
-    }
 
     /// Creates a node for testing with a given scheme.
     fn create_node<S: Scheme<PublicKey, Sha256Digest>>(
@@ -116,7 +108,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node = create_node(&fixture, 0, 1, "payload");
         let key = node.chunk.sequencer.clone();
@@ -142,7 +134,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node = create_node(&fixture, 0, 1, "payload");
         let key = node.chunk.sequencer.clone();
@@ -169,7 +161,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node1 = create_node(&fixture, 0, 1, "payload1");
         let key = node1.chunk.sequencer.clone();
@@ -197,7 +189,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node1 = create_node(&fixture, 0, 2, "payload");
         assert!(manager.put(&node1));
@@ -229,7 +221,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node1 = create_node(&fixture, 0, 1, "payload1");
         assert!(manager.put(&node1));
@@ -287,7 +279,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node1 = create_node(&fixture, 0, 1, "payload1");
         let node2 = create_node(&fixture, 1, 2, "payload2");
@@ -317,7 +309,7 @@ mod tests {
         S: Scheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
 
         // Insert tip with height 1.

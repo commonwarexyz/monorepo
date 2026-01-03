@@ -23,7 +23,7 @@ use crate::{
     Reporter,
 };
 use commonware_cryptography::{certificate, Digest};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
 ///
@@ -32,7 +32,7 @@ use rand::{CryptoRng, Rng};
 /// all activities are cryptographically valid before reporting.
 #[derive(Clone)]
 pub struct AttributableReporter<
-    E: Clone + Rng + CryptoRng + Send + 'static,
+    E: Clone + CryptoRngCore + Send + 'static,
     S: certificate::Scheme,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
@@ -50,7 +50,7 @@ pub struct AttributableReporter<
 }
 
 impl<
-        E: Clone + Rng + CryptoRng + Send + 'static,
+        E: Clone + CryptoRngCore + Send + 'static,
         S: certificate::Scheme,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
@@ -69,7 +69,7 @@ impl<
 }
 
 impl<
-        E: Clone + Rng + CryptoRng + Send + 'static,
+        E: Clone + CryptoRngCore + Send + 'static,
         S: Scheme<D>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,

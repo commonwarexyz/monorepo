@@ -12,7 +12,7 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_utils::ordered::{Quorum, Set};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use tracing::warn;
 
 /// Per-view state for vote accumulation and certificate tracking.
@@ -309,7 +309,7 @@ impl<
         self.verifier.ready_notarizes()
     }
 
-    pub fn verify_notarizes<E: Rng + CryptoRng>(
+    pub fn verify_notarizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
         namespace: &[u8],
@@ -325,7 +325,7 @@ impl<
         self.verifier.ready_nullifies()
     }
 
-    pub fn verify_nullifies<E: Rng + CryptoRng>(
+    pub fn verify_nullifies<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
         namespace: &[u8],
@@ -341,7 +341,7 @@ impl<
         self.verifier.ready_finalizes()
     }
 
-    pub fn verify_finalizes<E: Rng + CryptoRng>(
+    pub fn verify_finalizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
         namespace: &[u8],

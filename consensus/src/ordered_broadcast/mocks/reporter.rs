@@ -11,7 +11,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
 #[allow(clippy::large_enum_variant)]
@@ -23,7 +23,7 @@ enum Message<C: PublicKey, S: Scheme, D: Digest> {
     Get(C, u64, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
-pub struct Reporter<R: Rng + CryptoRng, C: PublicKey, S: Scheme, D: Digest> {
+pub struct Reporter<R: CryptoRngCore, C: PublicKey, S: Scheme, D: Digest> {
     mailbox: mpsc::Receiver<Message<C, S, D>>,
 
     // RNG used for signature verification with scheme.
@@ -51,7 +51,7 @@ pub struct Reporter<R: Rng + CryptoRng, C: PublicKey, S: Scheme, D: Digest> {
 
 impl<R, C, S, D> Reporter<R, C, S, D>
 where
-    R: Rng + CryptoRng,
+    R: CryptoRngCore,
     C: PublicKey,
     S: Scheme,
     D: Digest,

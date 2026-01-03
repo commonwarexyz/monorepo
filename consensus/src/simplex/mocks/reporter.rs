@@ -16,7 +16,7 @@ use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_utils::ordered::{Quorum, Set};
 use futures::channel::mpsc::{Receiver, Sender};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
@@ -37,7 +37,7 @@ pub struct Config<S: Scheme, L: ElectorConfig<S>> {
 }
 
 #[derive(Clone)]
-pub struct Reporter<E: Rng + CryptoRng, S: Scheme, L: ElectorConfig<S>, D: Digest> {
+pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest> {
     context: E,
     pub participants: Set<S::PublicKey>,
     scheme: S,
@@ -62,7 +62,7 @@ pub struct Reporter<E: Rng + CryptoRng, S: Scheme, L: ElectorConfig<S>, D: Diges
 
 impl<E, S, L, D> Reporter<E, S, L, D>
 where
-    E: Rng + CryptoRng,
+    E: CryptoRngCore,
     S: Scheme,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
@@ -108,7 +108,7 @@ where
 
 impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>
 where
-    E: Clone + Rng + CryptoRng + Send + Sync + 'static,
+    E: Clone + CryptoRngCore + Send + Sync + 'static,
     S: scheme::Scheme<D>,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
@@ -122,7 +122,7 @@ where
         let verified = activity.verified();
         match &activity {
             Activity::Notarize(notarize) => {
-                if !notarize.verify(&self.scheme, &self.namespace) {
+                if !notarize.verify(&mut self.context, &self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -164,7 +164,7 @@ where
                 self.certified(notarization.round(), &notarization.certificate);
             }
             Activity::Nullify(nullify) => {
-                if !nullify.verify(&self.scheme, &self.namespace) {
+                if !nullify.verify(&mut self.context, &self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -204,7 +204,7 @@ where
                 self.certified(nullification.round, &nullification.certificate);
             }
             Activity::Finalize(finalize) => {
-                if !finalize.verify(&self.scheme, &self.namespace) {
+                if !finalize.verify(&mut self.context, &self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -254,7 +254,7 @@ where
             }
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.scheme, &self.namespace) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -273,7 +273,7 @@ where
             }
             Activity::ConflictingFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.scheme, &self.namespace) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -292,7 +292,7 @@ where
             }
             Activity::NullifyFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.scheme, &self.namespace) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -315,7 +315,7 @@ where
 
 impl<E, S, L, D> Monitor for Reporter<E, S, L, D>
 where
-    E: Clone + Rng + CryptoRng + Send + Sync + 'static,
+    E: Clone + CryptoRngCore + Send + Sync + 'static,
     S: Scheme,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
