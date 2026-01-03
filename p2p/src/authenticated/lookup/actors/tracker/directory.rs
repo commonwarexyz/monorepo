@@ -1313,4 +1313,208 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn test_blocked_peer_not_dialable() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            // Add peer to a set
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            // Peer should be dialable before blocking
+            assert!(
+                directory.dialable().contains(&pk_1),
+                "Peer should be dialable before blocking"
+            );
+
+            // Block the peer
+            directory.block(&pk_1);
+
+            // Peer should NOT be dialable while blocked
+            assert!(
+                !directory.dialable().contains(&pk_1),
+                "Blocked peer should not be dialable"
+            );
+
+            // Advance time and unblock
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            // Peer should be dialable again after unblock
+            assert!(
+                directory.dialable().contains(&pk_1),
+                "Peer should be dialable after unblock"
+            );
+        });
+    }
+
+    #[test]
+    fn test_blocked_peer_not_acceptable() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: true, // Bypass IP check to simplify test
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            // Add peer to a set
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            // Peer should be acceptable before blocking
+            assert!(
+                directory.acceptable(&pk_1, addr_1.ip()),
+                "Peer should be acceptable before blocking"
+            );
+
+            // Block the peer
+            directory.block(&pk_1);
+
+            // Peer should NOT be acceptable while blocked
+            assert!(
+                !directory.acceptable(&pk_1, addr_1.ip()),
+                "Blocked peer should not be acceptable"
+            );
+
+            // Advance time and unblock
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            // Peer should be acceptable again after unblock
+            assert!(
+                directory.acceptable(&pk_1, addr_1.ip()),
+                "Peer should be acceptable after unblock"
+            );
+        });
+    }
+
+    #[test]
+    fn test_blocked_peer_not_listenable() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            // Add peer to a set
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            // Peer's IP should be listenable before blocking
+            assert!(
+                directory.listenable().contains(&addr_1.ip()),
+                "Peer's IP should be listenable before blocking"
+            );
+
+            // Block the peer
+            directory.block(&pk_1);
+
+            // Peer's IP should NOT be listenable while blocked
+            assert!(
+                !directory.listenable().contains(&addr_1.ip()),
+                "Blocked peer's IP should not be listenable"
+            );
+
+            // Advance time and unblock
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            // Peer's IP should be listenable again after unblock
+            assert!(
+                directory.listenable().contains(&addr_1.ip()),
+                "Peer's IP should be listenable after unblock"
+            );
+        });
+    }
+
+    #[test]
+    fn test_blocked_peer_not_eligible() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            // Add peer to a set
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            // Peer should be eligible before blocking
+            assert!(
+                directory.eligible(&pk_1),
+                "Peer should be eligible before blocking"
+            );
+
+            // Block the peer
+            directory.block(&pk_1);
+
+            // Peer should NOT be eligible while blocked
+            assert!(
+                !directory.eligible(&pk_1),
+                "Blocked peer should not be eligible"
+            );
+
+            // Advance time and unblock
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            // Peer should be eligible again after unblock
+            assert!(
+                directory.eligible(&pk_1),
+                "Peer should be eligible after unblock"
+            );
+        });
+    }
 }

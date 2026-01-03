@@ -694,4 +694,421 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn test_blocked_peer_remains_blocked_on_update() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let peer_signer = PrivateKey::from_seed(1);
+        let peer_pk = peer_signer.public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: 3,
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+
+            // Add peer to a set
+            let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
+            directory.add_set(0, peer_set);
+
+            // Block the peer
+            directory.block(&peer_pk);
+            assert!(
+                directory.blocked.contains(&peer_pk),
+                "Peer should be blocked after call to block"
+            );
+
+            // Update with peer info while blocked
+            let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
+            directory.update_peers(vec![peer_info.clone()]);
+
+            // Peer should still be blocked
+            assert!(
+                directory.blocked.contains(&peer_pk),
+                "Peer should remain blocked after update"
+            );
+
+            // But info should be updated
+            let record = directory.peers.get(&peer_pk).unwrap();
+            assert!(
+                record.ingress().is_some(),
+                "Peer info should be updated while blocked"
+            );
+
+            // Advance time past block duration and unblock
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            // Verify the peer is unblocked with the updated info
+            assert!(
+                !directory.blocked.contains(&peer_pk),
+                "Peer should be unblocked after expiry"
+            );
+            let record = directory.peers.get(&peer_pk).unwrap();
+            assert!(
+                record.ingress().is_some(),
+                "Unblocked peer should have the updated info"
+            );
+        });
+    }
+
+    #[test]
+    fn test_unblock_expired() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let peer_pk = PrivateKey::from_seed(1).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: 3,
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+
+            // Add peer to a set
+            let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
+            directory.add_set(0, peer_set);
+
+            // Block the peer
+            directory.block(&peer_pk);
+            assert!(directory.blocked.contains(&peer_pk));
+
+            // Verify next_unblock_deadline is set
+            let deadline = directory.next_unblock_deadline();
+            assert!(deadline.is_some(), "Should have an unblock deadline");
+
+            // unblock_expired should do nothing before expiry
+            directory.unblock_expired();
+            assert!(
+                directory.blocked.contains(&peer_pk),
+                "Peer should still be blocked before expiry"
+            );
+
+            // Advance time past block duration
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+
+            // Now unblock_expired should unblock the peer
+            directory.unblock_expired();
+            assert!(
+                !directory.blocked.contains(&peer_pk),
+                "Peer should be unblocked after expiry"
+            );
+
+            // Verify next_unblock_deadline is now None
+            assert!(
+                directory.next_unblock_deadline().is_none(),
+                "No more blocked peers, no deadline"
+            );
+        });
+    }
+
+    #[test]
+    fn test_unblock_expired_peer_removed_and_readded() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let pk_1 = PrivateKey::from_seed(1).public_key();
+        let pk_2 = PrivateKey::from_seed(2).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: 1, // Only keep 1 set so we can evict peers
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+
+            // Initially no blocked peers
+            assert_eq!(directory.metrics.blocked.get(), 0);
+
+            // Add pk_1 and block it
+            let peer_set: OrderedSet<_> = [pk_1.clone()].into_iter().try_collect().unwrap();
+            directory.add_set(0, peer_set);
+            directory.block(&pk_1);
+            assert!(directory.blocked.contains(&pk_1));
+            assert_eq!(directory.metrics.blocked.get(), 1);
+
+            // Add a new set that evicts pk_1 (max_sets=1)
+            // The blocked metric should remain 1 since the block persists
+            let peer_set_2: OrderedSet<_> = [pk_2.clone()].into_iter().try_collect().unwrap();
+            directory.add_set(1, peer_set_2);
+            assert!(
+                !directory.peers.contains_key(&pk_1),
+                "pk_1 should be removed"
+            );
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                1,
+                "blocked metric should still be 1 after peer removal"
+            );
+
+            // Re-add pk_1 - should still be blocked because block persists
+            let peer_set_3: OrderedSet<_> = [pk_1.clone()].into_iter().try_collect().unwrap();
+            directory.add_set(2, peer_set_3);
+            assert!(
+                directory.blocked.contains(&pk_1),
+                "Re-added pk_1 should still be blocked"
+            );
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                1,
+                "blocked metric should still be 1 after re-add"
+            );
+
+            // Advance time past block duration
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+
+            // Now unblock_expired should unblock pk_1
+            directory.unblock_expired();
+            assert!(
+                !directory.blocked.contains(&pk_1),
+                "pk_1 should no longer be blocked"
+            );
+            assert_eq!(
+                directory.metrics.blocked.get(),
+                0,
+                "blocked metric should be 0 after unblock"
+            );
+        });
+    }
+
+    #[test]
+    fn test_blocked_metric_multiple_peers() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let pk_1 = PrivateKey::from_seed(1).public_key();
+        let pk_2 = PrivateKey::from_seed(2).public_key();
+        let pk_3 = PrivateKey::from_seed(3).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: 3,
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+
+            // Add all peers
+            let peer_set: OrderedSet<_> = [pk_1.clone(), pk_2.clone(), pk_3.clone()]
+                .into_iter()
+                .try_collect()
+                .unwrap();
+            directory.add_set(0, peer_set);
+            assert_eq!(directory.metrics.blocked.get(), 0);
+
+            // Block all three peers
+            directory.block(&pk_1);
+            assert_eq!(directory.metrics.blocked.get(), 1);
+            directory.block(&pk_2);
+            assert_eq!(directory.metrics.blocked.get(), 2);
+            directory.block(&pk_3);
+            assert_eq!(directory.metrics.blocked.get(), 3);
+
+            // Blocking again should not increment
+            directory.block(&pk_1);
+            assert_eq!(directory.metrics.blocked.get(), 3);
+
+            // Advance time and unblock all
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+            assert_eq!(directory.metrics.blocked.get(), 0);
+        });
+    }
+
+    #[test]
+    fn test_blocked_peer_not_dialable() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let peer_signer = PrivateKey::from_seed(1);
+        let peer_pk = peer_signer.public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: 3,
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+
+            // Add peer to a set
+            let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
+            directory.add_set(0, peer_set);
+
+            // Update with peer info so it has a dialable address
+            let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
+            directory.update_peers(vec![peer_info]);
+
+            // Peer should be dialable before blocking
+            assert!(
+                directory.dialable().contains(&peer_pk),
+                "Peer should be dialable before blocking"
+            );
+
+            // Block the peer
+            directory.block(&peer_pk);
+
+            // Peer should NOT be dialable while blocked
+            assert!(
+                !directory.dialable().contains(&peer_pk),
+                "Blocked peer should not be dialable"
+            );
+
+            // Advance time and unblock
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            // Peer should be dialable again after unblock
+            assert!(
+                directory.dialable().contains(&peer_pk),
+                "Peer should be dialable after unblock"
+            );
+        });
+    }
+
+    #[test]
+    fn test_blocked_peer_not_acceptable() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let peer_signer = PrivateKey::from_seed(1);
+        let peer_pk = peer_signer.public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: 3,
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+
+            // Add peer to a set
+            let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
+            directory.add_set(0, peer_set);
+
+            // Update with peer info
+            let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
+            directory.update_peers(vec![peer_info]);
+
+            // Peer should be acceptable before blocking
+            assert!(
+                directory.acceptable(&peer_pk),
+                "Peer should be acceptable before blocking"
+            );
+
+            // Block the peer
+            directory.block(&peer_pk);
+
+            // Peer should NOT be acceptable while blocked
+            assert!(
+                !directory.acceptable(&peer_pk),
+                "Blocked peer should not be acceptable"
+            );
+
+            // Advance time and unblock
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            // Peer should be acceptable again after unblock
+            assert!(
+                directory.acceptable(&peer_pk),
+                "Peer should be acceptable after unblock"
+            );
+        });
+    }
+
+    #[test]
+    fn test_blocked_peer_not_eligible() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let peer_pk = PrivateKey::from_seed(1).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: 3,
+            dial_fail_limit: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
+
+            // Add peer to a set
+            let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
+            directory.add_set(0, peer_set);
+
+            // Peer should be eligible before blocking
+            assert!(
+                directory.eligible(&peer_pk),
+                "Peer should be eligible before blocking"
+            );
+
+            // Block the peer
+            directory.block(&peer_pk);
+
+            // Peer should NOT be eligible while blocked
+            assert!(
+                !directory.eligible(&peer_pk),
+                "Blocked peer should not be eligible"
+            );
+
+            // Advance time and unblock
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            // Peer should be eligible again after unblock
+            assert!(
+                directory.eligible(&peer_pk),
+                "Peer should be eligible after unblock"
+            );
+        });
+    }
 }
