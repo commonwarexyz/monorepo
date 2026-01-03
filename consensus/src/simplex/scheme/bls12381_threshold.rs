@@ -29,6 +29,7 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Subject as CertificateSubject, Verification},
     Digest, PublicKey,
 };
+use commonware_parallel::Sequential;
 use commonware_utils::ordered::Set;
 use rand_core::CryptoRngCore;
 use std::{
@@ -491,7 +492,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let vote_message = subject.message();
         let seed_message = seed_message_from_subject(&subject);
 
-        batch::verify_same_signer::<_, V, _>(
+        batch::verify_same_signer::<_, V, _, _>(
             rng,
             &evaluated,
             &[
@@ -506,7 +507,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                     attestation.signature.seed_signature,
                 ),
             ],
-            1,
+            &Sequential,
         )
         .is_ok()
     }
@@ -611,9 +612,13 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             return None;
         }
 
-        let (vote_signature, seed_signature) =
-            threshold::recover_pair::<V, _>(quorum, vote_partials.iter(), seed_partials.iter())
-                .ok()?;
+        let (vote_signature, seed_signature) = threshold::recover_pair::<V, _, _>(
+            quorum,
+            vote_partials.iter(),
+            seed_partials.iter(),
+            &Sequential,
+        )
+        .ok()?;
 
         Some(Signature {
             vote_signature,
@@ -634,7 +639,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let vote_message = subject.message();
         let seed_message = seed_message_from_subject(&subject);
 
-        batch::verify_same_signer::<_, V, _>(
+        batch::verify_same_signer::<_, V, _, _>(
             rng,
             identity,
             &[
@@ -649,7 +654,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                     certificate.seed_signature,
                 ),
             ],
-            1,
+            &Sequential,
         )
         .is_ok()
     }
@@ -693,7 +698,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             .iter()
             .map(|(ns, msg, sig)| (*ns, msg.as_ref(), *sig))
             .collect();
-        batch::verify_same_signer::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
+        batch::verify_same_signer::<_, V, _, _>(rng, identity, &entries_refs, &Sequential).is_ok()
     }
 
     fn is_attributable() -> bool {
