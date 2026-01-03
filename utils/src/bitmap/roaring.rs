@@ -1076,6 +1076,27 @@ impl RoaringBitmap {
         }
     }
 
+    /// Optimizes storage by converting containers to their most efficient format.
+    ///
+    /// This method should be called after a series of set operations (union, intersection, etc.)
+    /// when you want to minimize memory usage or prepare for serialization.
+    ///
+    /// The optimization:
+    /// - Converts sparse bitmaps (< 4096 elements) to arrays
+    /// - Converts arrays/bitmaps to run containers when runs are more efficient
+    ///
+    /// # Example
+    /// ```ignore
+    /// let result = a.intersection(&b).intersection(&c);
+    /// result.optimize(); // Convert sparse results to arrays/runs
+    /// ```
+    pub fn optimize(&mut self) {
+        for (_, container) in &mut self.containers {
+            container.maybe_convert_to_array();
+            container.maybe_convert_to_run();
+        }
+    }
+
     /// Performs a bitwise AND with another bitmap, modifying self in place.
     pub fn and(&mut self, other: &Self) {
         let mut result = Vec::new();
@@ -3012,6 +3033,62 @@ mod tests {
             assert!(*v >= 65530);
             assert!(*v < 66000);
             assert!(!have.contains(*v));
+        }
+    }
+
+    #[test]
+    fn test_optimize() {
+        use commonware_codec::EncodeSize;
+
+        // Create two bitmaps with random sparse data
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+
+        // Add sparse data (every 100th value) - will be stored as arrays
+        for i in (0..10000).step_by(100) {
+            a.insert(i);
+            b.insert(i + 50);
+        }
+
+        // Intersection will be empty (no overlap)
+        let result = a.intersection(&b);
+        assert_eq!(result.len(), 0);
+
+        // Create overlapping data for a real intersection
+        let mut c = RoaringBitmap::new();
+        let mut d = RoaringBitmap::new();
+        for i in 0..5000 {
+            c.insert(i);
+        }
+        for i in 2500..7500 {
+            d.insert(i);
+        }
+
+        // Intersection: 2500..5000 (2500 elements) - sparse enough to be array
+        let mut result = c.intersection(&d);
+        let size_before = result.encode_size();
+
+        result.optimize();
+        let size_after = result.encode_size();
+
+        // After optimization, should be smaller (converted to array)
+        assert!(
+            size_after <= size_before,
+            "optimize() should not increase size: before={}, after={}",
+            size_before,
+            size_after
+        );
+        assert_eq!(result.len(), 2500);
+
+        // Verify correctness
+        for i in 0..2500 {
+            assert!(!result.contains(i));
+        }
+        for i in 2500..5000 {
+            assert!(result.contains(i));
+        }
+        for i in 5000..7500 {
+            assert!(!result.contains(i));
         }
     }
 
