@@ -102,33 +102,33 @@ impl PoolRef {
         Pool::offset_to_page(self.page_size, offset)
     }
 
-    /// Try to read the specified bytes from the buffer pool cache only. Returns `true` if all
-    /// requested bytes were found in cache and copied to `buf`, `false` if any page was missing.
+    /// Try to read the specified bytes from the buffer pool cache only. Returns the number of
+    /// bytes successfully read from cache and copied to `buf` before a page fault, if any.
     ///
-    /// This method never reads from the underlying blob - it only checks the cache. Use this for
-    /// a fast-path when you know data might be cached and want to avoid waiting for I/O locks.
+    /// This method never reads from the underlying blob - it only checks the cache.
     ///
     /// # Warning
     ///
     /// Attempts to read any of the last (blob_size % page_size) "trailing bytes" of the blob will
-    /// always return `false` since the buffer pool only deals with page sized chunks.
-    pub(super) async fn try_read_cached(
+    /// always return 0 since the buffer pool only deals with page sized chunks.
+    pub(super) async fn read_cached(
         &self,
         blob_id: u64,
         mut buf: &mut [u8],
         mut offset: u64,
-    ) -> bool {
+    ) -> usize {
+        let original_len = buf.len();
         let buffer_pool = self.pool.read().await;
         while !buf.is_empty() {
             let count = buffer_pool.read_at(self.page_size, blob_id, buf, offset);
             if count == 0 {
-                // Cache miss - return false without modifying remaining buffer
-                return false;
+                // Cache miss - return how many bytes we successfully read
+                break;
             }
             offset += count as u64;
             buf = &mut buf[count..];
         }
-        true
+        original_len - buf.len()
     }
 
     /// Read the specified bytes, preferentially from the buffer pool cache. Bytes not found in the
