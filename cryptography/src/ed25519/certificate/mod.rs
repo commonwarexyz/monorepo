@@ -816,20 +816,19 @@ mod tests {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
 
-        // Get the actual signer indices for schemes[0], schemes[1], schemes[2]
-        let idx0 = schemes[0].me().unwrap();
-        let idx1 = schemes[1].me().unwrap();
-        let idx2 = schemes[2].me().unwrap();
+        // Get indices and sort them to create attestations in guaranteed reverse order
+        let mut indexed: Vec<_> = (0..3).map(|i| (schemes[i].me().unwrap(), i)).collect();
+        indexed.sort_by_key(|(idx, _)| *idx);
 
-        // Create votes in non-sorted order
+        // Create attestations in reverse sorted order (guaranteed non-sorted)
         let attestations = vec![
-            schemes[2]
+            schemes[indexed[2].1]
                 .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .unwrap(),
-            schemes[0]
+            schemes[indexed[1].1]
                 .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .unwrap(),
-            schemes[1]
+            schemes[indexed[0].1]
                 .sign::<Sha256Digest>(NAMESPACE, TestSubject { message: MESSAGE })
                 .unwrap(),
         ];
@@ -837,8 +836,7 @@ mod tests {
         let certificate = schemes[0].assemble(attestations).unwrap();
 
         // Verify signers are sorted by signer index
-        let mut expected = vec![idx0, idx1, idx2];
-        expected.sort();
+        let expected: Vec<_> = indexed.iter().map(|(idx, _)| *idx).collect();
         assert_eq!(certificate.signers.iter().collect::<Vec<_>>(), expected);
     }
 
