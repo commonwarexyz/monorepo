@@ -37,9 +37,8 @@ x25519-dalek = { workspace = true, features = ["zeroize"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 # aws-lc-rs provides optimized P-256 verification on x86_64 and aarch64.
-# It's only included on supported platforms (not WASM).
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
-aws-lc-rs = { workspace = true }
+aws-lc-rs.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
 # Enable "js" feature when WASM is target
