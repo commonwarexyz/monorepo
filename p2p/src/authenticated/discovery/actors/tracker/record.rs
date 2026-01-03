@@ -119,11 +119,16 @@ impl<C: PublicKey> Record<C> {
         }
     }
 
-    /// Mark this peer as having been blocked.
+    /// Attempt to block this peer.
     ///
-    /// Misbehaving bootstrappers should be deletable once no longer in any peer sets.
-    pub const fn mark_blocked(&mut self) {
+    /// Returns `true` if the peer is blockable (not Myself), `false` otherwise.
+    /// Misbehaving bootstrappers become deletable once no longer in any peer sets.
+    pub const fn block(&mut self) -> bool {
+        if matches!(self.address, Address::Myself(_)) {
+            return false;
+        }
         self.persistent = false;
+        true
     }
 
     /// Increase the count of peer sets this peer is part of.
@@ -193,13 +198,6 @@ impl<C: PublicKey> Record<C> {
     }
 
     // ---------- Getters ----------
-
-    /// Returns `true` if this record can be blocked.
-    ///
-    /// Only returns `false` for `Myself` records.
-    pub const fn is_blockable(&self) -> bool {
-        !matches!(self.address, Address::Myself(_))
-    }
 
     /// Returns the number of peer sets this peer is part of.
     pub const fn sets(&self) -> usize {
@@ -364,7 +362,6 @@ mod tests {
         assert!(!record.persistent);
         assert!(record.ingress().is_none());
         assert!(record.sharable().is_none());
-        assert!(record.is_blockable());
         assert!(!record.reserved());
         assert!(record.want(0), "Should want info for unknown peer");
         assert!(record.deletable());
@@ -386,7 +383,6 @@ mod tests {
             record.sharable().as_ref(),
             &my_info
         ));
-        assert!(!record.is_blockable());
         assert!(!record.reserved());
         assert!(!record.want(0), "Should not want info for myself");
         assert!(!record.deletable());
@@ -404,7 +400,6 @@ mod tests {
         assert!(record.persistent);
         assert_eq!(record.ingress(), Some(&ingress));
         assert!(record.sharable().is_none());
-        assert!(record.is_blockable());
         assert!(!record.reserved());
         assert!(record.want(0), "Should want info for bootstrapper");
         assert!(!record.deletable());
@@ -572,36 +567,33 @@ mod tests {
     }
 
     #[test]
-    fn test_is_blockable() {
+    fn test_block() {
         let my_info = create_peer_info::<PrivateKey>(0, test_socket(), 100);
 
-        // Myself is not blockable
-        let record_myself = Record::myself(my_info);
-        assert!(!record_myself.is_blockable());
+        // Myself cannot be blocked
+        let mut record_myself = Record::myself(my_info);
+        assert!(record_myself.persistent);
+        assert!(!record_myself.block());
+        assert!(record_myself.persistent, "Myself should remain persistent");
 
-        // All other address types are blockable
-        assert!(Record::<PublicKey>::unknown().is_blockable());
-        assert!(Record::<PublicKey>::bootstrapper(test_socket()).is_blockable());
+        // Bootstrapper can be blocked, sets persistent to false
+        let mut record_boot = Record::<PublicKey>::bootstrapper(test_socket());
+        assert!(record_boot.persistent);
+        assert!(record_boot.block());
+        assert!(!record_boot.persistent);
 
+        // Unknown can be blocked (already non-persistent)
+        let mut record_unknown = Record::<PublicKey>::unknown();
+        assert!(!record_unknown.persistent);
+        assert!(record_unknown.block());
+        assert!(!record_unknown.persistent);
+
+        // Discovered can be blocked
         let peer_info = create_peer_info::<PrivateKey>(1, test_socket(), 1000);
         let mut record_disc = Record::<PublicKey>::unknown();
         assert!(record_disc.update(peer_info));
-        assert!(record_disc.is_blockable());
-    }
-
-    #[test]
-    fn test_mark_blocked() {
-        // mark_blocked sets persistent to false
-        let mut record_boot = Record::<PublicKey>::bootstrapper(test_socket());
-        assert!(record_boot.persistent);
-        record_boot.mark_blocked();
-        assert!(!record_boot.persistent);
-
-        // Non-persistent records remain non-persistent
-        let mut record_unknown = Record::<PublicKey>::unknown();
-        assert!(!record_unknown.persistent);
-        record_unknown.mark_blocked();
-        assert!(!record_unknown.persistent);
+        assert!(record_disc.block());
+        assert!(!record_disc.persistent);
     }
 
     #[test]
@@ -842,15 +834,15 @@ mod tests {
         record.decrement(); // sets = 0
         assert!(record.deletable()); // sets = 0, !persistent, Inert
 
-        // mark_blocked makes a record non-persistent, but deletability still depends on sets/status
-        let mut record_marked = Record::<PublicKey>::bootstrapper(test_socket());
-        assert!(record_marked.persistent);
-        record_marked.increment(); // sets = 1
-        record_marked.mark_blocked();
-        assert!(!record_marked.persistent);
-        assert!(!record_marked.deletable()); // sets = 1
-        record_marked.decrement(); // sets = 0
-        assert!(record_marked.deletable()); // sets = 0, !persistent, Inert
+        // block() makes a record non-persistent, but deletability still depends on sets/status
+        let mut record_blocked = Record::<PublicKey>::bootstrapper(test_socket());
+        assert!(record_blocked.persistent);
+        record_blocked.increment(); // sets = 1
+        assert!(record_blocked.block());
+        assert!(!record_blocked.persistent);
+        assert!(!record_blocked.deletable()); // sets = 1
+        record_blocked.decrement(); // sets = 0
+        assert!(record_blocked.deletable()); // sets = 0, !persistent, Inert
     }
 
     #[test]

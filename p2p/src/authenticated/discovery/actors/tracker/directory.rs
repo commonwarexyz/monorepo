@@ -228,7 +228,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             // If peer is blocked (from before they were removed), mark the new record
             // so bootstrappers become deletable
             if self.blocked.is_blocked(peer) {
-                record.mark_blocked();
+                assert!(record.block());
             }
             record.increment();
             set.update(peer, !record.want(self.dial_fail_limit));
@@ -299,12 +299,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         }
 
-        // If record exists, check if blockable (not Myself)
+        // If record exists, attempt to block it (returns false for Myself)
         if let Some(record) = self.peers.get_mut(peer) {
-            if !record.is_blockable() {
+            if !record.block() {
                 return;
             }
-            record.mark_blocked();
         }
 
         let blocked_until = self.context.current() + self.block_duration;
