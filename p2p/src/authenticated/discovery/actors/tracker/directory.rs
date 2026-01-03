@@ -123,7 +123,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
-            blocked: blocked::Queue::new(metrics.blocked.clone()),
+            blocked: blocked::Queue::new(),
             releaser,
             metrics,
         }
@@ -308,6 +308,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         let blocked_until = self.context.current() + self.block_duration;
         self.blocked.block(peer.clone(), blocked_until);
+        let _ = self.metrics.blocked.try_set(self.blocked.len());
     }
 
     // ---------- Getters ----------
@@ -398,6 +399,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     pub fn unblock_expired(&mut self) {
         let now = self.context.current();
         let unblocked = self.blocked.unblock_expired(now);
+        if unblocked.is_empty() {
+            return;
+        }
+        let _ = self.metrics.blocked.try_set(self.blocked.len());
 
         // Update knowledge bitmaps
         for peer in unblocked {
