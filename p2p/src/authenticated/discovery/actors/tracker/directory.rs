@@ -468,13 +468,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let Some(record) = self.peers.get(peer) else {
             return false;
         };
-
         if !record.deletable() {
             return false;
         }
 
         // We don't decrement the blocked metric here because the block
-        // persists in blocked::Queue even after the record is deleted. The metric
+        // persists in PrioritySet even after the record is deleted. The metric
         // is decremented in unblock_expired when the block actually expires.
         self.peers.remove(peer);
         self.metrics.tracked.dec();
@@ -594,7 +593,7 @@ mod tests {
             let peer_set: OrderedSet<_> = [unknown_pk.clone()].into_iter().try_collect().unwrap();
             directory.add_set(0, peer_set);
 
-            // Peer should now be in peers and blocked (via blocked::Queue)
+            // Peer should now be in peers and blocked (via PrioritySet)
             assert!(
                 directory.peers.contains_key(&unknown_pk),
                 "Peer should be in peers after add_set"

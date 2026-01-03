@@ -123,7 +123,7 @@ impl Record {
     /// Returns `true` if this peer can be blocked.
     ///
     /// Only `Myself` cannot be blocked. Actual blocked status is tracked
-    /// by the Directory via blocked::Queue.
+    /// by the Directory via PrioritySet.
     pub const fn is_blockable(&self) -> bool {
         !matches!(self.address, Address::Myself)
     }

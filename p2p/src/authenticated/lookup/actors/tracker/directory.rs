@@ -382,13 +382,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let Some(record) = self.peers.get(peer) else {
             return false;
         };
-
         if !record.deletable() {
             return false;
         }
 
         // We don't decrement the blocked metric here because the block
-        // persists in blocked::Queue even after the record is deleted. The metric
+        // persists in PrioritySet even after the record is deleted. The metric
         // is decremented in unblock_expired when the block actually expires.
         self.peers.remove(peer);
         self.metrics.tracked.dec();
@@ -596,7 +595,7 @@ mod tests {
                 directory.blocked.contains(&pk_1),
                 "Peer should be blocked after call to block"
             );
-            // Address is preserved (blocking is tracked in blocked::Queue)
+            // Address is preserved (blocking is tracked in PrioritySet)
             let record = directory.peers.get(&pk_1).unwrap();
             assert_eq!(
                 record.ingress(),
