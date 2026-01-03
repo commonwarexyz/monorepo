@@ -19,6 +19,8 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+use p256::ecdsa::signature::Verifier;
 use p256::{ecdsa::signature::Signer, elliptic_curve::scalar::IsHigh};
 
 const SIGNATURE_LENGTH: usize = 64; // R || S
@@ -79,7 +81,6 @@ impl PublicKey {
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     #[inline(always)]
     fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
-        use p256::ecdsa::signature::Verifier;
         let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
             Cow::Owned(union_unique(namespace, msg))
         });
