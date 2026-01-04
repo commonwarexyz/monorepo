@@ -6,7 +6,7 @@ use chacha20poly1305::{
 };
 use rand_core::CryptoRngCore;
 use std::vec::Vec;
-use zeroize::{ZeroizeOnDrop, Zeroizing};
+use zeroize::ZeroizeOnDrop;
 
 /// The amount of overhead in a ciphertext, compared to the plain message.
 pub const CIPHERTEXT_OVERHEAD: usize = <ChaCha20Poly1305 as AeadCore>::TagSize::USIZE;
@@ -82,16 +82,12 @@ impl RecvCipher {
     }
 
     /// Decrypts ciphertext and returns the original data.
-    ///
-    /// The returned data is wrapped in [`Zeroizing`] to ensure it is securely
-    /// erased from memory when dropped.
-    pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+    pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
         self.inner
             .decrypt(
                 (&self.nonce.inc()?[..NONCE_SIZE_BYTES]).into(),
                 encrypted_data,
             )
-            .map(Zeroizing::new)
             .map_err(|_| Error::DecryptionFailed)
     }
 }

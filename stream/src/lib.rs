@@ -63,6 +63,7 @@
 pub mod utils;
 
 use crate::utils::codec::{recv_frame, send_frame};
+use bytes::Bytes;
 use zeroize::Zeroizing;
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
@@ -322,16 +323,27 @@ pub struct Receiver<I> {
 
 impl<I: Stream> Receiver<I> {
     /// Receives and decrypts a message from the peer.
-    ///
-    /// The returned data is wrapped in [`Zeroizing`] to ensure it is securely
-    /// erased from memory when dropped.
-    pub async fn recv(&mut self) -> Result<Zeroizing<Vec<u8>>, Error> {
+    pub async fn recv(&mut self) -> Result<Bytes, Error> {
         let c = recv_frame(
             &mut self.stream,
             self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
         )
         .await?;
-        Ok(self.cipher.recv(&c)?)
+        Ok(self.cipher.recv(&c)?.into())
+    }
+
+    /// Receives and decrypts a secret message from the peer.
+    ///
+    /// The returned data is wrapped in [`Zeroizing`] to ensure it is securely
+    /// erased from memory when dropped. Use this method when receiving messages
+    /// that contain sensitive data (e.g., DKG shares, private keys).
+    pub async fn recv_secret(&mut self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let c = recv_frame(
+            &mut self.stream,
+            self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
+        )
+        .await?;
+        Ok(Zeroizing::new(self.cipher.recv(&c)?))
     }
 }
 

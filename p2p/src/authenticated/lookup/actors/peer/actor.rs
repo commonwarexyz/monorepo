@@ -164,7 +164,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
 
                     // Parse the message
                     let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
-                    let msg = match types::Message::decode_cfg(msg.as_ref(), &max_data_length) {
+                    let msg = match types::Message::decode_cfg(msg, &max_data_length) {
                         Ok(msg) => msg,
                         Err(err) => {
                             debug!(?err, ?peer, "failed to decode message");
