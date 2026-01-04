@@ -117,7 +117,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 pub struct Channels<P: PublicKey> {
     messenger: router::Messenger<P>,
     max_size: u32,
-    receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message<P>>)>,
+    receivers: BTreeMap<Channel, (Quota, bool, mpsc::Sender<Message<P>>)>,
 }
 
 impl<P: PublicKey> Channels<P> {
@@ -129,15 +129,28 @@ impl<P: PublicKey> Channels<P> {
         }
     }
 
+    /// Registers a new channel with the given configuration.
+    ///
+    /// # Arguments
+    /// * `channel` - Unique identifier for this channel
+    /// * `rate` - Rate limiting quota for this channel
+    /// * `backlog` - Maximum number of pending messages
+    /// * `clock` - Clock instance for rate limiting
+    /// * `encrypted` - Whether messages on this channel should be encrypted
     pub fn register<C: Clock>(
         &mut self,
         channel: Channel,
         rate: Quota,
         backlog: usize,
         clock: C,
+        encrypted: bool,
     ) -> (Sender<P, C>, Receiver<P>) {
         let (sender, receiver) = mpsc::channel(backlog);
-        if self.receivers.insert(channel, (rate, sender)).is_some() {
+        if self
+            .receivers
+            .insert(channel, (rate, encrypted, sender))
+            .is_some()
+        {
             panic!("duplicate channel registration: {channel}");
         }
         (
@@ -146,7 +159,7 @@ impl<P: PublicKey> Channels<P> {
         )
     }
 
-    pub fn collect(self) -> BTreeMap<u64, (Quota, mpsc::Sender<Message<P>>)> {
+    pub fn collect(self) -> BTreeMap<u64, (Quota, bool, mpsc::Sender<Message<P>>)> {
         self.receivers
     }
 }

@@ -71,14 +71,22 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     }
 
     /// Creates a message from a payload, then sends and increments metrics.
+    ///
+    /// If `encrypted` is true, the message is encrypted before sending.
+    /// If `encrypted` is false, the message is sent as plaintext.
     async fn send<Si: Sink>(
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
         payload: types::Message,
+        encrypted: bool,
     ) -> Result<(), Error> {
         let msg = payload.encode();
-        sender.send(&msg).await.map_err(Error::SendFailed)?;
+        if encrypted {
+            sender.send(&msg).await.map_err(Error::SendFailed)?;
+        } else {
+            sender.send_plaintext(&msg).await.map_err(Error::SendFailed)?;
+        }
         sent_messages.get_or_create(&metric).inc();
         Ok(())
     }
@@ -92,12 +100,15 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
-        for (channel, (rate, sender)) in channels.collect() {
+        let mut encrypted_channels = HashMap::new();
+        for (channel, (rate, encrypted, sender)) in channels.collect() {
             let rate_limiter = RateLimiter::direct_with_clock(rate, self.context.clone());
             rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
+            encrypted_channels.insert(channel, encrypted);
         }
         let rate_limits = Arc::new(rate_limits);
+        let encrypted_channels = Arc::new(encrypted_channels);
         // Use half the ping frequency for rate limiting to allow for timing
         // jitter at message boundaries.
         let half = (self.ping_frequency / 2).max(SYSTEM_TIME_PRECISION);
@@ -108,6 +119,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
             let peer = peer.clone();
             let rate_limits = rate_limits.clone();
+            let encrypted_channels = encrypted_channels.clone();
             move |context| async move {
                 // Set the initial deadline (no need to send right away)
                 let mut deadline = context.current() + self.ping_frequency;
@@ -117,12 +129,13 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                     context,
                     on_stopped => {},
                     _ = context.sleep_until(deadline) => {
-                        // Periodically send a ping to the peer
+                        // Periodically send a ping to the peer (always encrypted)
                         Self::send(
                             &mut conn_sender,
                             &self.sent_messages,
                             metrics::Message::new_ping(&peer),
                             types::Message::Ping,
+                            true,
                         ).await?;
 
                         // Reset ticker
@@ -141,12 +154,14 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                     },
                     msg_high = self.high.next() => {
                         let msg = Self::validate_outbound_msg(msg_high, &rate_limits)?;
-                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
+                        let encrypted = encrypted_channels.get(&msg.channel).copied().unwrap_or(true);
+                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into(), encrypted)
                             .await?;
                     },
                     msg_low = self.low.next() => {
                         let msg = Self::validate_outbound_msg(msg_low, &rate_limits)?;
-                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
+                        let encrypted = encrypted_channels.get(&msg.channel).copied().unwrap_or(true);
+                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into(), encrypted)
                             .await?;
                     }
                 }
@@ -160,7 +175,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
             .spawn(move |context| async move {
                 loop {
                     // Receive a message from the peer
-                    let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
+                    let (msg, _encrypted) = conn_receiver.recv_any().await.map_err(Error::ReceiveFailed)?;
 
                     // Parse the message
                     let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion

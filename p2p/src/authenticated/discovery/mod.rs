@@ -319,7 +319,7 @@ mod tests {
 
             // Register basic application
             let (mut sender, mut receiver) =
-                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
 
             // Wait to connect to all peers, and then send messages to everyone
             network.start();
@@ -595,7 +595,7 @@ mod tests {
 
                 // Register basic application
                 let (mut sender, mut receiver) =
-                    network.register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG);
+                    network.register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG, true);
 
                 // Wait to connect to all peers, and then send messages to everyone
                 network.start();
@@ -673,7 +673,7 @@ mod tests {
 
             // Register basic application
             let (mut sender, _) =
-                network.register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG);
+                network.register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG, true);
 
             // Wait to connect to all peers, and then send messages to everyone
             network.start();
@@ -720,7 +720,7 @@ mod tests {
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
             let (mut sender0, _receiver0) =
-                network0.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+                network0.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG, true);
             network0.start();
 
             // Create network for peer 1
@@ -736,7 +736,7 @@ mod tests {
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
             let (_sender1, _receiver1) =
-                network1.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+                network1.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG, true);
             network1.start();
 
             // Send first message, which should be allowed and consume the quota.
@@ -890,7 +890,7 @@ mod tests {
                     .await;
 
                 let (mut sender, mut receiver) =
-                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
                 network.start();
 
                 peer_context.with_label("agent").spawn({
@@ -1166,7 +1166,7 @@ mod tests {
 
                 // Register channel
                 let (mut sender, mut receiver) =
-                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
 
                 network.start();
 
@@ -1259,7 +1259,7 @@ mod tests {
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
             let (mut sender0, mut receiver0) =
-                network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
             network0.start();
 
             // Create network for peer 1 with DNS bootstrapper
@@ -1280,7 +1280,7 @@ mod tests {
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
             let (mut sender1, mut receiver1) =
-                network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
             network1.start();
 
             // Wait a bit - peer 1 should fail to connect (DNS not registered)
@@ -1402,7 +1402,7 @@ mod tests {
                     .update(0, addresses.clone().try_into().unwrap())
                     .await;
                 let (mut sender, mut receiver) =
-                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
                 network.start();
 
                 context.with_label("agent").spawn({
@@ -1500,7 +1500,7 @@ mod tests {
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
             let (_sender0, mut receiver0) =
-                network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
             network0.start();
 
             // Create peer 1 with allow_private_ips=false using DNS bootstrapper
@@ -1518,7 +1518,7 @@ mod tests {
                 .update(0, addresses.clone().try_into().unwrap())
                 .await;
             let (mut sender1, _receiver1) =
-                network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
             network1.start();
 
             // Wait for a period during which peer 1 would normally connect
@@ -1598,7 +1598,7 @@ mod tests {
                     .update(0, addresses.clone().try_into().unwrap())
                     .await;
                 let (_sender0, mut receiver0) =
-                    network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                    network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
                 network0.start();
 
                 // Create peer 1 with peer 0 as DNS bootstrapper
@@ -1616,7 +1616,7 @@ mod tests {
                     .update(0, addresses.clone().try_into().unwrap())
                     .await;
                 let (mut sender1, _receiver1) =
-                    network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                    network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
                 network1.start();
 
                 // Wait for peers to connect (may take multiple attempts due to random IP selection)
@@ -1692,7 +1692,7 @@ mod tests {
                     .await;
 
                 let (sender, receiver) =
-                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
                 senders[i] = Some(sender);
                 receivers[i] = Some(receiver);
 
@@ -1787,7 +1787,7 @@ mod tests {
                         .await;
 
                     let (sender, receiver) =
-                        network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                        network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
                     senders[restart_peer_idx] = Some(sender);
                     receivers[restart_peer_idx] = Some(receiver);
 
@@ -1908,7 +1908,7 @@ mod tests {
                     .await;
 
                 let (sender, receiver) =
-                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
                 senders[i] = Some(sender);
                 receivers[i] = Some(receiver);
 
@@ -1999,7 +1999,7 @@ mod tests {
                 .await;
 
             let (sender, receiver) =
-                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, true);
             senders[restart_peer_idx] = Some(sender);
             receivers[restart_peer_idx] = Some(receiver);
 

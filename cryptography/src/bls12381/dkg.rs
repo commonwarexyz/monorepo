@@ -1939,7 +1939,7 @@ mod test_plan {
 
                         // Manually create the dealer with adjusted polynomial
                         let share = info
-                            .unwrap_or_random_share(&mut rng, share.map(|s| s.private))
+                            .unwrap_or_random_share(&mut rng, share.map(|s| s.private.clone()))
                             .expect("Failed to generate dealer share");
 
                         let my_poly = Poly::new_with_constant(&mut rng, degree, share);

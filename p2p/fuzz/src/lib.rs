@@ -265,7 +265,7 @@ impl NetworkScheme for Discovery {
         }
 
         let quota = Quota::per_second(NZU32!(100));
-        let (sender, receiver) = network.register(0, quota, DEFAULT_MESSAGE_BACKLOG);
+        let (sender, receiver) = network.register(0, quota, DEFAULT_MESSAGE_BACKLOG, true);
 
         // Start the network background task
         let handle = network.start();
@@ -356,7 +356,7 @@ impl NetworkScheme for Lookup {
         }
 
         let quota = Quota::per_second(NZU32!(100));
-        let (sender, receiver) = network.register(0, quota, DEFAULT_MESSAGE_BACKLOG);
+        let (sender, receiver) = network.register(0, quota, DEFAULT_MESSAGE_BACKLOG, true);
 
         // Start the network background task
         let handle = network.start();

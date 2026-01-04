@@ -94,6 +94,7 @@ impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Sign
     /// * `channel` - Unique identifier for the channel.
     /// * `rate` - Rate at which messages can be received over the channel.
     /// * `backlog` - Maximum number of messages that can be queued on the channel before blocking.
+    /// * `encrypted` - Whether messages on this channel should be encrypted.
     ///
     /// # Returns
     ///
@@ -106,6 +107,7 @@ impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Sign
         channel: Channel,
         rate: Quota,
         backlog: usize,
+        encrypted: bool,
     ) -> (
         channels::Sender<C::PublicKey, E>,
         channels::Receiver<C::PublicKey>,
@@ -114,7 +116,7 @@ impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Sign
             .context
             .with_label(&format!("channel_{channel}"))
             .take();
-        self.channels.register(channel, rate, backlog, clock)
+        self.channels.register(channel, rate, backlog, clock, encrypted)
     }
 
     /// Starts the network.
