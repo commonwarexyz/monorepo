@@ -1,4 +1,4 @@
-use commonware_utils::bitmap::roaring::{difference, intersection, union, RoaringBitmap};
+use commonware_utils::bitmap::roaring::{difference, intersection, union, Bitmap, RoaringBitmap};
 use criterion::{criterion_group, BenchmarkId, Criterion};
 use roaring::RoaringTreemap;
 
@@ -133,6 +133,24 @@ fn benchmark_union(c: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_bitmap_or(c: &mut Criterion) {
+    let mut group = c.benchmark_group("roaring/bitmap_or");
+
+    let mut bitmap_a = Bitmap::new();
+    let mut bitmap_b = Bitmap::new();
+
+    for i in 0u16..10000 {
+        bitmap_a.insert(i * 2);
+        bitmap_b.insert(i * 3);
+    }
+
+    group.bench_function("ours", |b| {
+        b.iter(|| Bitmap::or_new(&bitmap_a, &bitmap_b));
+    });
+
+    group.finish();
+}
+
 fn benchmark_intersection(c: &mut Criterion) {
     let mut group = c.benchmark_group("roaring/intersection");
 
@@ -220,6 +238,7 @@ criterion_group! {
         benchmark_insert_range,
         benchmark_contains,
         benchmark_union,
+        benchmark_bitmap_or,
         benchmark_intersection,
         benchmark_difference,
         benchmark_iteration,

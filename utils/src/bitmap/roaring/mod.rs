@@ -253,6 +253,16 @@ impl RoaringBitmap {
     pub const fn from_containers(containers: BTreeMap<u64, Container>) -> Self {
         Self { containers }
     }
+
+    /// Creates a bitmap with a single container.
+    ///
+    /// More efficient than `from_containers` for single-container results.
+    #[inline]
+    pub fn from_single_container(key: u64, container: Container) -> Self {
+        let mut containers = BTreeMap::new();
+        containers.insert(key, container);
+        Self { containers }
+    }
 }
 
 impl Write for RoaringBitmap {

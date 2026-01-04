@@ -26,12 +26,11 @@ pub use run::Run;
 /// - Array -> Bitmap when cardinality exceeds 4096
 /// - Bitmap -> Run when container becomes fully saturated (65536 values)
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(clippy::large_enum_variant)]
 pub enum Container {
     /// Sparse container using a sorted array.
     Array(Array),
-    /// Dense container using a fixed-size bit array.
-    Bitmap(Bitmap),
+    /// Dense container using a fixed-size bit array (boxed to reduce enum size).
+    Bitmap(Box<Bitmap>),
     /// Run-length encoded container for consecutive sequences.
     Run(Run),
 }
@@ -180,7 +179,7 @@ impl Container {
     /// Converts an Array container to a Bitmap container.
     fn convert_array_to_bitmap(&mut self) {
         if let Self::Array(a) = self {
-            *self = Self::Bitmap(Bitmap::from_array(a));
+            *self = Self::Bitmap(Box::new(Bitmap::from_array(a)));
         }
     }
 
@@ -265,7 +264,7 @@ impl Read for Container {
         let container_type = u8::read(buf)?;
         match container_type {
             CONTAINER_TYPE_ARRAY => Ok(Self::Array(Array::read(buf)?)),
-            CONTAINER_TYPE_BITMAP => Ok(Self::Bitmap(Bitmap::read(buf)?)),
+            CONTAINER_TYPE_BITMAP => Ok(Self::Bitmap(Box::new(Bitmap::read(buf)?))),
             CONTAINER_TYPE_RUN => Ok(Self::Run(Run::read(buf)?)),
             _ => Err(CodecError::InvalidEnum(container_type)),
         }
@@ -316,7 +315,7 @@ mod tests {
 
     #[test]
     fn test_auto_convert_bitmap_to_run() {
-        let mut container = Container::Bitmap(Bitmap::new());
+        let mut container = Container::Bitmap(Box::default());
 
         // Fill the entire container
         for i in 0..=u16::MAX {

@@ -32,9 +32,7 @@ pub fn union(a: &RoaringBitmap, b: &RoaringBitmap, limit: u64) -> RoaringBitmap 
         let (&b_key, b_container) = b_containers.first_key_value().unwrap();
         if a_key == b_key {
             let (new_container, _) = union_containers(a_container, b_container, limit);
-            let mut result = BTreeMap::new();
-            result.insert(a_key, new_container);
-            return RoaringBitmap::from_containers(result);
+            return RoaringBitmap::from_single_container(a_key, new_container);
         }
     }
 
@@ -119,12 +117,9 @@ pub fn intersection(a: &RoaringBitmap, b: &RoaringBitmap, limit: u64) -> Roaring
         let (&a_key, a_container) = a_containers.first_key_value().unwrap();
         let (&b_key, b_container) = b_containers.first_key_value().unwrap();
         if a_key == b_key {
-            let (new_container, count) =
-                intersect_containers(a_container, b_container, limit);
+            let (new_container, count) = intersect_containers(a_container, b_container, limit);
             if count > 0 {
-                let mut result = BTreeMap::new();
-                result.insert(a_key, new_container);
-                return RoaringBitmap::from_containers(result);
+                return RoaringBitmap::from_single_container(a_key, new_container);
             }
             return RoaringBitmap::new();
         }
@@ -174,9 +169,7 @@ pub fn difference(a: &RoaringBitmap, b: &RoaringBitmap, limit: u64) -> RoaringBi
         if a_key == b_key {
             let (new_container, count) = diff_containers(a_container, b_container, limit);
             if count > 0 {
-                let mut result = BTreeMap::new();
-                result.insert(a_key, new_container);
-                return RoaringBitmap::from_containers(result);
+                return RoaringBitmap::from_single_container(a_key, new_container);
             }
             return RoaringBitmap::new();
         }
@@ -239,9 +232,9 @@ fn union_containers(a: &Container, b: &Container, limit: u64) -> (Container, u64
         let result = Bitmap::or_new(a_bm, b_bm);
         let len = result.len() as u64;
         if len <= limit {
-            return (Container::Bitmap(result), len);
+            return (Container::Bitmap(Box::new(result)), len);
         }
-        return copy_container_with_limit(&Container::Bitmap(result), limit);
+        return copy_container_with_limit(&Container::Bitmap(Box::new(result)), limit);
     }
 
     // General case: iterate both in sorted order
@@ -298,9 +291,9 @@ fn intersect_containers(a: &Container, b: &Container, limit: u64) -> (Container,
         let result = Bitmap::and_new(a_bm, b_bm);
         let len = result.len() as u64;
         if len <= limit {
-            return (Container::Bitmap(result), len);
+            return (Container::Bitmap(Box::new(result)), len);
         }
-        return copy_container_with_limit(&Container::Bitmap(result), limit);
+        return copy_container_with_limit(&Container::Bitmap(Box::new(result)), limit);
     }
 
     // Optimization: iterate over the smaller container
@@ -336,9 +329,9 @@ fn diff_containers(a: &Container, b: &Container, limit: u64) -> (Container, u64)
         let result = Bitmap::and_not_new(a_bm, b_bm);
         let len = result.len() as u64;
         if len <= limit {
-            return (Container::Bitmap(result), len);
+            return (Container::Bitmap(Box::new(result)), len);
         }
-        return copy_container_with_limit(&Container::Bitmap(result), limit);
+        return copy_container_with_limit(&Container::Bitmap(Box::new(result)), limit);
     }
 
     // General case
