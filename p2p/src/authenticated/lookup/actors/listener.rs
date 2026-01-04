@@ -1,9 +1,9 @@
 //! Listener
 
 use crate::authenticated::{
-    lookup::actors::{spawner, tracker},
+    lookup::actors::{spawner, tracker, tracker::directory::ListenableIps},
     mailbox::UnboundedMailbox,
-    Mailbox,
+    Attempt, Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
@@ -16,11 +16,7 @@ use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
-use std::{
-    collections::HashSet,
-    net::{IpAddr, SocketAddr},
-    num::NonZeroU32,
-};
+use std::{net::SocketAddr, num::NonZeroU32};
 use tracing::debug;
 
 /// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
@@ -50,22 +46,36 @@ pub struct Actor<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Sign
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
-    registered_ips: HashSet<IpAddr>,
-    mailbox: mpsc::Receiver<HashSet<IpAddr>>,
+    listenable_ips: ListenableIps,
+    mailbox: mpsc::Receiver<ListenableIps>,
     handshakes_blocked: Counter,
+    handshakes_ip_blocked: Counter,
+    handshakes_ip_unregistered: Counter,
     handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
     handshakes_subnet_rate_limited: Counter,
 }
 
 impl<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
+    pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<ListenableIps>) -> Self {
         // Create metrics
         let handshakes_blocked = Counter::default();
         context.register(
             "handshakes_blocked",
-            "number of handshake attempts blocked because the IP was not registered",
+            "number of handshake attempts blocked because the IP was private",
             handshakes_blocked.clone(),
+        );
+        let handshakes_ip_blocked = Counter::default();
+        context.register(
+            "handshakes_ip_blocked",
+            "number of handshake attempts blocked because the IP belongs to a blocked peer",
+            handshakes_ip_blocked.clone(),
+        );
+        let handshakes_ip_unregistered = Counter::default();
+        context.register(
+            "handshakes_ip_unregistered",
+            "number of handshake attempts blocked because the IP was not registered",
+            handshakes_ip_unregistered.clone(),
         );
         let handshakes_concurrent_rate_limited = Counter::default();
         context.register(
@@ -96,9 +106,11 @@ impl<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E,
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
             allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
             allowed_handshake_rate_per_subnet: cfg.allowed_handshake_rate_per_subnet,
-            registered_ips: HashSet::new(),
+            listenable_ips: ListenableIps::default(),
             mailbox,
             handshakes_blocked,
+            handshakes_ip_blocked,
+            handshakes_ip_unregistered,
             handshakes_concurrent_rate_limited,
             handshakes_ip_rate_limited,
             handshakes_subnet_rate_limited,
@@ -119,7 +131,11 @@ impl<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E,
         let source_ip = address.ip();
         let (peer, send, recv) = match listen(
             context,
-            |peer| tracker.acceptable(peer, source_ip),
+            |peer| async {
+                // Check if peer is acceptable and convert to bool for the stream crate.
+                // Metrics and detailed logging are handled inside tracker.acceptable().
+                tracker.acceptable(peer, source_ip).await == Attempt::Ok
+            },
             stream_cfg,
             stream,
             sink,
@@ -185,11 +201,11 @@ impl<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E,
                 debug!("context shutdown, stopping listener");
             },
             update = self.mailbox.next() => {
-                let Some(registered_ips) = update else {
+                let Some(listenable_ips) = update else {
                     debug!("mailbox closed");
                     break;
                 };
-                self.registered_ips = registered_ips;
+                self.listenable_ips = listenable_ips;
             },
             listener = listener.accept() => {
                 // Accept a new connection
@@ -210,10 +226,17 @@ impl<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E,
                     continue;
                 }
 
-                // Check whether the IP is registered
-                if !self.bypass_ip_check && !self.registered_ips.contains(&ip) {
-                    self.handshakes_blocked.inc();
-                    debug!(?address, "rejecting unregistered address");
+                // Check whether the IP is registered (allowed takes priority over blocked
+                // in case multiple peers share the same IP)
+                if !self.bypass_ip_check && !self.listenable_ips.allowed.contains(&ip) {
+                    // Not in allowed list - check if it's a blocked peer's IP
+                    if self.listenable_ips.blocked.contains(&ip) {
+                        self.handshakes_ip_blocked.inc();
+                        debug!(?address, "rejecting blocked peer address");
+                    } else {
+                        self.handshakes_ip_unregistered.inc();
+                        debug!(?address, "rejecting unregistered address");
+                    }
                     continue;
                 }
 
@@ -285,6 +308,7 @@ mod tests {
     use commonware_utils::NZU32;
     use futures::SinkExt;
     use std::{
+        collections::HashSet,
         net::{IpAddr, Ipv4Addr},
         time::Duration,
     };
@@ -326,7 +350,10 @@ mod tests {
             let mut allowed = HashSet::new();
             allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
             updates_tx
-                .send(allowed)
+                .send(ListenableIps {
+                    allowed,
+                    blocked: HashSet::new(),
+                })
                 .await
                 .expect("update registered ips");
 
@@ -335,7 +362,7 @@ mod tests {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
+                            let _ = responder.send(Attempt::Ok);
                         }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
@@ -496,7 +523,7 @@ mod tests {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
+                            let _ = responder.send(Attempt::Ok);
                         }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
@@ -532,7 +559,7 @@ mod tests {
             // Check metrics
             let metrics = context.encode();
             assert!(
-                metrics.contains("handshakes_blocked_total 1"),
+                metrics.contains("handshakes_ip_unregistered_total 1"),
                 "{}",
                 metrics
             );
@@ -577,7 +604,7 @@ mod tests {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
+                            let _ = responder.send(Attempt::Ok);
                         }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
@@ -657,7 +684,10 @@ mod tests {
             let mut allowed = HashSet::new();
             allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
             updates_tx
-                .send(allowed)
+                .send(ListenableIps {
+                    allowed,
+                    blocked: HashSet::new(),
+                })
                 .await
                 .expect("update registered ips");
 
@@ -666,7 +696,7 @@ mod tests {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
+                            let _ = responder.send(Attempt::Ok);
                         }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);

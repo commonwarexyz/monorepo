@@ -1,4 +1,7 @@
-use crate::types::{self, Ingress};
+use crate::{
+    authenticated::Attempt,
+    types::{self, Ingress},
+};
 use std::net::IpAddr;
 
 /// Represents information known about a peer's address.
@@ -151,23 +154,27 @@ impl Record {
         ingress.is_valid(allow_private_ips, allow_dns)
     }
 
-    /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
+    /// Returns the acceptance status for this peer (can accept an incoming connection from them).
     ///
-    /// A peer is acceptable if:
-    /// - The peer is eligible (in a peer set, not ourselves)
-    /// - The source IP matches the expected egress IP for this peer (if not bypass_ip_check)
-    /// - We are not already connected or reserved
-    pub fn acceptable(&self, source_ip: IpAddr, bypass_ip_check: bool) -> bool {
-        if !self.eligible() || self.status != Status::Inert {
-            return false;
+    /// Checks for self, eligibility (peer set membership), egress IP match (if not bypass_ip_check),
+    /// and connection status.
+    pub fn acceptable(&self, source_ip: IpAddr, bypass_ip_check: bool) -> Attempt {
+        if matches!(self.address, Address::Myself) {
+            return Attempt::Myself;
         }
-        if bypass_ip_check {
-            return true;
+        if !self.eligible() {
+            return Attempt::Unregistered;
         }
-        match &self.address {
-            Address::Known(addr) => addr.egress_ip() == source_ip,
-            Address::Myself => false,
+        if !bypass_ip_check {
+            let ip_matches = self.egress_ip().is_some_and(|ip| ip == source_ip);
+            if !ip_matches {
+                return Attempt::Mismatch;
+            }
         }
+        if self.reserved() {
+            return Attempt::Reserved;
+        }
+        Attempt::Ok
     }
 
     /// Return the ingress address for dialing, if known.
@@ -391,6 +398,7 @@ mod tests {
 
     #[test]
     fn test_acceptable_checks_eligibility_status_and_ip() {
+        use crate::authenticated::Attempt;
         use std::net::IpAddr;
 
         let egress_ip: IpAddr = [8, 8, 8, 8].into();
@@ -400,46 +408,42 @@ mod tests {
         // Eligible, Inert, and correct IP - acceptable
         let mut record = Record::known(types::Address::Symmetric(public_socket));
         record.increment();
-        assert!(
-            record.acceptable(egress_ip, false),
-            "Eligible, Inert, correct IP is acceptable"
-        );
+        assert_eq!(record.acceptable(egress_ip, false), Attempt::Ok);
 
-        // Correct everything but wrong IP - not acceptable
-        assert!(
-            !record.acceptable(wrong_ip, false),
-            "Not acceptable when IP doesn't match"
-        );
+        // Correct everything but wrong IP - mismatch
+        assert_eq!(record.acceptable(wrong_ip, false), Attempt::Mismatch);
 
-        // Not eligible (sets=0) - not acceptable
+        // Not eligible (sets=0) - unregistered
         let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
-        assert!(
-            !record_not_eligible.acceptable(egress_ip, false),
-            "Not acceptable when not eligible"
+        assert_eq!(
+            record_not_eligible.acceptable(egress_ip, false),
+            Attempt::Unregistered
         );
 
-        // Already reserved - not acceptable
+        // Already reserved - reserved
         let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
         record_reserved.increment();
         record_reserved.reserve();
-        assert!(
-            !record_reserved.acceptable(egress_ip, false),
-            "Not acceptable when reserved"
+        assert_eq!(
+            record_reserved.acceptable(egress_ip, false),
+            Attempt::Reserved
         );
 
-        // Already connected - not acceptable
+        // Already connected - reserved
         let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
         record_connected.increment();
         record_connected.reserve();
         record_connected.connect();
-        assert!(
-            !record_connected.acceptable(egress_ip, false),
-            "Not acceptable when connected"
+        assert_eq!(
+            record_connected.acceptable(egress_ip, false),
+            Attempt::Reserved
         );
     }
 
     #[test]
     fn test_acceptable_bypass_ip_check() {
+        use crate::authenticated::Attempt;
+
         let egress_ip: IpAddr = [8, 8, 8, 8].into();
         let wrong_ip: IpAddr = [1, 2, 3, 4].into();
         let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
@@ -447,25 +451,22 @@ mod tests {
         // With bypass_ip_check=true, accepts even with wrong IP (skips IP check)
         let mut record = Record::known(types::Address::Symmetric(public_socket));
         record.increment();
-        assert!(
-            record.acceptable(wrong_ip, true),
-            "Acceptable with wrong IP when bypass_ip_check=true"
-        );
+        assert_eq!(record.acceptable(wrong_ip, true), Attempt::Ok);
 
         // Still requires eligible (sets > 0), even with bypass_ip_check=true
         let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
-        assert!(
-            !record_not_eligible.acceptable(egress_ip, true),
-            "Not acceptable when not eligible (sets=0), even with bypass_ip_check=true"
+        assert_eq!(
+            record_not_eligible.acceptable(egress_ip, true),
+            Attempt::Unregistered
         );
 
         // Still not acceptable when reserved
         let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
         record_reserved.increment();
         record_reserved.reserve();
-        assert!(
-            !record_reserved.acceptable(egress_ip, true),
-            "Not acceptable when reserved"
+        assert_eq!(
+            record_reserved.acceptable(egress_ip, true),
+            Attempt::Reserved
         );
 
         // Still not acceptable when connected
@@ -473,17 +474,14 @@ mod tests {
         record_connected.increment();
         record_connected.reserve();
         record_connected.connect();
-        assert!(
-            !record_connected.acceptable(egress_ip, true),
-            "Not acceptable when connected"
+        assert_eq!(
+            record_connected.acceptable(egress_ip, true),
+            Attempt::Reserved
         );
 
         // Still not acceptable when myself
         let record_myself = Record::myself();
-        assert!(
-            !record_myself.acceptable(egress_ip, true),
-            "Not acceptable when myself"
-        );
+        assert_eq!(record_myself.acceptable(egress_ip, true), Attempt::Myself);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use crate::authenticated::{
     discovery::actors::{spawner, tracker},
     mailbox::UnboundedMailbox,
-    Mailbox,
+    Attempt, Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
@@ -105,7 +105,11 @@ impl<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E,
     ) {
         let (peer, send, recv) = match listen(
             context,
-            |peer| tracker.acceptable(peer),
+            |peer| async {
+                // Check if peer is acceptable and convert to bool for the stream crate.
+                // Metrics and detailed logging are handled inside tracker.acceptable().
+                tracker.acceptable(peer).await == Attempt::Ok
+            },
             stream_cfg,
             stream,
             sink,
@@ -300,7 +304,7 @@ mod tests {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
+                            let _ = responder.send(Attempt::Ok);
                         }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
@@ -443,7 +447,7 @@ mod tests {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
                         tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
+                            let _ = responder.send(Attempt::Ok);
                         }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);

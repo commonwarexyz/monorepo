@@ -3,7 +3,7 @@ use crate::{
     authenticated::{
         lookup::actors::{peer, tracker::Metadata},
         mailbox::UnboundedMailbox,
-        Mailbox,
+        Attempt, Mailbox,
     },
     types::Address,
     Ingress,
@@ -79,8 +79,8 @@ pub enum Message<C: PublicKey> {
         /// The IP address the peer connected from.
         source_ip: IpAddr,
 
-        /// The sender to respond with whether the peer is acceptable.
-        responder: oneshot::Sender<bool>,
+        /// The sender to respond with the acceptance result.
+        responder: oneshot::Sender<Attempt>,
     },
 
     /// Request a reservation for a particular peer.
@@ -129,7 +129,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     }
 
     /// Send an `Acceptable` message to the tracker.
-    pub async fn acceptable(&mut self, public_key: C, source_ip: IpAddr) -> bool {
+    pub async fn acceptable(&mut self, public_key: C, source_ip: IpAddr) -> Attempt {
         let (tx, rx) = oneshot::channel();
         self.send(Message::Acceptable {
             public_key,

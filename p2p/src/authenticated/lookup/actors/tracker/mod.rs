@@ -3,10 +3,10 @@
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use std::{collections::HashSet, net::IpAddr, time::Duration};
+use std::time::Duration;
 
 pub mod actor;
-mod directory;
+pub mod directory;
 mod ingress;
 mod metadata;
 mod metrics;
@@ -14,6 +14,7 @@ mod record;
 mod reservation;
 
 pub use actor::Actor;
+pub use directory::ListenableIps;
 pub use ingress::{Message, Oracle};
 pub use metadata::Metadata;
 pub use reservation::Reservation;
@@ -26,6 +27,6 @@ pub struct Config<C: Signer> {
     pub allow_private_ips: bool,
     pub allow_dns: bool,
     pub bypass_ip_check: bool,
-    pub listener: Mailbox<HashSet<IpAddr>>,
+    pub listener: Mailbox<ListenableIps>,
     pub block_duration: Duration,
 }

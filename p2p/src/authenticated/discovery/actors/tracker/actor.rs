@@ -286,7 +286,7 @@ mod tests {
                 config::Bootstrapper,
                 types,
             },
-            Mailbox,
+            Attempt, Mailbox,
         },
         Blocker, Ingress, Manager,
     };
@@ -799,22 +799,28 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
 
-            // None listenable because not registered
-            assert!(!mailbox.acceptable(peer_pk.clone()).await);
-            assert!(!mailbox.acceptable(peer_pk2.clone()).await);
-            assert!(!mailbox.acceptable(peer_pk3.clone()).await);
+            // peer_pk is ourselves, others not registered
+            assert_eq!(mailbox.acceptable(peer_pk.clone()).await, Attempt::Myself);
+            assert_eq!(
+                mailbox.acceptable(peer_pk2.clone()).await,
+                Attempt::Unregistered
+            );
+            assert_eq!(
+                mailbox.acceptable(peer_pk3.clone()).await,
+                Attempt::Unregistered
+            );
 
             oracle
                 .update(0, [peer_pk.clone(), peer_pk2.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
-            // Not listenable because self
-            assert!(!mailbox.acceptable(peer_pk).await);
-            // Listenable because registered
-            assert!(mailbox.acceptable(peer_pk2).await);
-            // Not listenable because not registered
-            assert!(!mailbox.acceptable(peer_pk3).await);
+            // Not acceptable because self
+            assert_eq!(mailbox.acceptable(peer_pk).await, Attempt::Myself);
+            // Acceptable because registered
+            assert_eq!(mailbox.acceptable(peer_pk2).await, Attempt::Ok);
+            // Not acceptable because not registered
+            assert_eq!(mailbox.acceptable(peer_pk3).await, Attempt::Unregistered);
         });
     }
 
@@ -839,12 +845,12 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
-            assert!(mailbox.acceptable(peer_pk.clone()).await);
+            assert_eq!(mailbox.acceptable(peer_pk.clone()).await, Attempt::Ok);
 
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some());
 
-            assert!(!mailbox.acceptable(peer_pk.clone()).await);
+            assert_eq!(mailbox.acceptable(peer_pk.clone()).await, Attempt::Reserved);
 
             let failed_reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(failed_reservation.is_none());

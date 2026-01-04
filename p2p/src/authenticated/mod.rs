@@ -13,3 +13,20 @@ pub mod lookup;
 mod mailbox;
 pub use mailbox::Mailbox;
 mod relay;
+
+/// Result of checking if a peer is acceptable for an incoming connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Attempt {
+    /// Peer is acceptable.
+    Ok,
+    /// Peer is explicitly blocked.
+    Blocked,
+    /// Peer is not in any tracked peer set (or failed other eligibility checks).
+    Unregistered,
+    /// Peer is already connected or has a pending connection.
+    Reserved,
+    /// Some expected data doesn't match (e.g., source IP doesn't match expected egress IP).
+    Mismatch,
+    /// Peer is ourselves.
+    Myself,
+}

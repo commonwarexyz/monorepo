@@ -1,4 +1,7 @@
-use crate::{authenticated::discovery::types::Info, Ingress};
+use crate::{
+    authenticated::{discovery::types::Info, Attempt},
+    Ingress,
+};
 use commonware_cryptography::PublicKey;
 use tracing::trace;
 
@@ -218,13 +221,20 @@ impl<C: PublicKey> Record<C> {
         ingress.is_valid(allow_private_ips, allow_dns)
     }
 
-    /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
+    /// Returns the acceptance status for this peer (can accept an incoming connection from them).
     ///
-    /// A peer is acceptable if:
-    /// - The peer is eligible (in a peer set, not ourselves)
-    /// - We are not already connected or reserved
-    pub fn acceptable(&self) -> bool {
-        self.eligible() && self.status == Status::Inert
+    /// Checks for self, eligibility (peer set membership), and connection status.
+    pub const fn acceptable(&self) -> Attempt {
+        if matches!(self.address, Address::Myself(_)) {
+            return Attempt::Myself;
+        }
+        if !self.eligible() {
+            return Attempt::Unregistered;
+        }
+        if self.reserved() {
+            return Attempt::Reserved;
+        }
+        Attempt::Ok
     }
 
     /// Return the ingress address of the peer, if known.
