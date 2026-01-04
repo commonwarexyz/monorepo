@@ -492,7 +492,7 @@ impl Random for Scalar {
 }
 
 /// A share of a threshold signing key.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Zeroize, ZeroizeOnDrop)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Share {
     /// The share's index in the polynomial.

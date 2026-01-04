@@ -63,7 +63,7 @@
 pub mod utils;
 
 use crate::utils::codec::{recv_frame, send_frame};
-use bytes::Bytes;
+use zeroize::Zeroizing;
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
     handshake::{
@@ -322,13 +322,16 @@ pub struct Receiver<I> {
 
 impl<I: Stream> Receiver<I> {
     /// Receives and decrypts a message from the peer.
-    pub async fn recv(&mut self) -> Result<Bytes, Error> {
+    ///
+    /// The returned data is wrapped in [`Zeroizing`] to ensure it is securely
+    /// erased from memory when dropped.
+    pub async fn recv(&mut self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let c = recv_frame(
             &mut self.stream,
             self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
         )
         .await?;
-        Ok(self.cipher.recv(&c)?.into())
+        Ok(self.cipher.recv(&c)?)
     }
 }
 
@@ -396,10 +399,10 @@ mod test {
             for msg in &messages {
                 dialer_sender.send(msg).await?;
                 let syn_ack = listener_receiver.recv().await?;
-                assert_eq!(msg, &syn_ack);
+                assert_eq!(syn_ack.as_ref(), *msg);
                 listener_sender.send(msg).await?;
                 let ack = dialer_receiver.recv().await?;
-                assert_eq!(msg, &ack);
+                assert_eq!(ack.as_ref(), *msg);
             }
             Ok(())
         })
