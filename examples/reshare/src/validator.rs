@@ -14,7 +14,7 @@ use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Metrics, Quota};
+use commonware_runtime::{create_pool, tokio, Metrics, Quota};
 use commonware_utils::{union, union_unique, NZU32};
 use futures::future::try_join_all;
 use std::{
@@ -116,6 +116,8 @@ pub async fn run<S, L>(
     };
     let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
+    let n_threads = std::thread::available_parallelism().unwrap().get();
+    let thread_pool = create_pool(context.clone(), n_threads).unwrap();
     let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L>::new(
         context.with_label("engine"),
         engine::Config {
@@ -128,6 +130,7 @@ pub async fn run<S, L>(
             partition_prefix: "engine".to_string(),
             freezer_table_initial_size: 1024 * 1024, // 100mb
             peer_config,
+            thread_pool: Some(thread_pool),
         },
     )
     .await;
@@ -386,6 +389,7 @@ mod test {
                     partition_prefix: format!("validator_{}", &pk),
                     freezer_table_initial_size: 1024, // 1mb
                     peer_config: self.peer_config.clone(),
+                    thread_pool: None,
                 },
             )
             .await;

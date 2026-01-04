@@ -7,7 +7,7 @@ use commonware_cryptography::Hasher;
 
 mod actor;
 pub use actor::Application;
-use commonware_runtime::{Sink, Stream};
+use commonware_runtime::{Sink, Stream, ThreadPool};
 use commonware_stream::{Receiver, Sender};
 mod ingress;
 
@@ -27,4 +27,7 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream> {
     /// Number of messages from consensus to hold in our backlog
     /// before blocking.
     pub mailbox_size: usize,
+
+    /// An optional thread pool for the certificate scheme.
+    pub thread_pool: Option<ThreadPool>,
 }

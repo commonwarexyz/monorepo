@@ -24,6 +24,7 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    ThreadPool,
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{ordered::Set, union, NZUsize, NZU32, NZU64};
@@ -64,6 +65,7 @@ where
     pub peer_config: PeerConfig<C::PublicKey>,
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
+    pub thread_pool: Option<ThreadPool>,
 }
 
 pub struct Engine<E, C, P, B, H, V, S, L>
@@ -221,12 +223,17 @@ where
         // Create the certificate verifier from the initial output (if available).
         // This allows epoch-independent certificate verification after the DKG is complete.
         let certificate_verifier = config.output.as_ref().and_then(|output| {
-            <Provider<S, C> as EpochProvider>::certificate_verifier(&consensus_namespace, output)
+            <Provider<S, C> as EpochProvider>::certificate_verifier(
+                &consensus_namespace,
+                output,
+                config.thread_pool.clone(),
+            )
         });
         let provider = Provider::new(
             consensus_namespace.clone(),
             config.signer.clone(),
             certificate_verifier,
+            config.thread_pool.clone(),
         );
 
         let (marshal, marshal_mailbox, _processed_height) = marshal::Actor::init(

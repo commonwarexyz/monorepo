@@ -18,7 +18,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
     Digest, Hasher, Sha256, Signer as _,
 };
-use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
+use commonware_runtime::{create_pool, tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, TryCollect};
 use futures::{
@@ -126,19 +126,26 @@ fn main() {
     if networks.len() == 0 {
         panic!("Please provide at least one network");
     }
-    for network in networks {
-        let network = from_hex(network).expect("Network not well-formed");
-        let public =
-            <MinSig as Variant>::Public::decode(network.as_ref()).expect("Network not well-formed");
-        let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        verifiers.insert(public, Scheme::certificate_verifier(&namespace, public));
-        blocks.insert(public, HashMap::new());
-        finalizations.insert(public, BTreeMap::new());
-    }
 
     // Create context
     let executor = tokio::Runner::default();
     executor.start(|context| async move {
+        let n_threads = std::thread::available_parallelism().unwrap().get();
+        let thread_pool = create_pool(context.clone(), n_threads).unwrap();
+
+        for network in networks {
+            let network = from_hex(network).expect("Network not well-formed");
+            let public = <MinSig as Variant>::Public::decode(network.as_ref())
+                .expect("Network not well-formed");
+            let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
+            verifiers.insert(
+                public,
+                Scheme::certificate_verifier(&namespace, public, Some(thread_pool.clone())),
+            );
+            blocks.insert(public, HashMap::new());
+            finalizations.insert(public, BTreeMap::new());
+        }
+
         // Create message handler
         let (handler, mut receiver) = mpsc::unbounded();
 

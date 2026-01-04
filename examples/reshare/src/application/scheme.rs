@@ -11,6 +11,7 @@ use commonware_cryptography::{
     certificate::{self, Scheme},
     ed25519, PublicKey, Signer,
 };
+use commonware_runtime::ThreadPool;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -29,15 +30,22 @@ pub struct Provider<S: Scheme, C: Signer> {
     namespace: Vec<u8>,
     certificate_verifier: Option<Arc<S>>,
     signer: C,
+    thread_pool: Option<ThreadPool>,
 }
 
 impl<S: Scheme, C: Signer> Provider<S, C> {
-    pub fn new(namespace: Vec<u8>, signer: C, certificate_verifier: Option<S>) -> Self {
+    pub fn new(
+        namespace: Vec<u8>,
+        signer: C,
+        certificate_verifier: Option<S>,
+        thread_pool: Option<ThreadPool>,
+    ) -> Self {
         Self {
             schemes: Arc::new(Mutex::new(HashMap::new())),
             namespace,
             certificate_verifier: certificate_verifier.map(Arc::new),
             signer,
+            thread_pool,
         }
     }
 }
@@ -92,6 +100,7 @@ pub trait EpochProvider {
     fn certificate_verifier(
         namespace: &[u8],
         output: &dkg::Output<Self::Variant, Self::PublicKey>,
+        thread_pool: Option<ThreadPool>,
     ) -> Option<Self::Scheme>;
 }
 
@@ -113,6 +122,7 @@ impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::Private
                         .poly
                         .clone()
                         .expect("group polynomial must exist"),
+                    self.thread_pool.clone(),
                 )
             },
             |share| {
@@ -124,6 +134,7 @@ impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::Private
                         .clone()
                         .expect("group polynomial must exist"),
                     share.clone(),
+                    self.thread_pool.clone(),
                 )
                 .expect("share must be in dealers")
             },
@@ -133,10 +144,12 @@ impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::Private
     fn certificate_verifier(
         namespace: &[u8],
         output: &dkg::Output<Self::Variant, Self::PublicKey>,
+        thread_pool: Option<ThreadPool>,
     ) -> Option<Self::Scheme> {
         Some(ThresholdScheme::certificate_verifier(
             namespace,
             *output.public().public(),
+            thread_pool,
         ))
     }
 }
@@ -161,6 +174,7 @@ impl EpochProvider for Provider<EdScheme, ed25519::PrivateKey> {
     fn certificate_verifier(
         _namespace: &[u8],
         _output: &dkg::Output<Self::Variant, Self::PublicKey>,
+        _thread_pool: Option<ThreadPool>,
     ) -> Option<Self::Scheme> {
         // Ed25519 doesn't support epoch-independent certificate verification
         // since certificates require the full participant list which changes per epoch.

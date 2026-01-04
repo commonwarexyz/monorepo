@@ -16,7 +16,7 @@ use commonware_cryptography::{
     ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
-use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Quota, Runner};
+use commonware_runtime::{buffer::PoolRef, create_pool, tokio, Metrics, Network, Quota, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU32};
 use std::{
@@ -217,11 +217,22 @@ fn main() {
         );
 
         // Initialize application
+        let n_threads = std::thread::available_parallelism().unwrap().get();
+        let thread_pool = create_pool(context.clone(), n_threads).unwrap();
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let this_network =
-            Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
-                .expect("share must be in participants");
-        let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
+        let this_network = Scheme::signer(
+            &consensus_namespace,
+            validators.clone(),
+            identity,
+            share,
+            Some(thread_pool.clone()),
+        )
+        .expect("share must be in participants");
+        let other_network = Scheme::certificate_verifier(
+            &consensus_namespace,
+            other_public,
+            Some(thread_pool.clone()),
+        );
         let (application, scheme, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
@@ -230,6 +241,7 @@ fn main() {
                 this_network,
                 other_network,
                 mailbox_size: 1024,
+                thread_pool: Some(thread_pool),
             },
         );
 
