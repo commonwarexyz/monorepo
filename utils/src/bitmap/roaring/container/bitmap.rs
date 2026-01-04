@@ -258,6 +258,48 @@ impl Bitmap {
         }
         self.recalculate_cardinality();
     }
+
+    /// Creates a new bitmap that is the OR of two bitmaps.
+    /// More efficient than clone + or since it computes cardinality in one pass.
+    #[inline]
+    pub fn or_new(a: &Self, b: &Self) -> Self {
+        let mut words = [0u64; WORDS];
+        let mut cardinality = 0u32;
+        for i in 0..WORDS {
+            let word = a.words[i] | b.words[i];
+            words[i] = word;
+            cardinality += word.count_ones();
+        }
+        Self { words, cardinality }
+    }
+
+    /// Creates a new bitmap that is the AND of two bitmaps.
+    /// More efficient than clone + and since it computes cardinality in one pass.
+    #[inline]
+    pub fn and_new(a: &Self, b: &Self) -> Self {
+        let mut words = [0u64; WORDS];
+        let mut cardinality = 0u32;
+        for i in 0..WORDS {
+            let word = a.words[i] & b.words[i];
+            words[i] = word;
+            cardinality += word.count_ones();
+        }
+        Self { words, cardinality }
+    }
+
+    /// Creates a new bitmap that is a AND-NOT b (difference).
+    /// More efficient than clone + and_not since it computes cardinality in one pass.
+    #[inline]
+    pub fn and_not_new(a: &Self, b: &Self) -> Self {
+        let mut words = [0u64; WORDS];
+        let mut cardinality = 0u32;
+        for i in 0..WORDS {
+            let word = a.words[i] & !b.words[i];
+            words[i] = word;
+            cardinality += word.count_ones();
+        }
+        Self { words, cardinality }
+    }
 }
 
 impl Write for Bitmap {

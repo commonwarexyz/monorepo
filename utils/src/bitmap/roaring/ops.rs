@@ -3,7 +3,10 @@
 //! Provides union, intersection, and difference operations with optional
 //! early termination when a result limit is reached.
 
-use super::{container::Container, RoaringBitmap};
+use super::{
+    container::{Bitmap, Container},
+    RoaringBitmap,
+};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, vec::Vec};
 #[cfg(feature = "std")]
@@ -233,8 +236,7 @@ fn union_containers(a: &Container, b: &Container, limit: u64) -> (Container, u64
 
     // Fast path for bitmap-bitmap union
     if let (Container::Bitmap(a_bm), Container::Bitmap(b_bm)) = (a, b) {
-        let mut result = a_bm.clone();
-        result.or(b_bm);
+        let result = Bitmap::or_new(a_bm, b_bm);
         let len = result.len() as u64;
         if len <= limit {
             return (Container::Bitmap(result), len);
@@ -293,8 +295,7 @@ fn intersect_containers(a: &Container, b: &Container, limit: u64) -> (Container,
 
     // Fast path for bitmap-bitmap intersection
     if let (Container::Bitmap(a_bm), Container::Bitmap(b_bm)) = (a, b) {
-        let mut result = a_bm.clone();
-        result.and(b_bm);
+        let result = Bitmap::and_new(a_bm, b_bm);
         let len = result.len() as u64;
         if len <= limit {
             return (Container::Bitmap(result), len);
@@ -332,8 +333,7 @@ fn diff_containers(a: &Container, b: &Container, limit: u64) -> (Container, u64)
 
     // Fast path for bitmap-bitmap difference
     if let (Container::Bitmap(a_bm), Container::Bitmap(b_bm)) = (a, b) {
-        let mut result = a_bm.clone();
-        result.and_not(b_bm);
+        let result = Bitmap::and_not_new(a_bm, b_bm);
         let len = result.len() as u64;
         if len <= limit {
             return (Container::Bitmap(result), len);
