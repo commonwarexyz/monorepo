@@ -10,8 +10,8 @@ pub struct Metrics {
     /// Does not include self, despite having a record for it.
     pub tracked: Gauge,
 
-    /// The total number of blocked peers.
-    pub blocked: Gauge,
+    /// Blocked peers (1 = blocked).
+    pub blocked: Family<metrics::Peer, Gauge>,
 
     /// The total number of outstanding reservations.
     pub reserved: Gauge,
@@ -34,7 +34,7 @@ impl Metrics {
         );
         context.register(
             "blocked",
-            "Total number of blocked peers",
+            "Blocked peers (1 = blocked)",
             metrics.blocked.clone(),
         );
         context.register(
