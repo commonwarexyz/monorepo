@@ -293,7 +293,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         }
 
-        // If record exists, check if it's blockable (not Myself)
+        // If record exists, check if it's blockable
         if let Some(record) = self.peers.get(peer) {
             if !record.is_blockable() {
                 return;
