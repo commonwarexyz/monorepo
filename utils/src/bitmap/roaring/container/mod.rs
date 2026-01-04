@@ -85,6 +85,7 @@ impl Container {
     /// Automatically converts the container type if needed:
     /// - Array -> Bitmap when cardinality exceeds 4096
     /// - Bitmap -> Run when container becomes fully saturated
+    #[inline]
     pub fn insert(&mut self, value: u16) -> bool {
         match self {
             Self::Array(a) => {
@@ -110,6 +111,7 @@ impl Container {
     /// Returns the number of values newly inserted.
     ///
     /// Automatically converts the container type if needed.
+    #[inline]
     pub fn insert_range(&mut self, start: u16, end: u16) -> u32 {
         if start >= end {
             return 0;
@@ -119,8 +121,17 @@ impl Container {
             Self::Array(a) => {
                 let range_len = (end - start) as usize;
 
-                // If result would exceed array capacity, convert to bitmap first
-                // This is much faster than filling array then converting
+                // Fast path: empty array with consecutive range - use Run container
+                // Run stores (start, end) pairs, so a single range is just 4 bytes
+                // vs Array which would be 2 bytes per value
+                if a.is_empty() && range_len >= 64 {
+                    let mut run = Run::new();
+                    let inserted = run.insert_range(start, end);
+                    *self = Self::Run(run);
+                    return inserted;
+                }
+
+                // If result would exceed array capacity, convert to bitmap
                 if a.len() + range_len > array::MAX_CARDINALITY {
                     self.convert_array_to_bitmap();
                     return self.insert_range(start, end);

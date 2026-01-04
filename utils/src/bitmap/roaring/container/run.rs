@@ -300,7 +300,8 @@ impl Write for Run {
 impl EncodeSize for Run {
     fn encode_size(&self) -> usize {
         // Length varint + 4 bytes per run (2 u16s)
-        (self.runs.len() as u32).encode_size() + self.runs.len() * 4
+        // Must match slice encoding which uses usize for length
+        self.runs.len().encode_size() + self.runs.len() * 4
     }
 }
 

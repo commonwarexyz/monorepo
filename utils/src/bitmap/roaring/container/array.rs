@@ -126,35 +126,41 @@ impl Array {
 
         let range_len = (end - start) as usize;
 
-        // Find insertion point for start value
-        let start_pos = match self.values.binary_search(&start) {
-            Ok(pos) => pos,
-            Err(pos) => pos,
-        };
+        // Fast path for empty array
+        if self.values.is_empty() {
+            self.values = (start..end).collect();
+            return range_len;
+        }
 
-        // Find position after end-1 value
-        let end_pos = match self.values[start_pos..].binary_search(&(end - 1)) {
-            Ok(pos) => start_pos + pos + 1,
-            Err(pos) => start_pos + pos,
-        };
+        // Fast path: range is entirely after all existing values
+        if start > *self.values.last().unwrap() {
+            self.values.extend(start..end);
+            return range_len;
+        }
 
-        // Count existing values in range [start, end)
+        // Fast path: range is entirely before all existing values
+        if end <= *self.values.first().unwrap() {
+            let mut new_vec: Vec<u16> = (start..end).collect();
+            new_vec.extend_from_slice(&self.values);
+            self.values = new_vec;
+            return range_len;
+        }
+
+        // General case: range overlaps with existing values
+        let start_pos = self.values.partition_point(|&x| x < start);
+        let end_pos = self.values[start_pos..].partition_point(|&x| x < end) + start_pos;
+
         let existing_in_range = end_pos - start_pos;
-
-        // Calculate how many new values will be inserted
         let new_values = range_len - existing_in_range;
         if new_values == 0 {
             return 0;
         }
 
-        // Build new values vector efficiently
         let new_len = self.values.len() + new_values;
         let mut new_vec = Vec::with_capacity(new_len);
 
-        // Copy prefix (values before start)
         new_vec.extend_from_slice(&self.values[..start_pos]);
 
-        // Merge range with existing values in range using two-pointer approach
         let mut range_val = start;
         let mut exist_idx = start_pos;
 
@@ -173,19 +179,16 @@ impl Array {
             }
         }
 
-        // Push remaining range values
         while range_val < end {
             new_vec.push(range_val);
             range_val += 1;
         }
 
-        // Push remaining existing values in range (shouldn't happen if logic is correct)
         while exist_idx < end_pos {
             new_vec.push(self.values[exist_idx]);
             exist_idx += 1;
         }
 
-        // Copy suffix (values after end-1)
         new_vec.extend_from_slice(&self.values[end_pos..]);
 
         self.values = new_vec;
@@ -225,36 +228,72 @@ impl Array {
     /// Computes the union of two arrays.
     ///
     /// Returns a new array containing all values from both, with optional limit.
+    #[inline]
     pub fn union(&self, other: &Self, limit: usize) -> (Self, usize) {
-        let mut result = Vec::with_capacity((self.len() + other.len()).min(limit));
-        let mut a_iter = self.values.iter().peekable();
-        let mut b_iter = other.values.iter().peekable();
+        let a = &self.values;
+        let b = &other.values;
+        let max_size = a.len() + b.len();
 
-        while result.len() < limit {
-            match (a_iter.peek(), b_iter.peek()) {
-                (Some(&&a), Some(&&b)) => {
-                    if a < b {
-                        result.push(a);
-                        a_iter.next();
-                    } else if b < a {
-                        result.push(b);
-                        b_iter.next();
-                    } else {
-                        result.push(a);
-                        a_iter.next();
-                        b_iter.next();
-                    }
+        // Fast path: unlimited results (common case)
+        if limit >= max_size {
+            let mut result = Vec::with_capacity(max_size);
+            let mut i = 0;
+            let mut j = 0;
+
+            while i < a.len() && j < b.len() {
+                let av = a[i];
+                let bv = b[j];
+                if av < bv {
+                    result.push(av);
+                    i += 1;
+                } else if bv < av {
+                    result.push(bv);
+                    j += 1;
+                } else {
+                    result.push(av);
+                    i += 1;
+                    j += 1;
                 }
-                (Some(&&a), None) => {
-                    result.push(a);
-                    a_iter.next();
-                }
-                (None, Some(&&b)) => {
-                    result.push(b);
-                    b_iter.next();
-                }
-                (None, None) => break,
             }
+
+            // Extend with remaining elements
+            result.extend_from_slice(&a[i..]);
+            result.extend_from_slice(&b[j..]);
+
+            let count = result.len();
+            return (Self { values: result }, count);
+        }
+
+        // Limited case: need to check limit
+        let mut result = Vec::with_capacity(max_size.min(limit));
+        let mut i = 0;
+        let mut j = 0;
+
+        while i < a.len() && j < b.len() && result.len() < limit {
+            let av = a[i];
+            let bv = b[j];
+            if av < bv {
+                result.push(av);
+                i += 1;
+            } else if bv < av {
+                result.push(bv);
+                j += 1;
+            } else {
+                result.push(av);
+                i += 1;
+                j += 1;
+            }
+        }
+
+        let remaining = limit - result.len();
+        if remaining > 0 && i < a.len() {
+            let take = remaining.min(a.len() - i);
+            result.extend_from_slice(&a[i..i + take]);
+        }
+        let remaining = limit - result.len();
+        if remaining > 0 && j < b.len() {
+            let take = remaining.min(b.len() - j);
+            result.extend_from_slice(&b[j..j + take]);
         }
 
         let count = result.len();
@@ -264,25 +303,52 @@ impl Array {
     /// Computes the intersection of two arrays.
     ///
     /// Returns a new array containing values present in both, with optional limit.
+    #[inline]
     pub fn intersection(&self, other: &Self, limit: usize) -> (Self, usize) {
-        let mut result = Vec::with_capacity(self.len().min(other.len()).min(limit));
-        let mut a_iter = self.values.iter().peekable();
-        let mut b_iter = other.values.iter().peekable();
+        let a = &self.values;
+        let b = &other.values;
+        let min_size = a.len().min(b.len());
 
-        while result.len() < limit {
-            match (a_iter.peek(), b_iter.peek()) {
-                (Some(&&a), Some(&&b)) => {
-                    if a < b {
-                        a_iter.next();
-                    } else if b < a {
-                        b_iter.next();
-                    } else {
-                        result.push(a);
-                        a_iter.next();
-                        b_iter.next();
-                    }
+        // Fast path: unlimited results (common case)
+        if limit >= min_size {
+            let mut result = Vec::with_capacity(min_size);
+            let mut i = 0;
+            let mut j = 0;
+
+            while i < a.len() && j < b.len() {
+                let av = a[i];
+                let bv = b[j];
+                if av < bv {
+                    i += 1;
+                } else if bv < av {
+                    j += 1;
+                } else {
+                    result.push(av);
+                    i += 1;
+                    j += 1;
                 }
-                _ => break,
+            }
+
+            let count = result.len();
+            return (Self { values: result }, count);
+        }
+
+        // Limited case: need to check limit
+        let mut result = Vec::with_capacity(min_size.min(limit));
+        let mut i = 0;
+        let mut j = 0;
+
+        while i < a.len() && j < b.len() && result.len() < limit {
+            let av = a[i];
+            let bv = b[j];
+            if av < bv {
+                i += 1;
+            } else if bv < av {
+                j += 1;
+            } else {
+                result.push(av);
+                i += 1;
+                j += 1;
             }
         }
 
@@ -293,29 +359,59 @@ impl Array {
     /// Computes the difference (self - other).
     ///
     /// Returns a new array containing values in self but not in other, with optional limit.
+    #[inline]
     pub fn difference(&self, other: &Self, limit: usize) -> (Self, usize) {
-        let mut result = Vec::with_capacity(self.len().min(limit));
-        let mut a_iter = self.values.iter().peekable();
-        let mut b_iter = other.values.iter().peekable();
+        let a = &self.values;
+        let b = &other.values;
 
-        while result.len() < limit {
-            match (a_iter.peek(), b_iter.peek()) {
-                (Some(&&a), Some(&&b)) => {
-                    if a < b {
-                        result.push(a);
-                        a_iter.next();
-                    } else if b < a {
-                        b_iter.next();
-                    } else {
-                        a_iter.next();
-                        b_iter.next();
-                    }
+        // Fast path: unlimited results (common case)
+        if limit >= a.len() {
+            let mut result = Vec::with_capacity(a.len());
+            let mut i = 0;
+            let mut j = 0;
+
+            while i < a.len() && j < b.len() {
+                let av = a[i];
+                let bv = b[j];
+                if av < bv {
+                    result.push(av);
+                    i += 1;
+                } else if av > bv {
+                    j += 1;
+                } else {
+                    i += 1;
+                    j += 1;
                 }
-                (Some(&&a), None) => {
-                    result.push(a);
-                    a_iter.next();
-                }
-                _ => break,
+            }
+            // Remaining elements from a are all in the difference
+            result.extend_from_slice(&a[i..]);
+
+            let count = result.len();
+            return (Self { values: result }, count);
+        }
+
+        // Limited case: need to check limit
+        let mut result = Vec::with_capacity(a.len().min(limit));
+        let mut i = 0;
+        let mut j = 0;
+
+        while i < a.len() && result.len() < limit {
+            let av = a[i];
+            if j >= b.len() {
+                let remaining = limit - result.len();
+                let take = remaining.min(a.len() - i);
+                result.extend_from_slice(&a[i..i + take]);
+                break;
+            }
+            let bv = b[j];
+            if av < bv {
+                result.push(av);
+                i += 1;
+            } else if av > bv {
+                j += 1;
+            } else {
+                i += 1;
+                j += 1;
             }
         }
 

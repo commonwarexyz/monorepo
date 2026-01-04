@@ -135,6 +135,7 @@ impl RoaringBitmap {
     /// Inserts a value into the bitmap.
     ///
     /// Returns `true` if the value was newly inserted, `false` if it already existed.
+    #[inline]
     pub fn insert(&mut self, value: u64) -> bool {
         let key = high_bits(value);
         let index = low_bits(value);
@@ -144,36 +145,47 @@ impl RoaringBitmap {
     /// Inserts a range of values [start, end) into the bitmap.
     ///
     /// Returns the number of values newly inserted.
+    #[inline]
     pub fn insert_range(&mut self, start: u64, end: u64) -> u64 {
         if start >= end {
             return 0;
         }
 
-        let mut inserted = 0u64;
         let start_key = high_bits(start);
         let end_key = high_bits(end.saturating_sub(1));
+
+        // Fast path: entire range fits in a single container
+        if start_key == end_key {
+            let container_start = low_bits(start);
+            let container_end = low_bits(end.saturating_sub(1)).saturating_add(1);
+            return self
+                .containers
+                .entry(start_key)
+                .or_default()
+                .insert_range(container_start, container_end) as u64;
+        }
+
+        // Multi-container case
+        let mut inserted = 0u64;
 
         for key in start_key..=end_key {
             let container_start = if key == start_key { low_bits(start) } else { 0 };
             let container_end = if key == end_key {
                 low_bits(end.saturating_sub(1)).saturating_add(1)
             } else {
-                0 // Will wrap to insert full range
+                0
             };
 
-            // Handle the case where we need to insert the full container range
             let (range_start, range_end) = if key == end_key {
                 (container_start, container_end)
             } else if container_end == 0 && key != start_key {
-                // Full container range
-                (0u16, 0u16) // Special case handled below
+                (0u16, 0u16)
             } else {
                 (container_start, container_end)
             };
 
             let container = self.containers.entry(key).or_default();
             if range_end == 0 && key != end_key {
-                // Insert full range [range_start, 65536)
                 inserted += container.insert_range(range_start, u16::MAX) as u64;
                 if container.insert(u16::MAX) {
                     inserted += 1;

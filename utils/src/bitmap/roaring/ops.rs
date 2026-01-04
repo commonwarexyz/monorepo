@@ -14,17 +14,29 @@ use std::collections::BTreeMap;
 /// Pass `u64::MAX` for unlimited results.
 ///
 /// Uses early termination: once `limit` values are collected, processing stops.
+#[inline]
 pub fn union(a: &RoaringBitmap, b: &RoaringBitmap, limit: u64) -> RoaringBitmap {
     if limit == 0 {
         return RoaringBitmap::new();
     }
 
-    let mut result = BTreeMap::new();
-    let mut count = 0u64;
-
-    // Merge containers from both bitmaps
     let a_containers = a.containers();
     let b_containers = b.containers();
+
+    // Fast path: single container with same key (common case)
+    if a_containers.len() == 1 && b_containers.len() == 1 {
+        let (&a_key, a_container) = a_containers.first_key_value().unwrap();
+        let (&b_key, b_container) = b_containers.first_key_value().unwrap();
+        if a_key == b_key {
+            let (new_container, _) = union_containers(a_container, b_container, limit);
+            let mut result = BTreeMap::new();
+            result.insert(a_key, new_container);
+            return RoaringBitmap::from_containers(result);
+        }
+    }
+
+    let mut result = BTreeMap::new();
+    let mut count = 0u64;
 
     let mut a_iter = a_containers.iter().peekable();
     let mut b_iter = b_containers.iter().peekable();
@@ -90,16 +102,34 @@ pub fn union(a: &RoaringBitmap, b: &RoaringBitmap, limit: u64) -> RoaringBitmap 
 /// Pass `u64::MAX` for unlimited results.
 ///
 /// Uses early termination: once `limit` values are collected, processing stops.
+#[inline]
 pub fn intersection(a: &RoaringBitmap, b: &RoaringBitmap, limit: u64) -> RoaringBitmap {
     if limit == 0 {
         return RoaringBitmap::new();
     }
 
-    let mut result = BTreeMap::new();
-    let mut count = 0u64;
-
     let a_containers = a.containers();
     let b_containers = b.containers();
+
+    // Fast path: single container with same key (common case)
+    if a_containers.len() == 1 && b_containers.len() == 1 {
+        let (&a_key, a_container) = a_containers.first_key_value().unwrap();
+        let (&b_key, b_container) = b_containers.first_key_value().unwrap();
+        if a_key == b_key {
+            let (new_container, count) =
+                intersect_containers(a_container, b_container, limit);
+            if count > 0 {
+                let mut result = BTreeMap::new();
+                result.insert(a_key, new_container);
+                return RoaringBitmap::from_containers(result);
+            }
+            return RoaringBitmap::new();
+        }
+        return RoaringBitmap::new();
+    }
+
+    let mut result = BTreeMap::new();
+    let mut count = 0u64;
 
     // Only process keys that exist in both
     for (&key, a_container) in a_containers.iter() {
@@ -125,16 +155,32 @@ pub fn intersection(a: &RoaringBitmap, b: &RoaringBitmap, limit: u64) -> Roaring
 /// Pass `u64::MAX` for unlimited results.
 ///
 /// Uses early termination: once `limit` values are collected, processing stops.
+#[inline]
 pub fn difference(a: &RoaringBitmap, b: &RoaringBitmap, limit: u64) -> RoaringBitmap {
     if limit == 0 {
         return RoaringBitmap::new();
     }
 
-    let mut result = BTreeMap::new();
-    let mut count = 0u64;
-
     let a_containers = a.containers();
     let b_containers = b.containers();
+
+    // Fast path: single container with same key (common case)
+    if a_containers.len() == 1 && b_containers.len() == 1 {
+        let (&a_key, a_container) = a_containers.first_key_value().unwrap();
+        let (&b_key, b_container) = b_containers.first_key_value().unwrap();
+        if a_key == b_key {
+            let (new_container, count) = diff_containers(a_container, b_container, limit);
+            if count > 0 {
+                let mut result = BTreeMap::new();
+                result.insert(a_key, new_container);
+                return RoaringBitmap::from_containers(result);
+            }
+            return RoaringBitmap::new();
+        }
+    }
+
+    let mut result = BTreeMap::new();
+    let mut count = 0u64;
 
     for (&key, a_container) in a_containers.iter() {
         if count >= limit {
@@ -156,6 +202,7 @@ pub fn difference(a: &RoaringBitmap, b: &RoaringBitmap, limit: u64) -> RoaringBi
 }
 
 /// Copies a container, limiting the number of values.
+#[inline]
 fn copy_container_with_limit(container: &Container, limit: u64) -> (Container, u64) {
     let len = container.len() as u64;
     if len <= limit {
@@ -176,6 +223,7 @@ fn copy_container_with_limit(container: &Container, limit: u64) -> (Container, u
 }
 
 /// Computes the union of two containers, limiting the number of values.
+#[inline]
 fn union_containers(a: &Container, b: &Container, limit: u64) -> (Container, u64) {
     // Fast path for array-array union
     if let (Container::Array(a_arr), Container::Array(b_arr)) = (a, b) {
@@ -235,6 +283,7 @@ fn union_containers(a: &Container, b: &Container, limit: u64) -> (Container, u64
 }
 
 /// Computes the intersection of two containers, limiting the number of values.
+#[inline]
 fn intersect_containers(a: &Container, b: &Container, limit: u64) -> (Container, u64) {
     // Fast path for array-array intersection
     if let (Container::Array(a_arr), Container::Array(b_arr)) = (a, b) {
@@ -273,6 +322,7 @@ fn intersect_containers(a: &Container, b: &Container, limit: u64) -> (Container,
 }
 
 /// Computes the difference of two containers (a - b), limiting the number of values.
+#[inline]
 fn diff_containers(a: &Container, b: &Container, limit: u64) -> (Container, u64) {
     // Fast path for array-array difference
     if let (Container::Array(a_arr), Container::Array(b_arr)) = (a, b) {
