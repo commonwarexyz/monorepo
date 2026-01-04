@@ -417,11 +417,13 @@ pub fn select(input: TokenStream) -> TokenStream {
 
 /// Input for [select_loop!].
 ///
-/// Parses: `context, on_stopped => { block }, { branches... }`
+/// Parses: `context, [on_start => { block },] on_stopped => { block }, { branches... } [, on_end => { block }]`
 struct SelectLoopInput {
     context: Expr,
+    start_block: Option<Block>,
     shutdown_block: Block,
     branches: Vec<Branch>,
+    end_block: Option<Block>,
 }
 
 impl Parse for SelectLoopInput {
@@ -429,6 +431,22 @@ impl Parse for SelectLoopInput {
         // Parse context expression
         let context: Expr = input.parse()?;
         input.parse::<Token![,]>()?;
+
+        // Check for optional `on_start =>`
+        let start_block = if input.peek(Ident) {
+            let ident: Ident = input.fork().parse()?;
+            if ident == "on_start" {
+                input.parse::<Ident>()?; // consume the ident
+                input.parse::<Token![=>]>()?;
+                let block: Block = input.parse()?;
+                input.parse::<Token![,]>()?;
+                Some(block)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Parse `on_stopped =>`
         let on_stopped_ident: Ident = input.parse()?;
@@ -447,8 +465,17 @@ impl Parse for SelectLoopInput {
         input.parse::<Token![,]>()?;
 
         // Parse branches directly (no surrounding braces)
+        // Stop when we see `on_end` or reach end of input
         let mut branches = Vec::new();
         while !input.is_empty() {
+            // Check if next token is `on_end`
+            if input.peek(Ident) {
+                let ident: Ident = input.fork().parse()?;
+                if ident == "on_end" {
+                    break;
+                }
+            }
+
             let pattern = Pat::parse_single(input)?;
             input.parse::<Token![=]>()?;
             let future: Expr = input.parse()?;
@@ -468,10 +495,29 @@ impl Parse for SelectLoopInput {
             }
         }
 
+        // Check for optional `on_end =>`
+        let end_block = if !input.is_empty() && input.peek(Ident) {
+            let ident: Ident = input.parse()?;
+            if ident == "on_end" {
+                input.parse::<Token![=>]>()?;
+                let block: Block = input.parse()?;
+                if input.peek(Token![,]) {
+                    input.parse::<Token![,]>()?;
+                }
+                Some(block)
+            } else {
+                return Err(Error::new(ident.span(), "expected `on_end` keyword"));
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             context,
+            start_block,
             shutdown_block,
             branches,
+            end_block,
         })
     }
 }
@@ -492,11 +538,25 @@ impl Parse for SelectLoopInput {
 /// ```rust,ignore
 /// select_loop! {
 ///     context,
+///     on_start => { /* optional: runs at start of each iteration */ },
 ///     on_stopped => { cleanup },
 ///     pattern = future => block,
 ///     // ...
+///     on_end => { /* optional: runs after non-shutdown arm completes */ },
 /// }
 /// ```
+///
+/// The order of blocks matches execution order:
+/// 1. `on_start` (optional) - Runs at the start of each loop iteration, before the select.
+///    Can use `continue` to skip the select or `break` to exit the loop.
+/// 2. `on_stopped` (required) - The shutdown handler, executed when shutdown is signaled.
+/// 3. Select arms - The futures to select over.
+/// 4. `on_end` (optional) - Runs after a non-shutdown arm completes. Skipped when shutdown
+///    is triggered. Useful for post-processing that should happen after each arm.
+///
+/// All blocks share the same lexical scope within the loop body. Variables declared in
+/// `on_start` are visible in the select arms, `on_stopped`, and `on_end`. This allows
+/// preparing state in `on_start` and using it throughout the iteration.
 ///
 /// The `shutdown` variable (the future from `context.stopped()`) is accessible in the
 /// shutdown block, allowing explicit cleanup such as `drop(shutdown)` before breaking or returning.
@@ -507,14 +567,24 @@ impl Parse for SelectLoopInput {
 /// use commonware_macros::select_loop;
 ///
 /// async fn run(context: impl commonware_runtime::Spawner) {
+///     let mut counter = 0;
 ///     select_loop! {
 ///         context,
+///         on_start => {
+///             // Prepare state for this iteration (visible in arms and on_end)
+///             let start_time = std::time::Instant::now();
+///             counter += 1;
+///         },
 ///         on_stopped => {
-///             println!("shutting down");
+///             println!("shutting down after {} iterations", counter);
 ///             drop(shutdown);
 ///         },
 ///         msg = receiver.recv() => {
 ///             println!("received: {:?}", msg);
+///         },
+///         on_end => {
+///             // Access variables from on_start
+///             println!("iteration took {:?}", start_time.elapsed());
 ///         },
 ///     }
 /// }
@@ -523,8 +593,10 @@ impl Parse for SelectLoopInput {
 pub fn select_loop(input: TokenStream) -> TokenStream {
     let SelectLoopInput {
         context,
+        start_block,
         shutdown_block,
         branches,
+        end_block,
     } = parse_macro_input!(input as SelectLoopInput);
 
     // Convert branches to tokens for the inner select!
@@ -538,10 +610,23 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    // Generate on_start and on_end tokens if present
+    let on_start_tokens = start_block.map(|block| {
+        let stmts = block.stmts;
+        quote! { #(#stmts)* }
+    });
+
+    let on_end_tokens = end_block.map(|block| {
+        let stmts = block.stmts;
+        quote! { #(#stmts)* }
+    });
+
     quote! {
         {
             let mut shutdown = #context.stopped();
             loop {
+                #on_start_tokens
+
                 commonware_macros::select! {
                     _ = &mut shutdown => {
                         #shutdown_block
@@ -553,6 +638,8 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
                     },
                     #(#branch_tokens)*
                 }
+
+                #on_end_tokens
             }
         }
     }
