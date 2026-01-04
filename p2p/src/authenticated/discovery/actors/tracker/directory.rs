@@ -1,9 +1,12 @@
 use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
 use crate::{
-    authenticated::discovery::{
-        actors::tracker::ingress::Releaser,
-        metrics,
-        types::{self, Info},
+    authenticated::{
+        discovery::{
+            actors::tracker::ingress::Releaser,
+            metrics,
+            types::{self, Info},
+        },
+        Attempt,
     },
     Ingress,
 };
@@ -384,9 +387,39 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         result
     }
 
-    /// Returns true if this peer is acceptable (can accept an incoming connection from them).
-    pub fn acceptable(&self, peer: &C) -> bool {
-        !self.blocked.contains(peer) && self.peers.get(peer).is_some_and(|r| r.acceptable())
+    /// Returns the acceptance status for this peer (can accept an incoming connection from them).
+    ///
+    /// Checks blocked status first, then delegates to record for eligibility and connection status.
+    /// Increments metrics for rejections.
+    pub fn acceptable(&self, peer: &C) -> Attempt {
+        if self.blocked.contains(peer) {
+            self.metrics.rejected_blocked.inc();
+            debug!(?peer, "peer rejected: blocked");
+            return Attempt::Blocked;
+        }
+        let result = self
+            .peers
+            .get(peer)
+            .map(|r| r.acceptable())
+            .unwrap_or(Attempt::Unregistered);
+        match result {
+            Attempt::Ok => {}
+            Attempt::Blocked => unreachable!("record does not return Blocked"),
+            Attempt::Unregistered => {
+                self.metrics.rejected_unregistered.inc();
+                debug!(?peer, "peer rejected: unregistered or ineligible");
+            }
+            Attempt::Reserved => {
+                self.metrics.rejected_reserved.inc();
+                debug!(?peer, "peer rejected: already connected");
+            }
+            Attempt::Mismatch => unreachable!("discovery record does not return Mismatch"),
+            Attempt::Myself => {
+                self.metrics.rejected_myself.inc();
+                debug!(?peer, "peer rejected: is ourselves");
+            }
+        }
+        result
     }
 
     /// Unblock all peers whose block has expired and update the knowledge bitmap.
@@ -485,7 +518,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox};
+    use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox, Attempt};
     use commonware_cryptography::{secp256r1::standard::PrivateKey, Signer};
     use commonware_runtime::{deterministic, Clock, Runner};
     use commonware_utils::{bitmap::BitMap, NZU32};
@@ -1032,8 +1065,9 @@ mod tests {
             directory.update_peers(vec![peer_info]);
 
             // Peer should be acceptable before blocking
-            assert!(
+            assert_eq!(
                 directory.acceptable(&peer_pk),
+                Attempt::Ok,
                 "Peer should be acceptable before blocking"
             );
 
@@ -1041,8 +1075,9 @@ mod tests {
             directory.block(&peer_pk);
 
             // Peer should NOT be acceptable while blocked
-            assert!(
-                !directory.acceptable(&peer_pk),
+            assert_eq!(
+                directory.acceptable(&peer_pk),
+                Attempt::Blocked,
                 "Blocked peer should not be acceptable"
             );
 
@@ -1051,8 +1086,9 @@ mod tests {
             directory.unblock_expired();
 
             // Peer should be acceptable again after unblock
-            assert!(
+            assert_eq!(
                 directory.acceptable(&peer_pk),
+                Attempt::Ok,
                 "Peer should be acceptable after unblock"
             );
         });

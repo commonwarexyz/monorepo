@@ -1,5 +1,5 @@
 use super::{
-    directory::{self, Directory},
+    directory::{self, Directory, ListenableIps},
     ingress::{Message, Oracle},
     Config,
 };
@@ -16,10 +16,7 @@ use commonware_runtime::{
 use commonware_utils::ordered::Set;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
-use std::{
-    collections::{HashMap, HashSet},
-    net::IpAddr,
-};
+use std::collections::HashMap;
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
@@ -35,7 +32,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     receiver: mpsc::UnboundedReceiver<Message<C::PublicKey>>,
 
     /// The mailbox for the listener.
-    listener: Mailbox<HashSet<IpAddr>>,
+    listener: Mailbox<ListenableIps>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
@@ -231,7 +228,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{authenticated::lookup::actors::peer, Blocker, Ingress, Manager};
+    use crate::{
+        authenticated::{lookup::actors::peer, Attempt},
+        Blocker, Ingress, Manager,
+    };
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,
@@ -250,7 +250,7 @@ mod tests {
     fn test_config<C: Signer>(
         crypto: C,
         bypass_ip_check: bool,
-    ) -> (Config<C>, mpsc::Receiver<HashSet<IpAddr>>) {
+    ) -> (Config<C>, mpsc::Receiver<ListenableIps>) {
         let (registered_ips_sender, registered_ips_receiver) = Mailbox::new(1);
         (
             Config {
@@ -402,10 +402,19 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
 
-            // None acceptable because not registered
-            assert!(!mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await);
-            assert!(!mailbox.acceptable(peer_pk2.clone(), peer_addr2.ip()).await);
-            assert!(!mailbox.acceptable(peer_pk3.clone(), peer_addr3.ip()).await);
+            // peer_pk is ourselves, others not registered
+            assert_eq!(
+                mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await,
+                Attempt::Myself
+            );
+            assert_eq!(
+                mailbox.acceptable(peer_pk2.clone(), peer_addr2.ip()).await,
+                Attempt::Unregistered
+            );
+            assert_eq!(
+                mailbox.acceptable(peer_pk3.clone(), peer_addr3.ip()).await,
+                Attempt::Unregistered
+            );
 
             oracle
                 .update(
@@ -421,13 +430,25 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Not acceptable because self
-            assert!(!mailbox.acceptable(peer_pk, peer_addr.ip()).await);
+            assert_eq!(
+                mailbox.acceptable(peer_pk, peer_addr.ip()).await,
+                Attempt::Myself
+            );
             // Acceptable because registered with correct IP
-            assert!(mailbox.acceptable(peer_pk2.clone(), peer_addr2.ip()).await);
+            assert_eq!(
+                mailbox.acceptable(peer_pk2.clone(), peer_addr2.ip()).await,
+                Attempt::Ok
+            );
             // Not acceptable with wrong IP
-            assert!(!mailbox.acceptable(peer_pk2, peer_addr.ip()).await);
+            assert_eq!(
+                mailbox.acceptable(peer_pk2, peer_addr.ip()).await,
+                Attempt::Mismatch
+            );
             // Not acceptable because not registered
-            assert!(!mailbox.acceptable(peer_pk3, peer_addr3.ip()).await);
+            assert_eq!(
+                mailbox.acceptable(peer_pk3, peer_addr3.ip()).await,
+                Attempt::Unregistered
+            );
         });
     }
 
@@ -451,8 +472,9 @@ mod tests {
             } = setup_actor(context.clone(), cfg);
 
             // Unknown peer is NOT acceptable (bypass_ip_check only skips IP check)
-            assert!(
-                !mailbox.acceptable(peer_pk3.clone(), peer_addr3.ip()).await,
+            assert_eq!(
+                mailbox.acceptable(peer_pk3.clone(), peer_addr3.ip()).await,
+                Attempt::Unregistered,
                 "Unknown peer should not be acceptable"
             );
 
@@ -470,14 +492,16 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // With bypass_ip_check=true, registered peer with wrong IP is acceptable
-            assert!(
+            assert_eq!(
                 mailbox.acceptable(peer_pk2.clone(), peer_addr.ip()).await,
+                Attempt::Ok,
                 "Registered peer with wrong IP should be acceptable with bypass_ip_check=true"
             );
 
             // Self is still not acceptable
-            assert!(
-                !mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await,
+            assert_eq!(
+                mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await,
+                Attempt::Myself,
                 "Self should not be acceptable"
             );
 
@@ -485,8 +509,9 @@ mod tests {
             oracle.block(peer_pk2.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            assert!(
-                !mailbox.acceptable(peer_pk2.clone(), peer_addr2.ip()).await,
+            assert_eq!(
+                mailbox.acceptable(peer_pk2.clone(), peer_addr2.ip()).await,
+                Attempt::Blocked,
                 "Blocked peer should not be acceptable"
             );
         });
@@ -514,12 +539,18 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
-            assert!(mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await);
+            assert_eq!(
+                mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await,
+                Attempt::Ok
+            );
 
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some());
 
-            assert!(!mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await);
+            assert_eq!(
+                mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await,
+                Attempt::Reserved
+            );
 
             let failed_reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(failed_reservation.is_none());
@@ -672,10 +703,10 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Wait for a listener update
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(registered_ips.contains(&my_addr.ip()));
-            assert!(registered_ips.contains(&addr_1.ip()));
-            assert!(!registered_ips.contains(&addr_2.ip()));
+            let listenable_ips: ListenableIps = listener_receiver.next().await.unwrap();
+            assert!(listenable_ips.allowed.contains(&my_addr.ip()));
+            assert!(listenable_ips.allowed.contains(&addr_1.ip()));
+            assert!(!listenable_ips.allowed.contains(&addr_2.ip()));
 
             // Mark peer as connected
             let reservation = mailbox.listen(pk_1.clone()).await;
@@ -690,10 +721,10 @@ mod tests {
                 .await;
 
             // Wait for a listener update
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(!registered_ips.contains(&my_addr.ip()));
-            assert!(!registered_ips.contains(&addr_1.ip()));
-            assert!(registered_ips.contains(&addr_2.ip()));
+            let listenable_ips: ListenableIps = listener_receiver.next().await.unwrap();
+            assert!(!listenable_ips.allowed.contains(&my_addr.ip()));
+            assert!(!listenable_ips.allowed.contains(&addr_1.ip()));
+            assert!(listenable_ips.allowed.contains(&addr_2.ip()));
 
             // The first peer should be have received a kill message because its
             // peer set was removed because `tracked_peer_sets` is 1.

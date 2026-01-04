@@ -20,6 +20,21 @@ pub struct Metrics {
 
     /// A count of the number of updates for each peer.
     pub updates: Family<metrics::Peer, Counter>,
+
+    /// Number of times a peer was rejected because they were blocked.
+    pub rejected_blocked: Counter,
+
+    /// Number of times a peer was rejected because they were unregistered.
+    pub rejected_unregistered: Counter,
+
+    /// Number of times a peer was rejected because they were already connected.
+    pub rejected_reserved: Counter,
+
+    /// Number of times a peer was rejected because of data mismatch (e.g., IP).
+    pub rejected_mismatch: Counter,
+
+    /// Number of times a peer was rejected because they are ourselves.
+    pub rejected_myself: Counter,
 }
 
 impl Metrics {
@@ -50,6 +65,31 @@ impl Metrics {
             "updates",
             "Count of the number of updates for each peer",
             metrics.updates.clone(),
+        );
+        context.register(
+            "rejected_blocked",
+            "Number of times a peer was rejected because they were blocked",
+            metrics.rejected_blocked.clone(),
+        );
+        context.register(
+            "rejected_unregistered",
+            "Number of times a peer was rejected because they were unregistered",
+            metrics.rejected_unregistered.clone(),
+        );
+        context.register(
+            "rejected_reserved",
+            "Number of times a peer was rejected because they were already connected",
+            metrics.rejected_reserved.clone(),
+        );
+        context.register(
+            "rejected_mismatch",
+            "Number of times a peer was rejected because of data mismatch",
+            metrics.rejected_mismatch.clone(),
+        );
+        context.register(
+            "rejected_myself",
+            "Number of times a peer was rejected because they are ourselves",
+            metrics.rejected_myself.clone(),
         );
         metrics
     }

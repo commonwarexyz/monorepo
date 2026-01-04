@@ -1,6 +1,9 @@
 use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::{
-    authenticated::lookup::{actors::tracker::ingress::Releaser, metrics},
+    authenticated::{
+        lookup::{actors::tracker::ingress::Releaser, metrics},
+        Attempt,
+    },
     types::Address,
     Ingress,
 };
@@ -20,6 +23,15 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
+
+/// IPs that the listener should filter on.
+#[derive(Debug, Clone, Default)]
+pub struct ListenableIps {
+    /// IPs that are allowed to connect (eligible peers).
+    pub allowed: HashSet<IpAddr>,
+    /// IPs that belong to blocked peers (should be rejected with blocked metric).
+    pub blocked: HashSet<IpAddr>,
+}
 
 /// Configuration for the [Directory].
 pub struct Config {
@@ -279,30 +291,67 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         result
     }
 
-    /// Returns true if this peer is acceptable (can accept an incoming connection from them).
+    /// Returns the acceptance status for this peer (can accept an incoming connection from them).
     ///
-    /// Checks eligibility (peer set membership), blocked status, egress IP match (if not bypass_ip_check),
-    /// and connection status.
-    pub fn acceptable(&self, peer: &C, source_ip: IpAddr) -> bool {
-        !self.blocked.contains(peer)
-            && self
-                .peers
-                .get(peer)
-                .is_some_and(|record| record.acceptable(source_ip, self.bypass_ip_check))
+    /// Checks blocked status first, then delegates to record for eligibility, IP match,
+    /// and connection status. Increments metrics for rejections.
+    pub fn acceptable(&self, peer: &C, source_ip: IpAddr) -> Attempt {
+        if self.blocked.contains(peer) {
+            self.metrics.rejected_blocked.inc();
+            debug!(?peer, "peer rejected: blocked");
+            return Attempt::Blocked;
+        }
+        let result = self
+            .peers
+            .get(peer)
+            .map(|r| r.acceptable(source_ip, self.bypass_ip_check))
+            .unwrap_or(Attempt::Unregistered);
+        match result {
+            Attempt::Ok => {}
+            Attempt::Blocked => unreachable!("record does not return Blocked"),
+            Attempt::Unregistered => {
+                self.metrics.rejected_unregistered.inc();
+                debug!(?peer, "peer rejected: unregistered or ineligible");
+            }
+            Attempt::Reserved => {
+                self.metrics.rejected_reserved.inc();
+                debug!(?peer, "peer rejected: already connected");
+            }
+            Attempt::Mismatch => {
+                self.metrics.rejected_mismatch.inc();
+                debug!(?peer, "peer rejected: data mismatch");
+            }
+            Attempt::Myself => {
+                self.metrics.rejected_myself.inc();
+                debug!(?peer, "peer rejected: is ourselves");
+            }
+        }
+        result
     }
 
-    /// Return egress IPs we should listen for (accept incoming connections from).
+    /// Return IPs the listener should filter on.
     ///
-    /// Only includes IPs from peers that are:
-    /// - Currently eligible (not blocked, in a peer set)
-    /// - Have a valid egress IP (global, or private IPs are allowed)
-    pub fn listenable(&self) -> HashSet<IpAddr> {
-        self.peers
+    /// Returns both allowed IPs (eligible peers) and blocked IPs (for proper metric tracking).
+    pub fn listenable(&self) -> ListenableIps {
+        let is_valid_ip = |ip: &IpAddr| self.allow_private_ips || IpAddrExt::is_global(ip);
+
+        let allowed = self
+            .peers
             .iter()
             .filter(|(peer, r)| !self.blocked.contains(peer) && r.eligible())
             .filter_map(|(_, r)| r.egress_ip())
-            .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
-            .collect()
+            .filter(is_valid_ip)
+            .collect();
+
+        let blocked = self
+            .blocked
+            .iter()
+            .filter_map(|(peer, _)| self.peers.get(peer))
+            .filter_map(|r| r.egress_ip())
+            .filter(is_valid_ip)
+            .collect();
+
+        ListenableIps { allowed, blocked }
     }
 
     /// Unblock all peers whose block has expired.
@@ -399,7 +448,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        authenticated::{lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox},
+        authenticated::{
+            lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox, Attempt,
+        },
         types::Address,
         Ingress,
     };
@@ -720,16 +771,16 @@ mod tests {
             // Verify listenable() returns egress IPs for IP filtering
             let listenable = directory.listenable();
             assert!(
-                listenable.contains(&egress_socket.ip()),
-                "Listenable should contain peer 1's egress IP"
+                listenable.allowed.contains(&egress_socket.ip()),
+                "Listenable should contain peer 1's egress IP in allowed"
             );
             assert!(
-                listenable.contains(&egress_socket_2.ip()),
-                "Listenable should contain peer 2's egress IP"
+                listenable.allowed.contains(&egress_socket_2.ip()),
+                "Listenable should contain peer 2's egress IP in allowed"
             );
             assert!(
-                !listenable.contains(&ingress_socket.ip()),
-                "Listenable should NOT contain peer 1's ingress IP"
+                !listenable.allowed.contains(&ingress_socket.ip()),
+                "Listenable should NOT contain peer 1's ingress IP in allowed"
             );
         });
     }
@@ -863,8 +914,12 @@ mod tests {
 
             // Verify listenable() only returns public IP (private IP excluded from filter)
             let listenable = directory.listenable();
-            assert!(listenable.contains(&Ipv4Addr::new(8, 8, 8, 8).into()));
-            assert!(!listenable.contains(&Ipv4Addr::new(10, 0, 0, 1).into()));
+            assert!(listenable
+                .allowed
+                .contains(&Ipv4Addr::new(8, 8, 8, 8).into()));
+            assert!(!listenable
+                .allowed
+                .contains(&Ipv4Addr::new(10, 0, 0, 1).into()));
         });
     }
 
@@ -901,31 +956,39 @@ mod tests {
                     .unwrap(),
             );
 
-            // Both peers eligible: IP should be in listenable set
+            // Both peers eligible: IP should be in allowed set
             let listenable = directory.listenable();
             assert!(
-                listenable.contains(&shared_ip),
-                "IP should be listenable when both peers are eligible"
+                listenable.allowed.contains(&shared_ip),
+                "IP should be in allowed when both peers are eligible"
+            );
+            assert!(
+                !listenable.blocked.contains(&shared_ip),
+                "IP should not be in blocked when both peers are eligible"
             );
 
             // Block one peer
             directory.block(&pk_1);
 
-            // One eligible, one blocked: IP should still be listenable
+            // One eligible, one blocked: IP should still be in allowed (eligible wins)
             let listenable = directory.listenable();
             assert!(
-                listenable.contains(&shared_ip),
-                "IP should be listenable when at least one peer is eligible"
+                listenable.allowed.contains(&shared_ip),
+                "IP should be in allowed when at least one peer is eligible"
             );
 
             // Block the other peer
             directory.block(&pk_2);
 
-            // Both blocked: IP should NOT be in listenable set
+            // Both blocked: IP should be in blocked, not allowed
             let listenable = directory.listenable();
             assert!(
-                !listenable.contains(&shared_ip),
-                "IP should not be listenable when all peers are blocked"
+                !listenable.allowed.contains(&shared_ip),
+                "IP should not be in allowed when all peers are blocked"
+            );
+            assert!(
+                listenable.blocked.contains(&shared_ip),
+                "IP should be in blocked when all peers are blocked"
             );
         });
     }
@@ -957,10 +1020,15 @@ mod tests {
             // Block the peer
             directory.block(&pk_1);
 
-            // Verify peer is blocked and not listenable
+            // Verify peer is blocked and not in allowed (but is in blocked)
+            let listenable = directory.listenable();
             assert!(
-                !directory.listenable().contains(&addr_1.ip()),
-                "Blocked peer should not be listenable"
+                !listenable.allowed.contains(&addr_1.ip()),
+                "Blocked peer should not be in allowed"
+            );
+            assert!(
+                listenable.blocked.contains(&addr_1.ip()),
+                "Blocked peer should be in blocked"
             );
 
             // Verify peer is blocked
@@ -978,10 +1046,15 @@ mod tests {
             // Now unblock_expired should unblock the peer
             assert!(directory.unblock_expired(), "Should have unblocked a peer");
 
-            // Verify peer is now listenable
+            // Verify peer is now listenable (in allowed, not in blocked)
+            let listenable = directory.listenable();
             assert!(
-                directory.listenable().contains(&addr_1.ip()),
-                "Unblocked peer should be listenable"
+                listenable.allowed.contains(&addr_1.ip()),
+                "Unblocked peer should be in allowed"
+            );
+            assert!(
+                !listenable.blocked.contains(&addr_1.ip()),
+                "Unblocked peer should not be in blocked"
             );
 
             // Verify no more blocked peers
@@ -1392,8 +1465,9 @@ mod tests {
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
             // Peer should be acceptable before blocking
-            assert!(
+            assert_eq!(
                 directory.acceptable(&pk_1, addr_1.ip()),
+                Attempt::Ok,
                 "Peer should be acceptable before blocking"
             );
 
@@ -1401,8 +1475,9 @@ mod tests {
             directory.block(&pk_1);
 
             // Peer should NOT be acceptable while blocked
-            assert!(
-                !directory.acceptable(&pk_1, addr_1.ip()),
+            assert_eq!(
+                directory.acceptable(&pk_1, addr_1.ip()),
+                Attempt::Blocked,
                 "Blocked peer should not be acceptable"
             );
 
@@ -1411,8 +1486,9 @@ mod tests {
             directory.unblock_expired();
 
             // Peer should be acceptable again after unblock
-            assert!(
+            assert_eq!(
                 directory.acceptable(&pk_1, addr_1.ip()),
+                Attempt::Ok,
                 "Peer should be acceptable after unblock"
             );
         });
@@ -1442,29 +1518,44 @@ mod tests {
             // Add peer to a set
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
-            // Peer's IP should be listenable before blocking
+            // Peer's IP should be in allowed before blocking
+            let listenable = directory.listenable();
             assert!(
-                directory.listenable().contains(&addr_1.ip()),
-                "Peer's IP should be listenable before blocking"
+                listenable.allowed.contains(&addr_1.ip()),
+                "Peer's IP should be in allowed before blocking"
+            );
+            assert!(
+                !listenable.blocked.contains(&addr_1.ip()),
+                "Peer's IP should not be in blocked before blocking"
             );
 
             // Block the peer
             directory.block(&pk_1);
 
-            // Peer's IP should NOT be listenable while blocked
+            // Peer's IP should be in blocked, not allowed
+            let listenable = directory.listenable();
             assert!(
-                !directory.listenable().contains(&addr_1.ip()),
-                "Blocked peer's IP should not be listenable"
+                !listenable.allowed.contains(&addr_1.ip()),
+                "Blocked peer's IP should not be in allowed"
+            );
+            assert!(
+                listenable.blocked.contains(&addr_1.ip()),
+                "Blocked peer's IP should be in blocked"
             );
 
             // Advance time and unblock
             context.sleep(block_duration + Duration::from_secs(1)).await;
             directory.unblock_expired();
 
-            // Peer's IP should be listenable again after unblock
+            // Peer's IP should be back in allowed after unblock
+            let listenable = directory.listenable();
             assert!(
-                directory.listenable().contains(&addr_1.ip()),
-                "Peer's IP should be listenable after unblock"
+                listenable.allowed.contains(&addr_1.ip()),
+                "Peer's IP should be in allowed after unblock"
+            );
+            assert!(
+                !listenable.blocked.contains(&addr_1.ip()),
+                "Peer's IP should not be in blocked after unblock"
             );
         });
     }
