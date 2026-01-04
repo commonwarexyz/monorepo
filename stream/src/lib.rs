@@ -86,6 +86,12 @@ const CIPHERTEXT_OVERHEAD: u32 = {
     handshake::CIPHERTEXT_OVERHEAD as u32
 };
 
+/// Frame flag indicating the payload is plaintext (not encrypted).
+const FRAME_FLAG_PLAINTEXT: u8 = 0x00;
+
+/// Frame flag indicating the payload is encrypted.
+const FRAME_FLAG_ENCRYPTED: u8 = 0x01;
+
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -101,6 +107,10 @@ pub enum Error {
     RecvTooLarge(usize),
     #[error("invalid varint length prefix")]
     InvalidVarint,
+    #[error("unexpected frame flag: expected {expected:#x}, got {got:#x}")]
+    UnexpectedFrameFlag { expected: u8, got: u8 },
+    #[error("frame too short")]
+    FrameTooShort,
     #[error("send failed")]
     SendFailed(RuntimeError),
     #[error("send zero size")]
@@ -293,7 +303,7 @@ pub async fn listen<
     }
 }
 
-/// Sends encrypted messages to a peer.
+/// Sends messages to a peer, with optional encryption.
 pub struct Sender<O> {
     cipher: SendCipher,
     sink: O,
@@ -302,19 +312,47 @@ pub struct Sender<O> {
 
 impl<O: Sink> Sender<O> {
     /// Encrypts and sends a message to the peer.
+    ///
+    /// The message is encrypted using ChaCha20-Poly1305 before transmission.
     pub async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
-        let c = self.cipher.send(msg)?;
+        let ciphertext = self.cipher.send(msg)?;
+        // Frame format: [flag][ciphertext]
+        let mut frame = Vec::with_capacity(1 + ciphertext.len());
+        frame.push(FRAME_FLAG_ENCRYPTED);
+        frame.extend_from_slice(&ciphertext);
         send_frame(
             &mut self.sink,
-            &c,
-            self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
+            &frame,
+            self.max_message_size
+                .saturating_add(CIPHERTEXT_OVERHEAD)
+                .saturating_add(1), // +1 for flag byte
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Sends a plaintext message to the peer without encryption.
+    ///
+    /// Use this for non-sensitive data where encryption overhead is undesirable.
+    /// The connection is still authenticated via the handshake, but message
+    /// contents are not encrypted and can be observed or modified by network
+    /// attackers.
+    pub async fn send_plaintext(&mut self, msg: &[u8]) -> Result<(), Error> {
+        // Frame format: [flag][plaintext]
+        let mut frame = Vec::with_capacity(1 + msg.len());
+        frame.push(FRAME_FLAG_PLAINTEXT);
+        frame.extend_from_slice(msg);
+        send_frame(
+            &mut self.sink,
+            &frame,
+            self.max_message_size.saturating_add(1), // +1 for flag byte
         )
         .await?;
         Ok(())
     }
 }
 
-/// Receives encrypted messages from a peer.
+/// Receives messages from a peer, with optional decryption.
 pub struct Receiver<I> {
     cipher: RecvCipher,
     stream: I,
@@ -323,13 +361,32 @@ pub struct Receiver<I> {
 
 impl<I: Stream> Receiver<I> {
     /// Receives and decrypts a message from the peer.
+    ///
+    /// Expects the frame to be encrypted (flag byte 0x01). Returns an error
+    /// if a plaintext frame is received.
     pub async fn recv(&mut self) -> Result<Bytes, Error> {
-        let c = recv_frame(
+        let frame = recv_frame(
             &mut self.stream,
-            self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
+            self.max_message_size
+                .saturating_add(CIPHERTEXT_OVERHEAD)
+                .saturating_add(1), // +1 for flag byte
         )
         .await?;
-        Ok(self.cipher.recv(&c)?.into())
+
+        // Check flag byte
+        if frame.is_empty() {
+            return Err(Error::FrameTooShort);
+        }
+        let flag = frame[0];
+        if flag != FRAME_FLAG_ENCRYPTED {
+            return Err(Error::UnexpectedFrameFlag {
+                expected: FRAME_FLAG_ENCRYPTED,
+                got: flag,
+            });
+        }
+
+        // Decrypt the ciphertext (skip flag byte)
+        Ok(self.cipher.recv(&frame[1..])?.into())
     }
 
     /// Receives and decrypts a secret message from the peer.
@@ -338,12 +395,87 @@ impl<I: Stream> Receiver<I> {
     /// erased from memory when dropped. Use this method when receiving messages
     /// that contain sensitive data (e.g., DKG shares, private keys).
     pub async fn recv_secret(&mut self) -> Result<Zeroizing<Vec<u8>>, Error> {
-        let c = recv_frame(
+        let frame = recv_frame(
             &mut self.stream,
-            self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
+            self.max_message_size
+                .saturating_add(CIPHERTEXT_OVERHEAD)
+                .saturating_add(1), // +1 for flag byte
         )
         .await?;
-        Ok(Zeroizing::new(self.cipher.recv(&c)?))
+
+        // Check flag byte
+        if frame.is_empty() {
+            return Err(Error::FrameTooShort);
+        }
+        let flag = frame[0];
+        if flag != FRAME_FLAG_ENCRYPTED {
+            return Err(Error::UnexpectedFrameFlag {
+                expected: FRAME_FLAG_ENCRYPTED,
+                got: flag,
+            });
+        }
+
+        // Decrypt the ciphertext (skip flag byte)
+        Ok(Zeroizing::new(self.cipher.recv(&frame[1..])?))
+    }
+
+    /// Receives a plaintext message from the peer without decryption.
+    ///
+    /// Expects the frame to be plaintext (flag byte 0x00). Returns an error
+    /// if an encrypted frame is received.
+    pub async fn recv_plaintext(&mut self) -> Result<Bytes, Error> {
+        let frame = recv_frame(
+            &mut self.stream,
+            self.max_message_size.saturating_add(1), // +1 for flag byte
+        )
+        .await?;
+
+        // Check flag byte
+        if frame.is_empty() {
+            return Err(Error::FrameTooShort);
+        }
+        let flag = frame[0];
+        if flag != FRAME_FLAG_PLAINTEXT {
+            return Err(Error::UnexpectedFrameFlag {
+                expected: FRAME_FLAG_PLAINTEXT,
+                got: flag,
+            });
+        }
+
+        // Return plaintext (skip flag byte)
+        Ok(frame.slice(1..))
+    }
+
+    /// Receives a message, auto-detecting whether it's encrypted or plaintext.
+    ///
+    /// Returns the message data and a boolean indicating whether it was encrypted.
+    /// This is useful when receiving from channels with mixed encryption modes.
+    pub async fn recv_any(&mut self) -> Result<(Bytes, bool), Error> {
+        let frame = recv_frame(
+            &mut self.stream,
+            self.max_message_size
+                .saturating_add(CIPHERTEXT_OVERHEAD)
+                .saturating_add(1), // +1 for flag byte
+        )
+        .await?;
+
+        // Check flag byte
+        if frame.is_empty() {
+            return Err(Error::FrameTooShort);
+        }
+        let flag = frame[0];
+
+        match flag {
+            FRAME_FLAG_ENCRYPTED => {
+                let plaintext = self.cipher.recv(&frame[1..])?;
+                Ok((plaintext.into(), true))
+            }
+            FRAME_FLAG_PLAINTEXT => Ok((frame.slice(1..), false)),
+            _ => Err(Error::UnexpectedFrameFlag {
+                expected: FRAME_FLAG_ENCRYPTED, // or PLAINTEXT, doesn't matter for unknown
+                got: flag,
+            }),
+        }
     }
 }
 
