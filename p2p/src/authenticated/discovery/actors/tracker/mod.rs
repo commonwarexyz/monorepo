@@ -33,4 +33,5 @@ pub struct Config<C: Signer> {
     pub allowed_connection_rate_per_peer: Quota,
     pub peer_gossip_max_count: usize,
     pub dial_fail_limit: usize,
+    pub block_duration: Duration,
 }
