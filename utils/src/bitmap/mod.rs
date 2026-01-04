@@ -18,6 +18,7 @@ mod prunable;
 pub use prunable::Prunable;
 
 pub mod historical;
+pub mod roaring;
 
 /// The default [BitMap] chunk size in bytes.
 pub const DEFAULT_CHUNK_SIZE: usize = 8;
