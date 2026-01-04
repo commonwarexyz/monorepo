@@ -201,7 +201,7 @@ impl<C: PublicKey> Record<C> {
     ///
     /// A record is dialable if:
     /// - We have the ingress address of the peer
-    /// - It is not ourselves or blocked
+    /// - It is not ourselves
     /// - We are not already connected or reserved
     /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
     ///
@@ -221,7 +221,7 @@ impl<C: PublicKey> Record<C> {
     /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
     ///
     /// A peer is acceptable if:
-    /// - The peer is eligible (in a peer set, not blocked, not ourselves)
+    /// - The peer is eligible (in a peer set, not ourselves)
     /// - We are not already connected or reserved
     pub fn acceptable(&self) -> bool {
         self.eligible() && self.status == Status::Inert
