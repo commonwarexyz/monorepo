@@ -480,11 +480,14 @@ impl Read for Array {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Array {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        // Generate sorted unique values by partitioning the remaining u16 space.
+        // For each value, we compute the maximum increment that still allows
+        // room for all remaining values, then pick a random increment in [1, max].
+        // This ensures values are strictly increasing without gaps or overflow.
         let len = u.int_in_range(0..=MAX_CARDINALITY)?;
         let mut values = Vec::with_capacity(len);
         let mut prev = 0u16;
         for i in 0..len {
-            // Generate sorted unique values by adding increments
             let max_increment = (u16::MAX - prev) / (len - i) as u16;
             if max_increment == 0 {
                 break;

@@ -76,9 +76,6 @@ pub use ops::{difference, intersection, union};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
-/// Maximum container key (high 48 bits of a u64).
-const MAX_KEY: u64 = (1u64 << 48) - 1;
-
 /// Extracts the high 48 bits (container key) from a 64-bit value.
 #[inline]
 const fn high_bits(value: u64) -> u64 {
@@ -347,6 +344,9 @@ impl Read for RoaringBitmap {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for RoaringBitmap {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        // Maximum container key (high 48 bits of a u64).
+        const MAX_KEY: u64 = (1u64 << 48) - 1;
+
         let num_containers = u.int_in_range(0..=1000)?;
         let mut containers = BTreeMap::new();
         let mut prev_key = 0u64;

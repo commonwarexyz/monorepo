@@ -378,6 +378,9 @@ impl Iterator for Iter<'_> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.word_idx >= WORDS {
+            return (0, Some(0));
+        }
         let remaining: u32 = self.current_word.count_ones()
             + self.words[self.word_idx + 1..]
                 .iter()
@@ -464,6 +467,38 @@ mod tests {
 
         let values: Vec<_> = container.iter().collect();
         assert_eq!(values, vec![5, 10, 100, 1000]);
+    }
+
+    #[test]
+    fn test_iterator_size_hint_after_exhaustion_regression() {
+        // Regression test: size_hint() used to panic when called after iterator
+        // exhaustion because it accessed words[word_idx + 1..] where word_idx
+        // could be WORDS (1024), causing an out-of-bounds slice access.
+
+        // Test with non-empty bitmap
+        let mut container = Bitmap::new();
+        container.insert(5);
+        container.insert(100);
+
+        let mut iter = container.iter();
+        assert_eq!(iter.size_hint(), (2, Some(2)));
+
+        // Exhaust the iterator
+        assert_eq!(iter.next(), Some(5));
+        assert_eq!(iter.size_hint(), (1, Some(1)));
+        assert_eq!(iter.next(), Some(100));
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+        assert_eq!(iter.next(), None);
+
+        // This used to panic - now should return (0, Some(0))
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+
+        // Test with empty bitmap
+        let empty = Bitmap::new();
+        let mut iter = empty.iter();
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.size_hint(), (0, Some(0)));
     }
 
     #[test]
