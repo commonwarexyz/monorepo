@@ -1699,7 +1699,7 @@ mod tests {
                     let sent = sender
                         .send(
                             Recipients::All,
-                            peers[i].public_key().to_vec().into(),
+                            peers[i].public_key().as_ref(),
                             true,
                         )
                         .await
@@ -1748,7 +1748,7 @@ mod tests {
                     let sent = peer0_sender
                         .send(
                             Recipients::One(addresses[restart_peer_idx].clone()),
-                            addresses[0].to_vec().into(),
+                            addresses[0].as_ref(),
                             true,
                         )
                         .await
@@ -1792,7 +1792,7 @@ mod tests {
                         let sent = restarted_sender
                             .send(
                                 Recipients::All,
-                                peers[restart_peer_idx].public_key().to_vec().into(),
+                                peers[restart_peer_idx].public_key().as_ref(),
                                 true,
                             )
                             .await
@@ -1813,7 +1813,7 @@ mod tests {
                             let sent = sender
                                 .send(
                                     Recipients::One(addresses[restart_peer_idx].clone()),
-                                    peers[i].public_key().to_vec().into(),
+                                    peers[i].public_key().as_ref(),
                                     true,
                                 )
                                 .await
@@ -1913,7 +1913,7 @@ mod tests {
                 let sender = sender.as_mut().unwrap();
                 loop {
                     let sent = sender
-                        .send(Recipients::All, peers[i].public_key().to_vec().into(), true)
+                        .send(Recipients::All, peers[i].public_key().as_ref(), true)
                         .await
                         .unwrap();
                     if sent.len() == n - 1 {
@@ -1958,7 +1958,7 @@ mod tests {
             let sent = peer0_sender
                 .send(
                     Recipients::One(addresses[restart_peer_idx].clone()),
-                    addresses[0].to_vec().into(),
+                    addresses[0].as_ref(),
                     true,
                 )
                 .await
@@ -2008,7 +2008,7 @@ mod tests {
                 let sent = restarted_sender
                     .send(
                         Recipients::All,
-                        peers[restart_peer_idx].public_key().to_vec().into(),
+                        peers[restart_peer_idx].public_key().as_ref(),
                         true,
                     )
                     .await
@@ -2029,7 +2029,7 @@ mod tests {
                     let sent = sender
                         .send(
                             Recipients::One(addresses[restart_peer_idx].clone()),
-                            peers[i].public_key().to_vec().into(),
+                            peers[i].public_key().as_ref(),
                             true,
                         )
                         .await
