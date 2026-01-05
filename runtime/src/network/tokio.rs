@@ -383,21 +383,23 @@ mod tests {
             let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
             // Read messages without buffering
-            let buf1 = stream.recv(vec![0u8; 5]).await.unwrap();
-            let buf2 = stream.recv(vec![0u8; 5]).await.unwrap();
+            let mut buf1 = vec![0u8; 5];
+            let mut buf2 = vec![0u8; 5];
+            stream.recv(&mut buf1[..]).await.unwrap();
+            stream.recv(&mut buf2[..]).await.unwrap();
             (buf1, buf2)
         });
 
         // Connect and send two messages
         let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        sink.send(vec![1u8, 2, 3, 4, 5]).await.unwrap();
-        sink.send(vec![6u8, 7, 8, 9, 10]).await.unwrap();
+        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
+        sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
 
         // Wait for the reader to complete
         let (buf1, buf2) = reader.await.unwrap();
 
         // Verify we got the right data
-        assert_eq!(buf1.as_ref(), &[1u8, 2, 3, 4, 5]);
-        assert_eq!(buf2.as_ref(), &[6u8, 7, 8, 9, 10]);
+        assert_eq!(buf1.as_slice(), &[1u8, 2, 3, 4, 5]);
+        assert_eq!(buf2.as_slice(), &[6u8, 7, 8, 9, 10]);
     }
 }
