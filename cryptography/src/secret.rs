@@ -8,9 +8,11 @@
 //!
 //! # Type Constraints
 //!
-//! `Secret<T>` only provides full protection for self-contained types (no heap
-//! pointers). Types like `Vec<T>` or `String` will only have their stack
-//! metadata zeroized, not heap data.
+//! **Important**: `Secret<T>` is designed for flat data types without pointers
+//! (e.g. `[u8; N]`). It does NOT provide full protection for types with
+//! indirection. Types like `Vec<T>`, `String`, or `Box<T>` will only have their
+//! metadata (pointer, length, capacity) zeroized, the referenced data remains
+//! intact. Do not use `Secret` with types that contain pointers.
 
 use crate::bls12381::primitives::group::Scalar;
 use core::{
@@ -36,6 +38,11 @@ unsafe fn zeroize_ptr<T>(ptr: *mut T) {
 /// - Debug and Display show `[REDACTED]`
 /// - Zeroized on drop
 /// - Access requires explicit `expose()` call
+///
+/// # Type Constraints
+///
+/// Only use with flat data types that have no pointers (e.g. `[u8; N]`).
+/// See [module-level documentation](self) for details.
 pub struct Secret<T>(ManuallyDrop<T>);
 
 impl<T> Secret<T> {
