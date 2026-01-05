@@ -78,7 +78,6 @@ pub struct Config<
     pub journal_name_prefix: String,
 
     /// The number of entries to keep per journal section.
-    // TODO: make it NonZeroU64?
     pub journal_heights_per_section: u64,
 
     /// The number of bytes to buffer when replaying a journal.

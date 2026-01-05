@@ -138,7 +138,6 @@ pub struct Engine<
     ////////////////////////////////////////
 
     // The number of heights per each journal section.
-    // TODO: make it NonZeroU64?
     journal_heights_per_section: u64,
 
     // The number of bytes to buffer when replaying a journal.

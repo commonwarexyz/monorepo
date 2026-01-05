@@ -137,7 +137,6 @@ pub struct Engine<
     journal_partition: String,
     journal_write_buffer: NonZeroUsize,
     journal_replay_buffer: NonZeroUsize,
-    // TODO: make it NonZeroU64?
     journal_heights_per_section: u64,
     journal_compression: Option<u8>,
     journal_buffer_pool: PoolRef,
