@@ -1,6 +1,10 @@
-use crate::{simplex::{
-    Simplex, SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
-}, types::{Finalization, Notarization, Nullification, ReplicaState}, SimplexSecp256r1};
+use crate::{
+    simplex::{
+        Simplex, SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
+    },
+    types::{Finalization, Notarization, Nullification, ReplicaState},
+    SimplexSecp256r1,
+};
 use commonware_consensus::simplex::{
     elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme,
 };
