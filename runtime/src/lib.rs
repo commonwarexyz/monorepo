@@ -548,7 +548,7 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// Remaining bytes are reserved for future use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
-    /// Header bytes. First 4 bytes are magic bytes.
+    /// Header bytes.
     pub bytes: [u8; Self::SIZE],
 }
 
@@ -577,9 +577,14 @@ impl Header {
         Self { bytes }
     }
 
+    /// Returns the magic bytes from the header.
+    fn magic(&self) -> [u8; Self::MAGIC_LENGTH] {
+        self.bytes[..Self::MAGIC_LENGTH].try_into().unwrap()
+    }
+
     /// Validates the magic bytes match the expected value.
     pub fn validate_magic(&self) -> Result<(), Error> {
-        let found: [u8; Self::MAGIC_LENGTH] = self.bytes[..Self::MAGIC_LENGTH].try_into().unwrap();
+        let found = self.magic();
         if found != Self::MAGIC {
             return Err(Error::BlobMagicMismatch { found });
         }
