@@ -272,8 +272,7 @@ impl<
             let next = self.next();
 
             // Underflow safe: next >= self.tip is guaranteed by next()
-            // Compare gap (next - tip) against window
-            if next.get().saturating_sub(self.tip.get()) < self.window.get() {
+            if next.delta_from(self.tip).unwrap() < self.window {
                 trace!(%next, "requesting new digest");
                 assert!(self
                     .pending
@@ -746,12 +745,12 @@ impl<
         let max_pending = self
             .pending
             .last_key_value()
-            .map(|(k, _)| k.saturating_add(HeightDelta::new(1)))
+            .map(|(k, _)| k.next())
             .unwrap_or_default();
         let max_confirmed = self
             .confirmed
             .last_key_value()
-            .map(|(k, _)| k.saturating_add(HeightDelta::new(1)))
+            .map(|(k, _)| k.next())
             .unwrap_or_default();
         max(self.tip, max(max_pending, max_confirmed))
     }

@@ -195,6 +195,11 @@ impl Height {
         Self(self.0.saturating_sub(delta.0))
     }
 
+    /// Returns the delta from `other` to `self`, or `None` if `other > self`.
+    pub fn delta_from(self, other: Self) -> Option<HeightDelta> {
+        self.0.checked_sub(other.0).map(HeightDelta::new)
+    }
+
     /// Returns an iterator over the range [start, end).
     ///
     /// If start >= end, returns an empty range.
@@ -877,6 +882,20 @@ mod tests {
             let decoded = Height::decode(encoded).unwrap();
             assert_eq!(height, decoded);
         }
+    }
+
+    #[test]
+    fn test_height_delta_from() {
+        assert_eq!(
+            Height::new(10).delta_from(Height::new(3)),
+            Some(HeightDelta::new(7))
+        );
+        assert_eq!(
+            Height::new(5).delta_from(Height::new(5)),
+            Some(HeightDelta::zero())
+        );
+        assert_eq!(Height::new(3).delta_from(Height::new(10)), None);
+        assert_eq!(Height::zero().delta_from(Height::new(1)), None);
     }
 
     #[test]
