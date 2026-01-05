@@ -2684,7 +2684,7 @@ mod tests {
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
                 .build(&participants.clone().try_into().unwrap());
-            let (mut mailbox, mut batcher_receiver, relay) = setup_voter_for_certification_test(
+            let (mut mailbox, mut batcher_receiver, _) = setup_voter_for_certification_test(
                 &mut context,
                 &oracle,
                 &participants,
@@ -2693,7 +2693,7 @@ mod tests {
             )
             .await;
 
-            let (mut current_view, mut parent_payload) = advance_past_initial_timeout(
+            let (current_view, _) = advance_past_initial_timeout(
                 &mut mailbox,
                 &mut batcher_receiver,
                 &schemes,
@@ -2701,39 +2701,46 @@ mod tests {
             )
             .await;
 
-            // Find a view where we're NOT the leader (leader != 0)
-            let (target_view, leader_idx) = loop {
-                let round = Round::new(Epoch::new(333), current_view);
-                let leader = built_elector.elect(round, None);
-                if leader != 0 {
-                    break (current_view, leader);
-                }
+            // After advance_past_initial_timeout we're at view 2.
+            // With RoundRobin, epoch=333, n=5: leader = (333 + view) % 5
+            // View 2: leader = 0 (us), View 3: leader = 1 (not us)
+            assert_eq!(current_view, View::new(2));
+            assert_eq!(
+                built_elector.elect(Round::new(Epoch::new(333), current_view), None),
+                0,
+                "we should be leader at view 2"
+            );
 
-                // We're the leader, advance to next view
-                let prev_proposal = Proposal::new(
-                    round,
-                    current_view.previous().unwrap(),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
-                );
-                parent_payload = prev_proposal.payload;
-                let (_, finalization) = build_finalization(&schemes, &prev_proposal, quorum);
-                mailbox
-                    .resolved(Certificate::Finalization(finalization))
-                    .await;
+            // Advance one more view so we're a follower.
+            let view2_proposal = Proposal::new(
+                Round::new(Epoch::new(333), current_view),
+                current_view.previous().unwrap(),
+                Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+            );
+            let (_, finalization) = build_finalization(&schemes, &view2_proposal, quorum);
+            mailbox
+                .resolved(Certificate::Finalization(finalization))
+                .await;
 
-                current_view = loop {
-                    match batcher_receiver.next().await.unwrap() {
-                        batcher::Message::Update {
-                            current, active, ..
-                        } if current > current_view => {
-                            active.send(true).unwrap();
-                            break current;
-                        }
-                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
-                        batcher::Message::Constructed(_) => {}
+            let target_view = loop {
+                match batcher_receiver.next().await.unwrap() {
+                    batcher::Message::Update {
+                        current, active, ..
+                    } if current > current_view => {
+                        active.send(true).unwrap();
+                        break current;
                     }
-                };
+                    batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                    batcher::Message::Constructed(_) => {}
+                }
             };
+
+            assert_eq!(target_view, View::new(3));
+            assert_eq!(
+                built_elector.elect(Round::new(Epoch::new(333), target_view), None),
+                1,
+                "participant 1 should be leader at view 3"
+            );
 
             // Wait for timeout (nullify vote) WITHOUT sending notarize first
             loop {
@@ -2757,12 +2764,6 @@ mod tests {
                 target_view.previous().unwrap(),
                 Sha256::hash(b"timeout_test"),
             );
-            let leader = participants[leader_idx as usize].clone();
-            let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay
-                .broadcast(&leader, (proposal.payload, contents.into()))
-                .await;
-
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Notarization(notarization))
@@ -2941,11 +2942,10 @@ mod tests {
 
     /// Tests certification after: notarize -> timeout -> receive notarization -> certify.
     /// This test runs when we are NOT the leader (receiving proposal from another participant).
-    fn certification_after_notarize_timeout_as_follower<S, F, L>(mut fixture: F)
+    fn certification_after_notarize_timeout_as_follower<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -2968,8 +2968,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let elector = L::default();
-            let built_elector = elector
+            let elector = RoundRobin::<Sha256>::default();
+            let built_elector: RoundRobinElector<S> = elector
                 .clone()
                 .build(&participants.clone().try_into().unwrap());
             let (mut mailbox, mut batcher_receiver, relay) = setup_voter_for_certification_test(
@@ -2981,7 +2981,7 @@ mod tests {
             )
             .await;
 
-            let (mut current_view, mut parent_payload) = advance_past_initial_timeout(
+            let (current_view, _) = advance_past_initial_timeout(
                 &mut mailbox,
                 &mut batcher_receiver,
                 &schemes,
@@ -2989,48 +2989,55 @@ mod tests {
             )
             .await;
 
-            // Find a view where we're NOT the leader (leader != 0)
-            let (target_view, leader_idx) = loop {
-                let round = Round::new(Epoch::new(333), current_view);
-                let leader = built_elector.elect(round, None);
-                if leader != 0 {
-                    break (current_view, leader);
-                }
+            // After advance_past_initial_timeout we're at view 2.
+            // With RoundRobin, epoch=333, n=5: leader = (333 + view) % 5
+            // View 2: leader = 0 (us), View 3: leader = 1 (not us)
+            assert_eq!(current_view, View::new(2));
+            assert_eq!(
+                built_elector.elect(Round::new(Epoch::new(333), current_view), None),
+                0,
+                "we should be leader at view 2"
+            );
 
-                // We're the leader, advance to next view
-                let prev_proposal = Proposal::new(
-                    round,
-                    current_view.previous().unwrap(),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
-                );
-                parent_payload = prev_proposal.payload;
-                let (_, finalization) = build_finalization(&schemes, &prev_proposal, quorum);
-                mailbox
-                    .resolved(Certificate::Finalization(finalization))
-                    .await;
+            // Advance one more view so we're a follower.
+            let view2_proposal = Proposal::new(
+                Round::new(Epoch::new(333), current_view),
+                current_view.previous().unwrap(),
+                Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+            );
+            let (_, finalization) = build_finalization(&schemes, &view2_proposal, quorum);
+            mailbox
+                .resolved(Certificate::Finalization(finalization))
+                .await;
 
-                current_view = loop {
-                    match batcher_receiver.next().await.unwrap() {
-                        batcher::Message::Update { current, active, .. }
-                            if current > current_view =>
-                        {
-                            active.send(true).unwrap();
-                            break current;
-                        }
-                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
-                        batcher::Message::Constructed(_) => {}
+            let target_view = loop {
+                match batcher_receiver.next().await.unwrap() {
+                    batcher::Message::Update {
+                        current, active, ..
+                    } if current > current_view => {
+                        active.send(true).unwrap();
+                        break current;
                     }
-                };
+                    batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                    batcher::Message::Constructed(_) => {}
+                }
             };
 
-            // Create and send proposal as if from the leader
+            assert_eq!(target_view, View::new(3));
+            assert_eq!(
+                built_elector.elect(Round::new(Epoch::new(333), target_view), None),
+                1,
+                "participant 1 should be leader at view 3"
+            );
+
+            // Create and send proposal as if from the leader (participant 1)
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
                 Sha256::hash(b"follower_test"),
             );
-            let leader = participants[leader_idx as usize].clone();
-            let contents = (proposal.round, parent_payload, 0u64).encode();
+            let leader = participants[1].clone();
+            let contents = (proposal.round, view2_proposal.payload, 0u64).encode();
             relay
                 .broadcast(&leader, (proposal.payload, contents.into()))
                 .await;
@@ -3099,11 +3106,10 @@ mod tests {
 
     /// Tests certification after: notarize -> timeout -> receive notarization -> certify.
     /// This test runs when we ARE the leader (proposing ourselves).
-    fn certification_after_notarize_timeout_as_leader<S, F, L>(mut fixture: F)
+    fn certification_after_notarize_timeout_as_leader<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -3126,11 +3132,11 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let elector = L::default();
-            let built_elector = elector
+            let elector = RoundRobin::<Sha256>::default();
+            let built_elector: RoundRobinElector<S> = elector
                 .clone()
                 .build(&participants.clone().try_into().unwrap());
-            let (mut mailbox, mut batcher_receiver, _relay) = setup_voter_for_certification_test(
+            let (mut mailbox, mut batcher_receiver, _) = setup_voter_for_certification_test(
                 &mut context,
                 &oracle,
                 &participants,
@@ -3139,7 +3145,7 @@ mod tests {
             )
             .await;
 
-            let (mut current_view, _) = advance_past_initial_timeout(
+            let (target_view, _) = advance_past_initial_timeout(
                 &mut mailbox,
                 &mut batcher_receiver,
                 &schemes,
@@ -3147,38 +3153,15 @@ mod tests {
             )
             .await;
 
-            // Find a view where we ARE the leader (leader == 0)
-            let target_view = loop {
-                let round = Round::new(Epoch::new(333), current_view);
-                let leader = built_elector.elect(round, None);
-                if leader == 0 {
-                    break current_view;
-                }
-
-                // We're not the leader, advance to next view
-                let prev_proposal = Proposal::new(
-                    round,
-                    current_view.previous().unwrap(),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
-                );
-                let (_, finalization) = build_finalization(&schemes, &prev_proposal, quorum);
-                mailbox
-                    .resolved(Certificate::Finalization(finalization))
-                    .await;
-
-                current_view = loop {
-                    match batcher_receiver.next().await.unwrap() {
-                        batcher::Message::Update { current, active, .. }
-                            if current > current_view =>
-                        {
-                            active.send(true).unwrap();
-                            break current;
-                        }
-                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
-                        batcher::Message::Constructed(_) => {}
-                    }
-                };
-            };
+            // After advance_past_initial_timeout we're at view 2.
+            // With RoundRobin, epoch=333, n=5: leader = (333 + view) % 5
+            // View 2: leader = 0 (us) - we're already the leader!
+            assert_eq!(target_view, View::new(2));
+            assert_eq!(
+                built_elector.elect(Round::new(Epoch::new(333), target_view), None),
+                0,
+                "we should be leader at view 2"
+            );
 
             // As leader, wait for our own notarize vote (automaton will propose)
             let proposal = loop {
@@ -3245,37 +3228,37 @@ mod tests {
 
     #[test_traced]
     fn test_certification_after_notarize_timeout_as_follower() {
-        certification_after_notarize_timeout_as_follower::<_, _, RoundRobin>(
+        certification_after_notarize_timeout_as_follower::<_, _>(
             bls12381_threshold::fixture::<MinPk, _>,
         );
-        certification_after_notarize_timeout_as_follower::<_, _, RoundRobin>(
+        certification_after_notarize_timeout_as_follower::<_, _>(
             bls12381_threshold::fixture::<MinSig, _>,
         );
-        certification_after_notarize_timeout_as_follower::<_, _, RoundRobin>(
+        certification_after_notarize_timeout_as_follower::<_, _>(
             bls12381_multisig::fixture::<MinPk, _>,
         );
-        certification_after_notarize_timeout_as_follower::<_, _, RoundRobin>(
+        certification_after_notarize_timeout_as_follower::<_, _>(
             bls12381_multisig::fixture::<MinSig, _>,
         );
-        certification_after_notarize_timeout_as_follower::<_, _, RoundRobin>(ed25519::fixture);
-        certification_after_notarize_timeout_as_follower::<_, _, RoundRobin>(secp256r1::fixture);
+        certification_after_notarize_timeout_as_follower::<_, _>(ed25519::fixture);
+        certification_after_notarize_timeout_as_follower::<_, _>(secp256r1::fixture);
     }
 
     #[test_traced]
     fn test_certification_after_notarize_timeout_as_leader() {
-        certification_after_notarize_timeout_as_leader::<_, _, RoundRobin>(
+        certification_after_notarize_timeout_as_leader::<_, _>(
             bls12381_threshold::fixture::<MinPk, _>,
         );
-        certification_after_notarize_timeout_as_leader::<_, _, RoundRobin>(
+        certification_after_notarize_timeout_as_leader::<_, _>(
             bls12381_threshold::fixture::<MinSig, _>,
         );
-        certification_after_notarize_timeout_as_leader::<_, _, RoundRobin>(
+        certification_after_notarize_timeout_as_leader::<_, _>(
             bls12381_multisig::fixture::<MinPk, _>,
         );
-        certification_after_notarize_timeout_as_leader::<_, _, RoundRobin>(
+        certification_after_notarize_timeout_as_leader::<_, _>(
             bls12381_multisig::fixture::<MinSig, _>,
         );
-        certification_after_notarize_timeout_as_leader::<_, _, RoundRobin>(ed25519::fixture);
-        certification_after_notarize_timeout_as_leader::<_, _, RoundRobin>(secp256r1::fixture);
+        certification_after_notarize_timeout_as_leader::<_, _>(ed25519::fixture);
+        certification_after_notarize_timeout_as_leader::<_, _>(secp256r1::fixture);
     }
 }
