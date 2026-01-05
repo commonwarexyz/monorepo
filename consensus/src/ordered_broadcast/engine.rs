@@ -746,7 +746,7 @@ impl<
         }
 
         // Construct new node
-        let node = Node::sign(signer, height, payload, parent);
+        let node = signer.sign_node(height, payload, parent);
 
         // Deal with the chunk as if it were received over the network
         self.handle_node(&node).await;
@@ -881,11 +881,8 @@ impl<
         self.validate_chunk(&node.chunk, self.epoch)?;
 
         // Verify the node
-        node.verify(
-            &mut self.context,
-            &self.node_verifier,
-            &self.validators_provider,
-        )
+        self.node_verifier
+            .verify_node(&mut self.context, node, &self.validators_provider)
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.

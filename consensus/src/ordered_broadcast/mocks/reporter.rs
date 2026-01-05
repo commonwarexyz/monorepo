@@ -88,7 +88,7 @@ where
             match msg {
                 Message::Proposal(proposal) => {
                     // Verify properly constructed (not needed in production)
-                    if !proposal.verify(&self.node_verifier) {
+                    if !self.node_verifier.verify_proposal(&proposal) {
                         panic!("Invalid proof");
                     }
 
