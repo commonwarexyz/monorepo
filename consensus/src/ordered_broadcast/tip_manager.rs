@@ -58,7 +58,7 @@ mod tests {
     use super::*;
     use crate::ordered_broadcast::{
         scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
-        types::Chunk,
+        types::{Chunk, ChunkSigner},
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -81,8 +81,6 @@ mod tests {
         height: u64,
         payload: &str,
     ) -> Node<PublicKey, S, Sha256Digest> {
-        use crate::ordered_broadcast::types::{ChunkSigner, ChunkSubject};
-
         let sequencer = fixture.participants[sequencer_idx].clone();
         let digest = Sha256::hash(payload.as_bytes());
         let chunk = Chunk::new(sequencer, height, digest);
@@ -92,8 +90,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(sequencer_idx as u64);
         let private_key = commonware_cryptography::ed25519::PrivateKey::random(&mut rng);
         let mut signer = ChunkSigner::new(b"test", private_key);
-        let subject = ChunkSubject::new(&chunk);
-        let signature = signer.sign(subject);
+        let signature = signer.sign(&chunk);
 
         Node::new(chunk, signature, None)
     }

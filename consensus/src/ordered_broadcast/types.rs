@@ -7,7 +7,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    certificate::{self, Attestation, Namespace, Provider, Scheme, Subject},
+    certificate::{self, Attestation, Namespace, Provider, Scheme},
     Digest, PublicKey, Signer,
 };
 use commonware_utils::{ordered::Set, union};
@@ -184,39 +184,9 @@ impl Namespace for ChunkNamespace {
     }
 }
 
-/// Subject for signing/verifying chunks.
+/// Signer for chunk operations.
 ///
-/// This implements the `Subject` trait to provide a consistent interface
-/// with certificate signing for acks.
-#[derive(Debug, Clone)]
-pub struct ChunkSubject<'a, P: PublicKey, D: Digest> {
-    /// The chunk being signed or verified.
-    pub chunk: &'a Chunk<P, D>,
-}
-
-impl<'a, P: PublicKey, D: Digest> ChunkSubject<'a, P, D> {
-    /// Creates a new ChunkSubject for the given chunk.
-    pub const fn new(chunk: &'a Chunk<P, D>) -> Self {
-        Self { chunk }
-    }
-}
-
-impl<P: PublicKey, D: Digest> certificate::Subject for ChunkSubject<'_, P, D> {
-    type Namespace = ChunkNamespace;
-
-    fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8] {
-        &derived.0
-    }
-
-    fn message(&self) -> Bytes {
-        self.chunk.encode().into()
-    }
-}
-
-/// Signer for chunk/node operations using the Subject pattern.
-///
-/// This provides a certificate-scheme-like interface for sequencer signing,
-/// where the namespace is pre-computed at construction time.
+/// The namespace is pre-computed at construction time.
 #[derive(Clone)]
 pub struct ChunkSigner<C: Signer> {
     signer: C,
@@ -239,21 +209,19 @@ impl<C: Signer> ChunkSigner<C> {
         self.signer.public_key()
     }
 
-    /// Signs a chunk subject and returns the signature.
-    pub fn sign<P, D>(&mut self, subject: ChunkSubject<'_, P, D>) -> C::Signature
+    /// Signs a chunk and returns the signature.
+    pub fn sign<P, D>(&mut self, chunk: &Chunk<P, D>) -> C::Signature
     where
         P: PublicKey,
         D: Digest,
     {
-        let ns = subject.namespace(&self.namespace);
-        self.signer.sign(ns, &subject.message())
+        self.signer.sign(&self.namespace.0, &chunk.encode())
     }
 }
 
-/// Verifier for chunk/node operations using the Subject pattern.
+/// Verifier for chunk operations.
 ///
-/// This provides a certificate-scheme-like interface for verifying sequencer
-/// signatures, where the namespace is pre-computed at construction time.
+/// The namespace is pre-computed at construction time.
 #[derive(Clone)]
 pub struct ChunkVerifier {
     namespace: ChunkNamespace,
@@ -261,8 +229,6 @@ pub struct ChunkVerifier {
 
 impl ChunkVerifier {
     /// Creates a new ChunkVerifier with the given namespace.
-    ///
-    /// The chunk namespace is pre-computed from the base namespace.
     pub fn new(namespace: &[u8]) -> Self {
         Self {
             namespace: ChunkNamespace::derive(namespace),
@@ -272,14 +238,12 @@ impl ChunkVerifier {
     /// Verifies a chunk signature.
     pub fn verify<P: PublicKey, D: Digest>(
         &self,
-        subject: ChunkSubject<'_, P, D>,
+        chunk: &Chunk<P, D>,
         signature: &P::Signature,
     ) -> bool {
-        let ns = subject.namespace(&self.namespace);
-        subject
-            .chunk
+        chunk
             .sequencer
-            .verify(ns, &subject.message(), signature)
+            .verify(&self.namespace.0, &chunk.encode(), signature)
     }
 }
 
@@ -640,8 +604,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         C: Signer<PublicKey = P, Signature = P::Signature>,
     {
         let chunk = Chunk::new(signer.public_key(), height, payload);
-        let subject = ChunkSubject::new(&chunk);
-        let signature = signer.sign(subject);
+        let signature = signer.sign(&chunk);
         Self::new(chunk, signature, parent)
     }
 
@@ -666,8 +629,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         S: scheme::Scheme<P, D>,
     {
         // Verify chunk signature
-        let subject = ChunkSubject::new(&self.chunk);
-        if !verifier.verify(subject, &self.signature) {
+        if !verifier.verify(&self.chunk, &self.signature) {
             return Err(Error::InvalidSequencerSignature);
         }
         let Some(parent) = &self.parent else {
@@ -996,8 +958,7 @@ impl<P: PublicKey, D: Digest> Proposal<P, D> {
     ///
     /// Returns true if the sequencer's signature over the chunk is valid.
     pub fn verify(&self, verifier: &ChunkVerifier) -> bool {
-        let subject = ChunkSubject::new(&self.chunk);
-        verifier.verify(subject, &self.signature)
+        verifier.verify(&self.chunk, &self.signature)
     }
 }
 
