@@ -322,7 +322,7 @@ fn fuzz(input: FuzzInput) {
 
                 FuzzOperation::AppendCloneBlob => {
                     if let Some(ref append) = append_buffer {
-                        let _ = append.clone_blob();
+                        let _ = append.clone_blob().await;
                     }
                 }
 
