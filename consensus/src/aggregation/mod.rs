@@ -570,7 +570,7 @@ mod tests {
         // Test parameters
         let num_validators = 4;
         let skip_height = Height::new(50); // Height where no one will sign
-        let window = 10u64;
+        let window = HeightDelta::new(10);
         let target_height = Height::new(100);
 
         // Generate fixture once (persists across restarts)
@@ -630,7 +630,7 @@ mod tests {
                                 100,
                             )),
                             epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
-                            window: std::num::NonZeroU64::new(window).unwrap(),
+                            window: std::num::NonZeroU64::new(window.get()).unwrap(),
                             activity_timeout: HeightDelta::new(100),
                             journal_partition: format!("unsigned_height_test_{participant}"),
                             journal_write_buffer: NZUsize!(4096),
@@ -649,7 +649,7 @@ mod tests {
                 loop {
                     if let Some((tip_height, _)) = reporter_mailbox.get_tip().await {
                         debug!(%tip_height, %skip_height, %target_height, "reporter status");
-                        if tip_height.get() >= skip_height.get() + window - 1 {
+                        if tip_height >= skip_height.saturating_add(window).previous().unwrap() {
                             // max we can proceed before item confirmed
                             return;
                         }
@@ -1078,7 +1078,7 @@ mod tests {
                     .get_tip()
                     .await
                     .unwrap_or((Height::zero(), Epoch::zero()));
-                if tip > Height::zero() {
+                if !tip.is_zero() {
                     any_consensus = true;
                     tracing::warn!(
                         ?validator_pk,
