@@ -255,17 +255,12 @@ fn fuzz(data: FuzzInput) {
                 CurrentOperation::KeyValueProof { key } => {
                     let k = Key::new(*key);
 
-                    // Commit first to get Durable state (key_value_proof requires Durable)
-                    let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    uncommitted_ops = 0;
-                    let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
-                    last_committed_op_count = clean_db.op_count();
+                    let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
+                    let current_root = merkleized_db.root();
 
-                    let current_root = clean_db.root();
-
-                    match clean_db.key_value_proof(&mut hasher, k.clone()).await {
+                    match merkleized_db.key_value_proof(&mut hasher, k.clone()).await {
                         Ok(proof) => {
-                            let value = clean_db.get(&k).await.expect("get should not fail").expect("key should exist");
+                            let value = merkleized_db.get(&k).await.expect("get should not fail").expect("key should exist");
                             let verification_result = Current::<deterministic::Context, _, _, _, TwoCap, _>::verify_key_value_proof(
                                 &mut hasher,
                                 k,
@@ -285,7 +280,7 @@ fn fuzz(data: FuzzInput) {
                             panic!("Unexpected error during key value proof generation: {e:?}");
                         }
                     }
-                    db = clean_db.into_mutable();
+                    db = merkleized_db.into_mutable();
                 }
             }
         }
