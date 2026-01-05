@@ -280,8 +280,8 @@ impl<B: Blob> Blob for Append<B> {
         // Acquire buffer lock first.
         // NOTE: We MUST acquire the buffer lock before the blob lock to avoid deadlocks with
         // `append`, which acquires buffer then blob (via `flush_internal`).
-        let mut guard = self.buffer.write().await;
-        let (buffer, blob_size) = &mut *guard;
+        let mut buf_guard = self.buffer.write().await;
+        let (buffer, blob_size) = &mut *buf_guard;
 
         let flush_data = self.prepare_flush_data(buffer, *blob_size).await;
 
