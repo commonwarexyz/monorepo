@@ -2508,15 +2508,6 @@ mod tests {
         no_recertification_after_replay::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    /// Tests that certification can proceed even after timeout triggers nullify.
-    ///
-    /// Scenario:
-    /// 1. Voter times out waiting for notarization -> broadcasts nullify
-    /// 2. Later receives a notarization certificate
-    /// 3. Certification should still happen and view should advance
-    ///
-    /// This prevents a liveness deadlock where participants that timeout before
-    /// receiving notarization get stuck waiting for nullification quorum.
     /// Tests certification after: timeout -> receive notarization -> certify.
     /// This test does NOT send a notarize vote first (we timeout before receiving a proposal).
     fn certification_after_timeout<S, F>(mut fixture: F)
