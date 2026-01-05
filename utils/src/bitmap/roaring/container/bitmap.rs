@@ -265,21 +265,16 @@ impl Bitmap {
     pub fn or_new(a: &Self, b: &Self) -> Self {
         let mut words = [0u64; WORDS];
         let mut cardinality = 0u32;
-        // SAFETY: WORDS is 1024 which is divisible by 4, and we only access
-        // indices 0..WORDS which are all valid for the fixed-size arrays.
-        unsafe {
-            for i in (0..WORDS).step_by(4) {
-                let w0 = *a.words.get_unchecked(i) | *b.words.get_unchecked(i);
-                let w1 = *a.words.get_unchecked(i + 1) | *b.words.get_unchecked(i + 1);
-                let w2 = *a.words.get_unchecked(i + 2) | *b.words.get_unchecked(i + 2);
-                let w3 = *a.words.get_unchecked(i + 3) | *b.words.get_unchecked(i + 3);
-                *words.get_unchecked_mut(i) = w0;
-                *words.get_unchecked_mut(i + 1) = w1;
-                *words.get_unchecked_mut(i + 2) = w2;
-                *words.get_unchecked_mut(i + 3) = w3;
-                cardinality +=
-                    w0.count_ones() + w1.count_ones() + w2.count_ones() + w3.count_ones();
-            }
+        for i in (0..WORDS).step_by(4) {
+            let w0 = a.words[i] | b.words[i];
+            let w1 = a.words[i + 1] | b.words[i + 1];
+            let w2 = a.words[i + 2] | b.words[i + 2];
+            let w3 = a.words[i + 3] | b.words[i + 3];
+            words[i] = w0;
+            words[i + 1] = w1;
+            words[i + 2] = w2;
+            words[i + 3] = w3;
+            cardinality += w0.count_ones() + w1.count_ones() + w2.count_ones() + w3.count_ones();
         }
         Self { words, cardinality }
     }
@@ -290,21 +285,16 @@ impl Bitmap {
     pub fn and_new(a: &Self, b: &Self) -> Self {
         let mut words = [0u64; WORDS];
         let mut cardinality = 0u32;
-        // SAFETY: WORDS is 1024 which is divisible by 4, and we only access
-        // indices 0..WORDS which are all valid for the fixed-size arrays.
-        unsafe {
-            for i in (0..WORDS).step_by(4) {
-                let w0 = *a.words.get_unchecked(i) & *b.words.get_unchecked(i);
-                let w1 = *a.words.get_unchecked(i + 1) & *b.words.get_unchecked(i + 1);
-                let w2 = *a.words.get_unchecked(i + 2) & *b.words.get_unchecked(i + 2);
-                let w3 = *a.words.get_unchecked(i + 3) & *b.words.get_unchecked(i + 3);
-                *words.get_unchecked_mut(i) = w0;
-                *words.get_unchecked_mut(i + 1) = w1;
-                *words.get_unchecked_mut(i + 2) = w2;
-                *words.get_unchecked_mut(i + 3) = w3;
-                cardinality +=
-                    w0.count_ones() + w1.count_ones() + w2.count_ones() + w3.count_ones();
-            }
+        for i in (0..WORDS).step_by(4) {
+            let w0 = a.words[i] & b.words[i];
+            let w1 = a.words[i + 1] & b.words[i + 1];
+            let w2 = a.words[i + 2] & b.words[i + 2];
+            let w3 = a.words[i + 3] & b.words[i + 3];
+            words[i] = w0;
+            words[i + 1] = w1;
+            words[i + 2] = w2;
+            words[i + 3] = w3;
+            cardinality += w0.count_ones() + w1.count_ones() + w2.count_ones() + w3.count_ones();
         }
         Self { words, cardinality }
     }
@@ -315,21 +305,16 @@ impl Bitmap {
     pub fn and_not_new(a: &Self, b: &Self) -> Self {
         let mut words = [0u64; WORDS];
         let mut cardinality = 0u32;
-        // SAFETY: WORDS is 1024 which is divisible by 4, and we only access
-        // indices 0..WORDS which are all valid for the fixed-size arrays.
-        unsafe {
-            for i in (0..WORDS).step_by(4) {
-                let w0 = *a.words.get_unchecked(i) & !*b.words.get_unchecked(i);
-                let w1 = *a.words.get_unchecked(i + 1) & !*b.words.get_unchecked(i + 1);
-                let w2 = *a.words.get_unchecked(i + 2) & !*b.words.get_unchecked(i + 2);
-                let w3 = *a.words.get_unchecked(i + 3) & !*b.words.get_unchecked(i + 3);
-                *words.get_unchecked_mut(i) = w0;
-                *words.get_unchecked_mut(i + 1) = w1;
-                *words.get_unchecked_mut(i + 2) = w2;
-                *words.get_unchecked_mut(i + 3) = w3;
-                cardinality +=
-                    w0.count_ones() + w1.count_ones() + w2.count_ones() + w3.count_ones();
-            }
+        for i in (0..WORDS).step_by(4) {
+            let w0 = a.words[i] & !b.words[i];
+            let w1 = a.words[i + 1] & !b.words[i + 1];
+            let w2 = a.words[i + 2] & !b.words[i + 2];
+            let w3 = a.words[i + 3] & !b.words[i + 3];
+            words[i] = w0;
+            words[i + 1] = w1;
+            words[i + 2] = w2;
+            words[i + 3] = w3;
+            cardinality += w0.count_ones() + w1.count_ones() + w2.count_ones() + w3.count_ones();
         }
         Self { words, cardinality }
     }

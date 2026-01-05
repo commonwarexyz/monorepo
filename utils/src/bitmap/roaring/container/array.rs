@@ -240,61 +240,32 @@ impl Array {
             let a_len = a.len();
             let b_len = b.len();
 
-            // SAFETY: We pre-allocate max_size and only write up to that many elements.
-            // We check bounds before each unchecked access.
-            unsafe {
-                let mut i = 0;
-                let mut j = 0;
-                let result_ptr: *mut u16 = result.as_mut_ptr();
-                let mut out = 0;
+            let mut i = 0;
+            let mut j = 0;
 
-                while i < a_len && j < b_len {
-                    let av = *a.get_unchecked(i);
-                    let bv = *b.get_unchecked(j);
-                    // Use cmp ordering for better codegen
-                    match av.cmp(&bv) {
-                        core::cmp::Ordering::Less => {
-                            *result_ptr.add(out) = av;
-                            out += 1;
-                            i += 1;
-                        }
-                        core::cmp::Ordering::Greater => {
-                            *result_ptr.add(out) = bv;
-                            out += 1;
-                            j += 1;
-                        }
-                        core::cmp::Ordering::Equal => {
-                            *result_ptr.add(out) = av;
-                            out += 1;
-                            i += 1;
-                            j += 1;
-                        }
+            while i < a_len && j < b_len {
+                let av = a[i];
+                let bv = b[j];
+                match av.cmp(&bv) {
+                    core::cmp::Ordering::Less => {
+                        result.push(av);
+                        i += 1;
+                    }
+                    core::cmp::Ordering::Greater => {
+                        result.push(bv);
+                        j += 1;
+                    }
+                    core::cmp::Ordering::Equal => {
+                        result.push(av);
+                        i += 1;
+                        j += 1;
                     }
                 }
-
-                // Copy remaining elements using memcpy
-                let a_remaining = a_len - i;
-                if a_remaining > 0 {
-                    core::ptr::copy_nonoverlapping(
-                        a.as_ptr().add(i),
-                        result_ptr.add(out),
-                        a_remaining,
-                    );
-                    out += a_remaining;
-                }
-
-                let b_remaining = b_len - j;
-                if b_remaining > 0 {
-                    core::ptr::copy_nonoverlapping(
-                        b.as_ptr().add(j),
-                        result_ptr.add(out),
-                        b_remaining,
-                    );
-                    out += b_remaining;
-                }
-
-                result.set_len(out);
             }
+
+            // Copy remaining elements
+            result.extend_from_slice(&a[i..]);
+            result.extend_from_slice(&b[j..]);
 
             let count = result.len();
             return (Self { values: result }, count);
@@ -351,35 +322,25 @@ impl Array {
             let a_len = a.len();
             let b_len = b.len();
 
-            // SAFETY: We pre-allocate min_size and only write up to that many elements.
-            // We check bounds before each unchecked access.
-            unsafe {
-                let mut i = 0;
-                let mut j = 0;
-                let result_ptr: *mut u16 = result.as_mut_ptr();
-                let mut out = 0;
+            let mut i = 0;
+            let mut j = 0;
 
-                while i < a_len && j < b_len {
-                    let av = *a.get_unchecked(i);
-                    let bv = *b.get_unchecked(j);
-                    // Use cmp ordering for better codegen
-                    match av.cmp(&bv) {
-                        core::cmp::Ordering::Less => {
-                            i += 1;
-                        }
-                        core::cmp::Ordering::Greater => {
-                            j += 1;
-                        }
-                        core::cmp::Ordering::Equal => {
-                            *result_ptr.add(out) = av;
-                            out += 1;
-                            i += 1;
-                            j += 1;
-                        }
+            while i < a_len && j < b_len {
+                let av = a[i];
+                let bv = b[j];
+                match av.cmp(&bv) {
+                    core::cmp::Ordering::Less => {
+                        i += 1;
+                    }
+                    core::cmp::Ordering::Greater => {
+                        j += 1;
+                    }
+                    core::cmp::Ordering::Equal => {
+                        result.push(av);
+                        i += 1;
+                        j += 1;
                     }
                 }
-
-                result.set_len(out);
             }
 
             let count = result.len();
@@ -433,47 +394,29 @@ impl Array {
             let a_len = a.len();
             let b_len = b.len();
 
-            // SAFETY: We pre-allocate a.len() and only write up to that many elements.
-            // We check bounds before each unchecked access.
-            unsafe {
-                let mut i = 0;
-                let mut j = 0;
-                let result_ptr: *mut u16 = result.as_mut_ptr();
-                let mut out = 0;
+            let mut i = 0;
+            let mut j = 0;
 
-                while i < a_len && j < b_len {
-                    let av = *a.get_unchecked(i);
-                    let bv = *b.get_unchecked(j);
-                    // Use cmp ordering to reduce branches
-                    match av.cmp(&bv) {
-                        core::cmp::Ordering::Less => {
-                            *result_ptr.add(out) = av;
-                            out += 1;
-                            i += 1;
-                        }
-                        core::cmp::Ordering::Greater => {
-                            j += 1;
-                        }
-                        core::cmp::Ordering::Equal => {
-                            i += 1;
-                            j += 1;
-                        }
+            while i < a_len && j < b_len {
+                let av = a[i];
+                let bv = b[j];
+                match av.cmp(&bv) {
+                    core::cmp::Ordering::Less => {
+                        result.push(av);
+                        i += 1;
+                    }
+                    core::cmp::Ordering::Greater => {
+                        j += 1;
+                    }
+                    core::cmp::Ordering::Equal => {
+                        i += 1;
+                        j += 1;
                     }
                 }
-
-                // Copy remaining elements from a using memcpy
-                let a_remaining = a_len - i;
-                if a_remaining > 0 {
-                    core::ptr::copy_nonoverlapping(
-                        a.as_ptr().add(i),
-                        result_ptr.add(out),
-                        a_remaining,
-                    );
-                    out += a_remaining;
-                }
-
-                result.set_len(out);
             }
+
+            // Copy remaining elements from a
+            result.extend_from_slice(&a[i..]);
 
             let count = result.len();
             return (Self { values: result }, count);
