@@ -14,36 +14,11 @@
 
 use crate::bls12381::primitives::group::Scalar;
 use core::{
-    cmp::Ordering,
     fmt::{Debug, Display, Formatter},
     mem::ManuallyDrop,
 };
-use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeLess};
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
-
-/// Constant-time lexicographic comparison for equal-length byte slices.
-///
-/// # Panics
-///
-/// Panics if `a` and `b` have different lengths.
-#[inline]
-fn ct_cmp_bytes(a: &[u8], b: &[u8]) -> Ordering {
-    assert_eq!(a.len(), b.len());
-
-    let mut result = 0;
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        let is_eq = result.ct_eq(&0);
-        result = u8::conditional_select(&result, &1, is_eq & x.ct_lt(&y));
-        result = u8::conditional_select(&result, &2, is_eq & y.ct_lt(&x));
-    }
-
-    match result {
-        0 => Ordering::Equal,
-        1 => Ordering::Less,
-        2 => Ordering::Greater,
-        _ => unreachable!(),
-    }
-}
 
 /// Zeroize memory at the given pointer using volatile writes.
 ///
@@ -145,18 +120,6 @@ impl<const N: usize> PartialEq for Secret<[u8; N]> {
 
 impl<const N: usize> Eq for Secret<[u8; N]> {}
 
-impl<const N: usize> PartialOrd for Secret<[u8; N]> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<const N: usize> Ord for Secret<[u8; N]> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.expose(|a| other.expose(|b| ct_cmp_bytes(a, b)))
-    }
-}
-
 impl PartialEq for Secret<Scalar> {
     fn eq(&self, other: &Self) -> bool {
         self.expose(|a| other.expose(|b| a.as_slice().ct_eq(&b.as_slice()).into()))
@@ -165,24 +128,11 @@ impl PartialEq for Secret<Scalar> {
 
 impl Eq for Secret<Scalar> {}
 
-impl PartialOrd for Secret<Scalar> {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Secret<Scalar> {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.expose(|a| other.expose(|b| ct_cmp_bytes(&a.as_slice(), &b.as_slice())))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
-    use commonware_math::algebra::{Additive, Random, Ring};
-    use core::cmp::Ordering;
+    use commonware_math::algebra::Random;
     use rand::rngs::OsRng;
 
     #[test]
@@ -233,29 +183,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ordering() {
-        // Test the specific bug case: [2, 1] vs [1, 2]
-        let a = Secret::new([2u8, 1]);
-        let b = Secret::new([1u8, 2]);
-        assert_eq!(a.cmp(&b), Ordering::Greater); // [2, 1] > [1, 2] lexicographically
-
-        // Additional ordering tests
-        let c = Secret::new([1u8, 1]);
-        let d = Secret::new([1u8, 2]);
-        assert_eq!(c.cmp(&d), Ordering::Less);
-
-        let e = Secret::new([1u8, 2]);
-        let f = Secret::new([1u8, 2]);
-        assert_eq!(e.cmp(&f), Ordering::Equal);
-
-        // Single byte
-        let g = Secret::new([0u8]);
-        let h = Secret::new([255u8]);
-        assert_eq!(g.cmp(&h), Ordering::Less);
-        assert_eq!(h.cmp(&g), Ordering::Greater);
-    }
-
-    #[test]
     fn test_multiple_expose() {
         let secret = Secret::new([42u8; 32]);
 
@@ -268,22 +195,6 @@ mod tests {
         secret.expose(|v| {
             assert_eq!(v[31], 42);
         });
-    }
-
-    #[test]
-    fn test_partial_ord() {
-        let s1 = Secret::new([1u8, 2]);
-        let s2 = Secret::new([1u8, 3]);
-        let s3 = Secret::new([1u8, 2]);
-
-        assert!(s1 < s2);
-        assert!(s2 > s1);
-        assert!(s1 <= s3);
-        assert!(s1 >= s3);
-
-        assert_eq!(s1.partial_cmp(&s2), Some(core::cmp::Ordering::Less));
-        assert_eq!(s2.partial_cmp(&s1), Some(core::cmp::Ordering::Greater));
-        assert_eq!(s1.partial_cmp(&s3), Some(core::cmp::Ordering::Equal));
     }
 
     #[test]
@@ -300,21 +211,5 @@ mod tests {
         assert_eq!(s1, s2);
         // Different scalars should (very likely) be different
         assert_ne!(s1, s3);
-    }
-
-    #[test]
-    fn test_scalar_ordering() {
-        let zero = Scalar::zero();
-        let one = Scalar::one();
-
-        let s_zero = Secret::new(zero);
-        let s_one = Secret::new(one);
-
-        // Zero and one should compare consistently
-        assert_ne!(s_zero, s_one);
-        // Ordering should be deterministic
-        let cmp1 = s_zero.cmp(&s_one);
-        let cmp2 = s_zero.cmp(&s_one);
-        assert_eq!(cmp1, cmp2);
     }
 }

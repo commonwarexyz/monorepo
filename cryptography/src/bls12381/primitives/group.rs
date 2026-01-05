@@ -493,7 +493,7 @@ impl Random for Scalar {
 }
 
 /// A share of a threshold signing key.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
@@ -1141,7 +1141,7 @@ mod tests {
     use commonware_math::algebra::test_suites;
     use commonware_utils::test_rng;
     use proptest::prelude::*;
-    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::collections::{BTreeSet, HashMap};
 
     impl Arbitrary for Scalar {
         type Parameters = ();
@@ -1455,8 +1455,6 @@ mod tests {
         let mut scalar_set = BTreeSet::new();
         let mut g1_set = BTreeSet::new();
         let mut g2_set = BTreeSet::new();
-        #[allow(clippy::mutable_key_type)]
-        let mut share_set = BTreeSet::new();
         while scalar_set.len() < NUM_ITEMS {
             let scalar = Scalar::random(&mut rng);
             let g1 = G1::generator() * &scalar;
@@ -1466,14 +1464,12 @@ mod tests {
             scalar_set.insert(scalar);
             g1_set.insert(g1);
             g2_set.insert(g2);
-            share_set.insert(share);
         }
 
         // Verify that the sets contain the expected number of unique items.
         assert_eq!(scalar_set.len(), NUM_ITEMS);
         assert_eq!(g1_set.len(), NUM_ITEMS);
         assert_eq!(g2_set.len(), NUM_ITEMS);
-        assert_eq!(share_set.len(), NUM_ITEMS);
 
         // Verify that `BTreeSet` iteration is sorted, which relies on `Ord`.
         let scalars: Vec<_> = scalar_set.iter().collect();
@@ -1482,21 +1478,16 @@ mod tests {
         assert!(g1s.windows(2).all(|w| w[0] <= w[1]));
         let g2s: Vec<_> = g2_set.iter().collect();
         assert!(g2s.windows(2).all(|w| w[0] <= w[1]));
-        let shares: Vec<_> = share_set.iter().collect();
-        assert!(shares.windows(2).all(|w| w[0] <= w[1]));
 
         // Test that we can use these types as keys in hash maps, which relies on `Hash` and `Eq`.
         let scalar_map: HashMap<_, _> = scalar_set.iter().cloned().zip(0..).collect();
         let g1_map: HashMap<_, _> = g1_set.iter().cloned().zip(0..).collect();
         let g2_map: HashMap<_, _> = g2_set.iter().cloned().zip(0..).collect();
-        #[allow(clippy::mutable_key_type)]
-        let share_map: BTreeMap<_, _> = share_set.iter().cloned().zip(0..).collect();
 
         // Verify that the maps contain the expected number of unique items.
         assert_eq!(scalar_map.len(), NUM_ITEMS);
         assert_eq!(g1_map.len(), NUM_ITEMS);
         assert_eq!(g2_map.len(), NUM_ITEMS);
-        assert_eq!(share_map.len(), NUM_ITEMS);
     }
 
     #[test]

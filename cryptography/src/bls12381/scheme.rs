@@ -87,18 +87,6 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = group::PRIVATE_KEY_LENGTH;
 }
 
-impl Ord for PrivateKey {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.cmp(&other.raw)
-    }
-}
-
-impl PartialOrd for PrivateKey {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 impl From<Scalar> for PrivateKey {
     fn from(key: Scalar) -> Self {
         let raw = key.encode_fixed();

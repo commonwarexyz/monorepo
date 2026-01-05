@@ -76,18 +76,6 @@ impl FixedSize for PrivateKeyInner {
     const SIZE: usize = PRIVATE_KEY_LENGTH;
 }
 
-impl Ord for PrivateKeyInner {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.cmp(&other.raw)
-    }
-}
-
-impl PartialOrd for PrivateKeyInner {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 impl From<SigningKey> for PrivateKeyInner {
     fn from(signer: SigningKey) -> Self {
         Self::new(signer)
@@ -242,18 +230,6 @@ macro_rules! impl_private_key_wrapper {
 
         impl commonware_codec::FixedSize for $name {
             const SIZE: usize = PRIVATE_KEY_LENGTH;
-        }
-
-        impl Ord for $name {
-            fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-                self.0.cmp(&other.0)
-            }
-        }
-
-        impl PartialOrd for $name {
-            fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-                Some(self.cmp(other))
-            }
         }
 
         impl From<p256::ecdsa::SigningKey> for $name {

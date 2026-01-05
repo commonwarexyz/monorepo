@@ -103,18 +103,6 @@ impl PartialEq for PrivateKey {
     }
 }
 
-impl Ord for PrivateKey {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.cmp(&other.raw)
-    }
-}
-
-impl PartialOrd for PrivateKey {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 impl From<ed25519_consensus::SigningKey> for PrivateKey {
     fn from(key: ed25519_consensus::SigningKey) -> Self {
         let raw = key.to_bytes();
