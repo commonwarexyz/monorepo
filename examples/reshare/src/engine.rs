@@ -12,7 +12,7 @@ use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
     simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
-    types::ViewDelta,
+    types::{FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
     bls12381::{
@@ -28,7 +28,7 @@ use commonware_runtime::{
 use commonware_storage::archive::immutable;
 use commonware_utils::{ordered::Set, union, NZUsize, NZU32, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{marker::PhantomData, num::NonZero, time::Instant};
 use tracing::{error, info, warn};
 
@@ -68,7 +68,7 @@ where
 
 pub struct Engine<E, C, P, B, H, V, S, L>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -91,6 +91,7 @@ where
         Provider<S, C>,
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
+        FixedEpocher,
     >,
     #[allow(clippy::type_complexity)]
     orchestrator: orchestrator::Actor<
@@ -99,7 +100,7 @@ where
         V,
         C,
         H,
-        Marshaled<E, S, Application<E, S, H, C, V>, Block<H, C, V>>,
+        Marshaled<E, S, Application<E, S, H, C, V>, Block<H, C, V>, FixedEpocher>,
         S,
         L,
     >,
@@ -108,7 +109,7 @@ where
 
 impl<E, C, P, B, H, V, S, L> Engine<E, C, P, B, H, V, S, L>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -217,14 +218,24 @@ where
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let provider = Provider::new(config.signer.clone());
-        let (marshal, marshal_mailbox) = marshal::Actor::init(
+        // Create the certificate verifier from the initial output (if available).
+        // This allows epoch-independent certificate verification after the DKG is complete.
+        let certificate_verifier = config.output.as_ref().and_then(|output| {
+            <Provider<S, C> as EpochProvider>::certificate_verifier(&consensus_namespace, output)
+        });
+        let provider = Provider::new(
+            consensus_namespace.clone(),
+            config.signer.clone(),
+            certificate_verifier,
+        );
+
+        let (marshal, marshal_mailbox, _processed_height) = marshal::Actor::init(
             context.with_label("marshal"),
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
                 provider: provider.clone(),
-                epoch_length: BLOCKS_PER_EPOCH,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
@@ -232,7 +243,6 @@ where
                         .get()
                         .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
                 ),
-                namespace: consensus_namespace.clone(),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
                 buffer_pool: buffer_pool.clone(),
                 replay_buffer: REPLAY_BUFFER,
@@ -247,7 +257,7 @@ where
             context.with_label("application"),
             Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
-            BLOCKS_PER_EPOCH,
+            FixedEpocher::new(BLOCKS_PER_EPOCH),
         );
 
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
@@ -257,7 +267,6 @@ where
                 application,
                 provider,
                 marshal: marshal_mailbox,
-                namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
@@ -301,10 +310,6 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        orchestrator: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
         marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
@@ -319,7 +324,6 @@ where
                 resolver,
                 broadcast,
                 dkg,
-                orchestrator,
                 marshal,
                 callback
             )
@@ -350,10 +354,6 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        orchestrator: (
-            impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
-        ),
         marshal: (
             mpsc::Receiver<handler::Message<Block<H, C, V>>>,
             commonware_resolver::p2p::Mailbox<handler::Request<Block<H, C, V>>, C::PublicKey>,
@@ -371,9 +371,7 @@ where
         let marshal_handle = self
             .marshal
             .start(self.dkg_mailbox, self.buffered_mailbox, marshal);
-        let orchestrator_handle =
-            self.orchestrator
-                .start(votes, certificates, resolver, orchestrator);
+        let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
 
         if let Err(e) = try_join_all(vec![
             dkg_handle,

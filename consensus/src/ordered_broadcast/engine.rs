@@ -10,7 +10,8 @@
 use super::{
     metrics, scheme,
     types::{
-        Ack, Activity, Chunk, Context, Error, Lock, Node, Parent, Proposal, SequencersProvider,
+        Ack, Activity, Chunk, ChunkSigner, ChunkVerifier, Context, Error, Lock, Node, Parent,
+        Proposal, SequencersProvider,
     },
     AckManager, Config, TipManager,
 };
@@ -44,7 +45,7 @@ use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
 };
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -62,7 +63,7 @@ struct Verify<C: PublicKey, D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
+    E: Clock + Spawner + CryptoRngCore + Storage + Metrics,
     C: Signer,
     S: SequencersProvider<PublicKey = C::PublicKey>,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
@@ -76,7 +77,7 @@ pub struct Engine<
     // Interfaces
     ////////////////////////////////////////
     context: ContextCell<E>,
-    sequencer_signer: Option<C>,
+    sequencer_signer: Option<ChunkSigner<C>>,
     sequencers_provider: S,
     validators_provider: P,
     automaton: A,
@@ -88,8 +89,8 @@ pub struct Engine<
     // Namespace Constants
     ////////////////////////////////////////
 
-    // The namespace signatures.
-    namespace: Vec<u8>,
+    // Verifier for chunk signatures.
+    chunk_verifier: ChunkVerifier,
 
     ////////////////////////////////////////
     // Timeouts
@@ -198,7 +199,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
+        E: Clock + Spawner + CryptoRngCore + Storage + Metrics,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
@@ -223,7 +224,7 @@ impl<
             relay: cfg.relay,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
-            namespace: cfg.namespace,
+            chunk_verifier: cfg.chunk_verifier,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
@@ -480,10 +481,10 @@ impl<
             }
         }
 
-        // Close all journals, regardless of how we exit the loop
+        // Sync and drop all journals, regardless of how we exit the loop
         self.pending_verifies.cancel_all();
         while let Some((_, journal)) = self.journals.pop_first() {
-            journal.close().await.expect("unable to close journal");
+            journal.sync_all().await.expect("unable to sync journal");
         }
     }
 
@@ -533,12 +534,7 @@ impl<
         };
 
         // Construct vote (if a validator)
-        let Some(ack) = Ack::sign(
-            &self.namespace,
-            scheme.as_ref(),
-            tip.chunk.clone(),
-            self.epoch,
-        ) else {
+        let Some(ack) = Ack::sign(scheme.as_ref(), tip.chunk.clone(), self.epoch) else {
             return Err(Error::NotSigner(self.epoch));
         };
 
@@ -750,7 +746,7 @@ impl<
         }
 
         // Construct new node
-        let node = Node::sign(&self.namespace, signer, height, payload, parent);
+        let node = Node::sign(signer, height, payload, parent);
 
         // Deal with the chunk as if it were received over the network
         self.handle_node(&node).await;
@@ -887,7 +883,7 @@ impl<
         // Verify the node
         node.verify(
             &mut self.context,
-            &self.namespace,
+            &self.chunk_verifier,
             &self.validators_provider,
         )
     }
@@ -897,7 +893,7 @@ impl<
     /// Returns the chunk, epoch, and vote if the ack is valid.
     /// Returns an error if the ack is invalid.
     fn validate_ack(
-        &self,
+        &mut self,
         ack: &Ack<C::PublicKey, P::Scheme, D>,
         sender: &<P::Scheme as Scheme>::PublicKey,
     ) -> Result<(), Error> {
@@ -946,7 +942,7 @@ impl<
         }
 
         // Validate the vote signature
-        if !ack.verify(&self.namespace, scheme.as_ref()) {
+        if !ack.verify(&mut self.context, scheme.as_ref()) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -1018,7 +1014,7 @@ impl<
             write_buffer: self.journal_write_buffer,
         };
         let journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
-            self.context.with_label("journal").into(),
+            self.context.with_label("journal").into_present(),
             cfg,
         )
         .await

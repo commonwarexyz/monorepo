@@ -206,21 +206,21 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.15.0"
+version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5932a7d9d28b0d2ea34c6b3779d35e3dd6f6345317c34e73438c4f1f29144151"
+checksum = "6a88aab2464f1f25453baa7a07c84c5b7684e274054ba06817f382357f77a288"
 dependencies = [
  "aws-lc-sys",
+ "untrusted 0.7.1",
  "zeroize",
 ]
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.33.0"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1826f2e4cfc2cd19ee53c42fbf68e2f81ec21108e0b7ecf6a71cf062137360fc"
+checksum = "b45afffdee1e7c9126814751f88dddc747f41d91da16c9551a0f1e8a11e788a1"
 dependencies = [
- "bindgen",
  "cc",
  "cmake",
  "dunce",
@@ -630,26 +630,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55248b47b0caf0546f7988906588779981c43bb1bc9d0c44087278f80cdb44ba"
 
 [[package]]
-name = "bindgen"
-version = "0.72.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
-dependencies = [
- "bitflags",
- "cexpr",
- "clang-sys",
- "itertools 0.13.0",
- "log",
- "prettyplease",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash",
- "shlex",
- "syn",
-]
-
-[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -777,15 +757,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cexpr"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
-dependencies = [
- "nom",
-]
-
-[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -873,17 +844,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clang-sys"
-version = "1.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
-dependencies = [
- "glob",
- "libc",
- "libloading",
-]
-
-[[package]]
 name = "clap"
 version = "4.5.51"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -949,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-bridge"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "bytes",
  "clap",
@@ -966,13 +926,14 @@ dependencies = [
  "futures",
  "prometheus-client",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "commonware-broadcast"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -990,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast-fuzz"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1006,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-chat"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "chrono",
  "clap",
@@ -1026,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1039,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec-fuzz"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1051,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1075,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding-fuzz"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "commonware-coding",
@@ -1086,7 +1047,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-collector"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1107,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-collector-fuzz"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1124,7 +1085,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-conformance"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "commonware-conformance-macros",
  "commonware-macros",
@@ -1136,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-conformance-macros"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1145,7 +1106,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1166,6 +1127,7 @@ dependencies = [
  "pin-project",
  "prometheus-client",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "rand_distr",
  "rstest",
  "thiserror 2.0.17",
@@ -1175,7 +1137,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus-fuzz"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1191,16 +1153,18 @@ dependencies = [
  "libfuzzer-sys",
  "proptest",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "commonware-cryptography"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "anyhow",
  "arbitrary",
+ "aws-lc-rs",
  "blake3",
  "blst",
  "bytes",
@@ -1229,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography-fuzz"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -1247,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-deployer"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
@@ -1266,7 +1230,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-estimator"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "bytes",
  "clap",
@@ -1289,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-flood"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -1311,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-log"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "bytes",
  "chrono",
@@ -1335,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "futures",
  "futures-timer",
@@ -1350,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-math"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1366,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1386,6 +1350,7 @@ dependencies = [
  "num-traits",
  "prometheus-client",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "rand_distr",
  "thiserror 2.0.17",
  "tracing",
@@ -1394,7 +1359,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p-fuzz"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1411,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-reshare"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1440,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-resolver"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1463,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "async-lock",
  "axum",
@@ -1497,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime-fuzz"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "commonware-runtime",
@@ -1507,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "anyhow",
  "arbitrary",
@@ -1537,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage-fuzz"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1553,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -1573,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream-fuzz"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "chacha20poly1305",
@@ -1589,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-sync"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "bytes",
  "clap",
@@ -1612,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1635,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils-fuzz"
-version = "0.0.63"
+version = "0.0.64"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -3102,16 +3067,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libloading"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link 0.2.1",
-]
-
-[[package]]
 name = "libm"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3681,16 +3636,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prettyplease"
-version = "0.2.37"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
-dependencies = [
- "proc-macro2",
- "syn",
-]
-
-[[package]]
 name = "primeorder"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4144,7 +4089,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.2.16",
  "libc",
- "untrusted",
+ "untrusted 0.9.0",
  "windows-sys 0.52.0",
 ]
 
@@ -4295,7 +4240,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b6275d1ee7a1cd780b64aca7726599a1dbc893b1e64144529e55c3c2f745765"
 dependencies = [
  "ring",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -4307,7 +4252,7 @@ dependencies = [
  "aws-lc-rs",
  "ring",
  "rustls-pki-types",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -4365,7 +4310,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da046153aa2352493d6cb7da4b6e5c0c057d8a1d0a9aa8560baffdd945acd414"
 dependencies = [
  "ring",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -5288,6 +5233,12 @@ name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
+name = "untrusted"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
 
 [[package]]
 name = "untrusted"

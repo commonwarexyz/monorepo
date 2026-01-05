@@ -437,6 +437,7 @@ mod tests {
     use crate::ed25519;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
+    use commonware_utils::test_rng;
     use rand::rngs::OsRng;
 
     fn test_sign_and_verify(
@@ -593,7 +594,7 @@ mod tests {
     fn bad_signature() {
         let (private_key, public_key, message, _) = vector_1();
         let private_key_2 = PrivateKey::random(&mut OsRng);
-        let bad_signature = private_key_2.sign_inner(None, message.as_ref());
+        let bad_signature = private_key_2.sign_inner(None, &message);
         test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }
 
@@ -781,7 +782,7 @@ mod tests {
         let mut batch = ed25519::Batch::new();
         assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
         assert!(batch.add_inner(None, &v2.2, &v2.1, &v2.3));
-        assert!(batch.verify(&mut rand::thread_rng()));
+        assert!(batch.verify(&mut test_rng()));
     }
 
     #[test]
@@ -799,7 +800,7 @@ mod tests {
             &v2.1,
             &Signature::decode(bad_signature.as_ref()).unwrap()
         ));
-        assert!(!batch.verify(&mut rand::thread_rng()));
+        assert!(!batch.verify(&mut test_rng()));
     }
 
     #[test]

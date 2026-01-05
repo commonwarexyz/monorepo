@@ -10,11 +10,12 @@ use commonware_consensus::{
     types::{Epoch, Round, View},
     Epochable, Viewable,
 };
-use commonware_cryptography::sha256::Digest as Sha256Digest;
+use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
-use rand::{CryptoRng, Rng};
+use commonware_utils::ordered::Set;
+use rand_core::CryptoRngCore;
 use std::{collections::VecDeque, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_millis(100);
@@ -31,10 +32,11 @@ pub enum Mutation {
 }
 
 /// Byzantine actor that disrupts consensus by sending malformed/mutated messages.
-pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme<Sha256Digest>> {
+pub struct Disrupter<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>> {
     context: E,
+    validator: PublicKey,
     scheme: S,
-    namespace: Vec<u8>,
+    participants: Set<PublicKey>,
     fuzz_input: FuzzInput,
     last_vote: u64,
     last_finalized: u64,
@@ -43,11 +45,17 @@ pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme<Sha256Diges
     latest_proposals: VecDeque<Proposal<Sha256Digest>>,
 }
 
-impl<E: Clock + Spawner + Rng + CryptoRng, S: Scheme<Sha256Digest>> Disrupter<E, S>
+impl<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>> Disrupter<E, S>
 where
     <S::Certificate as Read>::Cfg: Default,
 {
-    pub fn new(context: E, scheme: S, namespace: Vec<u8>, fuzz_input: FuzzInput) -> Self {
+    pub fn new(
+        context: E,
+        validator: PublicKey,
+        scheme: S,
+        participants: Set<PublicKey>,
+        fuzz_input: FuzzInput,
+    ) -> Self {
         Self {
             last_vote: 0,
             last_finalized: 0,
@@ -55,8 +63,9 @@ where
             last_notarized: 0,
             latest_proposals: VecDeque::new(),
             context,
+            validator,
             scheme,
-            namespace,
+            participants,
             fuzz_input,
         }
     }
@@ -382,7 +391,7 @@ where
                     let _ = sender.send(Recipients::All, mutated.into(), true).await;
                 } else {
                     let proposal = self.mutate_proposal(&notarize.proposal);
-                    if let Some(v) = Notarize::sign(&self.scheme, &self.namespace, proposal) {
+                    if let Some(v) = Notarize::sign(&self.scheme, proposal) {
                         let msg = Vote::<S, Sha256Digest>::Notarize(v).encode().into();
                         let _ = sender.send(Recipients::All, msg, true).await;
                     }
@@ -394,7 +403,7 @@ where
                     let _ = sender.send(Recipients::All, mutated.into(), true).await;
                 } else {
                     let proposal = self.mutate_proposal(&finalize.proposal);
-                    if let Some(v) = Finalize::sign(&self.scheme, &self.namespace, proposal) {
+                    if let Some(v) = Finalize::sign(&self.scheme, proposal) {
                         let msg = Vote::<S, Sha256Digest>::Finalize(v).encode().into();
                         let _ = sender.send(Recipients::All, msg, true).await;
                     }
@@ -407,9 +416,7 @@ where
                 } else {
                     let v = self.random_view(self.last_vote);
                     let round = Round::new(Epoch::new(EPOCH), View::new(v));
-                    if let Some(v) =
-                        Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
-                    {
+                    if let Some(v) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {
                         let msg = Vote::<S, Sha256Digest>::Nullify(v).encode().into();
                         let _ = sender.send(Recipients::All, msg, true).await;
                     }
@@ -557,13 +564,13 @@ where
 
         match self.message() {
             Message::Notarize => {
-                if let Some(vote) = Notarize::sign(&self.scheme, &self.namespace, proposal) {
+                if let Some(vote) = Notarize::sign(&self.scheme, proposal) {
                     let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode().into();
                     let _ = sender.send(recipients, msg, true).await;
                 }
             }
             Message::Finalize => {
-                if let Some(vote) = Finalize::sign(&self.scheme, &self.namespace, proposal) {
+                if let Some(vote) = Finalize::sign(&self.scheme, proposal) {
                     let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode().into();
                     let _ = sender.send(recipients, msg, true).await;
                 }
@@ -573,9 +580,7 @@ where
                     Epoch::new(EPOCH),
                     View::new(self.random_view(self.last_vote)),
                 );
-                if let Some(vote) =
-                    Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
-                {
+                if let Some(vote) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {
                     let msg = Vote::<S, Sha256Digest>::Nullify(vote).encode().into();
                     let _ = sender.send(recipients, msg, true).await;
                 }

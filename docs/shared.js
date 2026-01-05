@@ -110,6 +110,7 @@ function insertFooter() {
         <div class="socials">
             <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
             <a href="/benchmarks.html">Benchmarks</a>
+            <a href="/mcp.html">MCP</a>
             <a href="/hiring.html">Hiring</a>
             <a href="https://x.com/commonwarexyz">X</a>
             <a href="/podcast.html">Podcast</a>
@@ -120,9 +121,38 @@ function insertFooter() {
     footerPlaceholder.innerHTML = footerHTML;
 }
 
+// Trim leading and trailing blank lines from all <pre><code> blocks
+function trimCode() {
+    const codeBlocks = document.querySelectorAll('pre code');
+
+    for (const block of codeBlocks) {
+        const lines = block.innerHTML.split('\n');
+        // Remove leading blank lines
+        while (lines.length > 0 && lines[0].trim() === '') {
+            lines.shift();
+        }
+        // Remove trailing blank lines
+        while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+            lines.pop();
+        }
+        block.innerHTML = lines.join('\n');
+
+        // Remove whitespace text nodes between <pre> and <code>
+        const pre = block.parentElement;
+        if (pre && pre.tagName === 'PRE') {
+            for (const child of [...pre.childNodes]) {
+                if (child.nodeType === Node.TEXT_NODE) {
+                    pre.removeChild(child);
+                }
+            }
+        }
+    }
+}
+
 // Load the logo when the DOM content is loaded
 document.addEventListener('DOMContentLoaded', () => {
     insertLogo();
     insertFooter();
     setExternalLinksToOpenInNewTab();
+    trimCode();
 });

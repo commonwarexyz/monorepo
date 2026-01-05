@@ -11,7 +11,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::collections::{btree_map::Entry, BTreeMap, HashSet};
 
 #[allow(clippy::large_enum_variant)]
@@ -24,14 +24,11 @@ enum Message<S: Scheme, D: Digest> {
     Get(Index, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
-pub struct Reporter<R: Rng + CryptoRng, S: Scheme, D: Digest> {
+pub struct Reporter<R: CryptoRngCore, S: Scheme, D: Digest> {
     mailbox: mpsc::Receiver<Message<S, D>>,
 
     // RNG used for signature verification with scheme.
     rng: R,
-
-    // Application namespace
-    namespace: Vec<u8>,
 
     // Signing scheme for verification
     scheme: S,
@@ -54,17 +51,16 @@ pub struct Reporter<R: Rng + CryptoRng, S: Scheme, D: Digest> {
 
 impl<R, S, D> Reporter<R, S, D>
 where
-    R: Rng + CryptoRng,
+    R: CryptoRngCore,
     S: scheme::Scheme<D>,
     D: Digest,
 {
-    pub fn new(rng: R, namespace: &[u8], scheme: S) -> (Self, Mailbox<S, D>) {
+    pub fn new(rng: R, scheme: S) -> (Self, Mailbox<S, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
             Self {
                 mailbox: receiver,
                 rng,
-                namespace: namespace.to_vec(),
                 scheme,
                 acks: HashSet::new(),
                 digests: BTreeMap::new(),
@@ -81,7 +77,7 @@ where
             match msg {
                 Message::Ack(ack) => {
                     // Verify properly constructed (not needed in production)
-                    assert!(ack.verify(&self.scheme, &self.namespace));
+                    assert!(ack.verify(&mut self.rng, &self.scheme));
 
                     // Test encoding/decoding
                     let encoded = ack.encode();
@@ -95,7 +91,7 @@ where
                 }
                 Message::Certified(certificate) => {
                     // Verify certificate
-                    assert!(certificate.verify(&mut self.rng, &self.scheme, &self.namespace));
+                    assert!(certificate.verify(&mut self.rng, &self.scheme));
 
                     // Test encoding/decoding
                     let encoded = certificate.encode();

@@ -97,7 +97,7 @@ pub fn create_pool<S: Spawner + Metrics>(
             // Tasks spawned in a thread pool are expected to run longer than any single
             // task and thus should be provisioned as a dedicated thread.
             context
-                .with_label("rayon-thread")
+                .with_label("rayon_thread")
                 .dedicated()
                 .spawn(move |_| async move { thread.run() });
             Ok(())
@@ -222,6 +222,24 @@ impl ArcWake for Blocker {
         // Notify a single waiter so the blocked thread re-checks the flag.
         arc_self.cv.notify_one();
     }
+}
+
+/// Validates that a label matches Prometheus metric name format: `[a-zA-Z][a-zA-Z0-9_]*`.
+///
+/// # Panics
+///
+/// Panics if the label is empty, starts with a non-alphabetic character,
+/// or contains characters other than `[a-zA-Z0-9_]`.
+pub fn validate_label(label: &str) {
+    let mut chars = label.chars();
+    assert!(
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic()),
+        "label must start with [a-zA-Z]: {label}"
+    );
+    assert!(
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "label must only contain [a-zA-Z0-9_]: {label}"
+    );
 }
 
 #[cfg(test)]

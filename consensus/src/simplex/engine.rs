@@ -4,22 +4,22 @@ use super::{
     elector::Config as Elector,
     types::{Activity, Context},
 };
-use crate::{simplex::scheme::Scheme, Automaton, Relay, Reporter};
+use crate::{simplex::scheme::Scheme, CertifiableAutomaton, Relay, Reporter};
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
-    E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -36,12 +36,12 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
+        E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
         S: Scheme<D>,
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
+        A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
     > Engine<E, S, L, B, D, A, R, F>
@@ -59,7 +59,6 @@ impl<
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
                 epoch: cfg.epoch,
-                namespace: cfg.namespace.clone(),
                 mailbox_size: cfg.mailbox_size,
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
@@ -79,7 +78,6 @@ impl<
                 partition: cfg.partition,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
-                namespace: cfg.namespace.clone(),
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 nullify_retry: cfg.nullify_retry,
@@ -98,7 +96,6 @@ impl<
                 scheme: cfg.scheme,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
-                namespace: cfg.namespace,
                 fetch_concurrent: cfg.fetch_concurrent,
                 fetch_timeout: cfg.fetch_timeout,
             },

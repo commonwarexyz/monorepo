@@ -16,13 +16,13 @@ use crate::{
         scheme::Scheme,
         types::{Finalization, Notarization},
     },
-    types::{Epoch, Round, ViewDelta},
-    utils, Block, Reporter,
+    types::{Epoch, Epocher, Round, ViewDelta},
+    Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
-    certificate::{Provider, Scheme as _},
+    certificate::{Provider, Scheme as CertificateScheme},
     PublicKey,
 };
 use commonware_macros::select;
@@ -48,7 +48,7 @@ use futures::{
 };
 use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     future::Future,
@@ -100,13 +100,14 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<E, B, P, FC, FB, A = Exact>
+pub struct Actor<E, B, P, FC, FB, ES, A = Exact>
 where
-    E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
+    E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
+    ES: Epocher,
     A: Acknowledgement,
 {
     // ---------- Context ----------
@@ -119,10 +120,8 @@ where
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
     provider: P,
-    // Epoch length (in blocks)
-    epoch_length: u64,
-    // Unique application namespace
-    namespace: Vec<u8>,
+    // Epoch configuration
+    epocher: ES,
     // Minimum number of views to retain temporary data after the application processes a block
     view_retention_timeout: ViewDelta,
     // Maximum number of blocks to repair at once
@@ -159,13 +158,14 @@ where
     processed_height: Gauge,
 }
 
-impl<E, B, P, FC, FB, A> Actor<E, B, P, FC, FB, A>
+impl<E, B, P, FC, FB, ES, A> Actor<E, B, P, FC, FB, ES, A>
 where
-    E: Rng + CryptoRng + Spawner + Metrics + Clock + Storage,
+    E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
+    ES: Epocher,
     A: Acknowledgement,
 {
     /// Create a new application actor.
@@ -173,8 +173,8 @@ where
         context: E,
         finalizations_by_height: FC,
         finalized_blocks: FB,
-        config: Config<B, P>,
-    ) -> (Self, Mailbox<P::Scheme, B>) {
+        config: Config<B, P, ES>,
+    ) -> (Self, Mailbox<P::Scheme, B>, u64) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -224,8 +224,7 @@ where
                 context: ContextCell::new(context),
                 mailbox,
                 provider: config.provider,
-                epoch_length: config.epoch_length,
-                namespace: config.namespace,
+                epocher: config.epocher,
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
@@ -242,6 +241,7 @@ where
                 processed_height,
             },
             Mailbox::new(sender),
+            last_processed_height,
         )
     }
 
@@ -253,7 +253,10 @@ where
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
     ) -> Handle<()>
     where
-        R: Resolver<Key = handler::Request<B>>,
+        R: Resolver<
+            Key = handler::Request<B>,
+            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+        >,
         K: PublicKey,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver).await)
@@ -266,7 +269,10 @@ where
         mut buffer: buffered::Mailbox<K, B>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
     ) where
-        R: Resolver<Key = handler::Request<B>>,
+        R: Resolver<
+            Key = handler::Request<B>,
+            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+        >,
         K: PublicKey,
     {
         // Create a local pool for waiter futures.
@@ -427,6 +433,21 @@ where
                             let finalization = self.get_finalization_by_height(height).await;
                             let _ = response.send(finalization);
                         }
+                        Message::HintFinalized { height, targets } => {
+                            // Skip if height is at or below the floor
+                            if height <= self.last_processed_height {
+                                continue;
+                            }
+
+                            // Skip if finalization is already available locally
+                            if self.get_finalization_by_height(height).await.is_some() {
+                                continue;
+                            }
+
+                            // Trigger a targeted fetch via the resolver
+                            let request = Request::<B>::Finalized { height };
+                            resolver.fetch_targeted(request, targets).await;
+                        }
                         Message::Subscribe { round, commitment, response } => {
                             // Check for block locally
                             if let Some(block) = self.find_block(&mut buffer, commitment).await {
@@ -476,19 +497,19 @@ where
                         Message::SetFloor { height } => {
                             if let Some(stored_height) = self.application_metadata.get(&LATEST_KEY) {
                                 if *stored_height >= height {
-                                    warn!(height, existing = stored_height, "sync floor not updated, lower than existing");
+                                    warn!(height, existing = stored_height, "floor not updated, lower than existing");
                                     continue;
                                 }
                             }
 
                             // Update the processed height
                             if let Err(err) = self.set_processed_height(height, &mut resolver).await {
-                                error!(?err, height, "failed to update sync floor");
+                                error!(?err, height, "failed to update floor");
                                 return;
                             }
 
                             // Drop the pending acknowledgement, if one exists. We must do this to prevent
-                            // an in-process block from being processed that is below the new sync floor
+                            // an in-process block from being processed that is below the new floor
                             // updating `last_processed_height`.
                             self.pending_ack = None.into();
 
@@ -596,8 +617,11 @@ where
                                     let _ = response.send(true);
                                 },
                                 Request::Finalized { height } => {
-                                    let epoch = utils::epoch(self.epoch_length, height);
-                                    let Some(scheme) = self.get_scheme_certificate_verifier(epoch) else {
+                                    let Some(bounds) = self.epocher.containing(height) else {
+                                        let _ = response.send(false);
+                                        continue;
+                                    };
+                                    let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -616,7 +640,7 @@ where
                                     // Validation
                                     if block.height() != height
                                         || finalization.proposal.payload != block.commitment()
-                                        || !finalization.verify(&mut self.context, &scheme, &self.namespace)
+                                        || !finalization.verify(&mut self.context, &scheme)
                                     {
                                         let _ = response.send(false);
                                         continue;
@@ -656,7 +680,7 @@ where
                                     // Validation
                                     if notarization.round() != round
                                         || notarization.proposal.payload != block.commitment()
-                                        || !notarization.verify(&mut self.context, &scheme, &self.namespace)
+                                        || !notarization.verify(&mut self.context, &scheme)
                                     {
                                         let _ = response.send(false);
                                         continue;
@@ -1013,7 +1037,7 @@ where
         self.last_processed_height = height;
         let _ = self.processed_height.try_set(self.last_processed_height);
 
-        // Cancel any existing requests below the new sync floor.
+        // Cancel any existing requests below the new floor.
         resolver
             .retain(Request::<B>::Finalized { height }.predicate())
             .await;

@@ -54,7 +54,7 @@ fn bench_fixed_replay(c: &mut Criterion) {
             // Create a large temp journal with random data.
             let mut j = get_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
             append_random_data::<ITEM_SIZE>(&mut j, items).await;
-            j.close().await.unwrap();
+            j.sync().await.unwrap();
         });
 
         // Run the benchmarks

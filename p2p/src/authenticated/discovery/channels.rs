@@ -15,7 +15,7 @@ use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 #[derive(Debug, Clone)]
 pub struct UnlimitedSender<P: PublicKey> {
     channel: Channel,
-    max_size: usize,
+    max_size: u32,
     messenger: Messenger<P>,
 }
 
@@ -29,7 +29,7 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
         message: Bytes,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        if message.len() > self.max_size {
+        if message.len() > self.max_size as usize {
             return Err(Error::MessageTooLarge(message.len()));
         }
 
@@ -49,7 +49,7 @@ pub struct Sender<P: PublicKey, C: Clock> {
 impl<P: PublicKey, C: Clock> Sender<P, C> {
     pub(super) fn new(
         channel: Channel,
-        max_size: usize,
+        max_size: u32,
         messenger: Messenger<P>,
         clock: C,
         quota: Quota,
@@ -115,12 +115,12 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 #[derive(Clone)]
 pub struct Channels<P: PublicKey> {
     messenger: Messenger<P>,
-    max_size: usize,
+    max_size: u32,
     receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message<P>>)>,
 }
 
 impl<P: PublicKey> Channels<P> {
-    pub const fn new(messenger: Messenger<P>, max_size: usize) -> Self {
+    pub const fn new(messenger: Messenger<P>, max_size: u32) -> Self {
         Self {
             messenger,
             max_size,

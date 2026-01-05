@@ -1,4 +1,4 @@
-use super::types::{Activity, Context, SequencersProvider};
+use super::types::{Activity, ChunkSigner, ChunkVerifier, Context, SequencersProvider};
 use crate::{
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Relay, Reporter,
@@ -19,7 +19,15 @@ pub struct Config<
     M: Monitor<Index = Epoch>,
 > {
     /// The signer used when this engine acts as a sequencer.
-    pub sequencer_signer: Option<C>,
+    ///
+    /// Create with `ChunkSigner::new(namespace, signer)`.
+    pub sequencer_signer: Option<ChunkSigner<C>>,
+
+    /// Verifier for node signatures.
+    ///
+    /// Create with `ChunkVerifier::new(namespace)` using the same namespace
+    /// as the `ChunkSigner`.
+    pub chunk_verifier: ChunkVerifier,
 
     /// Provider for epoch-specific sequencers set.
     pub sequencers_provider: S,
@@ -39,10 +47,6 @@ pub struct Config<
     /// Tracks the current state of consensus (to determine which participants should
     /// be involved in the current broadcast attempt).
     pub monitor: M,
-
-    /// The application namespace used to sign over different types of messages.
-    /// Used to prevent replay attacks on other applications.
-    pub namespace: Vec<u8>,
 
     /// Whether proposals are sent as priority.
     pub priority_proposals: bool,

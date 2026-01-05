@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     types::{Epoch, ViewDelta},
-    Automaton, Relay, Reporter,
+    CertifiableAutomaton, Relay, Reporter,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
@@ -17,7 +17,7 @@ pub struct Config<
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: Automaton<Context = Context<D, S::PublicKey>>,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -68,9 +68,6 @@ pub struct Config<
     /// Epoch for the consensus engine. Each running engine should have a unique epoch.
     pub epoch: Epoch,
 
-    /// Prefix for all signed messages to prevent replay attacks.
-    pub namespace: Vec<u8>,
-
     /// Number of bytes to buffer when replaying during startup.
     pub replay_buffer: NonZeroUsize,
 
@@ -115,7 +112,7 @@ impl<
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        A: Automaton<Context = Context<D, S::PublicKey>>,
+        A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
     > Config<S, L, B, D, A, R, F>

@@ -1,7 +1,7 @@
 use commonware_codec::Read;
 use commonware_consensus::simplex::{
     elector::{Config as ElectorConfig, RoundRobin},
-    scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
+    scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
@@ -17,7 +17,11 @@ where
 {
     type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
     type Elector: ElectorConfig<Self::Scheme> + Default;
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme>;
 }
 
 pub struct SimplexEd25519;
@@ -26,8 +30,12 @@ impl Simplex for SimplexEd25519 {
     type Scheme = ed25519::Scheme;
     type Elector = RoundRobin;
 
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        ed25519::fixture(context, n)
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme> {
+        ed25519::fixture(context, namespace, n)
     }
 }
 
@@ -37,8 +45,12 @@ impl Simplex for SimplexBls12381MultisigMinPk {
     type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinPk>;
     type Elector = RoundRobin;
 
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls12381_multisig::fixture::<MinPk, _>(context, n)
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme> {
+        bls12381_multisig::fixture::<MinPk, _>(context, namespace, n)
     }
 }
 
@@ -48,8 +60,12 @@ impl Simplex for SimplexBls12381MultisigMinSig {
     type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinSig>;
     type Elector = RoundRobin;
 
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls12381_multisig::fixture::<MinSig, _>(context, n)
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme> {
+        bls12381_multisig::fixture::<MinSig, _>(context, namespace, n)
     }
 }
 
@@ -59,8 +75,12 @@ impl Simplex for SimplexBls12381MinPk {
     type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinPk>;
     type Elector = RoundRobin;
 
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls12381_threshold::fixture::<MinPk, _>(context, n)
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme> {
+        bls12381_threshold::fixture::<MinPk, _>(context, namespace, n)
     }
 }
 
@@ -70,8 +90,27 @@ impl Simplex for SimplexBls12381MinSig {
     type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinSig>;
     type Elector = RoundRobin;
 
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        bls12381_threshold::fixture::<MinSig, _>(context, n)
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme> {
+        bls12381_threshold::fixture::<MinSig, _>(context, namespace, n)
+    }
+}
+
+struct SimplexSecp256r1;
+
+impl Simplex for SimplexSecp256r1 {
+    type Scheme = secp256r1::Scheme<Ed25519PublicKey>;
+    type Elector = RoundRobin;
+
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme> {
+        secp256r1::fixture(context, namespace, n)
     }
 }
 
@@ -141,6 +180,12 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
+    fn test_secp256r1_connected() {
+        fuzz::<SimplexSecp256r1>(test_input(TEST_CONTAINERS));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
     fn test_bls12381_multisig_minpk_connected() {
         fuzz::<SimplexBls12381MultisigMinPk>(test_input(TEST_CONTAINERS));
     }
@@ -172,6 +217,12 @@ mod tests {
         #[test]
         fn property_test_ed25519_connected(input in property_test_strategy()) {
             fuzz::<SimplexEd25519>(input);
+        }
+
+        #[test_group("slow")]
+        #[test]
+        fn property_test_secp256r1_connected(input in property_test_strategy()) {
+            fuzz::<SimplexSecp256r1>(input);
         }
 
         #[test_group("slow")]

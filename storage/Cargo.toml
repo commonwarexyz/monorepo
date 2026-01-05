@@ -66,6 +66,7 @@ arbitrary = [
 	"dep:arbitrary",
 ]
 fuzzing = []
+test-traits = []
 
 [lib]
 bench = false
@@ -75,6 +76,7 @@ crate-type = ["rlib", "cdylib"]
 name = "qmdb"
 harness = false
 path = "src/qmdb/benches/bench.rs"
+required-features = ["test-traits"]
 
 [[bench]]
 name="archive"

@@ -112,7 +112,7 @@ pub struct Config {
     pub allowed_peers: Vec<String>,
     pub bootstrappers: Vec<String>,
     pub worker_threads: usize,
-    pub message_size: usize,
+    pub message_size: u32,
     pub message_backlog: usize,
     pub mailbox_size: usize,
     pub instrument: bool,

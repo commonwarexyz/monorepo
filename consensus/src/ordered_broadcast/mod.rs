@@ -27,6 +27,9 @@
 //! - [`ed25519`][scheme::ed25519]: Attributable signatures with individual verification.
 //!   HSM-friendly, no trusted setup required. Certificates contain individual signatures.
 //!
+//! - [`secp256r1`][scheme::secp256r1]: Attributable signatures with individual verification.
+//!   HSM-friendly, no trusted setup required. Certificates contain individual signatures.
+//!
 //! - [`bls12381_multisig`][scheme::bls12381_multisig]: Attributable signatures with aggregated
 //!   verification. Produces compact certificates while preserving signer attribution.
 //!
@@ -69,9 +72,15 @@ pub mod mocks;
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, Config, Engine};
+    use super::{
+        mocks,
+        types::{ChunkSigner, ChunkVerifier},
+        Config, Engine,
+    };
     use crate::{
-        ordered_broadcast::scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
+        ordered_broadcast::scheme::{
+            bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme,
+        },
         types::{Epoch, EpochDelta},
     };
     use commonware_cryptography::{
@@ -100,6 +109,7 @@ mod tests {
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    const TEST_NAMESPACE: &[u8] = b"ordered_broadcast_test";
 
     type Registrations<P> = BTreeMap<
         P,
@@ -205,7 +215,7 @@ mod tests {
         let namespace = b"my testing namespace";
 
         for (idx, validator) in fixture.participants.iter().enumerate() {
-            let context = context.with_label(&validator.to_string());
+            let context = context.with_label(&format!("validator_{validator}"));
             let monitor = mocks::Monitor::new(epoch);
             let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
 
@@ -214,9 +224,10 @@ mod tests {
             assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));
 
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
+            let chunk_verifier = ChunkVerifier::new(namespace);
             let (reporter, reporter_mailbox) = mocks::Reporter::new(
                 context.clone(),
-                namespace,
+                chunk_verifier.clone(),
                 fixture.verifier.clone(),
                 misses_allowed,
             );
@@ -226,14 +237,17 @@ mod tests {
             let engine = Engine::new(
                 context.with_label("engine"),
                 Config {
-                    sequencer_signer: Some(fixture.private_keys[idx].clone()),
+                    sequencer_signer: Some(ChunkSigner::new(
+                        namespace,
+                        fixture.private_keys[idx].clone(),
+                    )),
+                    chunk_verifier,
                     sequencers_provider: sequencers,
                     validators_provider,
                     automaton: automaton.clone(),
                     relay: automaton.clone(),
                     reporter: reporters.get(validator).unwrap().clone(),
                     monitor,
-                    namespace: namespace.to_vec(),
                     priority_proposals: false,
                     priority_acks: false,
                     rebroadcast_timeout,
@@ -330,14 +344,14 @@ mod tests {
     fn all_online<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(120));
 
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let (_oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
@@ -371,12 +385,13 @@ mod tests {
         all_online(bls12381_multisig::fixture::<MinPk, _>);
         all_online(bls12381_multisig::fixture::<MinSig, _>);
         all_online(ed25519::fixture);
+        all_online(secp256r1::fixture);
     }
 
     fn unclean_shutdown<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: Fn(&mut deterministic::Context, u32) -> Fixture<S> + Clone,
+        F: Fn(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Clone,
     {
         let mut prev_checkpoint = None;
         let epoch = Epoch::new(111);
@@ -387,7 +402,7 @@ mod tests {
         loop {
             let fixture = fixture.clone();
             let f = |mut context: deterministic::Context| async move {
-                let fixture = fixture(&mut context, num_validators);
+                let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
                 let (network, mut oracle) = Network::new(
                     context.with_label("network"),
@@ -457,19 +472,20 @@ mod tests {
         unclean_shutdown(bls12381_multisig::fixture::<MinPk, _>);
         unclean_shutdown(bls12381_multisig::fixture::<MinSig, _>);
         unclean_shutdown(ed25519::fixture);
+        unclean_shutdown(secp256r1::fixture);
     }
 
     fn network_partition<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             // Configure the network
             let (mut oracle, mut registrations) =
@@ -519,12 +535,13 @@ mod tests {
         network_partition(bls12381_multisig::fixture::<MinPk, _>);
         network_partition(bls12381_multisig::fixture::<MinSig, _>);
         network_partition(ed25519::fixture);
+        network_partition(secp256r1::fixture);
     }
 
     fn slow_and_lossy_links<S, F>(fixture: F, seed: u64) -> String
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: Fn(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: Fn(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -534,7 +551,7 @@ mod tests {
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
@@ -582,6 +599,7 @@ mod tests {
         slow_and_lossy_links(bls12381_multisig::fixture::<MinPk, _>, 0);
         slow_and_lossy_links(bls12381_multisig::fixture::<MinSig, _>, 0);
         slow_and_lossy_links(ed25519::fixture, 0);
+        slow_and_lossy_links(secp256r1::fixture, 0);
     }
 
     #[test_group("slow")]
@@ -607,6 +625,11 @@ mod tests {
             let ed_state_2 = slow_and_lossy_links(ed25519::fixture, seed);
             assert_eq!(ed_state_1, ed_state_2);
 
+            // Test secp256r1
+            let secp_state_1 = slow_and_lossy_links(secp256r1::fixture, seed);
+            let secp_state_2 = slow_and_lossy_links(secp256r1::fixture, seed);
+            assert_eq!(secp_state_1, secp_state_2);
+
             // Test BLS multisig MinPk
             let ms_pk_state_1 = slow_and_lossy_links(bls12381_multisig::fixture::<MinPk, _>, seed);
             let ms_pk_state_2 = slow_and_lossy_links(bls12381_multisig::fixture::<MinPk, _>, seed);
@@ -625,6 +648,7 @@ mod tests {
                 ("multisig-minpk", ms_pk_state_1),
                 ("multisig-minsig", ms_sig_state_1),
                 ("ed25519", ed_state_1),
+                ("secp256r1", secp_state_1),
             ];
 
             // Sanity check that different schemes produce different states
@@ -641,14 +665,14 @@ mod tests {
     fn invalid_signature_injection<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let (_oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
@@ -682,19 +706,20 @@ mod tests {
         invalid_signature_injection(bls12381_multisig::fixture::<MinPk, _>);
         invalid_signature_injection(bls12381_multisig::fixture::<MinSig, _>);
         invalid_signature_injection(ed25519::fixture);
+        invalid_signature_injection(secp256r1::fixture);
     }
 
     fn updated_epoch<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             // Setup network
             let (mut oracle, mut registrations) =
@@ -709,7 +734,7 @@ mod tests {
             let namespace = b"my testing namespace";
 
             for (idx, validator) in fixture.participants.iter().enumerate() {
-                let context = context.with_label(&validator.to_string());
+                let context = context.with_label(&format!("validator_{validator}"));
                 let monitor = mocks::Monitor::new(epoch);
                 monitors.insert(validator.clone(), monitor.clone());
                 let sequencers = mocks::Sequencers::<PublicKey>::new(fixture.participants.clone());
@@ -720,9 +745,10 @@ mod tests {
                 validators_providers.insert(validator.clone(), validators_provider.clone());
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
+                let chunk_verifier = ChunkVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
-                    namespace,
+                    chunk_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
@@ -732,14 +758,17 @@ mod tests {
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
-                        sequencer_signer: Some(fixture.private_keys[idx].clone()),
+                        sequencer_signer: Some(ChunkSigner::new(
+                            namespace,
+                            fixture.private_keys[idx].clone(),
+                        )),
+                        chunk_verifier,
                         sequencers_provider: sequencers,
                         validators_provider,
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(validator).unwrap().clone(),
                         monitor,
-                        namespace: namespace.to_vec(),
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         height_bound: 2,
                         rebroadcast_timeout: Duration::from_secs(1),
@@ -814,18 +843,19 @@ mod tests {
         updated_epoch(bls12381_multisig::fixture::<MinPk, _>);
         updated_epoch(bls12381_multisig::fixture::<MinSig, _>);
         updated_epoch(ed25519::fixture);
+        updated_epoch(secp256r1::fixture);
     }
 
     fn external_sequencer<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             // Generate sequencer (external, not a validator)
             let sequencer = PrivateKey::from_seed(u64::MAX);
@@ -861,7 +891,7 @@ mod tests {
 
             // Spawn validator engines (no signing key, only validate)
             for (idx, validator) in fixture.participants.iter().enumerate() {
-                let context = context.with_label(&validator.to_string());
+                let context = context.with_label(&format!("validator_{validator}"));
                 let monitor = mocks::Monitor::new(epoch);
                 let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
 
@@ -871,9 +901,10 @@ mod tests {
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
 
+                let chunk_verifier = ChunkVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
-                    namespace,
+                    chunk_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
@@ -883,14 +914,14 @@ mod tests {
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
-                        sequencer_signer: None::<PrivateKey>, // Validators don't propose in this test
+                        sequencer_signer: None::<ChunkSigner<PrivateKey>>, // Validators don't propose in this test
+                        chunk_verifier,
                         sequencers_provider: sequencers,
                         validators_provider,
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(validator).unwrap().clone(),
                         monitor,
-                        namespace: namespace.to_vec(),
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         height_bound: 2,
                         rebroadcast_timeout: Duration::from_secs(5),
@@ -913,9 +944,10 @@ mod tests {
             {
                 let context = context.with_label("sequencer");
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
+                let chunk_verifier = ChunkVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
-                    namespace,
+                    chunk_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
@@ -930,7 +962,8 @@ mod tests {
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
-                        sequencer_signer: Some(sequencer.clone()),
+                        sequencer_signer: Some(ChunkSigner::new(namespace, sequencer.clone())),
+                        chunk_verifier,
                         sequencers_provider: mocks::Sequencers::<PublicKey>::new(vec![
                             sequencer.public_key()
                         ]),
@@ -939,7 +972,6 @@ mod tests {
                         automaton,
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
                         monitor: mocks::Monitor::new(epoch),
-                        namespace: namespace.to_vec(),
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         height_bound: 2,
                         rebroadcast_timeout: Duration::from_secs(5),
@@ -979,12 +1011,13 @@ mod tests {
         external_sequencer(bls12381_multisig::fixture::<MinPk, _>);
         external_sequencer(bls12381_multisig::fixture::<MinSig, _>);
         external_sequencer(ed25519::fixture);
+        external_sequencer(secp256r1::fixture);
     }
 
     fn run_1k<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let cfg = deterministic::Config::new();
         let runner = deterministic::Runner::new(cfg);
@@ -992,7 +1025,7 @@ mod tests {
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 10;
-            let fixture = fixture(&mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let delayed_link = Link {
                 latency: Duration::from_millis(80),
@@ -1066,5 +1099,11 @@ mod tests {
     #[test_traced]
     fn test_1k_ed25519() {
         run_1k(ed25519::fixture);
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_1k_secp256r1() {
+        run_1k(secp256r1::fixture);
     }
 }

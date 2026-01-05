@@ -161,10 +161,29 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 #[derive(Clone, Debug, Default)]
 pub struct Random;
 
+impl Random {
+    /// Returns the selected leader index for the given round and seed signature.
+    pub fn select_leader<V: Variant>(
+        round: Round,
+        n: usize,
+        seed_signature: Option<V::Signature>,
+    ) -> u32 {
+        assert!(seed_signature.is_some() || round.view() == View::new(1));
+
+        let Some(seed_signature) = seed_signature else {
+            // Standard round-robin for view 1
+            return (round.epoch().get().wrapping_add(round.view().get()) as usize % n) as u32;
+        };
+
+        // Use the seed signature as a source of randomness
+        modulo(seed_signature.encode().as_ref(), n as u64) as u32
+    }
+}
+
 impl<P, V> Config<bls12381_threshold::Scheme<P, V>> for Random
 where
     P: PublicKey,
-    V: Variant + Send + Sync + 'static,
+    V: Variant,
 {
     type Elector = RandomElector<bls12381_threshold::Scheme<P, V>>;
 
@@ -190,19 +209,10 @@ impl<P, V> Elector<bls12381_threshold::Scheme<P, V>>
     for RandomElector<bls12381_threshold::Scheme<P, V>>
 where
     P: PublicKey,
-    V: Variant + Send + Sync + 'static,
+    V: Variant,
 {
     fn elect(&self, round: Round, certificate: Option<&bls12381_threshold::Signature<V>>) -> u32 {
-        assert!(certificate.is_some() || round.view() == View::new(1));
-
-        let Some(certificate) = certificate else {
-            // Standard round-robin for view 1
-            return (round.epoch().get().wrapping_add(round.view().get()) as usize % self.n) as u32;
-        };
-
-        // Use the seed signature as a source of randomness
-        let seed = certificate.seed_signature.encode();
-        modulo(seed.as_ref(), self.n as u64) as u32
+        Random::select_leader::<V>(round, self.n, certificate.map(|c| c.seed_signature))
     }
 }
 
@@ -223,13 +233,15 @@ mod tests {
     use commonware_utils::{quorum_from_slice, TryFromIterator};
     use rand::{rngs::StdRng, SeedableRng};
 
+    const NAMESPACE: &[u8] = b"test";
+
     type ThresholdScheme =
         bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
 
     #[test]
     fn round_robin_rotates_through_participants() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = ed25519::fixture(&mut rng, 4);
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
         let elector: RoundRobinElector<ed25519::Scheme> =
@@ -252,7 +264,7 @@ mod tests {
     #[test]
     fn round_robin_cycles_through_epochs() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
         let elector: RoundRobinElector<ed25519::Scheme> =
@@ -278,7 +290,7 @@ mod tests {
     #[test]
     fn round_robin_shuffled_changes_order() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
 
         let elector_no_seed: RoundRobinElector<ed25519::Scheme> =
@@ -319,7 +331,7 @@ mod tests {
     #[test]
     fn round_robin_same_seed_is_deterministic() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
 
         let elector1: RoundRobinElector<ed25519::Scheme> =
@@ -345,7 +357,8 @@ mod tests {
     #[test]
     fn random_falls_back_to_round_robin_for_view_1() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
+        let Fixture { participants, .. } =
+            bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
@@ -374,7 +387,7 @@ mod tests {
             participants,
             schemes,
             ..
-        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
+        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
         let quorum = quorum_from_slice(&schemes) as usize;
@@ -385,7 +398,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign::<Sha256Digest>(b"test", Subject::Nullify { round: round1 })
+                s.sign::<Sha256Digest>(Subject::Nullify { round: round1 })
                     .unwrap()
             })
             .collect();
@@ -397,7 +410,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign::<Sha256Digest>(b"test", Subject::Nullify { round: round2 })
+                s.sign::<Sha256Digest>(Subject::Nullify { round: round2 })
                     .unwrap()
             })
             .collect();
@@ -428,7 +441,8 @@ mod tests {
     #[should_panic]
     fn random_panics_on_none_certificate_after_view_1() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
+        let Fixture { participants, .. } =
+            bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
 

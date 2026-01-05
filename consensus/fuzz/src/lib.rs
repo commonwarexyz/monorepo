@@ -153,7 +153,6 @@ impl Arbitrary<'_> for FuzzInput {
 fn run<P: simplex::Simplex>(input: FuzzInput) {
     let (n, _, f) = input.configuration;
     let required_containers = input.required_containers;
-    let namespace = NAMESPACE.to_vec();
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
 
@@ -173,7 +172,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             schemes,
             verifier: _,
             ..
-        } = P::fixture(&mut context, n);
+        } = P::fixture(&mut context, NAMESPACE, n);
 
         let mut registrations = register(&mut oracle, &participants).await;
 
@@ -225,14 +224,18 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         for i in 0..f as usize {
             let scheme = schemes[i].clone();
             let validator = participants[i].clone();
-            let context = context.with_label(&format!("validator-{validator}"));
+            let context = context.with_label(&format!("validator_{validator}"));
 
             let (vote_network, certificate_network, resolver_network) =
                 registrations.remove(&validator).unwrap();
             let disrupter = Disrupter::<_, _>::new(
                 context.with_label("disrupter"),
+                validator.clone(),
                 scheme,
-                namespace.clone(),
+                participants
+                    .clone()
+                    .try_into()
+                    .expect("public keys are unique"),
                 input.clone(),
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
@@ -240,10 +243,9 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
 
         for i in (f as usize)..(n as usize) {
             let validator = participants[i].clone();
-            let context = context.with_label(&format!("validator-{validator}"));
+            let context = context.with_label(&format!("validator_{validator}"));
             let elector = P::Elector::default();
             let reporter_cfg = reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants
                     .clone()
                     .try_into()
@@ -262,6 +264,8 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 me: validator.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: application::Certifier::Sometimes,
             };
             let (actor, application) =
                 application::Application::new(context.with_label("application"), app_cfg);
@@ -278,7 +282,6 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 partition: validator.to_string(),
                 mailbox_size: 1024,
                 epoch: Epoch::new(EPOCH),
-                namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),

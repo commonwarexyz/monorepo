@@ -21,12 +21,12 @@ use commonware_runtime::{
 use commonware_utils::ordered::{Quorum, Set};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace, warn};
 
 pub struct Actor<
-    E: Spawner + Metrics + Clock + Rng + CryptoRng,
+    E: Spawner + Metrics + Clock + CryptoRngCore,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
@@ -43,7 +43,6 @@ pub struct Actor<
     activity_timeout: ViewDelta,
     skip_timeout: ViewDelta,
     epoch: Epoch,
-    namespace: Vec<u8>,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -56,7 +55,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Spawner + Metrics + Clock + Rng + CryptoRng,
+        E: Spawner + Metrics + Clock + CryptoRngCore,
         S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
@@ -114,7 +113,6 @@ impl<
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
                 epoch: cfg.epoch,
-                namespace: cfg.namespace,
 
                 mailbox_receiver: receiver,
 
@@ -168,6 +166,9 @@ impl<
         let mut work = BTreeMap::new();
         let mut shutdown = self.context.stopped();
         loop {
+            // Track which view was modified (if any) for certificate construction
+            let updated_view;
+
             // Handle next message
             select! {
                 _ = &mut shutdown => {
@@ -199,6 +200,9 @@ impl<
                                 // Leader active in at least one recent round
                                 || work.iter().rev().take(skip_timeout).any(|(_, round)| round.is_active(leader));
                             active.send(is_active).unwrap();
+
+                            // Setting leader may enable batch verification
+                            updated_view = current;
                         }
                         Some(Message::Constructed(message)) => {
                             // If the view isn't interesting, we can skip
@@ -219,6 +223,7 @@ impl<
                                 .add_constructed(message)
                                 .await;
                             self.added.inc();
+                            updated_view = view;
                         }
                         None => {
                             break;
@@ -278,7 +283,6 @@ impl<
                             if !notarization.verify(
                                 &mut self.context,
                                 &self.scheme,
-                                &self.namespace,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid notarization");
                                 self.blocker.block(sender).await;
@@ -305,7 +309,6 @@ impl<
                             if !nullification.verify::<_, D>(
                                 &mut self.context,
                                 &self.scheme,
-                                &self.namespace,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid nullification");
                                 self.blocker.block(sender).await;
@@ -332,7 +335,6 @@ impl<
                             if !finalization.verify(
                                 &mut self.context,
                                 &self.scheme,
-                                &self.namespace,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid finalization");
                                 self.blocker.block(sender).await;
@@ -349,6 +351,9 @@ impl<
                                 .await;
                         }
                     }
+
+                    // Certificates are already forwarded to voter, no need for construction
+                    continue;
                 },
                 // Handle votes from the network
                 message = vote_receiver.recv() => {
@@ -399,8 +404,13 @@ impl<
                         .await {
                             self.added.inc();
                         }
+                    updated_view = view;
                 },
             }
+            assert!(
+                updated_view != View::zero(),
+                "updated view must be greater than zero"
+            );
 
             // Forward leader's proposal to voter (if we're not the leader and haven't already)
             if let Some(round) = work.get_mut(&current) {
@@ -411,64 +421,61 @@ impl<
                 }
             }
 
-            // Look for a ready verifier (prioritizing the current view)
+            // Skip verification and construction for views at or below finalized.
+            //
+            // We still use interesting() for filtering votes because we want to
+            // notify the reporter of all votes within the activity timeout (even
+            // if we don't need them in the voter).
+            if updated_view <= finalized {
+                continue;
+            }
+
+            // Process the updated view (if any)
+            let Some(round) = work.get_mut(&updated_view) else {
+                continue;
+            };
+
+            // Batch verify votes if ready
             let mut timer = self.verify_latency.timer();
-            let mut selected = None;
-            if let Some(round) = work.get_mut(&current) {
-                if round.ready_notarizes() {
-                    let (voters, failed) =
-                        round.verify_notarizes(&mut self.context, &self.namespace);
-                    selected = Some((current, voters, failed));
-                } else if round.ready_nullifies() {
-                    let (voters, failed) =
-                        round.verify_nullifies(&mut self.context, &self.namespace);
-                    selected = Some((current, voters, failed));
+            let verified = if round.ready_notarizes() {
+                Some(round.verify_notarizes(&mut self.context))
+            } else if round.ready_nullifies() {
+                Some(round.verify_nullifies(&mut self.context))
+            } else if round.ready_finalizes() {
+                Some(round.verify_finalizes(&mut self.context))
+            } else {
+                None
+            };
+
+            // Process batch verification results
+            if let Some((voters, failed)) = verified {
+                timer.observe();
+
+                // Process verified votes
+                let batch = voters.len() + failed.len();
+                trace!(view = %updated_view, batch, "batch verified votes");
+                self.verified.inc_by(batch as u64);
+                self.batch_size.observe(batch as f64);
+
+                // Block invalid signers
+                for invalid in failed {
+                    if let Some(signer) = self.participants.key(invalid) {
+                        warn!(?signer, "blocking peer for invalid signature");
+                        self.blocker.block(signer.clone()).await;
+                    }
                 }
-            }
-            if selected.is_none() {
-                let potential = work
-                    .iter_mut()
-                    .rev()
-                    .find(|(view, round)| {
-                        **view != current && **view >= finalized && round.ready_finalizes()
-                    })
-                    .map(|(view, round)| (*view, round));
-                if let Some((view, round)) = potential {
-                    let (voters, failed) =
-                        round.verify_finalizes(&mut self.context, &self.namespace);
-                    selected = Some((view, voters, failed));
+
+                // Store verified votes for certificate construction
+                for valid in voters {
+                    round.add_verified(valid);
                 }
-            }
-            let Some((view, voters, failed)) = selected else {
+            } else {
                 timer.cancel();
                 trace!(
                     %current,
                     %finalized,
-                    waiting = work.len(),
                     "no verifier ready"
                 );
-                continue;
-            };
-            timer.observe();
-
-            // Process verified votes
-            let batch = voters.len() + failed.len();
-            trace!(%view, batch, "batch verified votes");
-            self.verified.inc_by(batch as u64);
-            self.batch_size.observe(batch as f64);
-
-            // Block invalid signers
-            for invalid in failed {
-                if let Some(signer) = self.participants.key(invalid) {
-                    warn!(?signer, "blocking peer for invalid signature");
-                    self.blocker.block(signer.clone()).await;
-                }
-            }
-
-            // Store verified votes for certificate construction
-            let round = work.get_mut(&view).expect("round must exist");
-            for valid in voters {
-                round.add_verified(valid);
             }
 
             // Try to construct and forward certificates
@@ -476,7 +483,7 @@ impl<
                 .recover_latency
                 .time_some(|| round.try_construct_notarization(&self.scheme))
             {
-                debug!(%view, "constructed notarization, forwarding to voter");
+                debug!(view = %updated_view, "constructed notarization, forwarding to voter");
                 voter
                     .recovered(Certificate::Notarization(notarization))
                     .await;
@@ -485,7 +492,7 @@ impl<
                 .recover_latency
                 .time_some(|| round.try_construct_nullification(&self.scheme))
             {
-                debug!(%view, "constructed nullification, forwarding to voter");
+                debug!(view = %updated_view, "constructed nullification, forwarding to voter");
                 voter
                     .recovered(Certificate::Nullification(nullification))
                     .await;
@@ -494,7 +501,7 @@ impl<
                 .recover_latency
                 .time_some(|| round.try_construct_finalization(&self.scheme))
             {
-                debug!(%view, "constructed finalization, forwarding to voter");
+                debug!(view = %updated_view, "constructed finalization, forwarding to voter");
                 voter
                     .recovered(Certificate::Finalization(finalization))
                     .await;

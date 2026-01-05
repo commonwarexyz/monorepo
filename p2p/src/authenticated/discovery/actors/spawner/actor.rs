@@ -13,23 +13,19 @@ use crate::authenticated::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Quota, Sink, Spawner, Stream,
-};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: PublicKey> {
+pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey> {
     context: ContextCell<E>,
 
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
-    allowed_bit_vec_rate: Quota,
     max_peer_set_size: u64,
-    allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
     info_verifier: InfoVerifier<C>,
 
@@ -41,7 +37,7 @@ pub struct Actor<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Str
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: PublicKey>
+impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey>
     Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
@@ -73,9 +69,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
                 context: ContextCell::new(context),
                 mailbox_size: cfg.mailbox_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
-                allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 max_peer_set_size: cfg.max_peer_set_size,
-                allowed_peers_rate: cfg.allowed_peers_rate,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 info_verifier: cfg.info_verifier,
                 receiver,
@@ -132,9 +126,18 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
                             let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
                             let info_verifier = self.info_verifier.clone();
                             move |context| async move {
+                                // Get greeting from tracker (returns None if not eligible)
+                                let Some(greeting) = tracker.connect(peer.clone(), is_dialer).await
+                                else {
+                                    debug!(?peer, "peer not eligible");
+                                    connections.dec();
+                                    drop(reservation);
+                                    return;
+                                };
+
                                 // Create peer
                                 debug!(?peer, "peer started");
-                                let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
+                                let (peer_actor, messenger) = peer::Actor::new(
                                     context,
                                     peer::Config {
                                         sent_messages,
@@ -142,9 +145,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
                                         rate_limited,
                                         mailbox_size: self.mailbox_size,
                                         gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
-                                        allowed_bit_vec_rate: self.allowed_bit_vec_rate,
                                         max_peer_set_size: self.max_peer_set_size,
-                                        allowed_peers_rate: self.allowed_peers_rate,
                                         peer_gossip_max_count: self.peer_gossip_max_count,
                                         info_verifier,
                                     },
@@ -153,12 +154,9 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
                                 // Register peer with the router
                                 let channels = router.ready(peer.clone(), messenger).await;
 
-                                // Register peer with tracker
-                                tracker.connect(peer.clone(), is_dialer, peer_mailbox).await;
-
-                                // Run peer
+                                // Run peer (greeting is sent first before main loop)
                                 let result = peer_actor
-                                    .run(peer.clone(), connection, tracker, channels)
+                                    .run(peer.clone(), greeting, connection, tracker, channels)
                                     .await;
                                 connections.dec();
 

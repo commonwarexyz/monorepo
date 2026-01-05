@@ -4,6 +4,8 @@
 <head>
     <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Scaling Throughput with Ordered Broadcast</title>
@@ -11,9 +13,9 @@
     <meta name="author" content="Brendan Chou">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
-    <link rel="canonical" href="https://commonware.xyz/blogs/commonware-broadcast.html" />
+    <link rel="canonical" href="https://commonware.xyz/blogs/commonware-broadcast" />
 
-    <meta property="og:url" content="https://commonware.xyz/blogs/commonware-broadcast.html" />
+    <meta property="og:url" content="https://commonware.xyz/blogs/commonware-broadcast" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/broadcast-in-consensus.png" />
@@ -25,7 +27,7 @@
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
-    <meta property="twitter:url" content="https://commonware.xyz/blogs/commonware-broadcast.html" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/commonware-broadcast" />
     <meta property="twitter:title" content="Scaling Throughput with Ordered Broadcast" />
     <meta property="twitter:description" content="Blockchains require replicating data, like transactions, across nodes in the network—but doing it efficiently and reliably is a challenge. For the last decade, best-effort broadcast has been the norm, relying on consensus to guarantee delivery. The result? Wasted bandwidth by sending the same data multiple times, bottlenecked throughput by routing messages through a single node (the leader in consensus), and degraded performance whenever that node is unresponsive." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/broadcast-in-consensus.png" />

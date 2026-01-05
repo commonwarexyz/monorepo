@@ -19,6 +19,9 @@
 //! - [`ed25519`][scheme::ed25519]: Attributable signatures with individual verification.
 //!   HSM-friendly, no trusted setup required. Certificates contain individual signatures.
 //!
+//! - [`secp256r1`][scheme::secp256r1]: Attributable signatures with individual verification.
+//!   HSM-friendly, no trusted setup required. Certificates contain individual signatures.
+//!
 //! - [`bls12381_multisig`][scheme::bls12381_multisig]: Attributable signatures with aggregated
 //!   verification. Produces compact certificates while preserving signer attribution.
 //!
@@ -84,7 +87,7 @@ cfg_if::cfg_if! {
 mod tests {
     use super::{mocks, Config, Engine};
     use crate::{
-        aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
+        aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
         types::{Epoch, EpochDelta},
     };
     use commonware_cryptography::{
@@ -100,9 +103,9 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{NZUsize, NonZeroDuration};
+    use commonware_utils::{test_rng, NZUsize, NonZeroDuration};
     use futures::{channel::oneshot, future::join_all};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, Rng};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU32, NonZeroUsize},
@@ -115,6 +118,7 @@ mod tests {
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    const TEST_NAMESPACE: &[u8] = b"my testing namespace";
 
     /// Reliable network link configuration for testing.
     const RELIABLE_LINK: Link = Link {
@@ -185,13 +189,11 @@ mod tests {
     }
 
     /// Spawn aggregation engines for all validators.
-    #[allow(clippy::too_many_arguments)]
     fn spawn_validator_engines<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
         context: Context,
         fixture: &Fixture<S>,
         registrations: &mut Registrations<PublicKey>,
         oracle: &mut Oracle<PublicKey, deterministic::Context>,
-        namespace: &[u8],
         epoch: Epoch,
         rebroadcast_timeout: Duration,
         incorrect: Vec<usize>,
@@ -199,7 +201,7 @@ mod tests {
         let mut reporters = BTreeMap::new();
 
         for (idx, participant) in fixture.participants.iter().enumerate() {
-            let context = context.with_label(&participant.to_string());
+            let context = context.with_label(&format!("participant_{participant}"));
 
             // Create Provider and register scheme for epoch
             let provider = mocks::Provider::new();
@@ -218,7 +220,7 @@ mod tests {
 
             // Create reporter with verifier scheme
             let (reporter, reporter_mailbox) =
-                mocks::Reporter::new(context.clone(), namespace, fixture.verifier.clone());
+                mocks::Reporter::new(context.clone(), fixture.verifier.clone());
             context.with_label("reporter").spawn(|_| reporter.run());
             reporters.insert(participant.clone(), reporter_mailbox.clone());
 
@@ -234,7 +236,6 @@ mod tests {
                     automaton,
                     reporter: reporter_mailbox,
                     blocker,
-                    namespace: namespace.to_vec(),
                     priority_acks: false,
                     rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_timeout),
                     epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
@@ -311,14 +312,13 @@ mod tests {
     fn all_online<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
-            let namespace = b"my testing namespace";
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             let (mut oracle, mut registrations) =
@@ -330,7 +330,6 @@ mod tests {
                 &fixture,
                 &mut registrations,
                 &mut oracle,
-                namespace,
                 epoch,
                 Duration::from_secs(5),
                 vec![],
@@ -347,20 +346,20 @@ mod tests {
         all_online(bls12381_multisig::fixture::<MinPk, _>);
         all_online(bls12381_multisig::fixture::<MinSig, _>);
         all_online(ed25519::fixture);
+        all_online(secp256r1::fixture);
     }
 
     /// Test consensus resilience to Byzantine behavior.
     fn byzantine_proposer<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
-            let namespace = b"my testing namespace";
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             let (mut oracle, mut registrations) =
@@ -372,7 +371,6 @@ mod tests {
                 &fixture,
                 &mut registrations,
                 &mut oracle,
-                namespace,
                 epoch,
                 Duration::from_secs(5),
                 vec![0],
@@ -389,12 +387,13 @@ mod tests {
         byzantine_proposer(bls12381_multisig::fixture::<MinPk, _>);
         byzantine_proposer(bls12381_multisig::fixture::<MinSig, _>);
         byzantine_proposer(ed25519::fixture);
+        byzantine_proposer(secp256r1::fixture);
     }
 
     fn unclean_byzantine_shutdown<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: Fn(&mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         // Test parameters
         let num_validators = 4;
@@ -408,8 +407,8 @@ mod tests {
         let mut prev_checkpoint = None;
 
         // Generate fixture once (persists across restarts)
-        let mut rng = StdRng::seed_from_u64(0);
-        let fixture = fixture(&mut rng, num_validators);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, TEST_NAMESPACE, num_validators);
 
         // Continue until shared reporter reaches target or max shutdowns exceeded
         let mut shutdown_count = 0;
@@ -417,7 +416,6 @@ mod tests {
             let fixture = fixture.clone();
             let f = move |mut context: Context| {
                 async move {
-                    let namespace = b"my testing namespace";
                     let epoch = Epoch::new(111);
 
                     let (oracle, mut registrations) = initialize_simulation(
@@ -431,12 +429,13 @@ mod tests {
                     //
                     // We rely on replay to populate this reporter with a contiguous history of certificates.
                     let (reporter, mut reporter_mailbox) =
-                        mocks::Reporter::new(context.clone(), namespace, fixture.verifier.clone());
+                        mocks::Reporter::new(context.clone(), fixture.verifier.clone());
                     context.with_label("reporter").spawn(|_| reporter.run());
 
                     // Spawn validator engines
                     for (idx, participant) in fixture.participants.iter().enumerate() {
-                        let validator_context = context.with_label(&participant.to_string());
+                        let validator_context =
+                            context.with_label(&format!("participant_{participant}"));
 
                         // Create Provider and register scheme for epoch
                         let provider = mocks::Provider::new();
@@ -465,7 +464,6 @@ mod tests {
                                 automaton,
                                 reporter: reporter_mailbox.clone(),
                                 blocker,
-                                namespace: namespace.to_vec(),
                                 priority_acks: false,
                                 rebroadcast_timeout,
                                 epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
@@ -546,23 +544,23 @@ mod tests {
         unclean_byzantine_shutdown(bls12381_multisig::fixture::<MinPk, _>);
         unclean_byzantine_shutdown(bls12381_multisig::fixture::<MinSig, _>);
         unclean_byzantine_shutdown(ed25519::fixture);
+        unclean_byzantine_shutdown(secp256r1::fixture);
     }
 
     fn unclean_shutdown_with_unsigned_index<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: Fn(&mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         // Test parameters
         let num_validators = 4;
         let skip_index = 50; // Index where no one will sign
         let window = 10;
         let target_index = 100;
-        let namespace = b"my testing namespace";
 
         // Generate fixture once (persists across restarts)
-        let mut rng = StdRng::seed_from_u64(0);
-        let fixture = fixture(&mut rng, num_validators);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, TEST_NAMESPACE, num_validators);
 
         // First run: let validators skip signing at skip_index and reach beyond it
         let f = |context: Context| {
@@ -580,12 +578,13 @@ mod tests {
 
                 // Create a shared reporter
                 let (reporter, mut reporter_mailbox) =
-                    mocks::Reporter::new(context.clone(), namespace, fixture.verifier.clone());
+                    mocks::Reporter::new(context.clone(), fixture.verifier.clone());
                 context.with_label("reporter").spawn(|_| reporter.run());
 
                 // Start validator engines with Skip strategy for skip_index
                 for (idx, participant) in fixture.participants.iter().enumerate() {
-                    let validator_context = context.with_label(&participant.to_string());
+                    let validator_context =
+                        context.with_label(&format!("participant_{participant}"));
 
                     // Create Provider and register scheme for epoch
                     let provider = mocks::Provider::new();
@@ -610,7 +609,6 @@ mod tests {
                             automaton,
                             reporter: reporter_mailbox.clone(),
                             blocker,
-                            namespace: namespace.to_vec(),
                             priority_acks: false,
                             rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(
                                 100,
@@ -663,12 +661,13 @@ mod tests {
 
                 // Create a shared reporter
                 let (reporter, mut reporter_mailbox) =
-                    mocks::Reporter::new(context.clone(), namespace, fixture.verifier.clone());
+                    mocks::Reporter::new(context.clone(), fixture.verifier.clone());
                 context.with_label("reporter").spawn(|_| reporter.run());
 
                 // Start validator engines with Correct strategy (will sign everything now)
                 for (idx, participant) in fixture.participants.iter().enumerate() {
-                    let validator_context = context.with_label(&participant.to_string());
+                    let validator_context =
+                        context.with_label(&format!("participant_{participant}"));
 
                     // Create Provider and register scheme for epoch
                     let provider = mocks::Provider::new();
@@ -692,7 +691,6 @@ mod tests {
                             automaton,
                             reporter: reporter_mailbox.clone(),
                             blocker,
-                            namespace: namespace.to_vec(),
                             priority_acks: false,
                             rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(
                                 100,
@@ -739,12 +737,13 @@ mod tests {
         unclean_shutdown_with_unsigned_index(bls12381_multisig::fixture::<MinPk, _>);
         unclean_shutdown_with_unsigned_index(bls12381_multisig::fixture::<MinSig, _>);
         unclean_shutdown_with_unsigned_index(ed25519::fixture);
+        unclean_shutdown_with_unsigned_index(secp256r1::fixture);
     }
 
     fn slow_and_lossy_links<S, F>(fixture: F, seed: u64) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -753,8 +752,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
-            let namespace = b"my testing namespace";
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             // Use degraded network links with realistic conditions
@@ -773,7 +771,6 @@ mod tests {
                 &fixture,
                 &mut registrations,
                 &mut oracle,
-                namespace,
                 epoch,
                 Duration::from_secs(2),
                 vec![],
@@ -792,6 +789,7 @@ mod tests {
         slow_and_lossy_links(bls12381_multisig::fixture::<MinPk, _>, 0);
         slow_and_lossy_links(bls12381_multisig::fixture::<MinSig, _>, 0);
         slow_and_lossy_links(ed25519::fixture, 0);
+        slow_and_lossy_links(secp256r1::fixture, 0);
     }
 
     #[test_group("slow")]
@@ -829,12 +827,18 @@ mod tests {
             let ed_state_2 = slow_and_lossy_links(ed25519::fixture, seed);
             assert_eq!(ed_state_1, ed_state_2);
 
+            // Test secp256r1
+            let secp_state_1 = slow_and_lossy_links(secp256r1::fixture, seed);
+            let secp_state_2 = slow_and_lossy_links(secp256r1::fixture, seed);
+            assert_eq!(secp_state_1, secp_state_2);
+
             let states = [
                 ("threshold-minpk", ts_pk_state_1),
                 ("threshold-minsig", ts_sig_state_1),
                 ("multisig-minpk", ms_pk_state_1),
                 ("multisig-minsig", ms_sig_state_1),
                 ("ed25519", ed_state_1),
+                ("secp256r1", secp_state_1),
             ];
 
             // Sanity check that different types can't be identical
@@ -851,14 +855,13 @@ mod tests {
     fn one_offline<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let num_validators = 5;
-            let mut fixture = fixture(&mut context, num_validators);
-            let namespace = b"my testing namespace";
+            let mut fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             // Truncate to only 4 validators (one offline)
@@ -874,7 +877,6 @@ mod tests {
                 &fixture,
                 &mut registrations,
                 &mut oracle,
-                namespace,
                 epoch,
                 Duration::from_secs(5),
                 vec![],
@@ -891,20 +893,20 @@ mod tests {
         one_offline(bls12381_multisig::fixture::<MinPk, _>);
         one_offline(bls12381_multisig::fixture::<MinSig, _>);
         one_offline(ed25519::fixture);
+        one_offline(secp256r1::fixture);
     }
 
     /// Test consensus recovery after a network partition.
     fn network_partition<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
-            let namespace = b"my testing namespace";
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             let (mut oracle, mut registrations) =
@@ -916,7 +918,6 @@ mod tests {
                 &fixture,
                 &mut registrations,
                 &mut oracle,
-                namespace,
                 epoch,
                 Duration::from_secs(5),
                 vec![],
@@ -957,20 +958,20 @@ mod tests {
         network_partition(bls12381_multisig::fixture::<MinPk, _>);
         network_partition(bls12381_multisig::fixture::<MinSig, _>);
         network_partition(ed25519::fixture);
+        network_partition(secp256r1::fixture);
     }
 
     /// Test insufficient validator participation (below quorum).
     fn insufficient_validators<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(15));
 
         runner.start(|mut context| async move {
             let num_validators = 5;
-            let fixture = fixture(&mut context, num_validators);
-            let namespace = b"my testing namespace";
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             // Set up simulated network
@@ -984,7 +985,7 @@ mod tests {
 
             // Start only 2 out of 5 validators (below quorum of 3)
             for (idx, participant) in fixture.participants.iter().take(2).enumerate() {
-                let context = context.with_label(&participant.to_string());
+                let context = context.with_label(&format!("participant_{participant}"));
 
                 // Create Provider and register scheme for epoch
                 let provider = mocks::Provider::new();
@@ -998,7 +999,7 @@ mod tests {
 
                 // Create reporter with verifier scheme
                 let (reporter, reporter_mailbox) =
-                    mocks::Reporter::new(context.clone(), namespace, fixture.verifier.clone());
+                    mocks::Reporter::new(context.clone(), fixture.verifier.clone());
                 context.with_label("reporter").spawn(|_| reporter.run());
                 reporters.insert(participant.clone(), reporter_mailbox.clone());
 
@@ -1014,7 +1015,6 @@ mod tests {
                         automaton,
                         reporter: reporter_mailbox,
                         blocker,
-                        namespace: namespace.to_vec(),
                         priority_acks: false,
                         rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(3)),
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
@@ -1069,5 +1069,6 @@ mod tests {
         insufficient_validators(bls12381_multisig::fixture::<MinPk, _>);
         insufficient_validators(bls12381_multisig::fixture::<MinSig, _>);
         insufficient_validators(ed25519::fixture);
+        insufficient_validators(secp256r1::fixture);
     }
 }

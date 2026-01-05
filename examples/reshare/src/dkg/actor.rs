@@ -10,11 +10,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use commonware_consensus::{
-    types::Epoch,
-    utils::{epoch as compute_epoch, is_last_block_in_epoch, relative_height_in_epoch},
-    Reporter,
-};
+use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
     bls12381::{
         dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Output, PlayerAck},
@@ -168,7 +164,7 @@ where
         mut self,
         output: Option<Output<V, C::PublicKey>>,
         share: Option<Share>,
-        orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
+        orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         dkg: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -188,7 +184,7 @@ where
         mut self,
         output: Option<Output<V, C::PublicKey>>,
         share: Option<Share>,
-        mut orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
+        mut orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -197,6 +193,7 @@ where
     ) {
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let is_dkg = output.is_none();
+        let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
 
         // Initialize persistent state
         let mut storage = Storage::init(
@@ -290,9 +287,7 @@ where
                 share: epoch_state.share.clone(),
                 dealers: dealers.clone(),
             };
-            orchestrator
-                .report(orchestrator::Message::Enter(transition))
-                .await;
+            orchestrator.enter(transition).await;
 
             // Register a channel for this round
             let (mut round_sender, mut round_receiver) = dkg_mux
@@ -401,10 +396,10 @@ where
                             }
                         }
                         MailboxMessage::Finalized { block, response } => {
-                            let block_epoch = compute_epoch(BLOCKS_PER_EPOCH, block.height);
-                            let relative_height =
-                                relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
-                            let mid_point = BLOCKS_PER_EPOCH / 2;
+                            let bounds = epocher.containing(block.height).expect("block height covered by epoch strategy");
+                            let block_epoch = bounds.epoch();
+                            let phase = bounds.phase();
+                            let relative_height = bounds.relative();
                             info!(epoch = %block_epoch, relative_height, "processing finalized block");
 
                             // Skip blocks from previous epochs (can happen on restart if we
@@ -412,13 +407,6 @@ where
                             if block_epoch < epoch {
                                 response.acknowledge();
                                 continue;
-                            }
-
-                            // Inform the orchestrator of the epoch exit after first finalization
-                            if relative_height == 0 {
-                                if let Some(prev) = block_epoch.previous() {
-                                    orchestrator.report(orchestrator::Message::Exit(prev)).await;
-                                }
                             }
 
                             // Process dealer log from block if present
@@ -437,7 +425,7 @@ where
                             }
 
                             // In the first half of the epoch, continuously distribute shares
-                            if relative_height < mid_point {
+                            if phase == EpochPhase::Early {
                                 if let Some(ref mut ds) = dealer_state {
                                     Self::distribute_shares(
                                         &self_pk,
@@ -452,15 +440,14 @@ where
                             }
 
                             // At or past the midpoint, finalize dealer if not already done.
-                            // The >= check handles restart after midpoint acknowledgment.
-                            if relative_height >= mid_point {
+                            if matches!(phase, EpochPhase::Midpoint | EpochPhase::Late) {
                                 if let Some(ref mut ds) = dealer_state {
                                     ds.finalize();
                                 }
                             }
 
                             // Continue if not the last block in the epoch
-                            if is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height).is_none() {
+                            if block.height != bounds.last() {
                                 // Acknowledge block processing
                                 response.acknowledge();
                                 continue;
@@ -533,14 +520,15 @@ where
                                 Update::Failure { epoch }
                             };
 
+                            // Exit the engine for this epoch now that the boundary is finalized
+                            orchestrator
+                                .exit(epoch)
+                                .await;
+
                             // If the update is stop, wait forever.
                             if let PostUpdate::Stop = callback.on_update(update).await {
                                 // Close the mailbox to prevent accepting any new messages
                                 drop(self.mailbox);
-                                // Exit last consensus instance to avoid useless work while we wait for shutdown
-                                orchestrator
-                                    .report(orchestrator::Message::Exit(epoch))
-                                    .await;
                                 // Keep running until killed to keep the orchestrator mailbox alive
                                 info!("DKG complete; waiting for shutdown...");
                                 futures::future::pending::<()>().await;

@@ -12,7 +12,7 @@ use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
 const NAMESPACE: &[u8] = b"fuzz_transport";
-const MAX_MESSAGE_SIZE: usize = 2048;
+const MAX_MESSAGE_SIZE: u32 = 2048;
 
 #[derive(Debug)]
 enum Direction {

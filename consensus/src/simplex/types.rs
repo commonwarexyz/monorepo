@@ -11,7 +11,7 @@ use commonware_cryptography::{
     certificate::{Attestation, Scheme},
     Digest, PublicKey,
 };
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
@@ -480,6 +480,8 @@ pub enum Artifact<S: Scheme, D: Digest> {
     Notarize(Notarize<S, D>),
     /// A recovered certificate for a notarization.
     Notarization(Notarization<S, D>),
+    /// A notarization was locally certified.
+    Certification(Round, bool),
     /// A validator's nullify vote used to skip the current view.
     Nullify(Nullify<S>),
     /// A recovered certificate for a nullification.
@@ -501,20 +503,25 @@ impl<S: Scheme, D: Digest> Write for Artifact<S, D> {
                 1u8.write(writer);
                 v.write(writer);
             }
-            Self::Nullify(v) => {
+            Self::Certification(r, b) => {
                 2u8.write(writer);
-                v.write(writer);
+                r.write(writer);
+                b.write(writer);
             }
-            Self::Nullification(v) => {
+            Self::Nullify(v) => {
                 3u8.write(writer);
                 v.write(writer);
             }
-            Self::Finalize(v) => {
+            Self::Nullification(v) => {
                 4u8.write(writer);
                 v.write(writer);
             }
-            Self::Finalization(v) => {
+            Self::Finalize(v) => {
                 5u8.write(writer);
+                v.write(writer);
+            }
+            Self::Finalization(v) => {
+                6u8.write(writer);
                 v.write(writer);
             }
         }
@@ -526,6 +533,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Artifact<S, D> {
         1 + match self {
             Self::Notarize(v) => v.encode_size(),
             Self::Notarization(v) => v.encode_size(),
+            Self::Certification(r, b) => r.encode_size() + b.encode_size(),
             Self::Nullify(v) => v.encode_size(),
             Self::Nullification(v) => v.encode_size(),
             Self::Finalize(v) => v.encode_size(),
@@ -549,18 +557,23 @@ impl<S: Scheme, D: Digest> Read for Artifact<S, D> {
                 Ok(Self::Notarization(v))
             }
             2 => {
+                let r = Round::read(reader)?;
+                let b = bool::read(reader)?;
+                Ok(Self::Certification(r, b))
+            }
+            3 => {
                 let v = Nullify::read(reader)?;
                 Ok(Self::Nullify(v))
             }
-            3 => {
+            4 => {
                 let v = Nullification::read_cfg(reader, cfg)?;
                 Ok(Self::Nullification(v))
             }
-            4 => {
+            5 => {
                 let v = Finalize::read(reader)?;
                 Ok(Self::Finalize(v))
             }
-            5 => {
+            6 => {
                 let v = Finalization::read_cfg(reader, cfg)?;
                 Ok(Self::Finalization(v))
             }
@@ -577,6 +590,7 @@ impl<S: Scheme, D: Digest> Epochable for Artifact<S, D> {
         match self {
             Self::Notarize(v) => v.epoch(),
             Self::Notarization(v) => v.epoch(),
+            Self::Certification(r, _) => r.epoch(),
             Self::Nullify(v) => v.epoch(),
             Self::Nullification(v) => v.epoch(),
             Self::Finalize(v) => v.epoch(),
@@ -590,6 +604,7 @@ impl<S: Scheme, D: Digest> Viewable for Artifact<S, D> {
         match self {
             Self::Notarize(v) => v.view(),
             Self::Notarization(v) => v.view(),
+            Self::Certification(r, _) => r.view(),
             Self::Nullify(v) => v.view(),
             Self::Nullification(v) => v.view(),
             Self::Finalize(v) => v.view(),
@@ -626,7 +641,7 @@ where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let tag = u.int_in_range(0..=5)?;
+        let tag = u.int_in_range(0..=6)?;
         match tag {
             0 => {
                 let v = Notarize::arbitrary(u)?;
@@ -637,18 +652,23 @@ where
                 Ok(Self::Notarization(v))
             }
             2 => {
+                let r = Round::arbitrary(u)?;
+                let b = bool::arbitrary(u)?;
+                Ok(Self::Certification(r, b))
+            }
+            3 => {
                 let v = Nullify::arbitrary(u)?;
                 Ok(Self::Nullify(v))
             }
-            3 => {
+            4 => {
                 let v = Nullification::arbitrary(u)?;
                 Ok(Self::Nullification(v))
             }
-            4 => {
+            5 => {
                 let v = Finalize::arbitrary(u)?;
                 Ok(Self::Finalize(v))
             }
-            5 => {
+            6 => {
                 let v = Finalization::arbitrary(u)?;
                 Ok(Self::Finalization(v))
             }
@@ -749,16 +769,13 @@ pub struct Notarize<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Signs a notarize vote for the provided proposal.
-    pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Option<Self>
+    pub fn sign(scheme: &S, proposal: Proposal<D>) -> Option<Self>
     where
         S: scheme::Scheme<D>,
     {
-        let attestation = scheme.sign::<D>(
-            namespace,
-            Subject::Notarize {
-                proposal: &proposal,
-            },
-        )?;
+        let attestation = scheme.sign::<D>(Subject::Notarize {
+            proposal: &proposal,
+        })?;
 
         Some(Self {
             proposal,
@@ -769,12 +786,13 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Verifies the notarize vote against the provided signing scheme.
     ///
     /// This ensures that the notarize signature is valid for the claimed proposal.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<D>(
-            namespace,
+        scheme.verify_attestation::<_, D>(
+            rng,
             Subject::Notarize {
                 proposal: &self.proposal,
             },
@@ -897,13 +915,12 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Verifies the notarization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S) -> bool
     where
         S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(
             rng,
-            namespace,
             Subject::Notarize {
                 proposal: &self.proposal,
             },
@@ -1014,11 +1031,11 @@ impl<S: Scheme> Hash for Nullify<S> {
 
 impl<S: Scheme> Nullify<S> {
     /// Signs a nullify vote for the given round.
-    pub fn sign<D: Digest>(scheme: &S, namespace: &[u8], round: Round) -> Option<Self>
+    pub fn sign<D: Digest>(scheme: &S, round: Round) -> Option<Self>
     where
         S: scheme::Scheme<D>,
     {
-        let attestation = scheme.sign::<D>(namespace, Subject::Nullify { round })?;
+        let attestation = scheme.sign::<D>(Subject::Nullify { round })?;
 
         Some(Self { round, attestation })
     }
@@ -1026,12 +1043,13 @@ impl<S: Scheme> Nullify<S> {
     /// Verifies the nullify vote against the provided signing scheme.
     ///
     /// This ensures that the nullify signature is valid for the given round.
-    pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R, D: Digest>(&self, rng: &mut R, scheme: &S) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<D>(
-            namespace,
+        scheme.verify_attestation::<_, D>(
+            rng,
             Subject::Nullify { round: self.round },
             &self.attestation,
         )
@@ -1123,18 +1141,12 @@ impl<S: Scheme> Nullification<S> {
     /// Verifies the nullification certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed round.
-    pub fn verify<R: Rng + CryptoRng, D: Digest>(
-        &self,
-        rng: &mut R,
-        scheme: &S,
-        namespace: &[u8],
-    ) -> bool
+    pub fn verify<R: CryptoRngCore, D: Digest>(&self, rng: &mut R, scheme: &S) -> bool
     where
         S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(
             rng,
-            namespace,
             Subject::Nullify { round: self.round },
             &self.certificate,
         )
@@ -1222,16 +1234,13 @@ pub struct Finalize<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Finalize<S, D> {
     /// Signs a finalize vote for the provided proposal.
-    pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Option<Self>
+    pub fn sign(scheme: &S, proposal: Proposal<D>) -> Option<Self>
     where
         S: scheme::Scheme<D>,
     {
-        let attestation = scheme.sign::<D>(
-            namespace,
-            Subject::Finalize {
-                proposal: &proposal,
-            },
-        )?;
+        let attestation = scheme.sign::<D>(Subject::Finalize {
+            proposal: &proposal,
+        })?;
 
         Some(Self {
             proposal,
@@ -1242,12 +1251,13 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     /// Verifies the finalize vote against the provided signing scheme.
     ///
     /// This ensures that the finalize signature is valid for the claimed proposal.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<D>(
-            namespace,
+        scheme.verify_attestation::<_, D>(
+            rng,
             Subject::Finalize {
                 proposal: &self.proposal,
             },
@@ -1370,13 +1380,12 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Verifies the finalization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S) -> bool
     where
         S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(
             rng,
-            namespace,
             Subject::Finalize {
                 proposal: &self.proposal,
             },
@@ -1640,7 +1649,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
     }
 
     /// Verifies the certificates contained in this response against the signing scheme.
-    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S) -> bool
     where
         S: scheme::Scheme<D>,
     {
@@ -1665,7 +1674,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
             (context, &nullification.certificate)
         });
 
-        scheme.verify_certificates::<_, D, _>(rng, namespace, notarizations.chain(nullifications))
+        scheme.verify_certificates::<_, D, _>(rng, notarizations.chain(nullifications))
     }
 }
 
@@ -1767,6 +1776,8 @@ pub enum Activity<S: Scheme, D: Digest> {
     Notarize(Notarize<S, D>),
     /// A recovered certificate for a notarization (scheme-specific).
     Notarization(Notarization<S, D>),
+    /// A notarization was locally certified.
+    Certification(Notarization<S, D>),
     /// A validator's nullify vote used to skip the current view.
     Nullify(Nullify<S>),
     /// A recovered certificate for a nullification (scheme-specific).
@@ -1788,6 +1799,7 @@ impl<S: Scheme, D: Digest> PartialEq for Activity<S, D> {
         match (self, other) {
             (Self::Notarize(a), Self::Notarize(b)) => a == b,
             (Self::Notarization(a), Self::Notarization(b)) => a == b,
+            (Self::Certification(a), Self::Certification(b)) => a == b,
             (Self::Nullify(a), Self::Nullify(b)) => a == b,
             (Self::Nullification(a), Self::Nullification(b)) => a == b,
             (Self::Finalize(a), Self::Finalize(b)) => a == b,
@@ -1813,32 +1825,36 @@ impl<S: Scheme, D: Digest> Hash for Activity<S, D> {
                 1u8.hash(state);
                 v.hash(state);
             }
-            Self::Nullify(v) => {
+            Self::Certification(v) => {
                 2u8.hash(state);
                 v.hash(state);
             }
-            Self::Nullification(v) => {
+            Self::Nullify(v) => {
                 3u8.hash(state);
                 v.hash(state);
             }
-            Self::Finalize(v) => {
+            Self::Nullification(v) => {
                 4u8.hash(state);
                 v.hash(state);
             }
-            Self::Finalization(v) => {
+            Self::Finalize(v) => {
                 5u8.hash(state);
                 v.hash(state);
             }
-            Self::ConflictingNotarize(v) => {
+            Self::Finalization(v) => {
                 6u8.hash(state);
                 v.hash(state);
             }
-            Self::ConflictingFinalize(v) => {
+            Self::ConflictingNotarize(v) => {
                 7u8.hash(state);
                 v.hash(state);
             }
-            Self::NullifyFinalize(v) => {
+            Self::ConflictingFinalize(v) => {
                 8u8.hash(state);
+                v.hash(state);
+            }
+            Self::NullifyFinalize(v) => {
+                9u8.hash(state);
                 v.hash(state);
             }
         }
@@ -1851,6 +1867,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
         match self {
             Self::Notarize(_) => false,
             Self::Notarization(_) => true,
+            Self::Certification(_) => false,
             Self::Nullify(_) => false,
             Self::Nullification(_) => true,
             Self::Finalize(_) => false,
@@ -1866,20 +1883,21 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// This method **always** performs verification regardless of whether the activity has been
     /// previously verified. Callers can use [`Activity::verified`] to check if verification is
     /// necessary before calling this method.
-    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S) -> bool
     where
         S: scheme::Scheme<D>,
     {
         match self {
-            Self::Notarize(n) => n.verify(scheme, namespace),
-            Self::Notarization(n) => n.verify(rng, scheme, namespace),
-            Self::Nullify(n) => n.verify(scheme, namespace),
-            Self::Nullification(n) => n.verify(rng, scheme, namespace),
-            Self::Finalize(f) => f.verify(scheme, namespace),
-            Self::Finalization(f) => f.verify(rng, scheme, namespace),
-            Self::ConflictingNotarize(c) => c.verify(scheme, namespace),
-            Self::ConflictingFinalize(c) => c.verify(scheme, namespace),
-            Self::NullifyFinalize(c) => c.verify(scheme, namespace),
+            Self::Notarize(n) => n.verify(rng, scheme),
+            Self::Notarization(n) => n.verify(rng, scheme),
+            Self::Certification(n) => n.verify(rng, scheme),
+            Self::Nullify(n) => n.verify(rng, scheme),
+            Self::Nullification(n) => n.verify(rng, scheme),
+            Self::Finalize(f) => f.verify(rng, scheme),
+            Self::Finalization(f) => f.verify(rng, scheme),
+            Self::ConflictingNotarize(c) => c.verify(rng, scheme),
+            Self::ConflictingFinalize(c) => c.verify(rng, scheme),
+            Self::NullifyFinalize(c) => c.verify(rng, scheme),
         }
     }
 }
@@ -1895,32 +1913,36 @@ impl<S: Scheme, D: Digest> Write for Activity<S, D> {
                 1u8.write(writer);
                 v.write(writer);
             }
-            Self::Nullify(v) => {
+            Self::Certification(v) => {
                 2u8.write(writer);
                 v.write(writer);
             }
-            Self::Nullification(v) => {
+            Self::Nullify(v) => {
                 3u8.write(writer);
                 v.write(writer);
             }
-            Self::Finalize(v) => {
+            Self::Nullification(v) => {
                 4u8.write(writer);
                 v.write(writer);
             }
-            Self::Finalization(v) => {
+            Self::Finalize(v) => {
                 5u8.write(writer);
                 v.write(writer);
             }
-            Self::ConflictingNotarize(v) => {
+            Self::Finalization(v) => {
                 6u8.write(writer);
                 v.write(writer);
             }
-            Self::ConflictingFinalize(v) => {
+            Self::ConflictingNotarize(v) => {
                 7u8.write(writer);
                 v.write(writer);
             }
-            Self::NullifyFinalize(v) => {
+            Self::ConflictingFinalize(v) => {
                 8u8.write(writer);
+                v.write(writer);
+            }
+            Self::NullifyFinalize(v) => {
+                9u8.write(writer);
                 v.write(writer);
             }
         }
@@ -1932,6 +1954,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
         1 + match self {
             Self::Notarize(v) => v.encode_size(),
             Self::Notarization(v) => v.encode_size(),
+            Self::Certification(v) => v.encode_size(),
             Self::Nullify(v) => v.encode_size(),
             Self::Nullification(v) => v.encode_size(),
             Self::Finalize(v) => v.encode_size(),
@@ -1958,30 +1981,34 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
                 Ok(Self::Notarization(v))
             }
             2 => {
+                let v = Notarization::<S, D>::read_cfg(reader, cfg)?;
+                Ok(Self::Certification(v))
+            }
+            3 => {
                 let v = Nullify::<S>::read(reader)?;
                 Ok(Self::Nullify(v))
             }
-            3 => {
+            4 => {
                 let v = Nullification::<S>::read_cfg(reader, cfg)?;
                 Ok(Self::Nullification(v))
             }
-            4 => {
+            5 => {
                 let v = Finalize::<S, D>::read(reader)?;
                 Ok(Self::Finalize(v))
             }
-            5 => {
+            6 => {
                 let v = Finalization::<S, D>::read_cfg(reader, cfg)?;
                 Ok(Self::Finalization(v))
             }
-            6 => {
+            7 => {
                 let v = ConflictingNotarize::<S, D>::read(reader)?;
                 Ok(Self::ConflictingNotarize(v))
             }
-            7 => {
+            8 => {
                 let v = ConflictingFinalize::<S, D>::read(reader)?;
                 Ok(Self::ConflictingFinalize(v))
             }
-            8 => {
+            9 => {
                 let v = NullifyFinalize::<S, D>::read(reader)?;
                 Ok(Self::NullifyFinalize(v))
             }
@@ -1998,6 +2025,7 @@ impl<S: Scheme, D: Digest> Epochable for Activity<S, D> {
         match self {
             Self::Notarize(v) => v.epoch(),
             Self::Notarization(v) => v.epoch(),
+            Self::Certification(v) => v.epoch(),
             Self::Nullify(v) => v.epoch(),
             Self::Nullification(v) => v.epoch(),
             Self::Finalize(v) => v.epoch(),
@@ -2014,6 +2042,7 @@ impl<S: Scheme, D: Digest> Viewable for Activity<S, D> {
         match self {
             Self::Notarize(v) => v.view(),
             Self::Notarization(v) => v.view(),
+            Self::Certification(v) => v.view(),
             Self::Nullify(v) => v.view(),
             Self::Nullification(v) => v.view(),
             Self::Finalize(v) => v.view(),
@@ -2033,7 +2062,7 @@ where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let tag = u.int_in_range(0..=8)?;
+        let tag = u.int_in_range(0..=9)?;
         match tag {
             0 => {
                 let v = Notarize::<S, D>::arbitrary(u)?;
@@ -2044,30 +2073,34 @@ where
                 Ok(Self::Notarization(v))
             }
             2 => {
+                let v = Notarization::<S, D>::arbitrary(u)?;
+                Ok(Self::Certification(v))
+            }
+            3 => {
                 let v = Nullify::<S>::arbitrary(u)?;
                 Ok(Self::Nullify(v))
             }
-            3 => {
+            4 => {
                 let v = Nullification::<S>::arbitrary(u)?;
                 Ok(Self::Nullification(v))
             }
-            4 => {
+            5 => {
                 let v = Finalize::<S, D>::arbitrary(u)?;
                 Ok(Self::Finalize(v))
             }
-            5 => {
+            6 => {
                 let v = Finalization::<S, D>::arbitrary(u)?;
                 Ok(Self::Finalization(v))
             }
-            6 => {
+            7 => {
                 let v = ConflictingNotarize::<S, D>::arbitrary(u)?;
                 Ok(Self::ConflictingNotarize(v))
             }
-            7 => {
+            8 => {
                 let v = ConflictingFinalize::<S, D>::arbitrary(u)?;
                 Ok(Self::ConflictingFinalize(v))
             }
-            8 => {
+            9 => {
                 let v = NullifyFinalize::<S, D>::arbitrary(u)?;
                 Ok(Self::NullifyFinalize(v))
             }
@@ -2114,11 +2147,12 @@ impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.notarize_1.verify(scheme, namespace) && self.notarize_2.verify(scheme, namespace)
+        self.notarize_1.verify(rng, scheme) && self.notarize_2.verify(rng, scheme)
     }
 }
 
@@ -2228,11 +2262,12 @@ impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.finalize_1.verify(scheme, namespace) && self.finalize_2.verify(scheme, namespace)
+        self.finalize_1.verify(rng, scheme) && self.finalize_2.verify(rng, scheme)
     }
 }
 
@@ -2340,11 +2375,12 @@ impl<S: Scheme, D: Digest> NullifyFinalize<S, D> {
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.nullify.verify(scheme, namespace) && self.finalize.verify(scheme, namespace)
+        self.nullify.verify(rng, scheme) && self.finalize.verify(rng, scheme)
     }
 }
 
@@ -2413,14 +2449,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme};
+    use crate::simplex::scheme::{
+        bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme,
+    };
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
         sha256::Digest as Sha256,
     };
-    use commonware_utils::{quorum, quorum_from_slice};
+    use commonware_utils::{quorum, quorum_from_slice, test_rng};
     use rand::{
         rngs::{OsRng, StdRng},
         SeedableRng,
@@ -2433,22 +2471,21 @@ mod tests {
         Sha256::from([v; 32]) // Simple fixed digest for testing
     }
 
-    /// Generate a fixture using the provided generator function.
-    fn setup<S, F>(n: u32, fixture: F) -> Fixture<S>
-    where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
-    {
-        let mut rng = StdRng::seed_from_u64(0);
-        fixture(&mut rng, n)
-    }
-
     /// Generate a fixture using the provided generator function with a specific seed.
     fn setup_seeded<S, F>(n: u32, seed: u64, fixture: F) -> Fixture<S>
     where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        setup_seeded_ns(n, seed, NAMESPACE, fixture)
+    }
+
+    /// Generate a fixture using the provided generator function with a specific seed and namespace.
+    fn setup_seeded_ns<S, F>(n: u32, seed: u64, namespace: &[u8], fixture: F) -> Fixture<S>
+    where
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = StdRng::seed_from_u64(seed);
-        fixture(&mut rng, n)
+        fixture(&mut rng, namespace, n)
     }
 
     #[test]
@@ -2466,23 +2503,25 @@ mod tests {
     fn notarize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
-        let notarize = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
+        let notarize = Notarize::sign(&fixture.schemes[0], proposal).unwrap();
 
         let encoded = notarize.encode();
         let decoded = Notarize::decode(encoded).unwrap();
 
         assert_eq!(notarize, decoded);
-        assert!(decoded.verify(&fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
     }
 
     #[test]
     fn test_notarize_encode_decode() {
         notarize_encode_decode(ed25519::fixture);
+        notarize_encode_decode(secp256r1::fixture);
         notarize_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         notarize_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         notarize_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -2492,9 +2531,10 @@ mod tests {
     fn notarization_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let proposal = Proposal::new(
             Round::new(Epoch::new(0), View::new(10)),
             View::new(5),
@@ -2503,19 +2543,20 @@ mod tests {
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes).unwrap();
         let encoded = notarization.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Notarization::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(notarization, decoded);
-        assert!(decoded.verify(&mut OsRng, &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut OsRng, &fixture.schemes[0]));
     }
 
     #[test]
     fn test_notarization_encode_decode() {
         notarization_encode_decode(ed25519::fixture);
+        notarization_encode_decode(secp256r1::fixture);
         notarization_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         notarization_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         notarization_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -2525,20 +2566,22 @@ mod tests {
     fn nullify_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
-        let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], NAMESPACE, round).unwrap();
+        let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], round).unwrap();
         let encoded = nullify.encode();
         let decoded = Nullify::decode(encoded).unwrap();
         assert_eq!(nullify, decoded);
-        assert!(decoded.verify::<Sha256>(&fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify::<_, Sha256>(&mut rng, &fixture.schemes[0]));
     }
 
     #[test]
     fn test_nullify_encode_decode() {
         nullify_encode_decode(ed25519::fixture);
+        nullify_encode_decode(secp256r1::fixture);
         nullify_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         nullify_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         nullify_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -2548,26 +2591,28 @@ mod tests {
     fn nullification_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(333), View::new(10));
         let nullifies: Vec<_> = fixture
             .schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256>(scheme, NAMESPACE, round).unwrap())
+            .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
             .collect();
         let nullification = Nullification::from_nullifies(&fixture.schemes[0], &nullifies).unwrap();
         let encoded = nullification.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Nullification::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(nullification, decoded);
-        assert!(decoded.verify::<_, Sha256>(&mut OsRng, &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify::<_, Sha256>(&mut OsRng, &fixture.schemes[0]));
     }
 
     #[test]
     fn test_nullification_encode_decode() {
         nullification_encode_decode(ed25519::fixture);
+        nullification_encode_decode(secp256r1::fixture);
         nullification_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         nullification_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         nullification_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -2577,21 +2622,23 @@ mod tests {
     fn finalize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
-        let finalize = Finalize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
+        let finalize = Finalize::sign(&fixture.schemes[0], proposal).unwrap();
         let encoded = finalize.encode();
         let decoded = Finalize::decode(encoded).unwrap();
         assert_eq!(finalize, decoded);
-        assert!(decoded.verify(&fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
     }
 
     #[test]
     fn test_finalize_encode_decode() {
         finalize_encode_decode(ed25519::fixture);
+        finalize_encode_decode(secp256r1::fixture);
         finalize_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         finalize_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         finalize_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -2601,27 +2648,29 @@ mod tests {
     fn finalization_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let finalizes: Vec<_> = fixture
             .schemes
             .iter()
-            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let finalization = Finalization::from_finalizes(&fixture.schemes[0], &finalizes).unwrap();
         let encoded = finalization.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Finalization::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(finalization, decoded);
-        assert!(decoded.verify(&mut OsRng, &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut OsRng, &fixture.schemes[0]));
     }
 
     #[test]
     fn test_finalization_encode_decode() {
         finalization_encode_decode(ed25519::fixture);
+        finalization_encode_decode(secp256r1::fixture);
         finalization_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         finalization_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         finalization_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -2631,9 +2680,10 @@ mod tests {
     fn backfiller_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let cfg = fixture.schemes[0].certificate_codec_config();
         let request = Request::new(
             1,
@@ -2651,14 +2701,14 @@ mod tests {
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes).unwrap();
 
         let nullifies: Vec<_> = fixture
             .schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256>(scheme, NAMESPACE, round).unwrap())
+            .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
             .collect();
         let nullification = Nullification::from_nullifies(&fixture.schemes[0], &nullifies).unwrap();
 
@@ -2672,6 +2722,7 @@ mod tests {
     #[test]
     fn test_backfiller_encode_decode() {
         backfiller_encode_decode(ed25519::fixture);
+        backfiller_encode_decode(secp256r1::fixture);
         backfiller_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         backfiller_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         backfiller_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -2693,23 +2744,24 @@ mod tests {
     fn response_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
 
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes).unwrap();
 
         let nullifies: Vec<_> = fixture
             .schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256>(scheme, NAMESPACE, round).unwrap())
+            .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
             .collect();
         let nullification = Nullification::from_nullifies(&fixture.schemes[0], &nullifies).unwrap();
 
@@ -2722,18 +2774,19 @@ mod tests {
         assert_eq!(response.nullifications.len(), decoded.nullifications.len());
 
         let mut rng = OsRng;
-        assert!(decoded.verify(&mut rng, &fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
 
         decoded.nullifications[0].round = Round::new(
             decoded.nullifications[0].round.epoch(),
             decoded.nullifications[0].round.view().next(),
         );
-        assert!(!decoded.verify(&mut rng, &fixture.schemes[0], NAMESPACE));
+        assert!(!decoded.verify(&mut rng, &fixture.schemes[0]));
     }
 
     #[test]
     fn test_response_encode_decode() {
         response_encode_decode(ed25519::fixture);
+        response_encode_decode(secp256r1::fixture);
         response_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         response_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         response_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -2743,9 +2796,10 @@ mod tests {
     fn conflicting_notarize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let proposal1 = Proposal::new(
             Round::new(Epoch::new(0), View::new(10)),
             View::new(5),
@@ -2756,20 +2810,21 @@ mod tests {
             View::new(5),
             sample_digest(2),
         );
-        let notarize1 = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal1).unwrap();
-        let notarize2 = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal2).unwrap();
+        let notarize1 = Notarize::sign(&fixture.schemes[0], proposal1).unwrap();
+        let notarize2 = Notarize::sign(&fixture.schemes[0], proposal2).unwrap();
         let conflicting = ConflictingNotarize::new(notarize1, notarize2);
 
         let encoded = conflicting.encode();
         let decoded = ConflictingNotarize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting, decoded);
-        assert!(decoded.verify(&fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
     }
 
     #[test]
     fn test_conflicting_notarize_encode_decode() {
         conflicting_notarize_encode_decode(ed25519::fixture);
+        conflicting_notarize_encode_decode(secp256r1::fixture);
         conflicting_notarize_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         conflicting_notarize_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         conflicting_notarize_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -2779,9 +2834,10 @@ mod tests {
     fn conflicting_finalize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let proposal1 = Proposal::new(
             Round::new(Epoch::new(0), View::new(10)),
             View::new(5),
@@ -2792,20 +2848,21 @@ mod tests {
             View::new(5),
             sample_digest(2),
         );
-        let finalize1 = Finalize::sign(&fixture.schemes[0], NAMESPACE, proposal1).unwrap();
-        let finalize2 = Finalize::sign(&fixture.schemes[0], NAMESPACE, proposal2).unwrap();
+        let finalize1 = Finalize::sign(&fixture.schemes[0], proposal1).unwrap();
+        let finalize2 = Finalize::sign(&fixture.schemes[0], proposal2).unwrap();
         let conflicting = ConflictingFinalize::new(finalize1, finalize2);
 
         let encoded = conflicting.encode();
         let decoded = ConflictingFinalize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting, decoded);
-        assert!(decoded.verify(&fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
     }
 
     #[test]
     fn test_conflicting_finalize_encode_decode() {
         conflicting_finalize_encode_decode(ed25519::fixture);
+        conflicting_finalize_encode_decode(secp256r1::fixture);
         conflicting_finalize_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         conflicting_finalize_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         conflicting_finalize_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
@@ -2815,48 +2872,54 @@ mod tests {
     fn nullify_finalize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
-        let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], NAMESPACE, round).unwrap();
-        let finalize = Finalize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
+        let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], round).unwrap();
+        let finalize = Finalize::sign(&fixture.schemes[0], proposal).unwrap();
         let conflict = NullifyFinalize::new(nullify, finalize);
 
         let encoded = conflict.encode();
         let decoded = NullifyFinalize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflict, decoded);
-        assert!(decoded.verify(&fixture.schemes[0], NAMESPACE));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
     }
 
     #[test]
     fn test_nullify_finalize_encode_decode() {
         nullify_finalize_encode_decode(ed25519::fixture);
+        nullify_finalize_encode_decode(secp256r1::fixture);
         nullify_finalize_encode_decode(bls12381_multisig::fixture::<MinPk, _>);
         nullify_finalize_encode_decode(bls12381_multisig::fixture::<MinSig, _>);
         nullify_finalize_encode_decode(bls12381_threshold::fixture::<MinPk, _>);
         nullify_finalize_encode_decode(bls12381_threshold::fixture::<MinSig, _>);
     }
 
-    fn notarize_verify_wrong_namespace<S, F>(fixture: F)
+    fn notarize_verify_wrong_namespace<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        // Create two fixtures with different namespaces
+        let mut rng = test_rng();
+        let fixture = setup_seeded_ns(5, 0, NAMESPACE, &f);
+        let wrong_fixture = setup_seeded_ns(5, 0, b"wrong_namespace", &f);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
-        let notarize = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
+        let notarize = Notarize::sign(&fixture.schemes[0], proposal).unwrap();
 
-        assert!(notarize.verify(&fixture.schemes[0], NAMESPACE));
-        assert!(!notarize.verify(&fixture.schemes[0], b"wrong_namespace"));
+        assert!(notarize.verify(&mut rng, &fixture.schemes[0]));
+        assert!(!notarize.verify(&mut rng, &wrong_fixture.schemes[0]));
     }
 
     #[test]
     fn test_notarize_verify_wrong_namespace() {
         notarize_verify_wrong_namespace(ed25519::fixture);
+        notarize_verify_wrong_namespace(secp256r1::fixture);
         notarize_verify_wrong_namespace(bls12381_multisig::fixture::<MinPk, _>);
         notarize_verify_wrong_namespace(bls12381_multisig::fixture::<MinSig, _>);
         notarize_verify_wrong_namespace(bls12381_threshold::fixture::<MinPk, _>);
@@ -2866,21 +2929,23 @@ mod tests {
     fn notarize_verify_wrong_scheme<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
+        let mut rng = test_rng();
         let fixture = setup_seeded(5, 0, &f);
         let wrong_fixture = setup_seeded(5, 1, &f);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(2));
-        let notarize = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
+        let notarize = Notarize::sign(&fixture.schemes[0], proposal).unwrap();
 
-        assert!(notarize.verify(&fixture.schemes[0], NAMESPACE));
-        assert!(!notarize.verify(&wrong_fixture.verifier, NAMESPACE));
+        assert!(notarize.verify(&mut rng, &fixture.schemes[0]));
+        assert!(!notarize.verify(&mut rng, &wrong_fixture.verifier));
     }
 
     #[test]
     fn test_notarize_verify_wrong_scheme() {
         notarize_verify_wrong_scheme(ed25519::fixture);
+        notarize_verify_wrong_scheme(secp256r1::fixture);
         notarize_verify_wrong_scheme(bls12381_multisig::fixture::<MinPk, _>);
         notarize_verify_wrong_scheme(bls12381_multisig::fixture::<MinSig, _>);
         notarize_verify_wrong_scheme(bls12381_threshold::fixture::<MinPk, _>);
@@ -2890,7 +2955,7 @@ mod tests {
     fn notarization_verify_wrong_scheme<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let fixture = setup_seeded(5, 0, &f);
         let wrong_fixture = setup_seeded(5, 1, &f);
@@ -2901,33 +2966,37 @@ mod tests {
             .schemes
             .iter()
             .take(quorum)
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
         let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes)
             .expect("quorum notarization");
         let mut rng = OsRng;
-        assert!(notarization.verify(&mut rng, &fixture.schemes[0], NAMESPACE));
+        assert!(notarization.verify(&mut rng, &fixture.schemes[0]));
 
         let mut rng = OsRng;
-        assert!(!notarization.verify(&mut rng, &wrong_fixture.verifier, NAMESPACE));
+        assert!(!notarization.verify(&mut rng, &wrong_fixture.verifier));
     }
 
     #[test]
     fn test_notarization_verify_wrong_scheme() {
         notarization_verify_wrong_scheme(ed25519::fixture);
+        notarization_verify_wrong_scheme(secp256r1::fixture);
         notarization_verify_wrong_scheme(bls12381_multisig::fixture::<MinPk, _>);
         notarization_verify_wrong_scheme(bls12381_multisig::fixture::<MinSig, _>);
         notarization_verify_wrong_scheme(bls12381_threshold::fixture::<MinPk, _>);
         notarization_verify_wrong_scheme(bls12381_threshold::fixture::<MinSig, _>);
     }
 
-    fn notarization_verify_wrong_namespace<S, F>(fixture: F)
+    fn notarization_verify_wrong_namespace<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        // Create two fixtures with different namespaces
+        let fixture = setup_seeded_ns(5, 0, NAMESPACE, &f);
+        let wrong_fixture = setup_seeded_ns(5, 0, b"wrong_namespace", &f);
+        let mut rng = test_rng();
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(4));
         let quorum = quorum_from_slice(&fixture.schemes) as usize;
@@ -2935,21 +3004,20 @@ mod tests {
             .schemes
             .iter()
             .take(quorum)
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
         let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes)
             .expect("quorum notarization");
-        let mut rng = OsRng;
-        assert!(notarization.verify(&mut rng, &fixture.schemes[0], NAMESPACE));
+        assert!(notarization.verify(&mut rng, &fixture.schemes[0]));
 
-        let mut rng = OsRng;
-        assert!(!notarization.verify(&mut rng, &fixture.schemes[0], b"wrong_namespace"));
+        assert!(!notarization.verify(&mut rng, &wrong_fixture.schemes[0]));
     }
 
     #[test]
     fn test_notarization_verify_wrong_namespace() {
         notarization_verify_wrong_namespace(ed25519::fixture);
+        notarization_verify_wrong_namespace(secp256r1::fixture);
         notarization_verify_wrong_namespace(bls12381_multisig::fixture::<MinPk, _>);
         notarization_verify_wrong_namespace(bls12381_multisig::fixture::<MinSig, _>);
         notarization_verify_wrong_namespace(bls12381_threshold::fixture::<MinPk, _>);
@@ -2959,9 +3027,10 @@ mod tests {
     fn notarization_recover_insufficient_signatures<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(5, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let quorum_size = quorum(fixture.schemes.len() as u32) as usize;
         assert!(quorum_size > 1, "test requires quorum larger than one");
         let round = Round::new(Epoch::new(0), View::new(10));
@@ -2970,7 +3039,7 @@ mod tests {
             .schemes
             .iter()
             .take(quorum_size - 1)
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
         assert!(
@@ -2982,6 +3051,7 @@ mod tests {
     #[test]
     fn test_notarization_recover_insufficient_signatures() {
         notarization_recover_insufficient_signatures(ed25519::fixture);
+        notarization_recover_insufficient_signatures(secp256r1::fixture);
         notarization_recover_insufficient_signatures(bls12381_multisig::fixture::<MinPk, _>);
         notarization_recover_insufficient_signatures(bls12381_multisig::fixture::<MinSig, _>);
         notarization_recover_insufficient_signatures(bls12381_threshold::fixture::<MinPk, _>);
@@ -2991,26 +3061,30 @@ mod tests {
     fn conflicting_notarize_detection<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
+        let mut rng = test_rng();
         let fixture = setup_seeded(5, 0, &f);
-        let wrong_fixture = setup_seeded(5, 1, &f);
+        let wrong_ns_fixture = setup_seeded_ns(5, 0, b"wrong_namespace", &f);
+        let wrong_scheme_fixture = setup_seeded(5, 1, &f);
+
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal1 = Proposal::new(round, View::new(5), sample_digest(6));
         let proposal2 = Proposal::new(round, View::new(5), sample_digest(7));
 
-        let notarize1 = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal1).unwrap();
-        let notarize2 = Notarize::sign(&fixture.schemes[0], NAMESPACE, proposal2).unwrap();
+        let notarize1 = Notarize::sign(&fixture.schemes[0], proposal1).unwrap();
+        let notarize2 = Notarize::sign(&fixture.schemes[0], proposal2).unwrap();
         let conflict = ConflictingNotarize::new(notarize1, notarize2);
 
-        assert!(conflict.verify(&fixture.schemes[0], NAMESPACE));
-        assert!(!conflict.verify(&fixture.schemes[0], b"wrong_namespace"));
-        assert!(!conflict.verify(&wrong_fixture.verifier, NAMESPACE));
+        assert!(conflict.verify(&mut rng, &fixture.schemes[0]));
+        assert!(!conflict.verify(&mut rng, &wrong_ns_fixture.schemes[0]));
+        assert!(!conflict.verify(&mut rng, &wrong_scheme_fixture.verifier));
     }
 
     #[test]
     fn test_conflicting_notarize_detection() {
         conflicting_notarize_detection(ed25519::fixture);
+        conflicting_notarize_detection(secp256r1::fixture);
         conflicting_notarize_detection(bls12381_multisig::fixture::<MinPk, _>);
         conflicting_notarize_detection(bls12381_multisig::fixture::<MinSig, _>);
         conflicting_notarize_detection(bls12381_threshold::fixture::<MinPk, _>);
@@ -3020,25 +3094,29 @@ mod tests {
     fn nullify_finalize_detection<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
+        let mut rng = test_rng();
         let fixture = setup_seeded(5, 0, &f);
-        let wrong_fixture = setup_seeded(5, 1, &f);
+        let wrong_ns_fixture = setup_seeded_ns(5, 0, b"wrong_namespace", &f);
+        let wrong_scheme_fixture = setup_seeded(5, 1, &f);
+
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(8));
 
-        let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], NAMESPACE, round).unwrap();
-        let finalize = Finalize::sign(&fixture.schemes[0], NAMESPACE, proposal).unwrap();
+        let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], round).unwrap();
+        let finalize = Finalize::sign(&fixture.schemes[0], proposal).unwrap();
         let conflict = NullifyFinalize::new(nullify, finalize);
 
-        assert!(conflict.verify(&fixture.schemes[0], NAMESPACE));
-        assert!(!conflict.verify(&fixture.schemes[0], b"wrong_namespace"));
-        assert!(!conflict.verify(&wrong_fixture.verifier, NAMESPACE));
+        assert!(conflict.verify(&mut rng, &fixture.schemes[0]));
+        assert!(!conflict.verify(&mut rng, &wrong_ns_fixture.schemes[0]));
+        assert!(!conflict.verify(&mut rng, &wrong_scheme_fixture.verifier));
     }
 
     #[test]
     fn test_nullify_finalize_detection() {
         nullify_finalize_detection(ed25519::fixture);
+        nullify_finalize_detection(secp256r1::fixture);
         nullify_finalize_detection(bls12381_multisig::fixture::<MinPk, _>);
         nullify_finalize_detection(bls12381_multisig::fixture::<MinSig, _>);
         nullify_finalize_detection(bls12381_threshold::fixture::<MinPk, _>);
@@ -3048,7 +3126,7 @@ mod tests {
     fn finalization_verify_wrong_scheme<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let fixture = setup_seeded(5, 0, &f);
         let wrong_fixture = setup_seeded(5, 1, &f);
@@ -3059,21 +3137,22 @@ mod tests {
             .schemes
             .iter()
             .take(quorum)
-            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
         let finalization = Finalization::from_finalizes(&fixture.schemes[0], &finalizes)
             .expect("quorum finalization");
         let mut rng = OsRng;
-        assert!(finalization.verify(&mut rng, &fixture.schemes[0], NAMESPACE));
+        assert!(finalization.verify(&mut rng, &fixture.schemes[0]));
 
         let mut rng = OsRng;
-        assert!(!finalization.verify(&mut rng, &wrong_fixture.verifier, NAMESPACE));
+        assert!(!finalization.verify(&mut rng, &wrong_fixture.verifier));
     }
 
     #[test]
     fn test_finalization_wrong_scheme() {
         finalization_verify_wrong_scheme(ed25519::fixture);
+        finalization_verify_wrong_scheme(secp256r1::fixture);
         finalization_verify_wrong_scheme(bls12381_multisig::fixture::<MinPk, _>);
         finalization_verify_wrong_scheme(bls12381_multisig::fixture::<MinSig, _>);
         finalization_verify_wrong_scheme(bls12381_threshold::fixture::<MinPk, _>);

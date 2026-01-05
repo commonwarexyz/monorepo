@@ -1,7 +1,7 @@
 use crate::{
     ordered_broadcast::{
         scheme,
-        types::{Activity, Chunk, Lock, Proposal},
+        types::{Activity, Chunk, ChunkVerifier, Lock, Proposal},
     },
     types::Epoch,
 };
@@ -11,7 +11,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
 #[allow(clippy::large_enum_variant)]
@@ -23,14 +23,14 @@ enum Message<C: PublicKey, S: Scheme, D: Digest> {
     Get(C, u64, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
-pub struct Reporter<R: Rng + CryptoRng, C: PublicKey, S: Scheme, D: Digest> {
+pub struct Reporter<R: CryptoRngCore, C: PublicKey, S: Scheme, D: Digest> {
     mailbox: mpsc::Receiver<Message<C, S, D>>,
 
     // RNG used for signature verification with scheme.
     rng: R,
 
-    // Application namespace
-    namespace: Vec<u8>,
+    // Verifier for node signatures.
+    chunk_verifier: ChunkVerifier,
 
     // Scheme for verification
     scheme: S,
@@ -51,14 +51,14 @@ pub struct Reporter<R: Rng + CryptoRng, C: PublicKey, S: Scheme, D: Digest> {
 
 impl<R, C, S, D> Reporter<R, C, S, D>
 where
-    R: Rng + CryptoRng,
+    R: CryptoRngCore,
     C: PublicKey,
     S: Scheme,
     D: Digest,
 {
     pub fn new(
         rng: R,
-        namespace: &[u8],
+        chunk_verifier: ChunkVerifier,
         scheme: S,
         limit_misses: Option<usize>,
     ) -> (Self, Mailbox<C, S, D>) {
@@ -67,7 +67,7 @@ where
             Self {
                 rng,
                 mailbox: receiver,
-                namespace: namespace.to_vec(),
+                chunk_verifier,
                 scheme,
                 proposals: HashSet::new(),
                 limit_misses,
@@ -88,7 +88,7 @@ where
             match msg {
                 Message::Proposal(proposal) => {
                     // Verify properly constructed (not needed in production)
-                    if !proposal.verify(&self.namespace) {
+                    if !proposal.verify(&self.chunk_verifier) {
                         panic!("Invalid proof");
                     }
 
@@ -101,7 +101,7 @@ where
                 }
                 Message::Locked(lock) => {
                     // Verify properly constructed (not needed in production)
-                    if !lock.verify(&mut self.rng, &self.namespace, &self.scheme) {
+                    if !lock.verify(&mut self.rng, &self.scheme) {
                         panic!("Invalid proof");
                     }
 

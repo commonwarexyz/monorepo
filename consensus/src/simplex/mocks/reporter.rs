@@ -16,7 +16,7 @@ use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_utils::ordered::{Quorum, Set};
 use futures::channel::mpsc::{Receiver, Sender};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
@@ -30,20 +30,17 @@ type Faults<S, D> = HashMap<<S as Scheme>::PublicKey, HashMap<View, HashSet<Acti
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
 pub struct Config<S: Scheme, L: ElectorConfig<S>> {
-    pub namespace: Vec<u8>,
     pub participants: Set<S::PublicKey>,
     pub scheme: S,
     pub elector: L,
 }
 
 #[derive(Clone)]
-pub struct Reporter<E: Rng + CryptoRng, S: Scheme, L: ElectorConfig<S>, D: Digest> {
+pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest> {
     context: E,
     pub participants: Set<S::PublicKey>,
     scheme: S,
     elector: L::Elector,
-
-    namespace: Vec<u8>,
 
     pub leaders: Arc<Mutex<HashMap<View, S::PublicKey>>>,
     pub certified: Arc<Mutex<HashSet<View>>>,
@@ -62,7 +59,7 @@ pub struct Reporter<E: Rng + CryptoRng, S: Scheme, L: ElectorConfig<S>, D: Diges
 
 impl<E, S, L, D> Reporter<E, S, L, D>
 where
-    E: Rng + CryptoRng,
+    E: CryptoRngCore,
     S: Scheme,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
@@ -73,7 +70,6 @@ where
 
         Self {
             context,
-            namespace: cfg.namespace,
             participants: cfg.participants,
             scheme: cfg.scheme,
             elector,
@@ -108,7 +104,7 @@ where
 
 impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>
 where
-    E: Clone + Rng + CryptoRng + Send + Sync + 'static,
+    E: Clone + CryptoRngCore + Send + Sync + 'static,
     S: scheme::Scheme<D>,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
@@ -122,7 +118,7 @@ where
         let verified = activity.verified();
         match &activity {
             Activity::Notarize(notarize) => {
-                if !notarize.verify(&self.scheme, &self.namespace) {
+                if !notarize.verify(&mut self.context, &self.scheme) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -139,12 +135,11 @@ where
                     .or_default()
                     .insert(public_key);
             }
-            Activity::Notarization(notarization) => {
+            Activity::Notarization(notarization) | Activity::Certification(notarization) => {
                 // Verify notarization
                 let view = notarization.view();
                 if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
-                    &self.namespace,
                     Subject::Notarize {
                         proposal: &notarization.proposal,
                     },
@@ -164,7 +159,7 @@ where
                 self.certified(notarization.round(), &notarization.certificate);
             }
             Activity::Nullify(nullify) => {
-                if !nullify.verify(&self.scheme, &self.namespace) {
+                if !nullify.verify(&mut self.context, &self.scheme) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -184,7 +179,6 @@ where
                 let view = nullification.view();
                 if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
-                    &self.namespace,
                     Subject::Nullify {
                         round: nullification.round,
                     },
@@ -204,7 +198,7 @@ where
                 self.certified(nullification.round, &nullification.certificate);
             }
             Activity::Finalize(finalize) => {
-                if !finalize.verify(&self.scheme, &self.namespace) {
+                if !finalize.verify(&mut self.context, &self.scheme) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -226,7 +220,6 @@ where
                 let view = finalization.view();
                 if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
-                    &self.namespace,
                     Subject::Finalize {
                         proposal: &finalization.proposal,
                     },
@@ -254,7 +247,7 @@ where
             }
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.scheme, &self.namespace) {
+                if !conflicting.verify(&mut self.context, &self.scheme) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -273,7 +266,7 @@ where
             }
             Activity::ConflictingFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.scheme, &self.namespace) {
+                if !conflicting.verify(&mut self.context, &self.scheme) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -292,7 +285,7 @@ where
             }
             Activity::NullifyFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.scheme, &self.namespace) {
+                if !conflicting.verify(&mut self.context, &self.scheme) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -315,7 +308,7 @@ where
 
 impl<E, S, L, D> Monitor for Reporter<E, S, L, D>
 where
-    E: Clone + Rng + CryptoRng + Send + Sync + 'static,
+    E: Clone + CryptoRngCore + Send + Sync + 'static,
     S: Scheme,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,

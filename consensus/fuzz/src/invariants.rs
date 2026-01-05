@@ -12,7 +12,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
 };
 use commonware_utils::quorum;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     any::TypeId,
     collections::{HashMap, HashSet},
@@ -231,7 +231,7 @@ fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
 
 pub fn extract<E, S, L>(reporters: Vec<Reporter<E, S, L, Sha256Digest>>) -> Vec<ReplicaState>
 where
-    E: Rng + CryptoRng,
+    E: CryptoRngCore,
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
 {

@@ -35,6 +35,7 @@ use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
 };
+use rand_core::CryptoRngCore;
 use std::{
     cmp::max,
     collections::BTreeMap,
@@ -69,7 +70,7 @@ struct DigestRequest<D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + Storage + Metrics,
+    E: Clock + Spawner + Storage + Metrics + CryptoRngCore,
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Index, Digest = D> + Clone,
@@ -84,10 +85,6 @@ pub struct Engine<
     provider: P,
     reporter: Z,
     blocker: B,
-
-    // ---------- Namespace Constants ----------
-    /// The namespace signatures.
-    namespace: Vec<u8>,
 
     // Pruning
     /// A tuple representing the epochs to keep in memory.
@@ -154,7 +151,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Storage + Metrics,
+        E: Clock + Spawner + Storage + Metrics + CryptoRngCore,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
         A: Automaton<Context = Index, Digest = D> + Clone,
@@ -175,7 +172,6 @@ impl<
             monitor: cfg.monitor,
             provider: cfg.provider,
             blocker: cfg.blocker,
-            namespace: cfg.namespace,
             epoch_bounds: cfg.epoch_bounds,
             window: cfg.window.into(),
             activity_timeout: cfg.activity_timeout,
@@ -248,9 +244,12 @@ impl<
             buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::init(self.context.with_label("journal").into(), journal_cfg)
-            .await
-            .expect("init failed");
+        let journal = Journal::init(
+            self.context.with_label("journal").into_present(),
+            journal_cfg,
+        )
+        .await
+        .expect("init failed");
         let unverified_indices = self.replay(&journal).await;
         self.journal = Some(journal);
 
@@ -416,7 +415,7 @@ impl<
         // Close journal on shutdown
         if let Some(journal) = self.journal.take() {
             journal
-                .close()
+                .sync_all()
                 .await
                 .expect("unable to close aggregation journal");
         }
@@ -602,7 +601,7 @@ impl<
     ///
     /// Returns an error if the ack is invalid.
     fn validate_ack(
-        &self,
+        &mut self,
         ack: &Ack<P::Scheme, D>,
         sender: &<P::Scheme as Scheme>::PublicKey,
     ) -> Result<(), Error> {
@@ -662,7 +661,7 @@ impl<
         }
 
         // Validate signature
-        if !ack.verify(&*scheme, &self.namespace) {
+        if !ack.verify(&mut self.context, &*scheme) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -699,8 +698,7 @@ impl<
 
         // Sign the item
         let item = Item { index, digest };
-        let ack = Ack::sign(&*scheme, &self.namespace, self.epoch, item)
-            .ok_or(Error::NotSigner(self.epoch))?;
+        let ack = Ack::sign(&*scheme, self.epoch, item).ok_or(Error::NotSigner(self.epoch))?;
 
         // Journal the ack
         self.record(Activity::Ack(ack.clone())).await;

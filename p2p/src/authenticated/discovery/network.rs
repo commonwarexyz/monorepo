@@ -17,7 +17,7 @@ use commonware_runtime::{
 };
 use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use tracing::{debug, info};
 
 /// Unique suffix for all messages signed by the tracker.
@@ -27,8 +27,7 @@ const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Signer>
-{
+pub struct Network<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Signer> {
     context: ContextCell<E>,
     cfg: Config<C>,
 
@@ -40,9 +39,7 @@ pub struct Network<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + 
     info_verifier: InfoVerifier<C::PublicKey>,
 }
 
-impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Signer>
-    Network<E, C>
-{
+impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Signer> Network<E, C> {
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
@@ -69,6 +66,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 max_peer_set_size: cfg.max_peer_set_size,
                 dial_fail_limit: cfg.dial_fail_limit,
+                block_duration: cfg.block_duration,
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(
@@ -145,9 +143,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
-                allowed_bit_vec_rate: self.cfg.allowed_bit_vec_rate,
                 max_peer_set_size: self.cfg.max_peer_set_size,
-                allowed_peers_rate: self.cfg.allowed_peers_rate,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
                 info_verifier: self.info_verifier,
             },
@@ -159,7 +155,10 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
         let stream_cfg = StreamConfig {
             signing_key: self.cfg.crypto,
             namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: self.cfg.max_message_size + types::MAX_PAYLOAD_DATA_OVERHEAD,
+            max_message_size: self
+                .cfg
+                .max_message_size
+                .saturating_add(types::MAX_PAYLOAD_DATA_OVERHEAD),
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,

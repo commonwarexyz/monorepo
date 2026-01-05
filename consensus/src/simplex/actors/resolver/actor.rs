@@ -1,5 +1,5 @@
 use super::{
-    ingress::{Handler, Mailbox, Message},
+    ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage},
     Config,
 };
 use crate::{
@@ -20,13 +20,13 @@ use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{ordered::Quorum, sequence::U64};
 use futures::{channel::mpsc, StreamExt};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: Clock + Rng + CryptoRng + Metrics + Spawner,
+    E: Clock + CryptoRngCore + Metrics + Spawner,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
@@ -36,17 +36,16 @@ pub struct Actor<
     blocker: Option<B>,
 
     epoch: Epoch,
-    namespace: Vec<u8>,
     mailbox_size: usize,
     fetch_timeout: Duration,
 
     state: State<S, D>,
 
-    mailbox_receiver: mpsc::Receiver<Certificate<S, D>>,
+    mailbox_receiver: mpsc::Receiver<MailboxMessage<S, D>>,
 }
 
 impl<
-        E: Clock + Rng + CryptoRng + Metrics + Spawner,
+        E: Clock + CryptoRngCore + Metrics + Spawner,
         S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
@@ -61,7 +60,6 @@ impl<
                 blocker: Some(cfg.blocker),
 
                 epoch: cfg.epoch,
-                namespace: cfg.namespace,
                 mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
 
@@ -128,7 +126,15 @@ impl<
                 let Some(message) = mailbox else {
                     break;
                 };
-                self.state.handle(message, &mut resolver).await;
+                match message {
+                    MailboxMessage::Certificate(certificate) => {
+                        // Certificates from mailbox have no associated request view
+                        self.state.handle(certificate, None, &mut resolver).await;
+                    }
+                    MailboxMessage::Certified { view, success } => {
+                        self.state.handle_certified(view, success, &mut resolver).await;
+                    }
+                }
             },
             handler = handler_rx.next() => {
                 let Some(message) = handler else {
@@ -148,6 +154,7 @@ impl<
         // Validate message
         match incoming {
             Certificate::Notarization(notarization) => {
+                let notarization_view = notarization.view();
                 if notarization.view() < view {
                     debug!(%view, received = %notarization.view(), "notarization below view");
                     return None;
@@ -160,11 +167,18 @@ impl<
                     );
                     return None;
                 }
-                if !notarization.verify(&mut self.context, &self.scheme, &self.namespace) {
+                if self.state.is_failed(notarization_view) {
+                    debug!(
+                        %notarization_view,
+                        "rejecting notarization for view with failed certification"
+                    );
+                    return None;
+                }
+                if !notarization.verify(&mut self.context, &self.scheme) {
                     debug!(%view, "notarization failed verification");
                     return None;
                 }
-                debug!(%view, received = %notarization.view(), "received notarization for request");
+                debug!(%view, received = %notarization_view, "received notarization for request");
                 Some(Certificate::Notarization(notarization))
             }
             Certificate::Finalization(finalization) => {
@@ -180,7 +194,7 @@ impl<
                     );
                     return None;
                 }
-                if !finalization.verify(&mut self.context, &self.scheme, &self.namespace) {
+                if !finalization.verify(&mut self.context, &self.scheme) {
                     debug!(%view, "finalization failed verification");
                     return None;
                 }
@@ -200,7 +214,7 @@ impl<
                     );
                     return None;
                 }
-                if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
+                if !nullification.verify::<_, D>(&mut self.context, &self.scheme) {
                     debug!(%view, "nullification failed verification");
                     return None;
                 }
@@ -213,12 +227,12 @@ impl<
     /// Handles a message from the [p2p::Engine].
     async fn handle_resolver(
         &mut self,
-        message: Message,
+        message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
         resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
     ) {
         match message {
-            Message::Deliver {
+            HandlerMessage::Deliver {
                 view,
                 data,
                 response,
@@ -235,18 +249,18 @@ impl<
                 // Notify voter as soon as possible
                 voter.resolved(parsed.clone()).await;
 
-                // Process message
-                self.state.handle(parsed, resolver).await;
+                // Process message with the request view for tracking
+                self.state.handle(parsed, Some(view), resolver).await;
             }
-            Message::Produce { view, response } => {
+            HandlerMessage::Produce { view, response } => {
                 // Produce message for view
-                let Some(voter) = self.state.get(view) else {
+                let Some(certificate) = self.state.get(view) else {
                     // If we drop the response channel, the resolver will automatically
                     // send an error response to the caller (so they don't need to wait
                     // the full timeout)
                     return;
                 };
-                let _ = response.send(voter.encode().into());
+                let _ = response.send(certificate.encode().into());
             }
         }
     }
