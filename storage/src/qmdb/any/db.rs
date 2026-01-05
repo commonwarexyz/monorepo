@@ -352,22 +352,6 @@ where
     }
 }
 
-// Functionality shared across Durable states.
-impl<E, K, V, U, C, I, H, M> Db<E, C, I, H, U, M, Durable>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    M: MerkleizationState<DigestOf<H>>,
-    Operation<K, V, U>: Codec,
-    AuthenticatedLog<E, C, H, M>: MutableContiguous<Item = Operation<K, V, U>>,
-{
-}
-
 // Funtionality shared across NonDurable states.
 impl<E, K, V, U, C, I, H, M> Db<E, C, I, H, U, M, NonDurable>
 where
