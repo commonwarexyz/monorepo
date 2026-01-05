@@ -46,9 +46,6 @@ aws-lc-rs.workspace = true
 version = "0.2.15"
 features = ["js"]
 
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
-
 [dev-dependencies]
 anyhow.workspace = true
 commonware-conformance.workspace = true
@@ -63,7 +60,6 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = [ "std" ]
-unsafe-mlock = []
 parallel = [ "blake3/rayon", "rayon", "std" ]
 mocks = [ "std" ]
 arbitrary = [
@@ -102,19 +98,16 @@ std = [
 name = "bls12381"
 harness = false
 path = "src/bls12381/benches/bench.rs"
-required-features = ["unsafe-mlock"]
 
 [[bench]]
 name = "ed25519"
 harness = false
 path = "src/ed25519/benches/bench.rs"
-required-features = ["unsafe-mlock"]
 
 [[bench]]
 name = "secp256r1"
 harness = false
 path = "src/secp256r1/benches/bench.rs"
-required-features = ["unsafe-mlock"]
 
 [[bench]]
 name = "sha256"

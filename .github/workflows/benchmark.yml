@@ -37,7 +37,7 @@ jobs:
       matrix:
         include:
           - package: commonware-cryptography
-            cargo_flags: "--features commonware-cryptography/unsafe-mlock"
+            cargo_flags: ""
             file_suffix: ""
             benchmark_name: "commonware-cryptography"
           - package: commonware-storage
