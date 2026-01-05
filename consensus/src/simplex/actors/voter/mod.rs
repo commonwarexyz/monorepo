@@ -784,6 +784,7 @@ mod tests {
         let namespace = b"finalization_without_notarization".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
+            // Create simulated network
             let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
@@ -794,12 +795,14 @@ mod tests {
             );
             network.start();
 
+            // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Setup application mock and voter
             let elector = L::default();
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
@@ -908,6 +911,7 @@ mod tests {
         let namespace = b"certificate_conflicts_proposal_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
+            // Create simulated network
             let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
@@ -918,12 +922,14 @@ mod tests {
             );
             network.start();
 
+            // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Setup application mock and voter
             let elector = L::default();
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
@@ -1046,6 +1052,7 @@ mod tests {
         let namespace = b"proposal_conflicts_certificate_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
+            // Create simulated network
             let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
@@ -1056,12 +1063,14 @@ mod tests {
             );
             network.start();
 
+            // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Setup application mock and voter
             let elector = L::default();
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
@@ -1799,6 +1808,7 @@ mod tests {
         let namespace = b"finalization_from_resolver".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
+            // Create simulated network
             let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
@@ -1809,12 +1819,14 @@ mod tests {
             );
             network.start();
 
+            // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Setup application mock and voter
             let elector = L::default();
             let (mut mailbox, mut batcher_receiver, _, _, reporter) = setup_voter(
                 &mut context,
@@ -1902,6 +1914,7 @@ mod tests {
         let namespace = b"no_resolver_boomerang".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
+            // Create simulated network
             let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
@@ -1912,12 +1925,14 @@ mod tests {
             );
             network.start();
 
+            // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Setup application mock and voter
             let elector = L::default();
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
@@ -2511,9 +2526,10 @@ mod tests {
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"consensus".to_vec();
+        let namespace = b"certification_after_timeout".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
+            // Create simulated network
             let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
@@ -2524,12 +2540,14 @@ mod tests {
             );
             network.start();
 
+            // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
@@ -2632,9 +2650,10 @@ mod tests {
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"consensus".to_vec();
+        let namespace = b"certification_after_notarize_timeout_as_follower".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
+            // Create simulated network
             let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
@@ -2645,12 +2664,14 @@ mod tests {
             );
             network.start();
 
+            // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
@@ -2788,9 +2809,10 @@ mod tests {
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"consensus".to_vec();
+        let namespace = b"certification_after_notarize_timeout_as_leader".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
+            // Create simulated network
             let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
@@ -2801,12 +2823,14 @@ mod tests {
             );
             network.start();
 
+            // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
