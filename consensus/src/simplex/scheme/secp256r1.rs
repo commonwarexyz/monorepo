@@ -9,7 +9,7 @@
 //! so the batcher will verify signatures immediately as they arrive rather than
 //! waiting to batch them.
 
-use crate::simplex::types::Subject;
+use crate::simplex::{scheme::Namespace, types::Subject};
 use commonware_cryptography::impl_certificate_secp256r1;
 
-impl_certificate_secp256r1!(Subject<'a, D>);
+impl_certificate_secp256r1!(Subject<'a, D>, Namespace);

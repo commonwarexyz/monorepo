@@ -86,10 +86,6 @@ pub struct Engine<
     reporter: Z,
     blocker: B,
 
-    // ---------- Namespace Constants ----------
-    /// The namespace signatures.
-    namespace: Vec<u8>,
-
     // Pruning
     /// A tuple representing the epochs to keep in memory.
     /// The first element is the number of old epochs to keep.
@@ -176,7 +172,6 @@ impl<
             monitor: cfg.monitor,
             provider: cfg.provider,
             blocker: cfg.blocker,
-            namespace: cfg.namespace,
             epoch_bounds: cfg.epoch_bounds,
             window: cfg.window.into(),
             activity_timeout: cfg.activity_timeout,
@@ -666,7 +661,7 @@ impl<
         }
 
         // Validate signature
-        if !ack.verify(&mut self.context, &*scheme, &self.namespace) {
+        if !ack.verify(&mut self.context, &*scheme) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -703,8 +698,7 @@ impl<
 
         // Sign the item
         let item = Item { index, digest };
-        let ack = Ack::sign(&*scheme, &self.namespace, self.epoch, item)
-            .ok_or(Error::NotSigner(self.epoch))?;
+        let ack = Ack::sign(&*scheme, self.epoch, item).ok_or(Error::NotSigner(self.epoch))?;
 
         // Journal the ack
         self.record(Activity::Ack(ack.clone())).await;

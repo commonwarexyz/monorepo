@@ -23,7 +23,6 @@ pub struct Config<S: Scheme, B: Blocker, R: Reporter> {
     pub activity_timeout: ViewDelta,
     pub skip_timeout: ViewDelta,
     pub epoch: Epoch,
-    pub namespace: Vec<u8>,
     pub mailbox_size: usize,
 }
 
@@ -67,14 +66,13 @@ mod tests {
 
     fn build_notarization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
-        namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
         count: usize,
     ) -> Notarization<S, Sha256Digest> {
         let votes: Vec<_> = schemes
             .iter()
             .take(count)
-            .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         Notarization::from_notarizes(&schemes[0], &votes)
             .expect("notarization requires a quorum of votes")
@@ -82,14 +80,13 @@ mod tests {
 
     fn build_nullification<S: Scheme<Sha256Digest>>(
         schemes: &[S],
-        namespace: &[u8],
         round: Round,
         count: usize,
     ) -> Nullification<S> {
         let votes: Vec<_> = schemes
             .iter()
             .take(count)
-            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, namespace, round).unwrap())
+            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).unwrap())
             .collect();
         Nullification::from_nullifies(&schemes[0], &votes)
             .expect("nullification requires a quorum of votes")
@@ -97,14 +94,13 @@ mod tests {
 
     fn build_finalization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
-        namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
         count: usize,
     ) -> Finalization<S, Sha256Digest> {
         let votes: Vec<_> = schemes
             .iter()
             .take(count)
-            .map(|scheme| Finalize::sign(scheme, namespace, proposal.clone()).unwrap())
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         Finalization::from_finalizes(&schemes[0], &votes)
             .expect("finalization requires a quorum of votes")
@@ -113,7 +109,7 @@ mod tests {
     fn certificate_forwarding_from_network<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum = quorum(n) as usize;
@@ -137,11 +133,10 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
@@ -158,7 +153,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                namespace: namespace.clone(),
                 mailbox_size: 128,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -204,9 +198,9 @@ mod tests {
             let round = Round::new(epoch, view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
 
-            let notarization = build_notarization(&schemes, &namespace, &proposal, quorum);
-            let nullification = build_nullification(&schemes, &namespace, round, quorum);
-            let finalization = build_finalization(&schemes, &namespace, &proposal, quorum);
+            let notarization = build_notarization(&schemes, &proposal, quorum);
+            let nullification = build_nullification(&schemes, round, quorum);
+            let finalization = build_finalization(&schemes, &proposal, quorum);
 
             // Send notarization from network
             injector_sender
@@ -276,7 +270,7 @@ mod tests {
     fn quorum_votes_construct_certificate<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -300,11 +294,10 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
@@ -321,7 +314,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                namespace: namespace.clone(),
                 mailbox_size: 128,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -375,7 +367,7 @@ mod tests {
             // Participant 0's vote will be sent via mailbox.constructed()
             // Participant 1 is the leader, so their vote triggers proposal forwarding
             for i in 1..quorum_size {
-                let vote = Notarize::sign(&schemes[i], &namespace, proposal.clone()).unwrap();
+                let vote = Notarize::sign(&schemes[i], proposal.clone()).unwrap();
                 if let Some(ref mut sender) = participant_senders[i] {
                     sender
                         .send(
@@ -389,7 +381,7 @@ mod tests {
             }
 
             // Send our own vote via constructed message
-            let our_vote = Notarize::sign(&schemes[0], &namespace, proposal.clone()).unwrap();
+            let our_vote = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
             batcher_mailbox
                 .constructed(Vote::Notarize(our_vote))
                 .await;
@@ -423,7 +415,7 @@ mod tests {
     fn votes_and_certificate_deduplication<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -447,11 +439,10 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
@@ -468,7 +459,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                namespace: namespace.clone(),
                 mailbox_size: 128,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -527,12 +517,12 @@ mod tests {
             // Build proposal, votes, and certificate
             let round = Round::new(epoch, view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
-            let notarization = build_notarization(&schemes, &namespace, &proposal, quorum_size);
+            let notarization = build_notarization(&schemes, &proposal, quorum_size);
 
             // Send some votes (but not enough for quorum), starting with leader (participant 1)
             // This triggers proposal forwarding
             for i in 1..quorum_size - 1 {
-                let vote = Notarize::sign(&schemes[i], &namespace, proposal.clone()).unwrap();
+                let vote = Notarize::sign(&schemes[i], proposal.clone()).unwrap();
                 if let Some(ref mut sender) = participant_senders[i] {
                     sender
                         .send(
@@ -546,7 +536,7 @@ mod tests {
             }
 
             // Send our own vote
-            let our_vote = Notarize::sign(&schemes[0], &namespace, proposal.clone()).unwrap();
+            let our_vote = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
             batcher_mailbox.constructed(Vote::Notarize(our_vote)).await;
 
             // Give network time to deliver votes
@@ -577,7 +567,7 @@ mod tests {
 
             // Now send enough votes to reach quorum (this vote would complete quorum)
             let last_vote =
-                Notarize::sign(&schemes[quorum_size - 1], &namespace, proposal.clone()).unwrap();
+                Notarize::sign(&schemes[quorum_size - 1], proposal.clone()).unwrap();
             if let Some(ref mut sender) = participant_senders[quorum_size - 1] {
                 sender
                     .send(
@@ -616,7 +606,7 @@ mod tests {
     fn conflicting_votes_dont_produce_invalid_certificate<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 7;
         let namespace = b"batcher_test".to_vec();
@@ -639,11 +629,10 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
@@ -660,7 +649,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                namespace: namespace.clone(),
                 mailbox_size: 128,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -713,7 +701,7 @@ mod tests {
             // Send vote for proposal_a from participant 1 (the leader)
             // This establishes proposal_a as the leader's proposal
             let leader_vote =
-                Notarize::sign(&schemes[1], &namespace, proposal_a.clone()).unwrap();
+                Notarize::sign(&schemes[1], proposal_a.clone()).unwrap();
             if let Some(ref mut sender) = participant_senders[1] {
                 sender
                     .send(
@@ -738,7 +726,7 @@ mod tests {
             // Now send votes for proposal_b from participants 2, 3, 4, 5 (4 votes)
             // These are for a DIFFERENT proposal and should be filtered out by BatchVerifier
             for i in 2..=5 {
-                let vote = Notarize::sign(&schemes[i], &namespace, proposal_b.clone()).unwrap();
+                let vote = Notarize::sign(&schemes[i], proposal_b.clone()).unwrap();
                 if let Some(ref mut sender) = participant_senders[i] {
                     sender
                         .send(
@@ -771,13 +759,13 @@ mod tests {
 
             // Now send 4 more votes for proposal_a (from participants 0,2,3,4)
             // Participant 0 is us, use constructed
-            let our_vote = Notarize::sign(&schemes[0], &namespace, proposal_a.clone()).unwrap();
+            let our_vote = Notarize::sign(&schemes[0], proposal_a.clone()).unwrap();
             batcher_mailbox
                 .constructed(Vote::Notarize(our_vote))
                 .await;
 
             // Participants 6 hasn't voted yet - use them for proposal_a
-            let vote6 = Notarize::sign(&schemes[6], &namespace, proposal_a.clone()).unwrap();
+            let vote6 = Notarize::sign(&schemes[6], proposal_a.clone()).unwrap();
             if let Some(ref mut sender) = participant_senders[6] {
                 sender
                     .send(
@@ -821,7 +809,7 @@ mod tests {
     fn proposal_forwarded_after_leader_set<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let namespace = b"batcher_test".to_vec();
@@ -844,11 +832,10 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
@@ -865,7 +852,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                namespace: namespace.clone(),
                 mailbox_size: 128,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -910,7 +896,7 @@ mod tests {
             // Build proposal and leader's vote
             let round = Round::new(epoch, view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
-            let leader_vote = Notarize::sign(&schemes[1], &namespace, proposal.clone()).unwrap();
+            let leader_vote = Notarize::sign(&schemes[1], proposal.clone()).unwrap();
 
             // Now send the leader's vote - this should trigger proposal forwarding
             leader_sender
@@ -949,7 +935,7 @@ mod tests {
     fn proposal_forwarded_before_leader_set<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let namespace = b"batcher_test".to_vec();
@@ -972,11 +958,10 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
@@ -993,7 +978,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                namespace: namespace.clone(),
                 mailbox_size: 128,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -1029,7 +1013,7 @@ mod tests {
             let view = View::new(1);
             let round = Round::new(epoch, view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
-            let leader_vote = Notarize::sign(&schemes[1], &namespace, proposal.clone()).unwrap();
+            let leader_vote = Notarize::sign(&schemes[1], proposal.clone()).unwrap();
 
             // Send the leader's vote BEFORE setting the leader
             leader_sender
@@ -1078,7 +1062,7 @@ mod tests {
     fn leader_activity_detection<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let namespace = b"batcher_test".to_vec();
@@ -1102,11 +1086,10 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
@@ -1123,7 +1106,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(skip_timeout),
                 epoch,
-                namespace: namespace.clone(),
                 mailbox_size: 128,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -1176,7 +1158,7 @@ mod tests {
             // Test 3: Send a vote from the leader for the current view (view 5)
             let round = Round::new(epoch, view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
-            let leader_vote = Notarize::sign(&schemes[1], &namespace, proposal).unwrap();
+            let leader_vote = Notarize::sign(&schemes[1], proposal).unwrap();
             leader_sender
                 .send(
                     Recipients::One(me.clone()),
@@ -1228,7 +1210,7 @@ mod tests {
     fn votes_skipped_for_finalized_views<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -1252,11 +1234,10 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
@@ -1273,7 +1254,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
-                namespace: namespace.clone(),
                 mailbox_size: 128,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -1333,7 +1313,7 @@ mod tests {
             let round1 = Round::new(epoch, view1);
             let proposal1 = Proposal::new(round1, View::zero(), Sha256::hash(b"payload1"));
             for i in 1..quorum_size {
-                let vote = Notarize::sign(&schemes[i], &namespace, proposal1.clone()).unwrap();
+                let vote = Notarize::sign(&schemes[i], proposal1.clone()).unwrap();
                 if let Some(ref mut sender) = participant_senders[i] {
                     sender
                         .send(
@@ -1347,7 +1327,7 @@ mod tests {
             }
 
             // Send our own notarize vote for view 1 via constructed
-            let our_notarize = Notarize::sign(&schemes[0], &namespace, proposal1.clone()).unwrap();
+            let our_notarize = Notarize::sign(&schemes[0], proposal1.clone()).unwrap();
             batcher_mailbox
                 .constructed(Vote::Notarize(our_notarize))
                 .await;
@@ -1379,7 +1359,7 @@ mod tests {
             let round2 = Round::new(epoch, view2);
             let proposal2 = Proposal::new(round2, view1, Sha256::hash(b"payload2"));
             for i in 1..quorum_size {
-                let vote = Notarize::sign(&schemes[i], &namespace, proposal2.clone()).unwrap();
+                let vote = Notarize::sign(&schemes[i], proposal2.clone()).unwrap();
                 if let Some(ref mut sender) = participant_senders[i] {
                     sender
                         .send(
@@ -1393,7 +1373,7 @@ mod tests {
             }
 
             // Send our own notarize vote for view 2 via constructed
-            let our_notarize2 = Notarize::sign(&schemes[0], &namespace, proposal2.clone()).unwrap();
+            let our_notarize2 = Notarize::sign(&schemes[0], proposal2.clone()).unwrap();
             batcher_mailbox
                 .constructed(Vote::Notarize(our_notarize2))
                 .await;

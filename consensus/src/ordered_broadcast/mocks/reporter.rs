@@ -1,7 +1,7 @@
 use crate::{
     ordered_broadcast::{
         scheme,
-        types::{Activity, Chunk, Lock, Proposal},
+        types::{Activity, Chunk, ChunkVerifier, Lock, Proposal},
     },
     types::Epoch,
 };
@@ -29,8 +29,8 @@ pub struct Reporter<R: CryptoRngCore, C: PublicKey, S: Scheme, D: Digest> {
     // RNG used for signature verification with scheme.
     rng: R,
 
-    // Application namespace
-    namespace: Vec<u8>,
+    // Verifier for node signatures.
+    chunk_verifier: ChunkVerifier,
 
     // Scheme for verification
     scheme: S,
@@ -58,7 +58,7 @@ where
 {
     pub fn new(
         rng: R,
-        namespace: &[u8],
+        chunk_verifier: ChunkVerifier,
         scheme: S,
         limit_misses: Option<usize>,
     ) -> (Self, Mailbox<C, S, D>) {
@@ -67,7 +67,7 @@ where
             Self {
                 rng,
                 mailbox: receiver,
-                namespace: namespace.to_vec(),
+                chunk_verifier,
                 scheme,
                 proposals: HashSet::new(),
                 limit_misses,
@@ -88,7 +88,7 @@ where
             match msg {
                 Message::Proposal(proposal) => {
                     // Verify properly constructed (not needed in production)
-                    if !proposal.verify(&self.namespace) {
+                    if !proposal.verify(&self.chunk_verifier) {
                         panic!("Invalid proof");
                     }
 
@@ -101,7 +101,7 @@ where
                 }
                 Message::Locked(lock) => {
                     // Verify properly constructed (not needed in production)
-                    if !lock.verify(&mut self.rng, &self.namespace, &self.scheme) {
+                    if !lock.verify(&mut self.rng, &self.scheme) {
                         panic!("Invalid proof");
                     }
 

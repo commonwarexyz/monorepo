@@ -312,9 +312,8 @@ impl<
     pub fn verify_notarizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
     ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_notarizes(rng, namespace)
+        self.verifier.verify_notarizes(rng)
     }
 
     pub fn ready_nullifies(&self) -> bool {
@@ -328,9 +327,8 @@ impl<
     pub fn verify_nullifies<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
     ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_nullifies(rng, namespace)
+        self.verifier.verify_nullifies(rng)
     }
 
     pub fn ready_finalizes(&self) -> bool {
@@ -344,9 +342,8 @@ impl<
     pub fn verify_finalizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
     ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_finalizes(rng, namespace)
+        self.verifier.verify_finalizes(rng)
     }
 
     /// Returns true if the leader was active in this round.

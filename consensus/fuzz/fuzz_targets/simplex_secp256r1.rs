@@ -14,8 +14,12 @@ impl Simplex for SimplexSecp256r1 {
     type Scheme = secp256r1::Scheme<Ed25519PublicKey>;
     type Elector = RoundRobin;
 
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme> {
-        secp256r1::fixture(context, n)
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme> {
+        secp256r1::fixture(context, namespace, n)
     }
 }
 

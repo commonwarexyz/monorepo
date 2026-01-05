@@ -7,7 +7,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    certificate::{self, Attestation, Provider, Scheme},
+    certificate::{self, Attestation, Namespace, Provider, Scheme},
     Digest, PublicKey, Signer,
 };
 use commonware_utils::{ordered::Set, union};
@@ -158,7 +158,7 @@ pub const ACK_SUFFIX: &[u8] = b"_ACK";
 /// This provides domain separation for signatures, preventing cross-protocol attacks
 /// by ensuring signatures for chunks cannot be reused for other message types.
 #[inline]
-pub fn chunk_namespace(namespace: &[u8]) -> Vec<u8> {
+fn chunk_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, CHUNK_SUFFIX)
 }
 
@@ -169,6 +169,82 @@ pub fn chunk_namespace(namespace: &[u8]) -> Vec<u8> {
 #[inline]
 pub fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, ACK_SUFFIX)
+}
+
+/// Namespace type for chunk signing/verification.
+///
+/// This type encapsulates the pre-computed namespace bytes used for signing and
+/// verifying chunks (nodes and proposals).
+#[derive(Clone, Debug)]
+pub struct ChunkNamespace(Vec<u8>);
+
+impl Namespace for ChunkNamespace {
+    fn derive(namespace: &[u8]) -> Self {
+        Self(chunk_namespace(namespace))
+    }
+}
+
+/// Signer for chunk operations.
+///
+/// The namespace is pre-computed at construction time.
+#[derive(Clone)]
+pub struct ChunkSigner<C: Signer> {
+    signer: C,
+    namespace: ChunkNamespace,
+}
+
+impl<C: Signer> ChunkSigner<C> {
+    /// Creates a new ChunkSigner with the given namespace and signer.
+    ///
+    /// The chunk namespace is pre-computed from the base namespace.
+    pub fn new(namespace: &[u8], signer: C) -> Self {
+        Self {
+            signer,
+            namespace: ChunkNamespace::derive(namespace),
+        }
+    }
+
+    /// Returns the public key of the underlying signer.
+    pub fn public_key(&self) -> C::PublicKey {
+        self.signer.public_key()
+    }
+
+    /// Signs a chunk and returns the signature.
+    pub fn sign<P, D>(&mut self, chunk: &Chunk<P, D>) -> C::Signature
+    where
+        P: PublicKey,
+        D: Digest,
+    {
+        self.signer.sign(&self.namespace.0, &chunk.encode())
+    }
+}
+
+/// Verifier for chunk operations.
+///
+/// The namespace is pre-computed at construction time.
+#[derive(Clone)]
+pub struct ChunkVerifier {
+    namespace: ChunkNamespace,
+}
+
+impl ChunkVerifier {
+    /// Creates a new ChunkVerifier with the given namespace.
+    pub fn new(namespace: &[u8]) -> Self {
+        Self {
+            namespace: ChunkNamespace::derive(namespace),
+        }
+    }
+
+    /// Verifies a chunk signature.
+    pub fn verify<P: PublicKey, D: Digest>(
+        &self,
+        chunk: &Chunk<P, D>,
+        signature: &P::Signature,
+    ) -> bool {
+        chunk
+            .sequencer
+            .verify(&self.namespace.0, &chunk.encode(), signature)
+    }
 }
 
 /// Used as the [crate::Automaton::Context] type.
@@ -262,6 +338,19 @@ where
     }
 }
 
+/// Namespace type for ordered broadcast acknowledgments.
+///
+/// This type encapsulates the pre-computed namespace bytes used for signing and
+/// verifying acks.
+#[derive(Clone, Debug)]
+pub struct AckNamespace(Vec<u8>);
+
+impl Namespace for AckNamespace {
+    fn derive(namespace: &[u8]) -> Self {
+        Self(ack_namespace(namespace))
+    }
+}
+
 /// Context for signing/verifying validator acknowledgments.
 ///
 /// This is used as the context type for `Scheme` implementations for validators.
@@ -274,14 +363,19 @@ pub struct AckSubject<'a, P: PublicKey, D: Digest> {
     pub epoch: Epoch,
 }
 
-impl<'a, P: PublicKey, D: Digest> certificate::Subject for AckSubject<'a, P, D> {
-    fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
+impl<P: PublicKey, D: Digest> certificate::Subject for AckSubject<'_, P, D> {
+    type Namespace = AckNamespace;
+
+    fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8] {
+        &derived.0
+    }
+
+    fn message(&self) -> Bytes {
         let mut message =
             BytesMut::with_capacity(self.chunk.encode_size() + self.epoch.encode_size());
         self.chunk.write(&mut message);
         self.epoch.write(&mut message);
-
-        (ack_namespace(namespace).into(), message.freeze())
+        message.freeze()
     }
 }
 
@@ -433,92 +527,6 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         }
     }
 
-    /// Verify the Node (and its parent).
-    ///
-    /// This ensures:
-    /// 1. The sequencer's signature over the chunk is valid
-    /// 2. For non-genesis nodes, the parent's certificate is valid
-    ///
-    /// If verification is successful, returns:
-    /// - None for genesis nodes
-    /// - Some(parent_chunk) for non-genesis nodes
-    ///
-    /// If verification fails, returns an appropriate error.
-    pub fn verify<R>(
-        &self,
-        rng: &mut R,
-        namespace: &[u8],
-        provider: &impl Provider<Scope = Epoch, Scheme = S>,
-    ) -> Result<Option<Chunk<P, D>>, Error>
-    where
-        R: CryptoRngCore,
-        S: scheme::Scheme<P, D>,
-    {
-        // Verify chunk
-        let chunk_namespace = chunk_namespace(namespace);
-        let message = self.chunk.encode();
-        if !self
-            .chunk
-            .sequencer
-            .verify(chunk_namespace.as_ref(), &message, &self.signature)
-        {
-            return Err(Error::InvalidSequencerSignature);
-        }
-        let Some(parent) = &self.parent else {
-            return Ok(None);
-        };
-
-        // Verify parent (if present)
-        let parent_chunk = Chunk::new(
-            self.chunk.sequencer.clone(),
-            self.chunk
-                .height
-                .checked_sub(1)
-                .ok_or(Error::ParentMissing)?,
-            parent.digest,
-        );
-
-        // Verify parent certificate using the scheme for the parent's epoch
-        let parent_scheme = provider
-            .scoped(parent.epoch)
-            .ok_or(Error::UnknownScheme(parent.epoch))?;
-        let ack_namespace = ack_namespace(namespace);
-        let ack_ctx = AckSubject {
-            chunk: &parent_chunk,
-            epoch: parent.epoch,
-        };
-        if !parent_scheme.verify_certificate::<R, D>(
-            rng,
-            &ack_namespace,
-            ack_ctx,
-            &parent.certificate,
-        ) {
-            return Err(Error::InvalidCertificate);
-        }
-        Ok(Some(parent_chunk))
-    }
-
-    /// Generate a new node with the given chunk, signature, (and parent).
-    ///
-    /// This is used by sequencers to create and sign new nodes for broadcast.
-    /// For non-genesis nodes (height > 0), a parent with a certificate must be provided.
-    pub fn sign<C>(
-        namespace: &[u8],
-        signer: &mut C,
-        height: u64,
-        payload: D,
-        parent: Option<Parent<S, D>>,
-    ) -> Self
-    where
-        C: Signer<PublicKey = P, Signature = P::Signature>,
-    {
-        let chunk_namespace = chunk_namespace(namespace);
-        let pub_key = signer.public_key();
-        let chunk = Chunk::new(pub_key, height, payload);
-        let signature = signer.sign(chunk_namespace.as_ref(), &chunk.encode());
-        Self::new(chunk, signature, parent)
-    }
-
     /// Decode a Node from network bytes with epoch-aware certificate decoding.
     ///
     /// This method performs staged decoding:
@@ -580,6 +588,74 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             signature,
             parent,
         })
+    }
+
+    /// Signs and creates a new Node.
+    ///
+    /// This is used by sequencers to create and sign new nodes for broadcast.
+    /// For non-genesis nodes (height > 0), a parent with a certificate must be provided.
+    pub fn sign<C>(
+        signer: &mut ChunkSigner<C>,
+        height: u64,
+        payload: D,
+        parent: Option<Parent<S, D>>,
+    ) -> Self
+    where
+        C: Signer<PublicKey = P, Signature = P::Signature>,
+    {
+        let chunk = Chunk::new(signer.public_key(), height, payload);
+        let signature = signer.sign(&chunk);
+        Self::new(chunk, signature, parent)
+    }
+
+    /// Verifies a Node (and its parent).
+    ///
+    /// This ensures:
+    /// 1. The sequencer's signature over the chunk is valid
+    /// 2. For non-genesis nodes, the parent's certificate is valid
+    ///
+    /// If verification is successful, returns:
+    /// - None for genesis nodes
+    /// - Some(parent_chunk) for non-genesis nodes
+    ///
+    /// If verification fails, returns an appropriate error.
+    pub fn verify<R: CryptoRngCore>(
+        &self,
+        rng: &mut R,
+        verifier: &ChunkVerifier,
+        provider: &impl Provider<Scope = Epoch, Scheme = S>,
+    ) -> Result<Option<Chunk<P, D>>, Error>
+    where
+        S: scheme::Scheme<P, D>,
+    {
+        // Verify chunk signature
+        if !verifier.verify(&self.chunk, &self.signature) {
+            return Err(Error::InvalidSequencerSignature);
+        }
+        let Some(parent) = &self.parent else {
+            return Ok(None);
+        };
+
+        // Verify parent (if present)
+        let parent_chunk = Chunk::new(
+            self.chunk.sequencer.clone(),
+            self.chunk
+                .height
+                .checked_sub(1)
+                .ok_or(Error::ParentMissing)?,
+            parent.digest,
+        );
+        let parent_scheme = provider
+            .scoped(parent.epoch)
+            .ok_or(Error::UnknownScheme(parent.epoch))?;
+        let ctx = AckSubject {
+            chunk: &parent_chunk,
+            epoch: parent.epoch,
+        };
+        if !parent_scheme.verify_certificate::<R, D>(rng, ctx, &parent.certificate) {
+            return Err(Error::InvalidCertificate);
+        }
+        Ok(Some(parent_chunk))
     }
 }
 
@@ -706,33 +782,31 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     /// using the provided scheme.
     ///
     /// Returns true if the attestation is valid, false otherwise.
-    pub fn verify<R>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
     where
         R: CryptoRngCore,
         S: scheme::Scheme<P, D>,
     {
-        let ack_namespace = ack_namespace(namespace);
         let ctx = AckSubject {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_attestation::<_, D>(rng, &ack_namespace, ctx, &self.attestation)
+        scheme.verify_attestation::<_, D>(rng, ctx, &self.attestation)
     }
 
     /// Generate a new Ack by signing with the provided scheme.
     ///
     /// This is used by validators to create and sign new acknowledgments for chunks.
     /// Returns None if the scheme cannot sign.
-    pub fn sign(namespace: &[u8], scheme: &S, chunk: Chunk<P, D>, epoch: Epoch) -> Option<Self>
+    pub fn sign(scheme: &S, chunk: Chunk<P, D>, epoch: Epoch) -> Option<Self>
     where
         S: scheme::Scheme<P, D>,
     {
-        let ack_namespace = ack_namespace(namespace);
         let ctx = AckSubject {
             chunk: &chunk,
             epoch,
         };
-        let attestation = scheme.sign::<D>(&ack_namespace, ctx)?;
+        let attestation = scheme.sign::<D>(ctx)?;
         Some(Self::new(chunk, epoch, attestation))
     }
 }
@@ -880,17 +954,11 @@ impl<P: PublicKey, D: Digest> Proposal<P, D> {
         Self { chunk, signature }
     }
 
-    /// Verify the Proposal.
+    /// Verifies the proposal's signature.
     ///
-    /// This ensures that the sequencer's signature over the chunk is valid.
-    /// Returns true if the signature is valid, false otherwise.
-    pub fn verify(&self, namespace: &[u8]) -> bool {
-        // Verify chunk
-        let chunk_namespace = chunk_namespace(namespace);
-        let message = self.chunk.encode();
-        self.chunk
-            .sequencer
-            .verify(chunk_namespace.as_ref(), &message, &self.signature)
+    /// Returns true if the sequencer's signature over the chunk is valid.
+    pub fn verify(&self, verifier: &ChunkVerifier) -> bool {
+        verifier.verify(&self.chunk, &self.signature)
     }
 }
 
@@ -986,17 +1054,16 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
     /// using the provided scheme.
     ///
     /// Returns true if the signature is valid, false otherwise.
-    pub fn verify<R>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
     where
         R: CryptoRngCore,
         S: scheme::Scheme<P, D>,
     {
-        let ack_namespace = ack_namespace(namespace);
         let ctx = AckSubject {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_certificate::<R, D>(rng, &ack_namespace, ctx, &self.certificate)
+        scheme.verify_certificate::<R, D>(rng, ctx, &self.certificate)
     }
 }
 
@@ -1066,6 +1133,14 @@ mod tests {
 
     const NAMESPACE: &[u8] = b"test";
 
+    fn chunk_verifier() -> ChunkVerifier {
+        ChunkVerifier::new(NAMESPACE)
+    }
+
+    fn chunk_signer(signer: PrivateKey) -> ChunkSigner<PrivateKey> {
+        ChunkSigner::new(NAMESPACE, signer)
+    }
+
     // Helper function to create a sample digest
     fn sample_digest(v: u8) -> Sha256Digest {
         Sha256Digest::from([v; 32]) // Simple fixed digest for testing
@@ -1079,10 +1154,10 @@ mod tests {
     /// Generate a fixture using the provided generator function with a specific seed.
     fn setup_seeded<S, F>(n: u32, seed: u64, fixture: F) -> Fixture<S>
     where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = StdRng::seed_from_u64(seed);
-        fixture(&mut rng, n)
+        fixture(&mut rng, NAMESPACE, n)
     }
 
     #[test]
@@ -1098,9 +1173,9 @@ mod tests {
     fn parent_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let chunk = Chunk::new(fixture.participants[0].clone(), 0, sample_digest(1));
         let epoch = Epoch::new(5);
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
@@ -1112,11 +1187,7 @@ mod tests {
         };
         let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
 
         // Assemble certificate
@@ -1145,9 +1216,9 @@ mod tests {
     fn node_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let ed_scheme = sample_scheme(0);
         let public_key = ed_scheme.public_key();
         let chunk_namespace = chunk_namespace(NAMESPACE);
@@ -1178,11 +1249,7 @@ mod tests {
         };
         let parent_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
 
         let parent_certificate = fixture.schemes[0]
@@ -1224,9 +1291,9 @@ mod tests {
     fn node_read_staged<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
 
         // Create a provider that returns the verifier for any epoch.
         // This simulates the normal case where the scheme is available.
@@ -1265,11 +1332,7 @@ mod tests {
         // Collect signatures from a quorum of validators to form the parent certificate.
         let parent_attestations: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let parent_certificate = fixture.schemes[0]
             .assemble(parent_attestations)
@@ -1326,9 +1389,9 @@ mod tests {
     fn ack_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = fixture(&mut test_rng(), 4);
+        let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let chunk = Chunk::new(fixture.participants[0].clone(), 42, sample_digest(1));
         let epoch = Epoch::new(5);
 
@@ -1337,7 +1400,7 @@ mod tests {
             epoch,
         };
         let attestation = fixture.schemes[0]
-            .sign::<Sha256Digest>(NAMESPACE, ctx)
+            .sign::<Sha256Digest>(ctx)
             .expect("Should sign vote");
 
         let ack = Ack::<PublicKey, S, Sha256Digest> {
@@ -1367,10 +1430,10 @@ mod tests {
     fn activity_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(&mut rng, 4);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
         let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let chunk_namespace = chunk_namespace(NAMESPACE);
@@ -1405,11 +1468,7 @@ mod tests {
         };
         let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
 
         // Assemble certificate
@@ -1421,7 +1480,7 @@ mod tests {
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk.clone(), epoch, certificate);
 
         // Verify lock
-        assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
+        assert!(lock.verify(&mut rng, &fixture.verifier));
 
         // Test activity with the lock
         let activity = Activity::<PublicKey, S, Sha256Digest>::Lock(lock.clone());
@@ -1433,7 +1492,7 @@ mod tests {
             Activity::Lock(l) => {
                 assert_eq!(l.chunk, chunk);
                 assert_eq!(l.epoch, epoch);
-                assert!(l.verify(&mut rng, NAMESPACE, &fixture.verifier));
+                assert!(l.verify(&mut rng, &fixture.verifier));
             }
             _ => panic!("Decoded activity has wrong type"),
         }
@@ -1468,16 +1527,17 @@ mod tests {
         assert_eq!(decoded.signature, proposal.signature);
 
         // Verify the decoded proposal
-        assert!(decoded.verify(NAMESPACE));
+        let verifier = chunk_verifier();
+        assert!(decoded.verify(&verifier));
     }
 
     fn lock_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(&mut rng, 4);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
@@ -1490,11 +1550,7 @@ mod tests {
         };
         let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
 
         // Assemble certificate
@@ -1513,7 +1569,7 @@ mod tests {
         assert_eq!(decoded.epoch, lock.epoch);
 
         // Verify the signature in the decoded lock
-        assert!(decoded.verify(&mut rng, NAMESPACE, &fixture.verifier));
+        assert!(decoded.verify(&mut rng, &fixture.verifier));
     }
 
     #[test]
@@ -1529,24 +1585,21 @@ mod tests {
     fn node_sign_verify<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(&mut rng, 4);
-        let mut scheme = sample_scheme(0);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
+        let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
+        let mut signer = chunk_signer(scheme);
+        let verifier = chunk_verifier();
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
 
         // Test genesis node (no parent)
-        let node = Node::<PublicKey, S, Sha256Digest>::sign(
-            NAMESPACE,
-            &mut scheme,
-            0,
-            sample_digest(1),
-            None,
-        );
+        let node: Node<PublicKey, S, Sha256Digest> =
+            Node::sign(&mut signer, 0, sample_digest(1), None);
         let provider = ConstantProvider::new(fixture.verifier.clone());
-        let result = node.verify(&mut rng, NAMESPACE, &provider);
+        let result = node.verify(&mut rng, &verifier, &provider);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
 
@@ -1561,11 +1614,7 @@ mod tests {
         };
         let parent_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let parent_certificate = fixture.schemes[0]
             .assemble(parent_attestations)
@@ -1576,15 +1625,10 @@ mod tests {
             parent_epoch,
             parent_certificate,
         ));
-        let node = Node::<PublicKey, S, Sha256Digest>::sign(
-            NAMESPACE,
-            &mut scheme,
-            1,
-            sample_digest(2),
-            parent,
-        );
+        let node: Node<PublicKey, S, Sha256Digest> =
+            Node::sign(&mut signer, 1, sample_digest(2), parent);
 
-        let result = node.verify(&mut rng, NAMESPACE, &provider);
+        let result = node.verify(&mut rng, &verifier, &provider);
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
     }
@@ -1602,19 +1646,16 @@ mod tests {
     fn ack_sign_verify<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(&mut rng, 4);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
 
-        let ack = Ack::sign(NAMESPACE, &fixture.schemes[0], chunk, epoch).expect("Should sign ack");
-        assert!(ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
-
-        // Test that verification fails with wrong namespace
-        assert!(!ack.verify(&mut rng, b"wrong", &fixture.verifier));
+        let ack = Ack::sign(&fixture.schemes[0], chunk, epoch).expect("Should sign ack");
+        assert!(ack.verify(&mut rng, &fixture.verifier));
     }
 
     #[test]
@@ -1630,10 +1671,10 @@ mod tests {
     fn certificate_assembly<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(&mut rng, 4);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
@@ -1646,11 +1687,7 @@ mod tests {
         };
         let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
 
         // Assemble certificate
@@ -1662,7 +1699,7 @@ mod tests {
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk, epoch, certificate);
 
         // Verify lock
-        assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
+        assert!(lock.verify(&mut rng, &fixture.verifier));
     }
 
     #[test]
@@ -1678,10 +1715,10 @@ mod tests {
     fn lock_verify<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(&mut rng, 4);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
@@ -1694,11 +1731,7 @@ mod tests {
         };
         let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
             .assemble(attestations)
@@ -1708,10 +1741,7 @@ mod tests {
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk, epoch, certificate);
 
         // Verify lock
-        assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
-
-        // Test that verification fails with wrong namespace
-        assert!(!lock.verify(&mut rng, b"wrong", &fixture.verifier));
+        assert!(lock.verify(&mut rng, &fixture.verifier));
     }
 
     #[test]
@@ -1736,19 +1766,21 @@ mod tests {
         let proposal = Proposal::<PublicKey, Sha256Digest>::new(chunk, signature);
 
         // Verify proposal
-        assert!(proposal.verify(NAMESPACE));
+        let verifier = chunk_verifier();
+        assert!(proposal.verify(&verifier));
 
         // Test that verification fails with wrong namespace
-        assert!(!proposal.verify(b"wrong"));
+        let wrong_verifier = ChunkVerifier::new(b"wrong");
+        assert!(!proposal.verify(&wrong_verifier));
     }
 
     fn node_verify_invalid_signature<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(&mut rng, 4);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
         let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
 
@@ -1765,7 +1797,8 @@ mod tests {
 
         // Verification should succeed
         let provider = ConstantProvider::new(fixture.verifier);
-        assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
+        let verifier = chunk_verifier();
+        assert!(node.verify(&mut rng, &verifier, &provider).is_ok());
 
         // Now create a node with invalid signature
         let tampered_signature = scheme.sign(chunk_namespace.as_ref(), &node.encode());
@@ -1773,7 +1806,7 @@ mod tests {
 
         // Verification should fail
         assert!(matches!(
-            invalid_node.verify(&mut rng, NAMESPACE, &provider),
+            invalid_node.verify(&mut rng, &verifier, &provider),
             Err(Error::InvalidSequencerSignature)
         ));
     }
@@ -1791,10 +1824,10 @@ mod tests {
     fn node_verify_invalid_parent_signature<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(&mut rng, 4);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
         let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
@@ -1811,11 +1844,7 @@ mod tests {
         };
         let parent_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
             .assemble(parent_attestations)
@@ -1836,7 +1865,8 @@ mod tests {
 
         // Verification should succeed
         let provider = ConstantProvider::new(fixture.verifier.clone());
-        assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
+        let verifier = chunk_verifier();
+        assert!(node.verify(&mut rng, &verifier, &provider).is_ok());
 
         // Now create a parent with invalid certificate
         // Generate certificate with the wrong keys (sign with schemes[1..] but pretend it's from schemes[0..])
@@ -1846,11 +1876,7 @@ mod tests {
         };
         let wrong_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), wrong_ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(wrong_ctx.clone()).unwrap())
             .collect();
         let wrong_certificate = fixture.schemes[0]
             .assemble(wrong_attestations)
@@ -1869,7 +1895,7 @@ mod tests {
 
         // Verification should fail because the parent certificate was signed for different epoch
         assert!(matches!(
-            node.verify(&mut rng, NAMESPACE, &provider),
+            node.verify(&mut rng, &verifier, &provider),
             Err(Error::InvalidCertificate)
         ));
     }
@@ -1887,26 +1913,22 @@ mod tests {
     fn ack_verify_invalid_signature<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(&mut rng, 4);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
 
         // Create a valid ack
-        let ack = Ack::<PublicKey, S, Sha256Digest>::sign(
-            NAMESPACE,
-            &fixture.schemes[0],
-            chunk.clone(),
-            epoch,
-        )
-        .expect("Should sign ack");
+        let ack =
+            Ack::<PublicKey, S, Sha256Digest>::sign(&fixture.schemes[0], chunk.clone(), epoch)
+                .expect("Should sign ack");
 
         // Verification should succeed
-        assert!(ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut rng, &fixture.verifier));
 
         // Create an ack with tampered signature by signing with a different scheme
         let ctx = AckSubject {
@@ -1914,7 +1936,7 @@ mod tests {
             epoch,
         };
         let mut tampered_vote = fixture.schemes[1]
-            .sign::<Sha256Digest>(NAMESPACE, ctx)
+            .sign::<Sha256Digest>(ctx)
             .expect("Should sign vote");
         // Change the signer index to mismatch with the actual signature
         // The vote was signed by validator 1, but we claim it's from validator 0
@@ -1922,7 +1944,7 @@ mod tests {
         let invalid_ack = Ack::<PublicKey, S, Sha256Digest>::new(chunk, epoch, tampered_vote);
 
         // Verification should fail because the signer index doesn't match the signature
-        assert!(!invalid_ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
+        assert!(!invalid_ack.verify(&mut rng, &fixture.verifier));
     }
 
     #[test]
@@ -1938,7 +1960,7 @@ mod tests {
     fn ack_verify_wrong_validator<S, F>(f: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: Fn(&mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = setup_seeded(4, 0, &f);
@@ -1949,15 +1971,14 @@ mod tests {
         let epoch = Epoch::new(5);
 
         // Create a valid ack
-        let ack =
-            Ack::<PublicKey, S, Sha256Digest>::sign(NAMESPACE, &fixture.schemes[0], chunk, epoch)
-                .expect("Should sign ack");
+        let ack = Ack::<PublicKey, S, Sha256Digest>::sign(&fixture.schemes[0], chunk, epoch)
+            .expect("Should sign ack");
 
         // Verification should succeed with correct verifier
-        assert!(ack.verify(&mut rng, NAMESPACE, &fixture.verifier));
+        assert!(ack.verify(&mut rng, &fixture.verifier));
 
         // Verification should fail with wrong verifier
-        assert!(!ack.verify(&mut rng, NAMESPACE, &wrong_fixture.verifier));
+        assert!(!ack.verify(&mut rng, &wrong_fixture.verifier));
     }
 
     #[test]
@@ -1973,7 +1994,7 @@ mod tests {
     fn lock_verify_invalid_signature<S, F>(f: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: Fn(&mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = setup_seeded(4, 0, &f);
@@ -1990,11 +2011,7 @@ mod tests {
         };
         let attestations: Vec<_> = fixture.schemes[..quorum_size]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
             .assemble(attestations)
@@ -2004,16 +2021,12 @@ mod tests {
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk.clone(), epoch, certificate);
 
         // Verification should succeed
-        assert!(lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
+        assert!(lock.verify(&mut rng, &fixture.verifier));
 
         // Generate certificate with the wrong keys
         let wrong_attestations: Vec<_> = wrong_fixture.schemes[..quorum_size]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let wrong_certificate = wrong_fixture.schemes[0]
             .assemble(wrong_attestations)
@@ -2023,10 +2036,10 @@ mod tests {
         let wrong_lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk, epoch, wrong_certificate);
 
         // Verification should fail with the original public key
-        assert!(!wrong_lock.verify(&mut rng, NAMESPACE, &fixture.verifier));
+        assert!(!wrong_lock.verify(&mut rng, &fixture.verifier));
 
         // But succeed with the matching wrong verifier
-        assert!(wrong_lock.verify(&mut rng, NAMESPACE, &wrong_fixture.verifier));
+        assert!(wrong_lock.verify(&mut rng, &wrong_fixture.verifier));
     }
 
     #[test]
@@ -2051,10 +2064,12 @@ mod tests {
         let proposal = Proposal::<PublicKey, Sha256Digest>::new(chunk, signature);
 
         // Verify with correct namespace - should pass
-        assert!(proposal.verify(NAMESPACE));
+        let verifier = chunk_verifier();
+        assert!(proposal.verify(&verifier));
 
         // Verify with wrong namespace - should fail
-        assert!(!proposal.verify(b"wrong_namespace"));
+        let wrong_verifier = ChunkVerifier::new(b"wrong_namespace");
+        assert!(!proposal.verify(&wrong_verifier));
     }
 
     #[test]
@@ -2072,16 +2087,17 @@ mod tests {
         let proposal = Proposal::<PublicKey, Sha256Digest>::new(chunk, signature);
 
         // Verification should fail because the signature doesn't match the sequencer's public key
-        assert!(!proposal.verify(NAMESPACE));
+        let verifier = chunk_verifier();
+        assert!(!proposal.verify(&verifier));
     }
 
     fn node_genesis_with_parent_fails<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(&mut rng, 4);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
         // Try to create a node with height 0 and a parent
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
@@ -2099,11 +2115,7 @@ mod tests {
         };
         let attestations: Vec<_> = fixture.schemes[..quorum_size]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
             .assemble(attestations)
@@ -2134,10 +2146,10 @@ mod tests {
     fn node_non_genesis_without_parent_fails<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(&mut rng, 4);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
         // Try to create a non-genesis node without a parent
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 1, sample_digest(1)); // Height > 0
@@ -2167,10 +2179,10 @@ mod tests {
     fn node_genesis_with_parent_panics<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(&mut rng, 4);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
 
         // Try to create a genesis node (height 0) with a parent - should panic in Node::new
         let public_key = sample_scheme(0).public_key();
@@ -2188,11 +2200,7 @@ mod tests {
         };
         let parent_attestations: Vec<_> = fixture.schemes[..quorum(4) as usize]
             .iter()
-            .map(|scheme| {
-                scheme
-                    .sign::<Sha256Digest>(&ack_namespace(NAMESPACE), parent_ctx.clone())
-                    .unwrap()
-            })
+            .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let parent_certificate = fixture.schemes[0]
             .assemble(parent_attestations)
@@ -2233,10 +2241,10 @@ mod tests {
     fn node_non_genesis_without_parent_panics<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(&mut rng, 4);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
 
         // Try to create a non-genesis node (height > 0) without a parent - should panic on decode
         let public_key = sample_scheme(0).public_key();

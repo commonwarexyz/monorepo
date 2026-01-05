@@ -233,13 +233,15 @@ mod tests {
     use commonware_utils::{quorum_from_slice, TryFromIterator};
     use rand::{rngs::StdRng, SeedableRng};
 
+    const NAMESPACE: &[u8] = b"test";
+
     type ThresholdScheme =
         bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
 
     #[test]
     fn round_robin_rotates_through_participants() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = ed25519::fixture(&mut rng, 4);
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
         let elector: RoundRobinElector<ed25519::Scheme> =
@@ -262,7 +264,7 @@ mod tests {
     #[test]
     fn round_robin_cycles_through_epochs() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
         let elector: RoundRobinElector<ed25519::Scheme> =
@@ -288,7 +290,7 @@ mod tests {
     #[test]
     fn round_robin_shuffled_changes_order() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
 
         let elector_no_seed: RoundRobinElector<ed25519::Scheme> =
@@ -329,7 +331,7 @@ mod tests {
     #[test]
     fn round_robin_same_seed_is_deterministic() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = ed25519::fixture(&mut rng, 5);
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
 
         let elector1: RoundRobinElector<ed25519::Scheme> =
@@ -355,7 +357,8 @@ mod tests {
     #[test]
     fn random_falls_back_to_round_robin_for_view_1() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
+        let Fixture { participants, .. } =
+            bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
@@ -384,7 +387,7 @@ mod tests {
             participants,
             schemes,
             ..
-        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
+        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
         let quorum = quorum_from_slice(&schemes) as usize;
@@ -395,7 +398,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign::<Sha256Digest>(b"test", Subject::Nullify { round: round1 })
+                s.sign::<Sha256Digest>(Subject::Nullify { round: round1 })
                     .unwrap()
             })
             .collect();
@@ -407,7 +410,7 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign::<Sha256Digest>(b"test", Subject::Nullify { round: round2 })
+                s.sign::<Sha256Digest>(Subject::Nullify { round: round2 })
                     .unwrap()
             })
             .collect();
@@ -438,7 +441,8 @@ mod tests {
     #[should_panic]
     fn random_panics_on_none_certificate_after_view_1() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 5);
+        let Fixture { participants, .. } =
+            bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
 

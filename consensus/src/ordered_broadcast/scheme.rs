@@ -41,10 +41,10 @@ pub mod bls12381_multisig {
     //! Certificates contain signer indices alongside an aggregated signature,
     //! enabling secure per-validator activity tracking and conflict detection.
 
-    use crate::ordered_broadcast::types::AckSubject;
+    use crate::ordered_broadcast::types::{AckNamespace, AckSubject};
     use commonware_cryptography::impl_certificate_bls12381_multisig;
 
-    impl_certificate_bls12381_multisig!(AckSubject<'a, P, D>);
+    impl_certificate_bls12381_multisig!(AckSubject<'a, P, D>, AckNamespace);
 }
 
 pub mod bls12381_threshold {
@@ -56,10 +56,10 @@ pub mod bls12381_threshold {
     //! enabling equivocation attacks. Because peer connections are authenticated, evidence can be used locally
     //! (as it must be sent by said participant) but can't be used by an external observer.
 
-    use crate::ordered_broadcast::types::AckSubject;
+    use crate::ordered_broadcast::types::{AckNamespace, AckSubject};
     use commonware_cryptography::impl_certificate_bls12381_threshold;
 
-    impl_certificate_bls12381_threshold!(AckSubject<'a, P, D>);
+    impl_certificate_bls12381_threshold!(AckSubject<'a, P, D>, AckNamespace);
 }
 
 pub mod ed25519 {
@@ -70,10 +70,10 @@ pub mod ed25519 {
     //! contain signer indices alongside individual signatures, enabling secure
     //! per-validator activity tracking and fault detection.
 
-    use crate::ordered_broadcast::types::AckSubject;
+    use crate::ordered_broadcast::types::{AckNamespace, AckSubject};
     use commonware_cryptography::{ed25519, impl_certificate_ed25519};
 
-    impl_certificate_ed25519!(AckSubject<'a, ed25519::PublicKey, D>);
+    impl_certificate_ed25519!(AckSubject<'a, ed25519::PublicKey, D>, AckNamespace);
 }
 
 pub mod secp256r1 {
@@ -84,8 +84,8 @@ pub mod secp256r1 {
     //! contain signer indices alongside individual signatures, enabling secure
     //! per-validator activity tracking and fault detection.
 
-    use crate::ordered_broadcast::types::AckSubject;
+    use crate::ordered_broadcast::types::{AckNamespace, AckSubject};
     use commonware_cryptography::impl_certificate_secp256r1;
 
-    impl_certificate_secp256r1!(AckSubject<'a, P, D>);
+    impl_certificate_secp256r1!(AckSubject<'a, P, D>, AckNamespace);
 }

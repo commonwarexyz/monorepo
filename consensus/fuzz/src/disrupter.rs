@@ -35,7 +35,6 @@ pub struct Disrupter<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>
     validator: PublicKey,
     scheme: S,
     participants: Set<PublicKey>,
-    namespace: Vec<u8>,
     fuzz_input: FuzzInput,
     last_vote: u64,
     last_finalized: u64,
@@ -52,7 +51,6 @@ where
         validator: PublicKey,
         scheme: S,
         participants: Set<PublicKey>,
-        namespace: Vec<u8>,
         fuzz_input: FuzzInput,
     ) -> Self {
         Self {
@@ -64,7 +62,6 @@ where
             validator,
             scheme,
             participants,
-            namespace,
             fuzz_input,
         }
     }
@@ -222,7 +219,7 @@ where
                     let _ = sender.send(Recipients::All, mutated.into(), true).await;
                 } else {
                     let proposal = self.mutate_proposal(&notarize.proposal);
-                    if let Some(v) = Notarize::sign(&self.scheme, &self.namespace, proposal) {
+                    if let Some(v) = Notarize::sign(&self.scheme, proposal) {
                         let msg = Vote::<S, Sha256Digest>::Notarize(v).encode().into();
                         let _ = sender.send(Recipients::All, msg, true).await;
                     }
@@ -234,7 +231,7 @@ where
                     let _ = sender.send(Recipients::All, mutated.into(), true).await;
                 } else {
                     let proposal = self.mutate_proposal(&finalize.proposal);
-                    if let Some(v) = Finalize::sign(&self.scheme, &self.namespace, proposal) {
+                    if let Some(v) = Finalize::sign(&self.scheme, proposal) {
                         let msg = Vote::<S, Sha256Digest>::Finalize(v).encode().into();
                         let _ = sender.send(Recipients::All, msg, true).await;
                     }
@@ -247,9 +244,7 @@ where
                 } else {
                     let v = self.random_view(self.last_vote);
                     let round = Round::new(Epoch::new(EPOCH), View::new(v));
-                    if let Some(v) =
-                        Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
-                    {
+                    if let Some(v) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {
                         let msg = Vote::<S, Sha256Digest>::Nullify(v).encode().into();
                         let _ = sender.send(Recipients::All, msg, true).await;
                     }
@@ -338,13 +333,13 @@ where
 
         match self.message() {
             Message::Notarize => {
-                if let Some(vote) = Notarize::sign(&self.scheme, &self.namespace, proposal) {
+                if let Some(vote) = Notarize::sign(&self.scheme, proposal) {
                     let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode().into();
                     let _ = sender.send(Recipients::All, msg, true).await;
                 }
             }
             Message::Finalize => {
-                if let Some(vote) = Finalize::sign(&self.scheme, &self.namespace, proposal) {
+                if let Some(vote) = Finalize::sign(&self.scheme, proposal) {
                     let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode().into();
                     let _ = sender.send(Recipients::All, msg, true).await;
                 }
@@ -354,9 +349,7 @@ where
                     Epoch::new(EPOCH),
                     View::new(self.random_view(self.last_vote)),
                 );
-                if let Some(vote) =
-                    Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
-                {
+                if let Some(vote) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {
                     let msg = Vote::<S, Sha256Digest>::Nullify(vote).encode().into();
                     let _ = sender.send(Recipients::All, msg, true).await;
                 }

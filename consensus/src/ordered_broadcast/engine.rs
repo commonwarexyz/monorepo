@@ -10,7 +10,8 @@
 use super::{
     metrics, scheme,
     types::{
-        Ack, Activity, Chunk, Context, Error, Lock, Node, Parent, Proposal, SequencersProvider,
+        Ack, Activity, Chunk, ChunkSigner, ChunkVerifier, Context, Error, Lock, Node, Parent,
+        Proposal, SequencersProvider,
     },
     AckManager, Config, TipManager,
 };
@@ -76,7 +77,7 @@ pub struct Engine<
     // Interfaces
     ////////////////////////////////////////
     context: ContextCell<E>,
-    sequencer_signer: Option<C>,
+    sequencer_signer: Option<ChunkSigner<C>>,
     sequencers_provider: S,
     validators_provider: P,
     automaton: A,
@@ -88,8 +89,8 @@ pub struct Engine<
     // Namespace Constants
     ////////////////////////////////////////
 
-    // The namespace signatures.
-    namespace: Vec<u8>,
+    // Verifier for chunk signatures.
+    chunk_verifier: ChunkVerifier,
 
     ////////////////////////////////////////
     // Timeouts
@@ -223,7 +224,7 @@ impl<
             relay: cfg.relay,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
-            namespace: cfg.namespace,
+            chunk_verifier: cfg.chunk_verifier,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
@@ -533,12 +534,7 @@ impl<
         };
 
         // Construct vote (if a validator)
-        let Some(ack) = Ack::sign(
-            &self.namespace,
-            scheme.as_ref(),
-            tip.chunk.clone(),
-            self.epoch,
-        ) else {
+        let Some(ack) = Ack::sign(scheme.as_ref(), tip.chunk.clone(), self.epoch) else {
             return Err(Error::NotSigner(self.epoch));
         };
 
@@ -750,7 +746,7 @@ impl<
         }
 
         // Construct new node
-        let node = Node::sign(&self.namespace, signer, height, payload, parent);
+        let node = Node::sign(signer, height, payload, parent);
 
         // Deal with the chunk as if it were received over the network
         self.handle_node(&node).await;
@@ -887,7 +883,7 @@ impl<
         // Verify the node
         node.verify(
             &mut self.context,
-            &self.namespace,
+            &self.chunk_verifier,
             &self.validators_provider,
         )
     }
@@ -946,7 +942,7 @@ impl<
         }
 
         // Validate the vote signature
-        if !ack.verify(&mut self.context, &self.namespace, scheme.as_ref()) {
+        if !ack.verify(&mut self.context, scheme.as_ref()) {
             return Err(Error::InvalidAckSignature);
         }
 
