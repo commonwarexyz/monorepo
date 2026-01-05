@@ -47,7 +47,6 @@ use futures::{
 };
 use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
-use rand::{CryptoRng, Rng};
 use rand_core::CryptoRngCore;
 use std::{
     collections::{btree_map::Entry, BTreeMap},

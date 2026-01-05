@@ -281,7 +281,6 @@ where
         context: Context<CodingCommitment, <Z::Scheme as CertificateScheme>::PublicKey>,
         commitment: CodingCommitment,
     ) -> oneshot::Receiver<bool> {
-        let mut shards = self.shards.clone();
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
@@ -324,8 +323,8 @@ where
                     &mut marshal,
                 )
                 .await;
-                let block_request = shards
-                    .subscribe_block(DigestOrCommitment::Commitment(commitment))
+                let block_request = marshal
+                    .subscribe(Some(round), DigestOrCommitment::Commitment(commitment))
                     .await;
                 let block_requests = try_join(parent_request, block_request);
                 pin_mut!(block_requests);
