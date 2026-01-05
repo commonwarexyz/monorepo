@@ -5,7 +5,7 @@ use crate::{
     dkg,
 };
 use commonware_consensus::{
-    marshal::ingress::mailbox::AncestorStream, simplex::types::Context, Block as _,
+    marshal::ingress::mailbox::AncestorStream, simplex::types::Context, Heightable,
     VerifyingApplication,
 };
 use commonware_cryptography::{
@@ -80,7 +80,7 @@ where
         // Create a new block
         Some(Block::new(
             parent_commitment,
-            parent_block.height() + 1,
+            parent_block.height().next(),
             reshare,
         ))
     }

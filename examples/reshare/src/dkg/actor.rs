@@ -400,7 +400,7 @@ where
                             let block_epoch = bounds.epoch();
                             let phase = bounds.phase();
                             let relative_height = bounds.relative();
-                            info!(epoch = %block_epoch, relative_height, "processing finalized block");
+                            info!(epoch = %block_epoch, relative_height = %relative_height, "processing finalized block");
 
                             // Skip blocks from previous epochs (can happen on restart if we
                             // persisted state but crashed before acknowledging)
