@@ -350,6 +350,7 @@ pub struct Iter<'a> {
 impl Iterator for Iter<'_> {
     type Item = u16;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let (_, end) = self.current_run?;
