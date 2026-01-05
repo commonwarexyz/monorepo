@@ -547,10 +547,8 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// The first 4 bytes contain magic bytes to identify valid blobs.
 /// Remaining bytes are reserved for future use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Header {
-    /// Header bytes.
-    pub bytes: [u8; Self::SIZE],
-}
+#[repr(transparent)]
+pub struct Header([u8; Self::SIZE]);
 
 impl Default for Header {
     fn default() -> Self {
@@ -574,12 +572,12 @@ impl Header {
     pub fn new() -> Self {
         let mut bytes = [0u8; Self::SIZE];
         bytes[..Self::MAGIC_LENGTH].copy_from_slice(&Self::MAGIC);
-        Self { bytes }
+        Self(bytes)
     }
 
     /// Returns the magic bytes from the header.
     fn magic(&self) -> [u8; Self::MAGIC_LENGTH] {
-        self.bytes[..Self::MAGIC_LENGTH].try_into().unwrap()
+        self.0[..Self::MAGIC_LENGTH].try_into().unwrap()
     }
 
     /// Validates the magic bytes match the expected value.
@@ -589,6 +587,12 @@ impl Header {
             return Err(Error::BlobMagicMismatch { found });
         }
         Ok(())
+    }
+}
+
+impl AsRef<[u8]> for Header {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -675,11 +679,11 @@ mod tests {
     fn test_header_magic_bytes() {
         // Default header should have magic bytes
         let header = Header::default();
-        assert_eq!(&header.bytes[..Header::MAGIC_LENGTH], &Header::MAGIC);
+        assert_eq!(&header.as_ref()[..Header::MAGIC_LENGTH], &Header::MAGIC);
 
         // Rest should be zeros
         assert_eq!(
-            &header.bytes[Header::MAGIC_LENGTH..],
+            &header.as_ref()[Header::MAGIC_LENGTH..],
             &[0u8; Header::SIZE - Header::MAGIC_LENGTH]
         );
     }
@@ -692,9 +696,7 @@ mod tests {
 
     #[test]
     fn test_header_validate_magic_wrong_bytes() {
-        let header = Header {
-            bytes: [0u8; Header::SIZE],
-        };
+        let header = Header([0u8; Header::SIZE]);
         let result = header.validate_magic();
         match result {
             Err(Error::BlobMagicMismatch { found }) => {
@@ -703,8 +705,9 @@ mod tests {
             _ => panic!("expected BlobMagicMismatch error"),
         }
 
-        let mut header = Header::default();
-        header.bytes[0] = b'X'; // Corrupt first byte
+        let mut bytes = Header::default().0;
+        bytes[0] = b'X'; // Corrupt first byte
+        let header = Header(bytes);
         let result = header.validate_magic();
         match result {
             Err(Error::BlobMagicMismatch { found }) => {
