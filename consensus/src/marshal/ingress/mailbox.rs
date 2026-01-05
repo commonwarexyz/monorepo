@@ -425,14 +425,14 @@ impl<S: Scheme, B: Block> Stream for AncestorStream<S, B> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Because marshal cannot currently yield the genesis block, we stop at height 1.
-        let end_bound = Height::new(1);
+        const END_BOUND: Height = Height::new(1);
 
         let mut this = self.project();
 
         // If a result has been buffered, return it and queue the parent fetch if needed.
         if let Some(block) = this.buffered.pop() {
             let height = block.height();
-            let should_fetch_parent = height > end_bound && this.buffered.is_empty();
+            let should_fetch_parent = height > END_BOUND && this.buffered.is_empty();
             if should_fetch_parent {
                 let parent_commitment = block.parent();
                 let future = subscribe_block_future(this.marshal.clone(), parent_commitment);
@@ -453,7 +453,7 @@ impl<S: Scheme, B: Block> Stream for AncestorStream<S, B> {
             Poll::Ready(None) | Poll::Ready(Some(None)) => Poll::Ready(None),
             Poll::Ready(Some(Some(block))) => {
                 let height = block.height();
-                let should_fetch_parent = height > end_bound;
+                let should_fetch_parent = height > END_BOUND;
                 if should_fetch_parent {
                     let parent_commitment = block.parent();
                     let future = subscribe_block_future(this.marshal.clone(), parent_commitment);
