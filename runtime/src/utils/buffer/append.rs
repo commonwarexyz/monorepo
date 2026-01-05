@@ -113,19 +113,20 @@ impl<B: Blob> Append<B> {
     /// that need blob access will wait for the write to complete.
     async fn flush_internal(
         &self,
-        mut guard: crate::RwLockWriteGuard<'_, (Buffer, u64)>,
+        mut buf_guard: crate::RwLockWriteGuard<'_, (Buffer, u64)>,
     ) -> Result<(), Error> {
-        let (buffer, blob_size) = &mut *guard;
+        let (buffer, blob_size) = &mut *buf_guard;
 
         // Prepare the data to be written.
-        let Some((buf, write_offset)) = self.prepare_flush_data(buffer, *blob_size).await else {
+        let Some(buf) = self.prepare_flush_data(buffer, *blob_size).await else {
             return Ok(());
         };
 
         // Update blob_size *before* releasing the lock. We do this optimistically; if the write
         // fails below, the program will return an error and likely abort/panic, so maintaining
         // exact consistency on error isn't strictly required.
-        *blob_size = write_offset + buf.len() as u64;
+        let write_offset = *blob_size;
+        *blob_size += buf.len() as u64;
 
         // Acquire blob write lock BEFORE releasing buffer lock. This ensures no reader can access
         // the blob until the write completes.
@@ -133,12 +134,10 @@ impl<B: Blob> Append<B> {
 
         // Release buffer lock, allowing concurrent buffered reads while the write is in progress.
         // Any attempts to read from the blob will block until the write completes.
-        drop(guard);
+        drop(buf_guard);
 
         // Perform the write while holding only blob lock.
-        blob_guard.write_at(buf, write_offset).await?;
-
-        Ok(())
+        blob_guard.write_at(buf, write_offset).await
     }
 
     /// Prepares data from the buffer to be flushed to the blob.
@@ -147,11 +146,7 @@ impl<B: Blob> Append<B> {
     /// 1. Takes the data from the write buffer.
     /// 2. Caches it in the buffer pool.
     /// 3. Returns the data to be written and the offset to write it at (if any).
-    async fn prepare_flush_data(
-        &self,
-        buffer: &mut Buffer,
-        blob_size: u64,
-    ) -> Option<(Vec<u8>, u64)> {
+    async fn prepare_flush_data(&self, buffer: &mut Buffer, blob_size: u64) -> Option<Vec<u8>> {
         // Take the buffered data, if any.
         let (mut buf, offset) = buffer.take()?;
 
@@ -178,7 +173,7 @@ impl<B: Blob> Append<B> {
         }
 
         // Return the data to write, and the offset where to write it within the blob.
-        Some((buf, blob_size))
+        Some(buf)
     }
 
     /// Clones and returns the underlying blob.
@@ -220,7 +215,7 @@ impl<B: Blob> Blob for Append<B> {
             return Ok(buf);
         }
 
-        // Fast path: try to read *only from pool cache without acquiring blob lock. This allows
+        // Fast path: try to read *only* from pool cache without acquiring blob lock. This allows
         // concurrent reads even while a flush is in progress.
         let cached = self
             .pool_ref
@@ -271,6 +266,10 @@ impl<B: Blob> Blob for Append<B> {
     }
 
     /// Resize the blob to the provided `size`.
+    ///
+    /// # Warning
+    ///
+    /// Concurrent readers which try to read past the new size during the resize may error.
     async fn resize(&self, size: u64) -> Result<(), Error> {
         // Implementation note: rewinding the blob across a page boundary potentially results in
         // stale data remaining in the buffer pool's cache. We don't proactively purge the data
@@ -284,18 +283,20 @@ impl<B: Blob> Blob for Append<B> {
         let mut guard = self.buffer.write().await;
         let (buffer, blob_size) = &mut *guard;
 
+        let flush_data = self.prepare_flush_data(buffer, *blob_size).await;
+
         // Acquire blob write lock to prevent concurrent reads throughout the resize.
         let blob_guard = self.blob.write().await;
 
         // Flush any buffered bytes first, using the helper.
         // We hold both locks here, so no concurrent operations can happen.
-        if let Some((buf, write_offset)) = self.prepare_flush_data(buffer, *blob_size).await {
+        if let Some(buf) = flush_data {
             // Write the data to the blob.
             let len = buf.len() as u64;
-            blob_guard.write_at(buf, write_offset).await?;
+            blob_guard.write_at(buf, *blob_size).await?;
 
             // Update blob_size to reflect the flush.
-            *blob_size = write_offset + len;
+            *blob_size += len;
         }
 
         // Resize the underlying blob.
