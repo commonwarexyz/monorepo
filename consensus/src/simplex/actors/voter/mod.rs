@@ -206,7 +206,13 @@ mod tests {
             certificate_sender,
         );
 
-        (mailbox, batcher_receiver, resolver_receiver, relay, reporter)
+        (
+            mailbox,
+            batcher_receiver,
+            resolver_receiver,
+            relay,
+            reporter,
+        )
     }
 
     /// Helper to advance to a specific view by sending a finalization for the previous view.
