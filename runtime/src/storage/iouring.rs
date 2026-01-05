@@ -443,7 +443,7 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::tests::run_storage_tests;
+    use crate::{storage::tests::run_storage_tests, Blob, Header, Storage as _};
     use rand::{Rng as _, SeedableRng as _};
     use std::env;
 
@@ -472,8 +472,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_header_handling() {
-        use crate::{Blob, Header, Storage as _};
-
         let (storage, storage_directory) = create_test_storage();
 
         // Test 1: New blob returns logical size 0 and has default header

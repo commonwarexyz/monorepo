@@ -242,7 +242,7 @@ impl crate::Storage for Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::tests::run_storage_tests;
+    use crate::{storage::tests::run_storage_tests, Blob, Header, Storage as _};
     use rand::{Rng as _, SeedableRng};
     use std::env;
 
@@ -257,8 +257,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_header_handling() {
-        use crate::{Blob, Header, Storage as _};
-
         let mut rng = rand::rngs::StdRng::from_entropy();
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_header_{}", rng.gen::<u64>()));

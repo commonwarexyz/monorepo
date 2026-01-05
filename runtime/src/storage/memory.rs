@@ -205,7 +205,7 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::tests::run_storage_tests;
+    use crate::{storage::tests::run_storage_tests, Blob, Header, Storage as _};
 
     #[tokio::test]
     async fn test_memory_storage() {
@@ -215,8 +215,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_header_handling() {
-        use crate::{Blob, Header, Storage as _};
-
         let storage = Storage::default();
 
         // Test 1: New blob returns logical size 0 and has default header
