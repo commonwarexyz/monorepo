@@ -77,6 +77,8 @@
 //!   some number of views (again to trigger early view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
+//! * Require broadcasting `notarize(c,v)` and `notarization(c,v)` before broadcasting `finalize(c,v)` to ensure
+//!   participants contribute to notarization before finalization.
 //!
 //! ## Architecture
 //!
