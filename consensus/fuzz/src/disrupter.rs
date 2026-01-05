@@ -14,7 +14,7 @@ use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
-use commonware_utils::ordered::Set;
+use commonware_utils::ordered::{Quorum, Set};
 use rand_core::CryptoRngCore;
 use std::{collections::VecDeque, time::Duration};
 
@@ -560,6 +560,12 @@ where
         sender: &mut impl Sender<PublicKey = S::PublicKey>,
         recipients: Recipients<S::PublicKey>,
     ) {
+        if self.participants.index(&self.validator).is_none() {
+            let bytes = self.bytes();
+            let _ = sender.send(Recipients::All, bytes.into(), true).await;
+            return;
+        }
+
         let proposal = self.get_proposal();
 
         match self.message() {

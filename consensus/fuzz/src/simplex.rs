@@ -99,7 +99,7 @@ impl Simplex for SimplexBls12381MinSig {
     }
 }
 
-struct SimplexSecp256r1;
+pub struct SimplexSecp256r1;
 
 impl Simplex for SimplexSecp256r1 {
     type Scheme = secp256r1::Scheme<Ed25519PublicKey>;

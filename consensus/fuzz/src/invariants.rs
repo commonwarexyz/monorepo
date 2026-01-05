@@ -1,9 +1,6 @@
-use crate::{
-    simplex::{
-        Simplex, SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
-    },
-    types::{Finalization, Notarization, Nullification, ReplicaState},
-};
+use crate::{simplex::{
+    Simplex, SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
+}, types::{Finalization, Notarization, Nullification, ReplicaState}, SimplexSecp256r1};
 use commonware_consensus::simplex::{
     elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme,
 };
@@ -193,6 +190,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
 fn is_attributable_scheme<P: Simplex>() -> bool {
     let type_id = TypeId::of::<P>();
     type_id == TypeId::of::<SimplexEd25519>()
+        || type_id == TypeId::of::<SimplexSecp256r1>()
         || type_id == TypeId::of::<SimplexBls12381MultisigMinPk>()
         || type_id == TypeId::of::<SimplexBls12381MultisigMinSig>()
 }

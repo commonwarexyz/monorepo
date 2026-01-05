@@ -26,7 +26,7 @@ use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
-    SimplexBls12381MultisigMinSig, SimplexEd25519,
+    SimplexBls12381MultisigMinSig, SimplexEd25519, SimplexSecp256r1,
 };
 use std::{cell::RefCell, num::NonZeroUsize, panic, sync::Arc, time::Duration};
 
