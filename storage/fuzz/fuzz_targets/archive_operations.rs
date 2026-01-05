@@ -48,14 +48,15 @@ fn fuzz(data: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = Config {
-            partition: "test".into(),
+            translator: EightCap,
+            index_partition: "test_index".into(),
+            index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            value_partition: "test_value".into(),
             items_per_section: NZU64!(1024),
             write_buffer: NZUsize!(1024),
-            translator: EightCap,
-            replay_buffer: NZUsize!(1024*1024),
+            replay_buffer: NZUsize!(1024 * 1024),
             compression: None,
             codec_config: (),
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 
         let mut archive = Archive::<_, _, Key, Value>::init(context.clone(), cfg.clone()).await.expect("init failed");

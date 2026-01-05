@@ -63,10 +63,11 @@ impl Archive {
                     freezer_table_initial_size: 131_072,
                     freezer_table_resize_frequency: 4,
                     freezer_table_resize_chunk_size: 1024,
-                    freezer_journal_partition: "archive_bench_journal".into(),
-                    freezer_journal_target_size: 1024 * 1024 * 10, // 10MB
-                    freezer_journal_compression: compression,
-                    freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    freezer_key_index_partition: "archive_bench_key_index".into(),
+                    freezer_key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    freezer_value_journal_partition: "archive_bench_value_journal".into(),
+                    freezer_value_journal_target_size: 1024 * 1024 * 10, // 10MB
+                    freezer_value_journal_compression: compression,
                     ordinal_partition: "archive_bench_ordinal".into(),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),
                     write_buffer: NZUsize!(WRITE_BUFFER),
@@ -77,14 +78,15 @@ impl Archive {
             }
             Variant::Prunable => {
                 let cfg = prunable::Config {
-                    partition: "archive_bench_partition".into(),
                     translator: TwoCap,
+                    index_partition: "archive_bench_index".into(),
+                    index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    value_partition: "archive_bench_value".into(),
                     compression,
                     codec_config: (),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),
                     write_buffer: NZUsize!(WRITE_BUFFER),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 Self::Prunable(prunable::Archive::init(ctx, cfg).await.unwrap())
             }

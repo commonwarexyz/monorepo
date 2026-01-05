@@ -8,6 +8,7 @@ use commonware_utils::Array;
 use std::future::Future;
 use thiserror::Error;
 
+pub mod blob;
 pub mod immutable;
 pub mod prunable;
 
@@ -139,14 +140,15 @@ mod tests {
         compression: Option<u8>,
     ) -> impl Archive<Key = FixedBytes<64>, Value = i32> {
         let cfg = prunable::Config {
-            partition: "test".into(),
             translator: TwoCap,
+            index_partition: "test_index".into(),
+            index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            value_partition: "test_value".into(),
             compression,
             codec_config: (),
             items_per_section: NZU64!(1024),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
         prunable::Archive::init(context, cfg).await.unwrap()
     }
@@ -161,10 +163,11 @@ mod tests {
             freezer_table_initial_size: 64,
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 32,
-            freezer_journal_partition: "test_journal".into(),
-            freezer_journal_target_size: 1024 * 1024,
-            freezer_journal_compression: compression,
-            freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            freezer_key_index_partition: "test_key_index".into(),
+            freezer_key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            freezer_value_journal_partition: "test_value_journal".into(),
+            freezer_value_journal_target_size: 1024 * 1024,
+            freezer_value_journal_compression: compression,
             ordinal_partition: "test_ordinal".into(),
             items_per_section: NZU64!(1024),
             write_buffer: NZUsize!(1024 * 1024),

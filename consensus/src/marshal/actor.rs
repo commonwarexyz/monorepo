@@ -181,7 +181,7 @@ where
             prunable_items_per_section: config.prunable_items_per_section,
             replay_buffer: config.replay_buffer,
             write_buffer: config.write_buffer,
-            freezer_journal_buffer_pool: config.buffer_pool.clone(),
+            index_buffer_pool: config.buffer_pool.clone(),
         };
         let cache = cache::Manager::init(
             context.with_label("cache"),

@@ -237,13 +237,17 @@ mod tests {
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 10,
                 freezer_table_resize_chunk_size: 10,
-                freezer_journal_partition: format!(
-                    "{}-finalizations-by-height-freezer-journal",
+                freezer_key_index_partition: format!(
+                    "{}-finalizations-by-height-freezer-key-index",
                     config.partition_prefix
                 ),
-                freezer_journal_target_size: 1024,
-                freezer_journal_compression: None,
-                freezer_journal_buffer_pool: config.buffer_pool.clone(),
+                freezer_key_index_buffer_pool: config.buffer_pool.clone(),
+                freezer_value_journal_partition: format!(
+                    "{}-finalizations-by-height-freezer-value-journal",
+                    config.partition_prefix
+                ),
+                freezer_value_journal_target_size: 1024,
+                freezer_value_journal_compression: None,
                 ordinal_partition: format!(
                     "{}-finalizations-by-height-ordinal",
                     config.partition_prefix
@@ -274,13 +278,17 @@ mod tests {
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 10,
                 freezer_table_resize_chunk_size: 10,
-                freezer_journal_partition: format!(
-                    "{}-finalized_blocks-freezer-journal",
+                freezer_key_index_partition: format!(
+                    "{}-finalized_blocks-freezer-key-index",
                     config.partition_prefix
                 ),
-                freezer_journal_target_size: 1024,
-                freezer_journal_compression: None,
-                freezer_journal_buffer_pool: config.buffer_pool.clone(),
+                freezer_key_index_buffer_pool: config.buffer_pool.clone(),
+                freezer_value_journal_partition: format!(
+                    "{}-finalized_blocks-freezer-value-journal",
+                    config.partition_prefix
+                ),
+                freezer_value_journal_target_size: 1024,
+                freezer_value_journal_compression: None,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: NZU64!(10),
                 codec_config: config.block_codec_config,

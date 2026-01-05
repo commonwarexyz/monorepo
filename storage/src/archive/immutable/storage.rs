@@ -126,11 +126,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         let freezer = Freezer::init_with_checkpoint(
             context.with_label("freezer"),
             freezer::Config {
-                journal_partition: cfg.freezer_journal_partition,
-                journal_compression: cfg.freezer_journal_compression,
-                journal_write_buffer: cfg.write_buffer,
-                journal_target_size: cfg.freezer_journal_target_size,
-                journal_buffer_pool: cfg.freezer_journal_buffer_pool,
+                key_index_partition: cfg.freezer_key_index_partition,
+                key_index_write_buffer: cfg.write_buffer,
+                key_index_buffer_pool: cfg.freezer_key_index_buffer_pool,
+                value_journal_partition: cfg.freezer_value_journal_partition,
+                value_journal_compression: cfg.freezer_value_journal_compression,
+                value_journal_write_buffer: cfg.write_buffer,
+                value_journal_target_size: cfg.freezer_value_journal_target_size,
                 table_partition: cfg.freezer_table_partition,
                 table_initial_size: cfg.freezer_table_initial_size,
                 table_resize_frequency: cfg.freezer_table_resize_frequency,

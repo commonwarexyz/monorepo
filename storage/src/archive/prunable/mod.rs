@@ -1,7 +1,8 @@
 //! A prunable key-value store for ordered data.
 //!
-//! Data is stored in [crate::journal::segmented::variable::Journal] (an append-only log) and the
-//! location of written data is stored in-memory by both index and key (via
+//! Data is stored across two backends: an **index journal** ([crate::journal::segmented::fixed])
+//! for fixed-size index entries and a **value blob** ([crate::archive::blob::Blob])
+//! for values. The location of written data is stored in-memory by both index and key (via
 //! [crate::index::unordered::Index]) to enable **single-read lookups** for both query patterns over
 //! archived data.
 //!
@@ -10,15 +11,30 @@
 //!
 //! # Format
 //!
-//! [Archive] stores data in the following format:
+//! [Archive] uses a two-journal structure for efficient buffer pool usage:
 //!
+//! **Index Journal (segmented/fixed)** - Fixed-size entries for fast startup replay:
+//! ```text
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |12 |13 |14 |15 |16 |17 |18 |19 |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! |          Index(u64)           |  Key(Fixed Size)  |val_offset(u32)|val_size(u32)|
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! ```
+//!
+//! **Value Blob** - Raw values with CRC32 checksums (direct reads, no buffer pool):
 //! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |12 |      ...      |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! |          Index(u64)           |  Key(Fixed Size)  |     Data      |
+//! |         Compressed Data (optional)        |       CRC32(u32)      |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //! ```
+//!
+//! This separation provides:
+//! - **Fast startup replay**: Only reads index journal (no values)
+//! - **Efficient key lookups**: Key comparison without reading values
+//! - **Direct value reads**: Large values bypass buffer pool (avoids cache pollution)
 //!
 //! # Uniqueness
 //!
@@ -78,7 +94,7 @@
 //! ## Lazy Index Cleanup
 //!
 //! Instead of performing a full iteration of the in-memory index, storing an additional in-memory
-//! index per `section`, or replaying a `section` of [crate::journal::segmented::variable::Journal],
+//! index per `section`, or replaying a `section` of the value blob,
 //! [Archive] lazily cleans up the [crate::index::unordered::Index] after pruning. When a new key is
 //! stored that overlaps (same translated value) with a pruned key, the pruned key is removed from
 //! the in-memory index.
@@ -121,13 +137,14 @@
 //!     // Create an archive
 //!     let cfg = Config {
 //!         translator: FourCap,
-//!         partition: "demo".into(),
+//!         index_partition: "demo_index".into(),
+//!         index_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!         value_partition: "demo_value".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
 //!         items_per_section: NZU64!(1024),
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!         replay_buffer: NZUsize!(4096),
-//!         buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
 //!     };
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
@@ -155,10 +172,16 @@ pub struct Config<T: Translator, C> {
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
 
-    /// The partition to use for the archive's [crate::journal] storage.
-    pub partition: String,
+    /// The partition to use for the index journal (stores index+key metadata).
+    pub index_partition: String,
 
-    /// The compression level to use for the archive's [crate::journal] storage.
+    /// The buffer pool to use for the index journal.
+    pub index_buffer_pool: PoolRef,
+
+    /// The partition to use for the value blob (stores values).
+    pub value_partition: String,
+
+    /// The compression level to use for the value blob.
     pub compression: Option<u8>,
 
     /// The [commonware_codec::Codec] configuration to use for the value stored in the archive.
@@ -173,9 +196,6 @@ pub struct Config<T: Translator, C> {
 
     /// The buffer size to use when replaying a [commonware_runtime::Blob].
     pub replay_buffer: NonZeroUsize,
-
-    /// The buffer pool to use for the archive's [crate::journal] storage.
-    pub buffer_pool: PoolRef,
 }
 
 #[cfg(test)]
@@ -186,7 +206,7 @@ mod tests {
         journal::Error as JournalError,
         translator::{FourCap, TwoCap},
     };
-    use commonware_codec::{varint::UInt, DecodeExt, EncodeSize, Error as CodecError};
+    use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -214,14 +234,15 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the archive
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: FourCap,
+                index_partition: "test_index".into(),
+                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value".into(),
                 codec_config: (),
                 compression: Some(3),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -240,21 +261,32 @@ mod tests {
             archive.sync().await.expect("Failed to sync archive");
             drop(archive);
 
-            // Initialize the archive again without compression
+            // Initialize the archive again without compression.
+            // Index journal replay succeeds (no compression), but value reads will fail.
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: FourCap,
+                index_partition: "test_index".into(),
+                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let result = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone()).await;
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone())
+                .await
+                .unwrap();
+
+            // Getting the value should fail because compression settings mismatch.
+            // Without compression, the codec sees extra bytes after decoding the value
+            // (because the compressed data doesn't match the expected format).
+            let result: Result<Option<i32>, _> = archive.get(Identifier::Index(index)).await;
             assert!(matches!(
                 result,
-                Err(Error::Journal(JournalError::Codec(CodecError::EndOfBuffer)))
+                Err(Error::Journal(JournalError::Codec(CodecError::ExtraData(
+                    _
+                ))))
             ));
         });
     }
@@ -266,14 +298,15 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the archive
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: FourCap,
+                index_partition: "test_index".into(),
+                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -293,31 +326,32 @@ mod tests {
             archive.sync().await.expect("Failed to sync archive");
             drop(archive);
 
-            // Corrupt the value
+            // Corrupt the index journal
             let section = (index / DEFAULT_ITEMS_PER_SECTION) * DEFAULT_ITEMS_PER_SECTION;
             let (blob, _) = context
-                .open("test_partition", &section.to_be_bytes())
+                .open("test_index", &section.to_be_bytes())
                 .await
                 .unwrap();
-            let value_location = 4 /* journal size */ + UInt(1u64).encode_size() as u64 /* index */ + 64 + 4 /* value length */;
-            blob.write_at(b"testdaty".to_vec(), value_location).await.unwrap();
+            blob.write_at(b"corrupt!".to_vec(), 8).await.unwrap();
             blob.sync().await.unwrap();
 
             // Initialize the archive again
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
                 context,
                 Config {
-                    partition: "test_partition".into(),
                     translator: FourCap,
+                    index_partition: "test_index".into(),
+                    index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    value_partition: "test_value".into(),
                     codec_config: (),
                     compression: None,
                     write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                     replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                     items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
-            .await.expect("Failed to initialize archive");
+            .await
+            .expect("Failed to initialize archive");
 
             // Check that the archive is empty
             let retrieved: Option<i32> = archive
@@ -335,14 +369,15 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the archive
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: FourCap,
+                index_partition: "test_index".into(),
+                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -398,14 +433,15 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the archive
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: FourCap,
+                index_partition: "test_index".into(),
+                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -455,14 +491,15 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the archive
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: FourCap,
+                index_partition: "test_index".into(),
+                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1), // no mask - each item is its own section
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -541,14 +578,15 @@ mod tests {
             // Initialize the archive
             let items_per_section = 256u64;
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: TwoCap,
+                index_partition: "test_index".into(),
+                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -600,14 +638,15 @@ mod tests {
 
             // Reinitialize the archive
             let cfg = Config {
-                partition: "test_partition".into(),
                 translator: TwoCap,
+                index_partition: "test_index".into(),
+                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive =
                 Archive::<_, _, _, FixedBytes<1024>>::init(context.clone(), cfg.clone())

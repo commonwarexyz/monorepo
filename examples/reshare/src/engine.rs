@@ -163,13 +163,17 @@ where
                 freezer_table_initial_size: config.freezer_table_initial_size,
                 freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
                 freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
-                freezer_journal_partition: format!(
-                    "{}-finalizations-by-height-freezer-journal",
+                freezer_key_index_partition: format!(
+                    "{}-finalizations-by-height-freezer-key-index",
                     config.partition_prefix
                 ),
-                freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
-                freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
-                freezer_journal_buffer_pool: buffer_pool.clone(),
+                freezer_key_index_buffer_pool: buffer_pool.clone(),
+                freezer_value_journal_partition: format!(
+                    "{}-finalizations-by-height-freezer-value-journal",
+                    config.partition_prefix
+                ),
+                freezer_value_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
+                freezer_value_journal_compression: FREEZER_JOURNAL_COMPRESSION,
                 ordinal_partition: format!(
                     "{}-finalizations-by-height-ordinal",
                     config.partition_prefix
@@ -200,13 +204,17 @@ where
                 freezer_table_initial_size: config.freezer_table_initial_size,
                 freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
                 freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
-                freezer_journal_partition: format!(
-                    "{}-finalized_blocks-freezer-journal",
+                freezer_key_index_partition: format!(
+                    "{}-finalized_blocks-freezer-key-index",
                     config.partition_prefix
                 ),
-                freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
-                freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
-                freezer_journal_buffer_pool: buffer_pool.clone(),
+                freezer_key_index_buffer_pool: buffer_pool.clone(),
+                freezer_value_journal_partition: format!(
+                    "{}-finalized_blocks-freezer-value-journal",
+                    config.partition_prefix
+                ),
+                freezer_value_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
+                freezer_value_journal_compression: FREEZER_JOURNAL_COMPRESSION,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
                 codec_config: num_participants,

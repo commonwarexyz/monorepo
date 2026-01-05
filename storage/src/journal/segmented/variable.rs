@@ -604,6 +604,174 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(item)
     }
 
+    /// Retrieves an item from `Journal` at a given `section` and `offset`,
+    /// bypassing the buffer pool cache.
+    ///
+    /// Use this for large one-time reads that shouldn't pollute the cache with
+    /// data that won't be reused. This is ideal for fetching large values
+    /// when you already know their location.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::get`].
+    pub async fn get_direct(&self, section: u64, offset: u32) -> Result<V, Error> {
+        self.prune_guard(section)?;
+        let blob = match self.blobs.get(&section) {
+            Some(blob) => blob,
+            None => return Err(Error::SectionOutOfRange(section)),
+        };
+
+        let (_, _, item) = Self::read_direct(
+            self.cfg.compression.is_some(),
+            &self.cfg.codec_config,
+            blob,
+            offset,
+        )
+        .await?;
+        Ok(item)
+    }
+
+    /// Retrieves an item from `Journal` at a given `section` and `offset` with known size,
+    /// bypassing the buffer pool cache.
+    ///
+    /// This is more efficient than [`Self::get_direct`] because it performs a single read
+    /// instead of two (one for size prefix, one for data). Use this when you have stored
+    /// the item size separately (e.g., in an index entry).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::get`].
+    pub async fn get_direct_with_size(
+        &self,
+        section: u64,
+        offset: u32,
+        size: u32,
+    ) -> Result<V, Error> {
+        self.prune_guard(section)?;
+        let blob = match self.blobs.get(&section) {
+            Some(blob) => blob,
+            None => return Err(Error::SectionOutOfRange(section)),
+        };
+
+        Self::read_direct_with_size(
+            self.cfg.compression.is_some(),
+            &self.cfg.codec_config,
+            blob,
+            offset,
+            size,
+        )
+        .await
+    }
+
+    /// Reads an item from the blob at the given offset, bypassing the buffer pool.
+    async fn read_direct(
+        compressed: bool,
+        cfg: &V::Cfg,
+        blob: &Append<E::Blob>,
+        offset: u32,
+    ) -> Result<(u32, u32, V), Error> {
+        // Read varint size (max 5 bytes for u32)
+        let mut hasher = crc32fast::Hasher::new();
+        let offset = offset as u64 * ITEM_ALIGNMENT;
+        let varint_buf = blob.read_at_direct(vec![0; MIN_ITEM_SIZE], offset).await?;
+        let mut varint = varint_buf.as_ref();
+        let size = UInt::<u32>::read(&mut varint).map_err(Error::Codec)?.0 as usize;
+        let varint_len = MIN_ITEM_SIZE - varint.remaining();
+        hasher.update(&varint_buf.as_ref()[..varint_len]);
+        let offset = offset
+            .checked_add(varint_len as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
+        // Read remaining
+        let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
+        let buf = blob.read_at_direct(vec![0u8; buf_size], offset).await?;
+        let buf = buf.as_ref();
+        let offset = offset
+            .checked_add(buf_size as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
+        // Read item
+        let item = &buf[..size];
+        hasher.update(item);
+
+        // Verify integrity
+        let checksum = hasher.finalize();
+        let stored_checksum = u32::from_be_bytes(buf[size..].try_into().unwrap());
+        if checksum != stored_checksum {
+            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
+        }
+
+        // Compute next offset
+        let aligned_offset = compute_next_offset(offset)?;
+
+        // If compression is enabled, decompress the item
+        let item = if compressed {
+            let decompressed =
+                decode_all(Cursor::new(&item)).map_err(|_| Error::DecompressionFailed)?;
+            V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)?
+        } else {
+            V::decode_cfg(item, cfg).map_err(Error::Codec)?
+        };
+
+        // Return item
+        Ok((aligned_offset, size as u32, item))
+    }
+
+    /// Reads an item from the blob at the given offset with known size, bypassing the buffer pool.
+    ///
+    /// This is more efficient than `read_direct` because it performs a single read
+    /// instead of two (one for size prefix, one for data).
+    async fn read_direct_with_size(
+        compressed: bool,
+        cfg: &V::Cfg,
+        blob: &Append<E::Blob>,
+        offset: u32,
+        size: u32,
+    ) -> Result<V, Error> {
+        let file_offset = offset as u64 * ITEM_ALIGNMENT;
+
+        // Calculate total read size: varint(size) + data + checksum
+        let varint_len = UInt(size).encode_size();
+        let total_size = varint_len + size as usize + 4;
+
+        // Single read for entire entry
+        let buf = blob
+            .read_at_direct(vec![0u8; total_size], file_offset)
+            .await?;
+        let buf = buf.as_ref();
+
+        // Verify the varint matches expected size
+        let mut varint = &buf[..varint_len];
+        let read_size = UInt::<u32>::read(&mut varint).map_err(Error::Codec)?.0;
+        if read_size != size {
+            return Err(Error::ChecksumMismatch(size, read_size));
+        }
+
+        // Extract item data and checksum
+        let item = &buf[varint_len..varint_len + size as usize];
+        let stored_checksum =
+            u32::from_be_bytes(buf[varint_len + size as usize..].try_into().unwrap());
+
+        // Verify integrity (checksum covers varint + data)
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buf[..varint_len + size as usize]);
+        let checksum = hasher.finalize();
+        if checksum != stored_checksum {
+            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
+        }
+
+        // Decompress if needed and decode
+        let item = if compressed {
+            let decompressed =
+                decode_all(Cursor::new(item)).map_err(|_| Error::DecompressionFailed)?;
+            V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)?
+        } else {
+            V::decode_cfg(item, cfg).map_err(Error::Codec)?
+        };
+
+        Ok(item)
+    }
+
     /// Gets the size of the journal for a specific section.
     ///
     /// Returns 0 if the section does not exist.

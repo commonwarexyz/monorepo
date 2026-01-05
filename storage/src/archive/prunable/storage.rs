@@ -1,89 +1,127 @@
 use super::{Config, Translator};
 use crate::{
-    archive::{Error, Identifier},
+    archive::{blob::Blob as ValueBlob, Error, Identifier},
     index::{unordered::Index, Unordered},
-    journal::segmented::variable::{Config as JConfig, Journal},
+    journal::segmented::fixed::{Config as FixedJournalConfig, Journal as FixedJournal},
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{Codec, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Storage};
 use commonware_utils::Array;
-use futures::{future::try_join_all, pin_mut, StreamExt};
+use futures::{future::join, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
-/// Record stored in the `Archive`.
-struct Record<K: Array, V: Codec> {
+/// Index entry stored in the segmented/fixed index journal.
+///
+/// All fields are fixed size, enabling fast startup replay without
+/// reading values from the value journal.
+#[derive(Debug, Clone, PartialEq)]
+struct IndexEntry<K: Array> {
+    /// The index for this entry.
     index: u64,
+    /// The key for this entry.
     key: K,
-    value: V,
+    /// Offset in value journal (same section).
+    value_offset: u32,
+    /// Size of value data in the variable journal.
+    value_size: u32,
 }
 
-impl<K: Array, V: Codec> Record<K, V> {
-    /// Create a new `Record`.
-    const fn new(index: u64, key: K, value: V) -> Self {
-        Self { index, key, value }
+impl<K: Array> IndexEntry<K> {
+    /// Create a new [IndexEntry].
+    const fn new(index: u64, key: K, value_offset: u32, value_size: u32) -> Self {
+        Self {
+            index,
+            key,
+            value_offset,
+            value_size,
+        }
     }
 }
 
-impl<K: Array, V: Codec> Write for Record<K, V> {
+impl<K: Array> Write for IndexEntry<K> {
     fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.index).write(buf);
+        self.index.write(buf);
         self.key.write(buf);
-        self.value.write(buf);
+        self.value_offset.write(buf);
+        self.value_size.write(buf);
     }
 }
 
-impl<K: Array, V: Codec> Read for Record<K, V> {
-    type Cfg = V::Cfg;
+impl<K: Array> Read for IndexEntry<K> {
+    type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let index = UInt::read(buf)?.into();
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let index = u64::read(buf)?;
         let key = K::read(buf)?;
-        let value = V::read_cfg(buf, cfg)?;
-        Ok(Self { index, key, value })
+        let value_offset = u32::read(buf)?;
+        let value_size = u32::read(buf)?;
+        Ok(Self {
+            index,
+            key,
+            value_offset,
+            value_size,
+        })
     }
 }
 
-impl<K: Array, V: Codec> EncodeSize for Record<K, V> {
-    fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + K::SIZE + self.value.encode_size()
-    }
+impl<K: Array> FixedSize for IndexEntry<K> {
+    // index + key + value_offset + value_size
+    const SIZE: usize = u64::SIZE + K::SIZE + u32::SIZE + u32::SIZE;
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Array, V: Codec> arbitrary::Arbitrary<'_> for Record<K, V>
+impl<K: Array> arbitrary::Arbitrary<'_> for IndexEntry<K>
 where
     K: for<'a> arbitrary::Arbitrary<'a>,
-    V: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self::new(
-            u.arbitrary::<u64>()?,
-            u.arbitrary::<K>()?,
-            u.arbitrary::<V>()?,
-        ))
+        Ok(Self {
+            index: u64::arbitrary(u)?,
+            key: K::arbitrary(u)?,
+            value_offset: u32::arbitrary(u)?,
+            value_size: u32::arbitrary(u)?,
+        })
     }
 }
 
 /// Implementation of `Archive` storage.
+///
+/// Uses two storage backends:
+/// - **index_journal**: Fixed-size entries containing (index, key, value_offset, value_size)
+/// - **value_blob**: Raw blob storage for values (no size prefix, CRC32 checksums)
+///
+/// This separation provides:
+/// - Fast startup replay (only reads index journal, no values)
+/// - Efficient key lookups (key comparison without reading values)
+/// - Direct value reads bypass buffer pool (avoids cache pollution)
 pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     items_per_section: u64,
-    journal: Journal<E, Record<K, V>>,
+
+    /// Fixed-size journal for index entries (fast replay, efficient key lookups).
+    index_journal: FixedJournal<E, IndexEntry<K>>,
+
+    /// Blob storage for values (direct reads bypass buffer pool).
+    value_blob: ValueBlob<E, V>,
+
     pending: BTreeSet<u64>,
 
-    // Oldest allowed section to read from. This is updated when `prune` is called.
+    /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
 
-    // To efficiently serve `get` and `has` requests, we map a translated representation of each key
-    // to its corresponding index. To avoid iterating over this keys map during pruning, we map said
-    // indexes to their locations in the journal.
+    /// Maps translated key representation to its corresponding index.
     keys: Index<T, u64>,
-    indices: BTreeMap<u64, u32>,
+
+    /// Maps index to (position in index journal, value_offset, value_size).
+    indices: BTreeMap<u64, (u32, u32, u32)>,
+
+    /// Interval tracking for gap detection.
     intervals: RMap,
 
+    // Metrics
     items_tracked: Gauge,
     indices_pruned: Counter,
     unnecessary_reads: Counter,
@@ -101,41 +139,60 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
-    /// by replaying the journal.
+    /// by replaying only the index journal (no values are read).
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
-        // Initialize journal
-        let journal = Journal::<E, Record<K, V>>::init(
-            context.with_label("journal"),
-            JConfig {
-                partition: cfg.partition,
-                compression: cfg.compression,
-                codec_config: cfg.codec_config,
-                buffer_pool: cfg.buffer_pool,
-                write_buffer: cfg.write_buffer,
-            },
-        )
-        .await?;
+        // Initialize index journal (segmented/fixed)
+        let index_journal_cfg = FixedJournalConfig {
+            partition: cfg.index_partition,
+            write_buffer: cfg.write_buffer,
+            buffer_pool: cfg.index_buffer_pool,
+        };
+        let index_journal: FixedJournal<E, IndexEntry<K>> =
+            FixedJournal::init(context.with_label("index_journal"), index_journal_cfg).await?;
 
-        // Initialize keys and run corruption check
+        // Initialize value blob storage
+        let value_blob = ValueBlob::init(
+            context.with_label("value_blob"),
+            cfg.value_partition,
+            cfg.compression,
+            cfg.write_buffer,
+            cfg.codec_config,
+        )
+        .await
+        .map_err(Error::Journal)?;
+
+        // Initialize keys and replay index journal (no values read!)
         let mut indices = BTreeMap::new();
         let mut keys = Index::new(context.with_label("index"), cfg.translator.clone());
         let mut intervals = RMap::new();
         {
-            debug!("initializing archive");
-            let stream = journal.replay(0, 0, cfg.replay_buffer).await?;
+            debug!("initializing archive from index journal");
+            let stream = index_journal.replay(0, cfg.replay_buffer).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
-                // Extract key from record
-                let (_, offset, _, data) = result?;
+                let (section, position, entry) = result?;
 
-                // Store index
-                indices.insert(data.index, offset);
+                // Store index location (position in index journal, value_offset, value_size)
+                indices.insert(
+                    entry.index,
+                    (position, entry.value_offset, entry.value_size),
+                );
 
                 // Store index in keys
-                keys.insert(&data.key, data.index);
+                keys.insert(&entry.key, entry.index);
 
                 // Store index in intervals
-                intervals.insert(data.index);
+                intervals.insert(entry.index);
+
+                // Verify section matches expected section
+                let expected_section =
+                    (entry.index / cfg.items_per_section.get()) * cfg.items_per_section.get();
+                if section != expected_section {
+                    debug!(
+                        index = entry.index,
+                        section, expected_section, "section mismatch during replay"
+                    );
+                }
             }
             debug!("archive initialized");
         }
@@ -170,7 +227,8 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         // Return populated archive
         Ok(Self {
             items_per_section: cfg.items_per_section.get(),
-            journal,
+            index_journal,
+            value_blob,
             pending: BTreeSet::new(),
             oldest_allowed: None,
             indices,
@@ -190,15 +248,19 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         self.gets.inc();
 
         // Get index location
-        let offset = match self.indices.get(&index) {
-            Some(offset) => *offset,
+        let (_, value_offset, value_size) = match self.indices.get(&index) {
+            Some(loc) => *loc,
             None => return Ok(None),
         };
 
-        // Fetch item from disk
+        // Fetch value directly from blob storage (bypasses buffer pool)
         let section = self.section(index);
-        let record = self.journal.get(section, offset).await?;
-        Ok(Some(record.value))
+        let value = self
+            .value_blob
+            .get(section, value_offset, value_size)
+            .await
+            .map_err(Error::Journal)?;
+        Ok(Some(value))
     }
 
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
@@ -214,14 +276,23 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 continue;
             }
 
-            // Fetch item from disk
-            let offset = *self.indices.get(index).ok_or(Error::RecordCorrupted)?;
-            let section = self.section(*index);
-            let record = self.journal.get(section, offset).await?;
+            // Get index location
+            let (position, value_offset, value_size) =
+                *self.indices.get(index).ok_or(Error::RecordCorrupted)?;
 
-            // Get key from item
-            if record.key.as_ref() == key.as_ref() {
-                return Ok(Some(record.value));
+            // Fetch index entry from index journal to verify key
+            let section = self.section(*index);
+            let entry = self.index_journal.get(section, position).await?;
+
+            // Get key from entry
+            if entry.key.as_ref() == key.as_ref() {
+                // Fetch value directly from blob storage (bypasses buffer pool)
+                let value = self
+                    .value_blob
+                    .get(section, value_offset, value_size)
+                    .await
+                    .map_err(Error::Journal)?;
+                return Ok(Some(value));
             }
             self.unnecessary_reads.inc();
         }
@@ -253,8 +324,11 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         }
         debug!(min, "pruning archive");
 
-        // Prune journal
-        self.journal.prune(min).await.map_err(Error::Journal)?;
+        // Prune index journal and value blob
+        let (index_result, value_result) =
+            join(self.index_journal.prune(min), self.value_blob.prune(min)).await;
+        index_result.map_err(Error::Journal)?;
+        value_result.map_err(Error::Journal)?;
 
         // Remove pending writes (no need to call `sync` as we are pruning)
         loop {
@@ -280,8 +354,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             self.intervals.remove(0, min - 1);
         }
 
-        // Update last pruned (to prevent reads from
-        // pruned sections)
+        // Update last pruned (to prevent reads from pruned sections)
         self.oldest_allowed = Some(min);
         let _ = self.items_tracked.try_set(self.indices.len());
         Ok(())
@@ -306,13 +379,21 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
             return Ok(());
         }
 
-        // Store item in journal
-        let record = Record::new(index, key.clone(), data);
+        // Write value to blob storage (returns offset and size)
         let section = self.section(index);
-        let (offset, _) = self.journal.append(section, record).await?;
+        let (value_offset, value_size) = self
+            .value_blob
+            .append(section, &data)
+            .await
+            .map_err(Error::Journal)?;
 
-        // Store index
-        self.indices.insert(index, offset);
+        // Write index entry to fixed journal
+        let entry = IndexEntry::new(index, key.clone(), value_offset, value_size);
+        let position = self.index_journal.append(section, entry).await?;
+
+        // Store index location
+        self.indices
+            .insert(index, (position, value_offset, value_size));
 
         // Store interval
         self.intervals.insert(index);
@@ -345,12 +426,25 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        let mut syncs = Vec::with_capacity(self.pending.len());
-        for section in self.pending.iter() {
-            syncs.push(self.journal.sync(*section));
+        // Collect pending sections
+        let pending: Vec<u64> = self.pending.iter().copied().collect();
+
+        // Sync index journal concurrently
+        let mut index_syncs = Vec::with_capacity(pending.len());
+        for section in pending.iter() {
+            index_syncs.push(self.index_journal.sync(*section));
             self.syncs.inc();
         }
-        try_join_all(syncs).await?;
+        futures::future::try_join_all(index_syncs).await?;
+
+        // Sync value blob sections sequentially (requires &mut self)
+        for section in pending.iter() {
+            self.value_blob
+                .sync(*section)
+                .await
+                .map_err(Error::Journal)?;
+        }
+
         self.pending.clear();
         Ok(())
     }
@@ -376,7 +470,12 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.journal.destroy().await.map_err(Error::Journal)
+        // Destroy index journal and value blob
+        let (index_result, value_result) =
+            join(self.index_journal.destroy(), self.value_blob.destroy()).await;
+        index_result.map_err(Error::Journal)?;
+        value_result.map_err(Error::Journal)?;
+        Ok(())
     }
 }
 
@@ -387,6 +486,6 @@ mod conformance {
     use commonware_utils::sequence::U64;
 
     commonware_conformance::conformance_tests! {
-        CodecConformance<Record<U64, Vec<u8>>>
+        CodecConformance<IndexEntry<U64>>
     }
 }

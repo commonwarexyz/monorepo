@@ -140,6 +140,44 @@ impl<B: Blob> Append<B> {
     }
 }
 
+impl<B: Blob> Append<B> {
+    /// Read directly from the underlying blob, bypassing the buffer pool cache.
+    ///
+    /// Use this for large one-time reads that shouldn't pollute the cache with
+    /// data that won't be reused (e.g., fetching large values by known location).
+    ///
+    /// This method still respects the write buffer, so it will return correct
+    /// data even if it hasn't been flushed to disk yet.
+    pub async fn read_at_direct(
+        &self,
+        buf: impl Into<StableBuf> + Send,
+        offset: u64,
+    ) -> Result<StableBuf, Error> {
+        let mut buf = buf.into();
+
+        let end_offset = offset
+            .checked_add(buf.len() as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
+        let (buffer, _) = &*self.buffer.read().await;
+
+        if end_offset > buffer.size() {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        let remaining = buffer.extract(buf.as_mut(), offset);
+        if remaining == 0 {
+            return Ok(buf);
+        }
+
+        // Read directly from the underlying blob, bypassing the buffer pool
+        let read_buf = self.blob.read_at(vec![0u8; remaining], offset).await?;
+        buf.as_mut()[..remaining].copy_from_slice(read_buf.as_ref());
+
+        Ok(buf)
+    }
+}
+
 impl<B: Blob> Blob for Append<B> {
     async fn read_at(
         &self,
