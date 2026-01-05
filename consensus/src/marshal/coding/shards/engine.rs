@@ -488,6 +488,17 @@ where
             return;
         }
 
+        // Try to reconstruct immediately before adding subscription.
+        // This handles the case where shards arrived before this subscription was created
+        // (e.g., when receiving a notarization after other validators have already broadcast
+        // their shards).
+        if let DigestOrCommitment::Commitment(commitment) = id {
+            if let Ok(Some(block)) = self.try_reconstruct(commitment).await {
+                let _ = responder.send(block);
+                return;
+            }
+        }
+
         match self.block_subscriptions.entry(id.block_digest()) {
             Entry::Vacant(entry) => {
                 entry.insert(BlockSubscription {
