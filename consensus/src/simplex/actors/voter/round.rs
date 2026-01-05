@@ -550,7 +550,7 @@ mod tests {
             participants,
             verifier,
             ..
-        } = ed25519::fixture(namespace, &mut rng, 4);
+        } = ed25519::fixture(&mut rng, namespace, 4);
         let proposal_a = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -603,7 +603,7 @@ mod tests {
             participants,
             verifier,
             ..
-        } = ed25519::fixture(namespace, &mut rng, 4);
+        } = ed25519::fixture(&mut rng, namespace, 4);
         let proposal_a = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -666,7 +666,7 @@ mod tests {
         let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..
-        } = ed25519::fixture(namespace, &mut rng, 4);
+        } = ed25519::fixture(&mut rng, namespace, 4);
         let proposal = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -697,7 +697,7 @@ mod tests {
         let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..
-        } = ed25519::fixture(namespace, &mut rng, 4);
+        } = ed25519::fixture(&mut rng, namespace, 4);
         let local_scheme = schemes[0].clone();
 
         // Setup round and proposal
@@ -762,7 +762,7 @@ mod tests {
     fn construct_nullify_blocked_by_finalize() {
         let mut rng = StdRng::seed_from_u64(2029);
         let namespace = b"ns";
-        let Fixture { schemes, .. } = ed25519::fixture(namespace, &mut rng, 4);
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, namespace, 4);
         let local_scheme = schemes[0].clone();
 
         // Setup round and proposal

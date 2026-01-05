@@ -538,7 +538,7 @@ mod tests {
     fn all_online<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -568,7 +568,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -789,7 +789,7 @@ mod tests {
     fn observer<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -819,7 +819,7 @@ mod tests {
                 schemes,
                 verifier,
                 ..
-            } = fixture(&namespace, &mut context, n_active);
+            } = fixture(&mut context, &namespace, n_active);
 
             // Add observer (no share)
             let private_key_observer = PrivateKey::from_seed(n_active as u64);
@@ -953,7 +953,7 @@ mod tests {
     fn unclean_shutdown<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -974,7 +974,7 @@ mod tests {
             participants,
             schemes,
             ..
-        } = fixture(&namespace, &mut rng, n);
+        } = fixture(&mut rng, &namespace, n);
 
         // Create block relay, shared across restarts.
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, S::PublicKey>::new());
@@ -1150,7 +1150,7 @@ mod tests {
     fn backfill<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1179,7 +1179,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1407,7 +1407,7 @@ mod tests {
     fn one_offline<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1438,7 +1438,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1669,7 +1669,7 @@ mod tests {
     fn slow_validator<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1698,7 +1698,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -1857,7 +1857,7 @@ mod tests {
     fn all_recovery<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1886,7 +1886,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2070,7 +2070,7 @@ mod tests {
     fn partition<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2099,7 +2099,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2271,7 +2271,7 @@ mod tests {
     fn slow_and_lossy_links<S, F, L>(seed: u64, mut fixture: F) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2303,7 +2303,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2501,7 +2501,7 @@ mod tests {
     fn conflicter<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2533,7 +2533,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2687,7 +2687,7 @@ mod tests {
     fn invalid<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2719,13 +2719,13 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Create scheme with wrong namespace for byzantine node (index 0)
             let Fixture {
                 schemes: wrong_schemes,
                 ..
-            } = fixture(b"wrong-namespace", &mut context, n);
+            } = fixture(&mut context, b"wrong-namespace", n);
 
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
@@ -2865,7 +2865,7 @@ mod tests {
     fn impersonator<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2897,7 +2897,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3035,7 +3035,7 @@ mod tests {
     fn equivocator<S, F, L>(seed: u64, mut fixture: F) -> bool
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3067,7 +3067,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3337,7 +3337,7 @@ mod tests {
     fn reconfigurer<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3369,7 +3369,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3506,7 +3506,7 @@ mod tests {
     fn nuller<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3538,7 +3538,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3685,7 +3685,7 @@ mod tests {
     fn outdated<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3717,7 +3717,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3847,7 +3847,7 @@ mod tests {
     fn run_1k<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3877,7 +3877,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4023,7 +4023,7 @@ mod tests {
     fn engine_shutdown<S, F, L>(mut fixture: F, graceful: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -4049,7 +4049,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -4192,7 +4192,7 @@ mod tests {
     fn attributable_reporter_filtering<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         let n = 3;
@@ -4218,7 +4218,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4391,7 +4391,7 @@ mod tests {
     fn split_views_no_lockup<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Scenario:
@@ -4447,7 +4447,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // ========== Create engines ==========
@@ -4790,7 +4790,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&namespace, &mut context, n);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4916,7 +4916,7 @@ mod tests {
     ) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -4945,7 +4945,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5321,7 +5321,7 @@ mod tests {
     fn twins<S, F, L>(seed: u64, n: u32, strategy: Strategy, link: Link, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         let faults = max_faults(n);
@@ -5348,7 +5348,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let participants: Arc<[_]> = participants.into();
             let mut registrations = register_validators(&mut oracle, &participants).await;
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
@@ -5636,7 +5636,7 @@ mod tests {
     fn test_twins<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         for strategy in [

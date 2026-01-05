@@ -2474,7 +2474,7 @@ mod tests {
     /// Generate a fixture using the provided generator function with a specific seed.
     fn setup_seeded<S, F>(n: u32, seed: u64, fixture: F) -> Fixture<S>
     where
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         setup_seeded_ns(n, seed, NAMESPACE, fixture)
     }
@@ -2482,10 +2482,10 @@ mod tests {
     /// Generate a fixture using the provided generator function with a specific seed and namespace.
     fn setup_seeded_ns<S, F>(n: u32, seed: u64, namespace: &[u8], fixture: F) -> Fixture<S>
     where
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = StdRng::seed_from_u64(seed);
-        fixture(namespace, &mut rng, n)
+        fixture(&mut rng, namespace, n)
     }
 
     #[test]
@@ -2503,10 +2503,10 @@ mod tests {
     fn notarize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(NAMESPACE, &mut rng, 5);
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let notarize = Notarize::sign(&fixture.schemes[0], proposal).unwrap();
@@ -2531,10 +2531,10 @@ mod tests {
     fn notarization_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(NAMESPACE, &mut rng, 5);
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let proposal = Proposal::new(
             Round::new(Epoch::new(0), View::new(10)),
             View::new(5),
@@ -2566,10 +2566,10 @@ mod tests {
     fn nullify_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(NAMESPACE, &mut rng, 5);
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], round).unwrap();
         let encoded = nullify.encode();
@@ -2591,10 +2591,10 @@ mod tests {
     fn nullification_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(NAMESPACE, &mut rng, 5);
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(333), View::new(10));
         let nullifies: Vec<_> = fixture
             .schemes
@@ -2622,10 +2622,10 @@ mod tests {
     fn finalize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(NAMESPACE, &mut rng, 5);
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let finalize = Finalize::sign(&fixture.schemes[0], proposal).unwrap();
@@ -2648,10 +2648,10 @@ mod tests {
     fn finalization_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(NAMESPACE, &mut rng, 5);
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let finalizes: Vec<_> = fixture
@@ -2680,10 +2680,10 @@ mod tests {
     fn backfiller_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(NAMESPACE, &mut rng, 5);
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let cfg = fixture.schemes[0].certificate_codec_config();
         let request = Request::new(
             1,
@@ -2744,10 +2744,10 @@ mod tests {
     fn response_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(NAMESPACE, &mut rng, 5);
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
 
@@ -2796,10 +2796,10 @@ mod tests {
     fn conflicting_notarize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(NAMESPACE, &mut rng, 5);
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let proposal1 = Proposal::new(
             Round::new(Epoch::new(0), View::new(10)),
             View::new(5),
@@ -2834,10 +2834,10 @@ mod tests {
     fn conflicting_finalize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(NAMESPACE, &mut rng, 5);
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let proposal1 = Proposal::new(
             Round::new(Epoch::new(0), View::new(10)),
             View::new(5),
@@ -2872,10 +2872,10 @@ mod tests {
     fn nullify_finalize_encode_decode<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(NAMESPACE, &mut rng, 5);
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], round).unwrap();
@@ -2902,7 +2902,7 @@ mod tests {
     fn notarize_verify_wrong_namespace<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         // Create two fixtures with different namespaces
         let mut rng = test_rng();
@@ -2929,7 +2929,7 @@ mod tests {
     fn notarize_verify_wrong_scheme<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = setup_seeded(5, 0, &f);
@@ -2955,7 +2955,7 @@ mod tests {
     fn notarization_verify_wrong_scheme<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let fixture = setup_seeded(5, 0, &f);
         let wrong_fixture = setup_seeded(5, 1, &f);
@@ -2991,7 +2991,7 @@ mod tests {
     fn notarization_verify_wrong_namespace<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         // Create two fixtures with different namespaces
         let fixture = setup_seeded_ns(5, 0, NAMESPACE, &f);
@@ -3027,10 +3027,10 @@ mod tests {
     fn notarization_recover_insufficient_signatures<S, F>(fixture: F)
     where
         S: Scheme<Sha256>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(NAMESPACE, &mut rng, 5);
+        let fixture = fixture(&mut rng, NAMESPACE, 5);
         let quorum_size = quorum(fixture.schemes.len() as u32) as usize;
         assert!(quorum_size > 1, "test requires quorum larger than one");
         let round = Round::new(Epoch::new(0), View::new(10));
@@ -3061,7 +3061,7 @@ mod tests {
     fn conflicting_notarize_detection<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = setup_seeded(5, 0, &f);
@@ -3094,7 +3094,7 @@ mod tests {
     fn nullify_finalize_detection<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = setup_seeded(5, 0, &f);
@@ -3126,7 +3126,7 @@ mod tests {
     fn finalization_verify_wrong_scheme<S, F>(f: F)
     where
         S: Scheme<Sha256>,
-        F: Fn(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let fixture = setup_seeded(5, 0, &f);
         let wrong_fixture = setup_seeded(5, 1, &f);

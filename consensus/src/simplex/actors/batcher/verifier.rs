@@ -493,10 +493,10 @@ mod tests {
     fn add_notarize<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
@@ -559,10 +559,10 @@ mod tests {
     fn set_leader<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
@@ -601,10 +601,10 @@ mod tests {
     fn ready_and_verify_notarizes<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -673,10 +673,10 @@ mod tests {
     fn add_nullify<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -704,10 +704,10 @@ mod tests {
     fn ready_and_verify_nullifies<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -749,10 +749,10 @@ mod tests {
     fn add_finalize<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -795,10 +795,10 @@ mod tests {
     fn ready_and_verify_finalizes<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -845,10 +845,10 @@ mod tests {
     fn leader_proposal_filters_messages<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -889,10 +889,10 @@ mod tests {
     fn set_leader_twice_panics<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), 3);
         verifier.set_leader(0);
         verifier.set_leader(1);
@@ -937,10 +937,10 @@ mod tests {
     fn notarizes_wait_for_quorum<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -981,10 +981,10 @@ mod tests {
     fn ready_notarizes_without_leader<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -1024,10 +1024,10 @@ mod tests {
     fn ready_finalizes_without_leader<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -1066,10 +1066,10 @@ mod tests {
     fn verify_notarizes_empty<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -1092,10 +1092,10 @@ mod tests {
     fn verify_nullifies_empty<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         assert!(verifier.nullifies.is_empty());
@@ -1119,10 +1119,10 @@ mod tests {
     fn verify_finalizes_empty<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 3);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         verifier.set_leader(0);
@@ -1147,10 +1147,10 @@ mod tests {
     fn ready_notarizes_exact_quorum<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -1200,10 +1200,10 @@ mod tests {
     fn ready_nullifies_exact_quorum<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -1240,10 +1240,10 @@ mod tests {
     fn ready_finalizes_exact_quorum<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -1285,10 +1285,10 @@ mod tests {
     fn ready_notarizes_quorum_already_met_by_verified<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
@@ -1337,10 +1337,10 @@ mod tests {
     fn ready_nullifies_quorum_already_met_by_verified<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
@@ -1381,10 +1381,10 @@ mod tests {
     fn ready_finalizes_quorum_already_met_by_verified<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(NAMESPACE, &mut rng, 5);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,

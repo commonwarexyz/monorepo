@@ -108,9 +108,9 @@ mod tests {
     fn put_new_tip<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = fixture(NAMESPACE, &mut test_rng(), 4);
+        let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node = create_node(&fixture, 0, 1, "payload");
         let key = node.chunk.sequencer.clone();
@@ -134,9 +134,9 @@ mod tests {
     fn put_same_height_same_payload<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = fixture(NAMESPACE, &mut test_rng(), 4);
+        let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node = create_node(&fixture, 0, 1, "payload");
         let key = node.chunk.sequencer.clone();
@@ -161,9 +161,9 @@ mod tests {
     fn put_higher_tip<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = fixture(NAMESPACE, &mut test_rng(), 4);
+        let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node1 = create_node(&fixture, 0, 1, "payload1");
         let key = node1.chunk.sequencer.clone();
@@ -189,9 +189,9 @@ mod tests {
     fn put_lower_tip_panics<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = fixture(NAMESPACE, &mut test_rng(), 4);
+        let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node1 = create_node(&fixture, 0, 2, "payload");
         assert!(manager.put(&node1));
@@ -221,9 +221,9 @@ mod tests {
     fn put_same_height_different_payload_panics<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = fixture(NAMESPACE, &mut test_rng(), 4);
+        let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node1 = create_node(&fixture, 0, 1, "payload1");
         assert!(manager.put(&node1));
@@ -279,9 +279,9 @@ mod tests {
     fn multiple_sequencers<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = fixture(NAMESPACE, &mut test_rng(), 4);
+        let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
         let node1 = create_node(&fixture, 0, 1, "payload1");
         let node2 = create_node(&fixture, 1, 2, "payload2");
@@ -309,9 +309,9 @@ mod tests {
     fn put_multiple_updates<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = fixture(NAMESPACE, &mut test_rng(), 4);
+        let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
 
         // Insert tip with height 1.

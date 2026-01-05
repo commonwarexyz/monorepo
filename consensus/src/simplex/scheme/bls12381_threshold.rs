@@ -237,8 +237,8 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
 /// scheme instances share a consistent ordering.
 #[cfg(feature = "mocks")]
 pub fn fixture<V, R>(
-    namespace: &[u8],
     rng: &mut R,
+    namespace: &[u8],
     n: u32,
 ) -> commonware_cryptography::certificate::mocks::Fixture<
     Scheme<commonware_cryptography::ed25519::PublicKey, V>,
@@ -248,8 +248,8 @@ where
     R: rand::RngCore + rand::CryptoRng,
 {
     commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
-        namespace,
         rng,
+        namespace,
         n,
         Scheme::signer,
         Scheme::verifier,
@@ -750,7 +750,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold::fixture::<V, _>(NAMESPACE, &mut rng, n);
+        } = bls12381_threshold::fixture::<V, _>(&mut rng, NAMESPACE, n);
 
         (schemes, verifier)
     }

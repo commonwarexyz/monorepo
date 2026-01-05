@@ -312,13 +312,13 @@ mod tests {
     fn all_online<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let num_validators = 4;
-            let fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             let (mut oracle, mut registrations) =
@@ -353,13 +353,13 @@ mod tests {
     fn byzantine_proposer<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let num_validators = 4;
-            let fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             let (mut oracle, mut registrations) =
@@ -393,7 +393,7 @@ mod tests {
     fn unclean_byzantine_shutdown<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: Fn(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         // Test parameters
         let num_validators = 4;
@@ -408,7 +408,7 @@ mod tests {
 
         // Generate fixture once (persists across restarts)
         let mut rng = test_rng();
-        let fixture = fixture(TEST_NAMESPACE, &mut rng, num_validators);
+        let fixture = fixture(&mut rng, TEST_NAMESPACE, num_validators);
 
         // Continue until shared reporter reaches target or max shutdowns exceeded
         let mut shutdown_count = 0;
@@ -550,7 +550,7 @@ mod tests {
     fn unclean_shutdown_with_unsigned_index<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: Fn(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         // Test parameters
         let num_validators = 4;
@@ -560,7 +560,7 @@ mod tests {
 
         // Generate fixture once (persists across restarts)
         let mut rng = test_rng();
-        let fixture = fixture(TEST_NAMESPACE, &mut rng, num_validators);
+        let fixture = fixture(&mut rng, TEST_NAMESPACE, num_validators);
 
         // First run: let validators skip signing at skip_index and reach beyond it
         let f = |context: Context| {
@@ -743,7 +743,7 @@ mod tests {
     fn slow_and_lossy_links<S, F>(fixture: F, seed: u64) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -752,7 +752,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let num_validators = 4;
-            let fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             // Use degraded network links with realistic conditions
@@ -855,13 +855,13 @@ mod tests {
     fn one_offline<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let num_validators = 5;
-            let mut fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+            let mut fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             // Truncate to only 4 validators (one offline)
@@ -900,13 +900,13 @@ mod tests {
     fn network_partition<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
             let num_validators = 4;
-            let fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             let (mut oracle, mut registrations) =
@@ -965,13 +965,13 @@ mod tests {
     fn insufficient_validators<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(15));
 
         runner.start(|mut context| async move {
             let num_validators = 5;
-            let fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             // Set up simulated network

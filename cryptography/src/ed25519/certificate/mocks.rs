@@ -29,8 +29,8 @@ where
 
 /// Builds ed25519 identities alongside a caller-provided ed25519 certificate scheme wrapper.
 pub fn fixture<S, R>(
-    namespace: &[u8],
     rng: &mut R,
+    namespace: &[u8],
     n: u32,
     signer: impl Fn(&[u8], Set<PublicKey>, PrivateKey) -> Option<S>,
     verifier: impl Fn(&[u8], Set<PublicKey>) -> S,

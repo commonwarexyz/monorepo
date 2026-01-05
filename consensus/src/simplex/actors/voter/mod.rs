@@ -128,7 +128,7 @@ mod tests {
     fn stale_backfill<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -152,7 +152,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Initialize voter actor
             let me = participants[0].clone();
@@ -364,7 +364,7 @@ mod tests {
     fn append_old_interesting_view<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -389,7 +389,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup the target Voter actor (validator 0)
             let signing = schemes[0].clone();
@@ -642,7 +642,7 @@ mod tests {
     fn finalization_without_notarization_certificate<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -666,7 +666,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup application mock
             let elector = L::default();
@@ -824,7 +824,7 @@ mod tests {
     fn certificate_conflicts_proposal<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -848,7 +848,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup application mock
             let elector = L::default();
@@ -1020,7 +1020,7 @@ mod tests {
     fn proposal_conflicts_certificate<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -1042,7 +1042,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
@@ -1199,7 +1199,7 @@ mod tests {
     fn certificate_verifies_proposal<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -1221,7 +1221,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
@@ -1377,7 +1377,7 @@ mod tests {
     fn drop_our_proposal_on_conflict<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1402,7 +1402,7 @@ mod tests {
                 schemes,
                 verifier: _,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
@@ -1595,7 +1595,7 @@ mod tests {
     fn populate_resolver_on_restart<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -1619,7 +1619,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup application mock
             let elector = L::default();
@@ -1822,7 +1822,7 @@ mod tests {
     fn finalization_from_resolver<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         // This is a regression test as the resolver didn't use to send
@@ -1848,7 +1848,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup application mock
             let elector = L::default();
@@ -1986,7 +1986,7 @@ mod tests {
     fn no_resolver_boomerang<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -2010,7 +2010,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup application mock
             let elector = L::default();
@@ -2159,7 +2159,7 @@ mod tests {
     fn verification_failure_emits_nullify_immediately<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -2184,7 +2184,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Use participant[0] as the voter
             let signing = schemes[0].clone();
@@ -2384,7 +2384,7 @@ mod tests {
     fn no_recertification_after_replay<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -2406,7 +2406,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Track certify calls across restarts
             let certify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));

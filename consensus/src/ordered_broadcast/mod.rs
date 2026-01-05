@@ -336,14 +336,14 @@ mod tests {
     fn all_online<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(120));
 
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 4;
-            let fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let (_oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
@@ -383,7 +383,7 @@ mod tests {
     fn unclean_shutdown<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: Fn(&[u8], &mut deterministic::Context, u32) -> Fixture<S> + Clone,
+        F: Fn(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Clone,
     {
         let mut prev_checkpoint = None;
         let epoch = Epoch::new(111);
@@ -394,7 +394,7 @@ mod tests {
         loop {
             let fixture = fixture.clone();
             let f = |mut context: deterministic::Context| async move {
-                let fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+                let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
                 let (network, mut oracle) = Network::new(
                     context.with_label("network"),
@@ -470,14 +470,14 @@ mod tests {
     fn network_partition<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 4;
-            let fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             // Configure the network
             let (mut oracle, mut registrations) =
@@ -533,7 +533,7 @@ mod tests {
     fn slow_and_lossy_links<S, F>(fixture: F, seed: u64) -> String
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: Fn(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: Fn(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -543,7 +543,7 @@ mod tests {
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 4;
-            let fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
@@ -657,14 +657,14 @@ mod tests {
     fn invalid_signature_injection<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 4;
-            let fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let (_oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
@@ -704,14 +704,14 @@ mod tests {
     fn updated_epoch<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 4;
-            let fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             // Setup network
             let (mut oracle, mut registrations) =
@@ -837,13 +837,13 @@ mod tests {
     fn external_sequencer<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 4;
-            let fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             // Generate sequencer (external, not a validator)
             let sequencer = PrivateKey::from_seed(u64::MAX);
@@ -1003,7 +1003,7 @@ mod tests {
     fn run_1k<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let cfg = deterministic::Config::new();
         let runner = deterministic::Runner::new(cfg);
@@ -1011,7 +1011,7 @@ mod tests {
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
             let num_validators = 10;
-            let fixture = fixture(TEST_NAMESPACE, &mut context, num_validators);
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
             let delayed_link = Link {
                 latency: Duration::from_millis(80),

@@ -12,8 +12,8 @@ use rand::{CryptoRng, RngCore};
 
 /// Builds ed25519 identities and matching Secp256r1 signing schemes.
 pub fn fixture<S, R>(
-    namespace: &[u8],
     rng: &mut R,
+    namespace: &[u8],
     n: u32,
     signer: impl Fn(&[u8], BiMap<ed25519::PublicKey, PublicKey>, PrivateKey) -> Option<S>,
     verifier: impl Fn(&[u8], BiMap<ed25519::PublicKey, PublicKey>) -> S,
