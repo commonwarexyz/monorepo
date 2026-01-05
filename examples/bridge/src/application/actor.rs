@@ -40,25 +40,17 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
     /// Create a new application actor.
     pub fn new(context: R, config: Config<H, Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let public = *config.scheme.identity();
         (
             Self {
                 context,
                 indexer: config.indexer,
-                public: *config.identity.public(),
-                other_certificate_verifier: Scheme::certificate_verifier(
-                    &config.namespace,
-                    config.other_public,
-                ),
+                public,
+                other_certificate_verifier: config.other_certificate_verifier,
                 hasher: config.hasher,
                 mailbox,
             },
-            Scheme::signer(
-                &config.namespace,
-                config.participants,
-                config.identity,
-                config.share,
-            )
-            .expect("share must be in participants"),
+            config.scheme,
             Mailbox::new(sender),
         )
     }
