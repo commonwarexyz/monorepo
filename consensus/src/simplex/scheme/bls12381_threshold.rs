@@ -29,8 +29,7 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Subject as CertificateSubject, Verification},
     Digest, PublicKey,
 };
-use commonware_parallel::{Parallel, Sequential};
-use commonware_runtime::ThreadPool;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::ordered::Set;
 use rand_core::CryptoRngCore;
 use std::{
@@ -73,15 +72,15 @@ enum Role<P: PublicKey, V: Variant> {
 /// a verifier (with evaluated public polynomial), or an external verifier that
 /// only checks recovered certificates.
 ///
-/// An optional thread pool can be provided to parallelize cryptographic operations
-/// such as signature recovery and batch verification.
+/// The scheme is generic over a [`Strategy`] which determines whether cryptographic operations
+/// such as signature recovery and batch verification run sequentially or in parallel.
 #[derive(Clone, Debug)]
-pub struct Scheme<P: PublicKey, V: Variant> {
+pub struct Scheme<P: PublicKey, V: Variant, S: Strategy = Sequential> {
     role: Role<P, V>,
-    pool: Option<ThreadPool>,
+    strategy: S,
 }
 
-impl<P: PublicKey, V: Variant> Scheme<P, V> {
+impl<P: PublicKey, V: Variant, S: Strategy> Scheme<P, V, S> {
     /// Constructs a signer instance with a private share and evaluated public polynomial.
     ///
     /// The participant identity keys are used for committee ordering and indexing.
@@ -94,13 +93,13 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
-    /// * `pool` - optional thread pool for parallel cryptographic operations
+    /// * `strategy` - execution strategy for parallel cryptographic operations
     pub fn signer(
         namespace: &[u8],
         participants: Set<P>,
         polynomial: Sharing<V>,
         share: Share,
-        pool: Option<ThreadPool>,
+        strategy: S,
     ) -> Option<Self> {
         assert_eq!(
             polynomial.total().get() as usize,
@@ -119,7 +118,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                     share,
                     namespace: Namespace::new(namespace),
                 },
-                pool,
+                strategy,
             })
         } else {
             None
@@ -135,12 +134,12 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
-    /// * `pool` - optional thread pool for parallel cryptographic operations
+    /// * `strategy` - execution strategy for parallel cryptographic operations
     pub fn verifier(
         namespace: &[u8],
         participants: Set<P>,
         polynomial: Sharing<V>,
-        pool: Option<ThreadPool>,
+        strategy: S,
     ) -> Self {
         assert_eq!(
             polynomial.total().get() as usize,
@@ -155,7 +154,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                 polynomial,
                 namespace: Namespace::new(namespace),
             },
-            pool,
+            strategy,
         }
     }
 
@@ -166,18 +165,14 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     ///
     /// * `namespace` - base namespace for domain separation
     /// * `identity` - public identity of the committee (constant across reshares)
-    /// * `pool` - optional thread pool for parallel cryptographic operations
-    pub fn certificate_verifier(
-        namespace: &[u8],
-        identity: V::Public,
-        pool: Option<ThreadPool>,
-    ) -> Self {
+    /// * `strategy` - execution strategy for parallel cryptographic operations
+    pub fn certificate_verifier(namespace: &[u8], identity: V::Public, strategy: S) -> Self {
         Self {
             role: Role::CertificateVerifier {
                 identity,
                 namespace: Namespace::new(namespace),
             },
-            pool,
+            strategy,
         }
     }
 
@@ -290,10 +285,10 @@ where
         namespace,
         n,
         |namespace, participants, polynomial, share| {
-            Scheme::signer(namespace, participants, polynomial, share, None)
+            Scheme::signer(namespace, participants, polynomial, share, Sequential)
         },
         |namespace, participants, polynomial| {
-            Scheme::verifier(namespace, participants, polynomial, None)
+            Scheme::verifier(namespace, participants, polynomial, Sequential)
         },
     )
 }
@@ -473,7 +468,7 @@ fn seed_message_from_subject<D: Digest>(subject: &Subject<'_, D>) -> bytes::Byte
     }
 }
 
-impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
+impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V, S> {
     type Subject<'a, D: Digest> = Subject<'a, D>;
     type PublicKey = P;
     type Signature = Signature<V>;
@@ -545,16 +540,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                 attestation.signature.seed_signature,
             ),
         ];
-        match &self.pool {
-            Some(pool) => batch::verify_same_signer::<_, V, _, _>(
-                rng,
-                &evaluated,
-                entries,
-                &Parallel::new(pool.clone()),
-            ),
-            None => batch::verify_same_signer::<_, V, _, _>(rng, &evaluated, entries, &Sequential),
-        }
-        .is_ok()
+        batch::verify_same_signer::<_, V, _, _>(rng, &evaluated, entries, &self.strategy).is_ok()
     }
 
     fn verify_attestations<R, D, I>(
@@ -657,28 +643,13 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             return None;
         }
 
-        let (vote_signature, seed_signature) = self
-            .pool
-            .as_ref()
-            .map_or_else(
-                || {
-                    threshold::recover_pair::<V, _, _>(
-                        quorum,
-                        vote_partials.iter(),
-                        seed_partials.iter(),
-                        &Sequential,
-                    )
-                },
-                |pool| {
-                    threshold::recover_pair::<V, _, _>(
-                        quorum,
-                        vote_partials.iter(),
-                        seed_partials.iter(),
-                        &Parallel::new(pool.clone()),
-                    )
-                },
-            )
-            .ok()?;
+        let (vote_signature, seed_signature) = threshold::recover_pair::<V, _, _>(
+            quorum,
+            vote_partials.iter(),
+            seed_partials.iter(),
+            &self.strategy,
+        )
+        .ok()?;
 
         Some(Signature {
             vote_signature,
@@ -711,16 +682,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                 certificate.seed_signature,
             ),
         ];
-        match &self.pool {
-            Some(pool) => batch::verify_same_signer::<_, V, _, _>(
-                rng,
-                identity,
-                entries,
-                &Parallel::new(pool.clone()),
-            ),
-            None => batch::verify_same_signer::<_, V, _, _>(rng, identity, entries, &Sequential),
-        }
-        .is_ok()
+        batch::verify_same_signer::<_, V, _, _>(rng, identity, entries, &self.strategy).is_ok()
     }
 
     fn verify_certificates<'a, R, D, I>(&self, rng: &mut R, certificates: I) -> bool
@@ -762,18 +724,8 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             .iter()
             .map(|(ns, msg, sig)| (*ns, msg.as_ref(), *sig))
             .collect();
-        match &self.pool {
-            Some(pool) => batch::verify_same_signer::<_, V, _, _>(
-                rng,
-                identity,
-                &entries_refs,
-                &Parallel::new(pool.clone()),
-            ),
-            None => {
-                batch::verify_same_signer::<_, V, _, _>(rng, identity, &entries_refs, &Sequential)
-            }
-        }
-        .is_ok()
+        batch::verify_same_signer::<_, V, _, _>(rng, identity, &entries_refs, &self.strategy)
+            .is_ok()
     }
 
     fn is_attributable() -> bool {
@@ -852,7 +804,7 @@ mod tests {
             participants.keys().clone(),
             polynomial,
             shares[0].clone(),
-            None,
+            Sequential,
         );
     }
 
@@ -876,7 +828,7 @@ mod tests {
             participants.keys().clone(),
             polynomial,
             shares[0].clone(),
-            None,
+            Sequential,
         );
     }
 
@@ -896,7 +848,12 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 5);
         let (polynomial, _) = deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
-        Scheme::<V>::verifier(NAMESPACE, participants.keys().clone(), polynomial, None);
+        Scheme::<V>::verifier(
+            NAMESPACE,
+            participants.keys().clone(),
+            polynomial,
+            Sequential,
+        );
     }
 
     #[test]
@@ -1350,7 +1307,7 @@ mod tests {
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         let certificate_verifier =
-            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity(), None);
+            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity(), Sequential);
         assert!(
             certificate_verifier
                 .sign(Subject::Finalize {
@@ -1377,7 +1334,7 @@ mod tests {
     fn certificate_verifier_panics_on_vote<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 37);
         let certificate_verifier =
-            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity(), None);
+            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity(), Sequential);
         let proposal = sample_proposal(Epoch::new(0), View::new(15), 8);
         let vote = schemes[1]
             .sign(Subject::Finalize {

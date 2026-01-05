@@ -21,6 +21,7 @@ commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-p2p.workspace = true
+commonware-parallel.workspace = true
 commonware-runtime.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-stream.workspace = true

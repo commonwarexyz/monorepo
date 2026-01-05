@@ -56,6 +56,7 @@
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
 use cfg_if::cfg_if;
+use core::fmt;
 
 cfg_if! {
     if #[cfg(feature = "std")] {
@@ -75,7 +76,7 @@ cfg_if! {
 /// This trait abstracts over sequential and parallel execution, allowing algorithms
 /// to be written generically and then executed with different strategies depending
 /// on the use case (e.g., sequential for testing/debugging, parallel for production).
-pub trait Strategy: Clone + Send + Sync {
+pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
     /// Reduces a collection to a single value with per-partition initialization.
     ///
     /// Similar to [`fold`](Self::fold), but provides a separate initialization value

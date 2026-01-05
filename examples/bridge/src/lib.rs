@@ -155,8 +155,9 @@
 
 use commonware_consensus::simplex::scheme::bls12381_threshold;
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
+use commonware_parallel::Parallel;
 
-pub type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
+pub type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig, Parallel>;
 
 #[doc(hidden)]
 pub mod application;

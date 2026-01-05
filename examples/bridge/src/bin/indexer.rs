@@ -5,19 +5,24 @@ use commonware_bridge::{
         inbound::{self, Inbound},
         outbound::Outbound,
     },
-    Scheme, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{simplex::types::Finalization, types::View, Viewable};
+use commonware_consensus::{
+    simplex::{scheme::bls12381_threshold, types::Finalization},
+    types::View,
+    Viewable,
+};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::G2,
         variant::{MinSig, Variant},
     },
-    ed25519::{self},
+    ed25519::{self, PublicKey},
     sha256::Digest as Sha256Digest,
     Digest, Hasher, Sha256, Signer as _,
 };
+use commonware_parallel::Parallel;
 use commonware_runtime::{create_pool, tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, TryCollect};
@@ -31,6 +36,8 @@ use std::{
     time::Duration,
 };
 use tracing::{debug, info};
+
+type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig, Parallel>;
 
 #[allow(clippy::large_enum_variant)]
 enum Message<D: Digest> {
@@ -132,6 +139,7 @@ fn main() {
     executor.start(|context| async move {
         let n_threads = std::thread::available_parallelism().unwrap().get();
         let thread_pool = create_pool(context.clone(), n_threads).unwrap();
+        let strategy = Parallel::new(thread_pool);
 
         for network in networks {
             let network = from_hex(network).expect("Network not well-formed");
@@ -140,7 +148,11 @@ fn main() {
             let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
             verifiers.insert(
                 public,
-                Scheme::certificate_verifier(&namespace, public, Some(thread_pool.clone())),
+                bls12381_threshold::Scheme::certificate_verifier(
+                    &namespace,
+                    public,
+                    strategy.clone(),
+                ),
             );
             blocks.insert(public, HashMap::new());
             finalizations.insert(public, BTreeMap::new());
