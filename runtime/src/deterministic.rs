@@ -180,7 +180,6 @@ impl Auditor {
 }
 
 /// Configuration for the `deterministic` runtime.
-#[derive(Clone)]
 pub struct Config {
     /// Seed for the random number generator.
     seed: u64,
