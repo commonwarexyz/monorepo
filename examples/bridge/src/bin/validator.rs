@@ -218,17 +218,17 @@ fn main() {
 
         // Initialize application
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let scheme = Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
-            .expect("share must be in participants");
-        let other_certificate_verifier =
-            Scheme::certificate_verifier(&consensus_namespace, other_public);
+        let this_network =
+            Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
+                .expect("share must be in participants");
+        let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
         let (application, scheme, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 indexer,
                 hasher: Sha256::default(),
-                scheme,
-                other_certificate_verifier,
+                this_network,
+                other_network,
                 mailbox_size: 1024,
             },
         );

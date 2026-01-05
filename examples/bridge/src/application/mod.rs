@@ -19,10 +19,10 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream> {
     pub hasher: H,
 
     /// Pre-configured signing scheme for this network.
-    pub scheme: Scheme,
+    pub this_network: Scheme,
 
     /// Pre-configured certificate verifier for the other network.
-    pub other_certificate_verifier: Scheme,
+    pub other_network: Scheme,
 
     /// Number of messages from consensus to hold in our backlog
     /// before blocking.
