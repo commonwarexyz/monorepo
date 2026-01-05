@@ -16,7 +16,7 @@ use crate::bls12381::primitives::group::Scalar;
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter},
-    mem::MaybeUninit,
+    mem::ManuallyDrop,
 };
 use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeLess};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -49,7 +49,7 @@ fn ct_cmp_bytes(a: &[u8], b: &[u8]) -> Ordering {
 ///
 /// # Safety
 ///
-/// `ptr` must point to valid, writable memory of at least `size_of::<T>()` bytes.
+/// `ptr` must point to allocated, writable memory of at least `size_of::<T>()` bytes.
 #[inline]
 unsafe fn zeroize_ptr<T>(ptr: *mut T) {
     let slice = core::slice::from_raw_parts_mut(ptr as *mut u8, core::mem::size_of::<T>());
@@ -61,14 +61,14 @@ unsafe fn zeroize_ptr<T>(ptr: *mut T) {
 /// - Debug and Display show `[REDACTED]`
 /// - Zeroized on drop
 /// - Access requires explicit `expose()` call
-pub struct Secret<T>(MaybeUninit<T>);
+pub struct Secret<T>(ManuallyDrop<T>);
 
 impl<T> Secret<T> {
     /// Creates a new `Secret` wrapping the given value.
     #[inline]
     #[allow(clippy::missing_const_for_fn)]
     pub fn new(value: T) -> Self {
-        Self(MaybeUninit::new(value))
+        Self(ManuallyDrop::new(value))
     }
 
     /// Exposes the secret value for read-only access within a closure.
@@ -83,18 +83,20 @@ impl<T> Secret<T> {
     /// avoid leaking secrets through such patterns.
     #[inline]
     pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a T) -> R) -> R {
-        // SAFETY: self.0 is always initialized (set in new, only zeroed in drop)
-        f(unsafe { self.0.assume_init_ref() })
+        f(&self.0)
     }
 }
 
 impl<T> Drop for Secret<T> {
     fn drop(&mut self) {
-        // SAFETY: self.0 is initialized and we have exclusive access.
-        // We drop the inner value first to run its destructor, then zeroize.
+        let ptr = &mut *self.0 as *mut T;
+        // SAFETY:
+        // - Pointer obtained while self.0 is still initialized
+        // - ManuallyDrop::drop: self.0 is initialized and we have exclusive access
+        // - zeroize_ptr: uses raw pointer (not reference) to zero memory after drop
         unsafe {
-            core::ptr::drop_in_place(self.0.as_mut_ptr());
-            zeroize_ptr(self.0.as_mut_ptr());
+            ManuallyDrop::drop(&mut self.0);
+            zeroize_ptr(ptr);
         }
     }
 }
