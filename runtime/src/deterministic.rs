@@ -74,6 +74,7 @@ use prometheus_client::{
     registry::{Metric, Registry},
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
+use rand_core::CryptoRngCore;
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
@@ -179,10 +180,13 @@ impl Auditor {
     }
 }
 
+/// A dynamic RNG that can safely be sent between threads.
+pub type BoxDynRng = Box<dyn CryptoRngCore + Send + 'static>;
+
 /// Configuration for the `deterministic` runtime.
 pub struct Config {
-    /// Seed for the random number generator.
-    seed: u64,
+    /// Random number generator.
+    rng: BoxDynRng,
 
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
@@ -197,9 +201,9 @@ pub struct Config {
 
 impl Config {
     /// Returns a new [Config] with default values.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            seed: 42,
+            rng: Box::new(StdRng::seed_from_u64(42)),
             cycle: Duration::from_millis(1),
             timeout: None,
             catch_panics: false,
@@ -208,10 +212,20 @@ impl Config {
 
     // Setters
     /// See [Config]
-    pub const fn with_seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
+    pub fn with_seed(self, seed: u64) -> Self {
+        self.with_rng(Box::new(StdRng::seed_from_u64(seed)))
+    }
+
+    /// Provide the config with a dynamic RNG directly.
+    ///
+    /// This can be useful for, e.g. fuzzing, where beyond just having randomness,
+    /// you might want to control specific bytes of the RNG. By taking in a dynamic
+    /// RNG object, any behavior is possible.
+    pub fn with_rng(mut self, rng: BoxDynRng) -> Self {
+        self.rng = rng;
         self
     }
+
     /// See [Config]
     pub const fn with_cycle(mut self, cycle: Duration) -> Self {
         self.cycle = cycle;
@@ -229,10 +243,6 @@ impl Config {
     }
 
     // Getters
-    /// See [Config]
-    pub const fn seed(&self) -> u64 {
-        self.seed
-    }
     /// See [Config]
     pub const fn cycle(&self) -> Duration {
         self.cycle
@@ -272,7 +282,7 @@ pub struct Executor {
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
-    rng: Mutex<StdRng>,
+    rng: Mutex<BoxDynRng>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
@@ -359,7 +369,7 @@ pub struct Checkpoint {
     cycle: Duration,
     deadline: Option<SystemTime>,
     auditor: Arc<Auditor>,
-    rng: Mutex<StdRng>,
+    rng: Mutex<BoxDynRng>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
@@ -411,11 +421,7 @@ impl Runner {
     /// Initialize a new `deterministic` runtime with the default configuration
     /// and the provided seed.
     pub fn seeded(seed: u64) -> Self {
-        let cfg = Config {
-            seed,
-            ..Config::default()
-        };
-        Self::new(cfg)
+        Self::new(Config::default().with_seed(seed))
     }
 
     /// Initialize a new `deterministic` runtime with the default configuration
@@ -835,7 +841,7 @@ impl Context {
             deadline,
             metrics,
             auditor,
-            rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
+            rng: Mutex::new(cfg.rng),
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
