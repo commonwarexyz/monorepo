@@ -1459,7 +1459,6 @@ mod tests {
             let scalar = Scalar::random(&mut rng);
             let g1 = G1::generator() * &scalar;
             let g2 = G2::generator() * &scalar;
-            let share = Share::new(scalar_set.len() as u32, scalar.clone());
 
             scalar_set.insert(scalar);
             g1_set.insert(g1);
