@@ -20,6 +20,11 @@ use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
+/// Maximum number of runs in a Run container.
+///
+/// The theoretical maximum is 32768 (alternating single values: 0, 2, 4, ..., 65534).
+pub const MAX_RUNS: usize = 32768;
+
 /// A container that stores values as run-length encoded ranges.
 ///
 /// Each entry in the BTreeMap represents an inclusive range `[start, end]`.
@@ -309,8 +314,8 @@ impl Read for Run {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        // Read as Vec of (start, end) pairs
-        let pairs = Vec::<(u16, u16)>::read_cfg(buf, &(RangeCfg::new(..), ((), ())))?;
+        // Read as Vec of (start, end) pairs with bounded count to prevent OOM
+        let pairs = Vec::<(u16, u16)>::read_cfg(buf, &(RangeCfg::new(..=MAX_RUNS), ((), ())))?;
 
         let mut runs = BTreeMap::new();
         let mut prev_end: Option<u16> = None;

@@ -287,20 +287,14 @@ impl EncodeSize for RoaringBitmap {
 }
 
 impl Read for RoaringBitmap {
-    type Cfg = ();
+    /// Configuration for decoding: range limit on number of containers.
+    ///
+    /// Use `RangeCfg::new(..=max_containers)` to limit memory allocation.
+    type Cfg = RangeCfg<usize>;
 
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let entries = Vec::<(u64, Container)>::read_cfg(buf, &(RangeCfg::new(..), ((), ())))?;
-
-        // Validate keys are strictly increasing (sorted and unique)
-        if entries.windows(2).any(|w| w[0].0 >= w[1].0) {
-            return Err(CodecError::Invalid(
-                "RoaringBitmap",
-                "container keys must be sorted and unique",
-            ));
-        }
-
-        let containers = entries.into_iter().collect();
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        // Use BTreeMap's codec which validates sorted/unique keys and bounds count
+        let containers = BTreeMap::<u64, Container>::read_cfg(buf, &(*cfg, ((), ())))?;
         Ok(Self { containers })
     }
 }
@@ -455,17 +449,17 @@ mod tests {
 
     #[test]
     fn test_codec_roundtrip_empty() {
-        use commonware_codec::{DecodeExt, Encode};
+        use commonware_codec::{Decode, Encode};
 
         let bitmap = RoaringBitmap::new();
         let encoded = bitmap.encode();
-        let decoded = RoaringBitmap::decode(encoded).unwrap();
+        let decoded = RoaringBitmap::decode_cfg(encoded, &(..).into()).unwrap();
         assert_eq!(bitmap, decoded);
     }
 
     #[test]
     fn test_codec_roundtrip_sparse() {
-        use commonware_codec::{DecodeExt, Encode};
+        use commonware_codec::{Decode, Encode};
 
         let mut bitmap = RoaringBitmap::new();
         bitmap.insert(42);
@@ -473,25 +467,25 @@ mod tests {
         bitmap.insert(1000000);
 
         let encoded = bitmap.encode();
-        let decoded = RoaringBitmap::decode(encoded).unwrap();
+        let decoded = RoaringBitmap::decode_cfg(encoded, &(..).into()).unwrap();
         assert_eq!(bitmap, decoded);
     }
 
     #[test]
     fn test_codec_roundtrip_dense() {
-        use commonware_codec::{DecodeExt, Encode};
+        use commonware_codec::{Decode, Encode};
 
         let mut bitmap = RoaringBitmap::new();
         bitmap.insert_range(0, 5000);
 
         let encoded = bitmap.encode();
-        let decoded = RoaringBitmap::decode(encoded).unwrap();
+        let decoded = RoaringBitmap::decode_cfg(encoded, &(..).into()).unwrap();
         assert_eq!(bitmap, decoded);
     }
 
     #[test]
     fn test_codec_roundtrip_multiple_containers() {
-        use commonware_codec::{DecodeExt, Encode};
+        use commonware_codec::{Decode, Encode};
 
         let mut bitmap = RoaringBitmap::new();
         bitmap.insert_range(0, 100);
@@ -499,7 +493,29 @@ mod tests {
         bitmap.insert(1u64 << 40);
 
         let encoded = bitmap.encode();
-        let decoded = RoaringBitmap::decode(encoded).unwrap();
+        let decoded = RoaringBitmap::decode_cfg(encoded, &(..).into()).unwrap();
         assert_eq!(bitmap, decoded);
+    }
+
+    #[test]
+    fn test_codec_container_limit() {
+        use commonware_codec::{Decode, Encode, Error};
+
+        let mut bitmap = RoaringBitmap::new();
+        // Create 3 containers
+        bitmap.insert(0);
+        bitmap.insert(65536);
+        bitmap.insert(131072);
+        assert_eq!(bitmap.container_count(), 3);
+
+        let encoded = bitmap.encode();
+
+        // Should succeed with limit >= 3
+        let decoded = RoaringBitmap::decode_cfg(encoded.clone(), &(..=3).into()).unwrap();
+        assert_eq!(bitmap, decoded);
+
+        // Should fail with limit < 3
+        let result = RoaringBitmap::decode_cfg(encoded, &(..=2).into());
+        assert!(matches!(result, Err(Error::InvalidLength(3))));
     }
 }
