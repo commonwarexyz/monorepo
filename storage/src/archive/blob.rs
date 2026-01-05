@@ -29,7 +29,7 @@
 use crate::journal::Error;
 use bytes::BufMut;
 use commonware_codec::Codec;
-use commonware_runtime::{Blob as _, Error as RError, Metrics, Storage};
+use commonware_runtime::{buffer, Blob as _, Error as RError, Metrics, Storage};
 use commonware_utils::hex;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
@@ -43,8 +43,8 @@ use zstd::{bulk::compress, decode_all};
 
 /// Simple section-based blob storage for values.
 ///
-/// Uses an internal write buffer for batching writes. Reads go directly to
-/// blobs without any caching (ideal for large values that shouldn't pollute
+/// Uses [buffer::Write] for batching writes. Reads go directly to blobs
+/// without any caching (ideal for large values that shouldn't pollute
 /// a buffer pool cache).
 pub struct Blob<E: Storage + Metrics, V: Codec> {
     context: E,
@@ -53,8 +53,8 @@ pub struct Blob<E: Storage + Metrics, V: Codec> {
     write_buffer_size: NonZeroUsize,
     codec_config: V::Cfg,
 
-    /// Section blobs: section -> (blob, current_size, write_buffer)
-    blobs: BTreeMap<u64, (E::Blob, u64, Vec<u8>)>,
+    /// Section blobs: section -> write-buffered blob
+    blobs: BTreeMap<u64, buffer::Write<E::Blob>>,
 
     /// A section number before which all sections have been pruned.
     oldest_retained_section: u64,
@@ -91,7 +91,7 @@ impl<E: Storage + Metrics, V: Codec> Blob<E, V> {
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
             debug!(section, blob = hex_name, size, "loaded section blob");
-            blobs.insert(section, (blob, size, Vec::new()));
+            blobs.insert(section, buffer::Write::new(blob, size, write_buffer));
         }
 
         // Initialize metrics
@@ -142,9 +142,6 @@ impl<E: Storage + Metrics, V: Codec> Blob<E, V> {
             encoded.into()
         };
 
-        // Calculate checksum of compressed data
-        let checksum = crc32fast::hash(&compressed);
-
         // Total entry size: compressed data + 4 bytes checksum
         let entry_size = compressed
             .len()
@@ -155,50 +152,29 @@ impl<E: Storage + Metrics, V: Codec> Blob<E, V> {
             .map_err(|_| Error::ItemTooLarge(entry_size))?;
 
         // Get or create blob for this section
-        let (_blob, blob_size, buffer) = match self.blobs.entry(section) {
+        let writer = match self.blobs.entry(section) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
                 let name = section.to_be_bytes();
                 let (blob, size) = self.context.open(&self.partition, &name).await?;
                 self.tracked.inc();
-                entry.insert((blob, size, Vec::new()))
+                entry.insert(buffer::Write::new(blob, size, self.write_buffer_size))
             }
         };
 
-        // Calculate offset (current blob size + buffered data)
-        let offset = *blob_size + buffer.len() as u64;
+        // Get current offset (logical size including buffered data)
+        let offset = writer.size().await;
         let offset_u32: u32 = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
 
-        // Add to write buffer
-        buffer.extend_from_slice(&compressed);
-        buffer.put_u32(checksum);
+        // Pre-allocate buffer with exact size: compressed data + checksum
+        let mut buf = Vec::with_capacity(entry_size);
+        buf.extend_from_slice(&compressed);
+        buf.put_u32(crc32fast::hash(&compressed));
 
-        // Flush if buffer exceeds threshold
-        if buffer.len() >= self.write_buffer_size.get() {
-            self.flush_section(section).await?;
-        }
+        // Write via buffered writer (handles batching internally)
+        writer.write_at(buf, offset).await?;
 
         Ok((offset_u32, entry_size_u32))
-    }
-
-    /// Flush a section's write buffer to disk.
-    async fn flush_section(&mut self, section: u64) -> Result<(), Error> {
-        let (blob, blob_size, buffer) = match self.blobs.get_mut(&section) {
-            Some(entry) => entry,
-            None => return Ok(()),
-        };
-
-        if buffer.is_empty() {
-            return Ok(());
-        }
-
-        // Write buffer to blob
-        let buf = std::mem::take(buffer);
-        let write_len = buf.len() as u64;
-        blob.write_at(buf, *blob_size).await?;
-        *blob_size += write_len;
-
-        Ok(())
     }
 
     /// Read value at offset with known size (from index entry).
@@ -207,55 +183,18 @@ impl<E: Storage + Metrics, V: Codec> Blob<E, V> {
     pub async fn get(&self, section: u64, offset: u32, size: u32) -> Result<V, Error> {
         self.prune_guard(section)?;
 
-        let (blob, blob_size, buffer) = match self.blobs.get(&section) {
+        let writer = match self.blobs.get(&section) {
             Some(entry) => entry,
             None => return Err(Error::SectionOutOfRange(section)),
         };
 
-        let offset_u64 = offset as u64;
         let size_usize = size as usize;
 
-        // Check if data is in buffer or on disk
-        let buf = if offset_u64 >= *blob_size {
-            // Data is in the write buffer
-            let buffer_offset = (offset_u64 - *blob_size) as usize;
-            let buffer_end = buffer_offset
-                .checked_add(size_usize)
-                .ok_or(Error::OffsetOverflow)?;
-            if buffer_end > buffer.len() {
-                return Err(Error::Runtime(RError::BlobInsufficientLength));
-            }
-            buffer[buffer_offset..buffer_end].to_vec()
-        } else {
-            // Data is on disk - read directly (no caching)
-            let end_offset = offset_u64
-                .checked_add(size_usize as u64)
-                .ok_or(Error::OffsetOverflow)?;
-
-            if end_offset <= *blob_size {
-                // Entirely on disk
-                let read_buf = blob.read_at(vec![0u8; size_usize], offset_u64).await?;
-                read_buf.into()
-            } else {
-                // Spans disk and buffer
-                let disk_len = (*blob_size - offset_u64) as usize;
-                let buffer_len = size_usize - disk_len;
-
-                let mut result = vec![0u8; size_usize];
-
-                // Read disk portion
-                let disk_buf = blob.read_at(vec![0u8; disk_len], offset_u64).await?;
-                result[..disk_len].copy_from_slice(disk_buf.as_ref());
-
-                // Copy buffer portion
-                if buffer_len > buffer.len() {
-                    return Err(Error::Runtime(RError::BlobInsufficientLength));
-                }
-                result[disk_len..].copy_from_slice(&buffer[..buffer_len]);
-
-                result
-            }
-        };
+        // Read via buffered writer (handles read-through for buffered data)
+        let buf = writer
+            .read_at(vec![0u8; size_usize], offset as u64)
+            .await?;
+        let buf = buf.as_ref();
 
         // Entry format: [compressed_data] [crc32 (4 bytes)]
         if buf.len() < 4 {
@@ -288,13 +227,9 @@ impl<E: Storage + Metrics, V: Codec> Blob<E, V> {
     pub async fn sync(&mut self, section: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 
-        // Flush buffer first
-        self.flush_section(section).await?;
-
-        // Sync the blob
-        if let Some((blob, _, _)) = self.blobs.get(&section) {
+        if let Some(writer) = self.blobs.get(&section) {
             self.synced.inc();
-            blob.sync().await.map_err(Error::Runtime)?;
+            writer.sync().await.map_err(Error::Runtime)?;
         }
 
         Ok(())
@@ -302,13 +237,9 @@ impl<E: Storage + Metrics, V: Codec> Blob<E, V> {
 
     /// Sync all sections to disk.
     pub async fn sync_all(&mut self) -> Result<(), Error> {
-        let sections: Vec<u64> = self.blobs.keys().copied().collect();
-        for section in sections {
-            self.flush_section(section).await?;
-            if let Some((blob, _, _)) = self.blobs.get(&section) {
-                self.synced.inc();
-                blob.sync().await.map_err(Error::Runtime)?;
-            }
+        for writer in self.blobs.values() {
+            self.synced.inc();
+            writer.sync().await.map_err(Error::Runtime)?;
         }
         Ok(())
     }
@@ -318,7 +249,7 @@ impl<E: Storage + Metrics, V: Codec> Blob<E, V> {
         self.prune_guard(section)?;
 
         match self.blobs.get(&section) {
-            Some((_, blob_size, buffer)) => Ok(*blob_size + buffer.len() as u64),
+            Some(writer) => Ok(writer.size().await),
             None => Ok(0),
         }
     }
@@ -329,15 +260,8 @@ impl<E: Storage + Metrics, V: Codec> Blob<E, V> {
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 
-        if let Some((blob, blob_size, buffer)) = self.blobs.get_mut(&section) {
-            // Clear any buffered data
-            buffer.clear();
-
-            // Truncate blob if necessary
-            if *blob_size > size {
-                blob.resize(size).await?;
-                *blob_size = size;
-            }
+        if let Some(writer) = self.blobs.get(&section) {
+            writer.resize(size).await?;
         }
 
         Ok(())
@@ -352,8 +276,8 @@ impl<E: Storage + Metrics, V: Codec> Blob<E, V> {
             }
 
             // Remove blob
-            let (blob, size, _) = self.blobs.remove(&section).unwrap();
-            drop(blob);
+            let writer = self.blobs.remove(&section).unwrap();
+            drop(writer);
 
             // Remove from storage
             self.context
@@ -361,7 +285,7 @@ impl<E: Storage + Metrics, V: Codec> Blob<E, V> {
                 .await?;
             pruned = true;
 
-            debug!(section, size, "pruned value blob");
+            debug!(section, "pruned value blob");
             self.tracked.dec();
             self.pruned.inc();
         }
@@ -385,9 +309,9 @@ impl<E: Storage + Metrics, V: Codec> Blob<E, V> {
 
     /// Destroy all blobs.
     pub async fn destroy(self) -> Result<(), Error> {
-        for (section, (blob, size, _)) in self.blobs.into_iter() {
-            drop(blob);
-            debug!(section, size, "destroyed value blob");
+        for (section, writer) in self.blobs.into_iter() {
+            drop(writer);
+            debug!(section, "destroyed value blob");
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
@@ -559,13 +483,13 @@ mod tests {
             let (offset, size) = blob.append(1, &value).await.expect("Failed to append");
             blob.sync(1).await.expect("Failed to sync");
 
-            // Corrupt the data
-            let (underlying_blob, _, _) = blob.blobs.get(&1).unwrap();
-            underlying_blob
+            // Corrupt the data by writing directly to the underlying blob
+            let writer = blob.blobs.get(&1).unwrap();
+            writer
                 .write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], offset as u64)
                 .await
                 .expect("Failed to corrupt");
-            underlying_blob.sync().await.expect("Failed to sync");
+            writer.sync().await.expect("Failed to sync");
 
             // Get should fail with checksum mismatch
             let result = blob.get(1, offset, size).await;

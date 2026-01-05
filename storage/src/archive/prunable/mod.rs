@@ -64,7 +64,7 @@
 //!
 //! `index` is the key to the map used to serve lookups by `index` that stores the location of data
 //! in a given `Blob` (selected by `section = index & section_mask` to minimize the number of open
-//! [crate::journal::segmented::variable::Journal]s):
+//! [crate::archive::blob::Blob]s):
 //!
 //! ```rust
 //! struct Location {
