@@ -22,6 +22,10 @@ pub struct Append<B: Blob> {
     /// The underlying blob being wrapped, protected by a lock for I/O coordination.
     blob: Arc<RwLock<B>>,
 
+    /// The blob's header, captured at construction time.
+    /// We store it here to avoid grabbing the blob lock to get the header.
+    header: Header,
+
     /// Unique id assigned by the buffer pool.
     id: u64,
 
@@ -67,8 +71,10 @@ impl<B: Blob> Append<B> {
             assert!(!buffer.append(buf.as_ref()));
         }
 
+        let header = blob.header();
         Ok(Self {
             blob: Arc::new(RwLock::new(blob)),
+            header,
             id: pool_ref.next_id().await,
             pool_ref,
             buffer: Arc::new(RwLock::new((buffer, size))),
@@ -184,7 +190,7 @@ impl<B: Blob> Append<B> {
 
 impl<B: Blob> Blob for Append<B> {
     fn header(&self) -> Header {
-        self.blob.header()
+        self.header
     }
 
     async fn read_at(
