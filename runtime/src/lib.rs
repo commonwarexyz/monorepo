@@ -97,6 +97,8 @@ pub enum Error {
     BlobSyncFailed(String, String, IoError),
     #[error("blob insufficient length")]
     BlobInsufficientLength,
+    #[error("blob magic mismatch: expected {:?}, found {found:?}", Header::MAGIC)]
+    BlobMagicMismatch { found: [u8; Header::MAGIC_LENGTH] },
     #[error("offset overflow")]
     OffsetOverflow,
     #[error("io error: {0}")]
@@ -542,11 +544,18 @@ pub trait Storage: Clone + Send + Sync + 'static {
 
 /// Fixed-size header at the start of each [Blob].
 ///
-/// This space is reserved for future use.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The first 4 bytes contain magic bytes to identify valid blobs.
+/// Remaining bytes are reserved for future use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
-    /// Reserved bytes for future use.
+    /// Header bytes. First 4 bytes are magic bytes.
     pub bytes: [u8; Self::SIZE],
+}
+
+impl Default for Header {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Header {
@@ -555,6 +564,27 @@ impl Header {
 
     /// Size of the header as u64 for offset calculations.
     pub const SIZE_U64: u64 = Self::SIZE as u64;
+
+    pub const MAGIC_LENGTH: usize = 4;
+
+    /// Magic bytes identifying a valid commonware blob.
+    pub const MAGIC: [u8; Self::MAGIC_LENGTH] = *b"CWIC"; // Commonware Is CWIC
+
+    /// Creates a new header with magic bytes set.
+    pub fn new() -> Self {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[..Self::MAGIC_LENGTH].copy_from_slice(&Self::MAGIC);
+        Self { bytes }
+    }
+
+    /// Validates the magic bytes match the expected value.
+    pub fn validate_magic(&self) -> Result<(), Error> {
+        let found: [u8; Self::MAGIC_LENGTH] = self.bytes[..Self::MAGIC_LENGTH].try_into().unwrap();
+        if found != Self::MAGIC {
+            return Err(Error::BlobMagicMismatch { found });
+        }
+        Ok(())
+    }
 }
 
 /// Interface to read and write to a blob.
@@ -635,6 +665,49 @@ mod tests {
     };
     use tracing::{error, Level};
     use utils::reschedule;
+
+    #[test]
+    fn test_header_magic_bytes() {
+        // Default header should have magic bytes
+        let header = Header::default();
+        assert_eq!(&header.bytes[..Header::MAGIC_LENGTH], &Header::MAGIC);
+
+        // Rest should be zeros
+        assert_eq!(
+            &header.bytes[Header::MAGIC_LENGTH..],
+            &[0u8; Header::SIZE - Header::MAGIC_LENGTH]
+        );
+    }
+
+    #[test]
+    fn test_header_validate_magic_success() {
+        let header = Header::default();
+        assert!(header.validate_magic().is_ok());
+    }
+
+    #[test]
+    fn test_header_validate_magic_wrong_bytes() {
+        let header = Header {
+            bytes: [0u8; Header::SIZE],
+        };
+        let result = header.validate_magic();
+        match result {
+            Err(Error::BlobMagicMismatch { found }) => {
+                assert_eq!(found, [0u8; Header::MAGIC_LENGTH]);
+            }
+            _ => panic!("expected BlobMagicMismatch error"),
+        }
+
+        let mut header = Header::default();
+        header.bytes[0] = b'X'; // Corrupt first byte
+        let result = header.validate_magic();
+        match result {
+            Err(Error::BlobMagicMismatch { found }) => {
+                assert_eq!(found[0], b'X');
+            }
+            _ => panic!("expected BlobMagicMismatch error"),
+        }
+    }
 
     fn test_error_future<R: Runner>(runner: R) {
         async fn error_future() -> Result<&'static str, &'static str> {

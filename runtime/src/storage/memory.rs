@@ -32,19 +32,19 @@ impl crate::Storage for Storage {
         let raw_len = content.len() as u64;
         let (header, logical_len) = if raw_len < Header::SIZE_U64 {
             // New or corrupted blob - truncate and write default header
+            let header = Header::default();
             content.clear();
-            content.resize(Header::SIZE, 0);
-            (Header::default(), 0)
+            content.extend_from_slice(&header.bytes);
+            (header, 0)
         } else {
             // Existing blob - read header from first 32 bytes
             let mut header_bytes = [0u8; Header::SIZE];
             header_bytes.copy_from_slice(&content[..Header::SIZE]);
-            (
-                Header {
-                    bytes: header_bytes,
-                },
-                raw_len - Header::SIZE_U64,
-            )
+            let header = Header {
+                bytes: header_bytes,
+            };
+            header.validate_magic()?;
+            (header, raw_len - Header::SIZE_U64)
         };
 
         Ok((
@@ -249,8 +249,12 @@ mod tests {
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"test".to_vec()).unwrap();
             assert_eq!(raw_content.len(), Header::SIZE + data.len());
-            // First 32 bytes should be header (zeros)
-            assert_eq!(&raw_content[..Header::SIZE], &[0u8; Header::SIZE]);
+            // First 4 bytes should be magic bytes
+            assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Header::MAGIC);
+            assert_eq!(
+                &raw_content[Header::MAGIC_LENGTH..Header::SIZE],
+                &[0u8; Header::SIZE - Header::MAGIC_LENGTH]
+            );
             // Data should start at offset 32
             assert_eq!(&raw_content[Header::SIZE..], data);
         }
@@ -321,6 +325,29 @@ mod tests {
                 Header::SIZE,
                 "corrupted blob should be reset to header-only"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_blob_magic_mismatch() {
+        let storage = Storage::default();
+
+        // Manually insert a blob with invalid magic bytes
+        {
+            let mut partitions = storage.partitions.lock().unwrap();
+            let partition = partitions.entry("partition".into()).or_default();
+            // Create a blob with wrong magic bytes (all zeros)
+            partition.insert(b"bad_magic".to_vec(), vec![0u8; Header::SIZE]);
+        }
+
+        // Opening should fail with magic mismatch error
+        let result = storage.open("partition", b"bad_magic").await;
+        match result {
+            Err(crate::Error::BlobMagicMismatch { found }) => {
+                assert_eq!(found, [0u8; Header::MAGIC_LENGTH]);
+            }
+            Err(err) => panic!("expected BlobMagicMismatch error, got: {:?}", err),
+            Ok(_) => panic!("expected error, got Ok"),
         }
     }
 }

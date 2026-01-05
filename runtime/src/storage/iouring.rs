@@ -155,12 +155,11 @@ impl crate::Storage for Storage {
             let mut header_bytes = [0u8; Header::SIZE];
             file.read_exact(&mut header_bytes)
                 .map_err(|_| Error::ReadFailed)?;
-            (
-                Header {
-                    bytes: header_bytes,
-                },
-                raw_len - Header::SIZE_U64,
-            )
+            let header = Header {
+                bytes: header_bytes,
+            };
+            header.validate_magic()?;
+            (header, raw_len - Header::SIZE_U64)
         };
 
         let blob = Blob::new(partition.into(), name, file, self.io_sender.clone(), header);
@@ -503,7 +502,11 @@ mod tests {
 
         // Verify raw file layout
         let raw_content = std::fs::read(&file_path).unwrap();
-        assert_eq!(&raw_content[..Header::SIZE], &[0u8; Header::SIZE]);
+        assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Header::MAGIC);
+        assert_eq!(
+            &raw_content[Header::MAGIC_LENGTH..Header::SIZE],
+            &[0u8; Header::SIZE - Header::MAGIC_LENGTH]
+        );
         assert_eq!(&raw_content[Header::SIZE..], data);
 
         // Test 3: Read at logical offset 0 returns data from raw offset 32
@@ -562,6 +565,31 @@ mod tests {
 
         // Cleanup
         drop(blob3);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_magic_mismatch() {
+        let (storage, storage_directory) = create_test_storage();
+
+        // Create the partition directory
+        let partition_path = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition_path).unwrap();
+
+        // Manually create a file with invalid magic bytes
+        let bad_magic_path = partition_path.join(hex(b"bad_magic"));
+        std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE]).unwrap();
+
+        // Opening should fail with magic mismatch error
+        let result = storage.open("partition", b"bad_magic").await;
+        match result {
+            Err(crate::Error::BlobMagicMismatch { found }) => {
+                assert_eq!(found, [0u8; Header::MAGIC_LENGTH]);
+            }
+            Err(err) => panic!("expected BlobMagicMismatch error, got: {:?}", err),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 }
