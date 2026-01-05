@@ -488,6 +488,17 @@ where
             return;
         }
 
+        // Try to reconstruct immediately before adding subscription.
+        // This handles the case where shards arrived before this subscription was created
+        // (e.g., when receiving a notarization after other validators have already broadcast
+        // their shards).
+        if let DigestOrCommitment::Commitment(commitment) = id {
+            if let Ok(Some(block)) = self.try_reconstruct(commitment).await {
+                let _ = responder.send(block);
+                return;
+            }
+        }
+
         match self.block_subscriptions.entry(id.block_digest()) {
             Entry::Vacant(entry) => {
                 entry.insert(BlockSubscription {
@@ -829,6 +840,88 @@ mod test {
             // Resolve the block subscription; it should now be fulfilled.
             let block = block_subscription.await.unwrap();
             assert_eq!(block.commitment(), coded_block.commitment());
+        });
+    }
+
+    /// Tests the scenario where a validator receives a notarization after other validators
+    /// have already broadcast their shards. This simulates the case where:
+    /// 1. Validators A, B, C verify a proposal and broadcast their shards
+    /// 2. Validators A, B receive notarization, certify, and advance
+    /// 3. Validator C times out and votes to nullify
+    /// 4. Validator C later receives the notarization and tries to certify
+    ///
+    /// Without the fix, C's `subscribe_block` would hang forever because:
+    /// - Shards have already arrived (from A and B's broadcasts)
+    /// - But no `Notarize` messages will arrive to trigger reconstruction
+    ///
+    /// With the fix, `subscribe_block` immediately tries to reconstruct.
+    #[test_traced]
+    fn test_late_notarization_triggers_reconstruction() {
+        let fixture = Fixture {
+            num_peers: 4, // Minimum for the scenario: 1 proposer + 3 validators, threshold = 3
+            link: DEFAULT_LINK,
+        };
+
+        fixture.start(|config, context, mut mailboxes, coding_config| async move {
+            let inner = B::new::<H>(Sha256Digest::EMPTY, 1, 2);
+            let coded_block = CodedBlock::<B, C>::new(inner, coding_config, CONCURRENCY);
+            let peers: Vec<P> = mailboxes.keys().cloned().collect();
+
+            // Step 1: Proposer broadcasts shards to all peers
+            let proposer_mailbox = mailboxes.get_mut(&peers[0]).unwrap();
+            proposer_mailbox
+                .proposed(coded_block.clone(), peers.clone())
+                .await;
+
+            // Wait for shards to be delivered
+            context.sleep(config.link.latency * 2).await;
+
+            // Step 2: Peers 0, 1, 2 validate their shards (simulating 3 nodes that voted to notarize)
+            // This triggers them to broadcast their weak shards to all other peers
+            for i in 0..3 {
+                let mailbox = mailboxes.get_mut(&peers[i]).unwrap();
+                let valid = mailbox
+                    .subscribe_shard_validity(coded_block.commitment(), i)
+                    .await
+                    .await
+                    .unwrap();
+                assert!(valid, "shard {i} should be valid");
+            }
+
+            // Wait for weak shards to propagate to all peers
+            context.sleep(config.link.latency * 2).await;
+
+            // Step 3: Peer 3 now has shards from peers 0, 1, 2 in its buffer
+            // (the weak shards were broadcast after validation)
+            // This simulates the case where peer 3 receives the notarization LATE
+            // and tries to subscribe to the block for certification.
+            //
+            // IMPORTANT: We do NOT call any Notarize message handling here,
+            // simulating that all notarize votes were already processed.
+
+            let late_peer_mailbox = mailboxes.get_mut(&peers[3]).unwrap();
+
+            // Before the fix: This subscription would hang forever because:
+            // - Block is not in reconstructed_blocks
+            // - No Notarize messages will arrive to trigger try_reconstruct
+            // - Shards are in the buffer but nothing triggers reconstruction
+            //
+            // After the fix: subscribe_block immediately tries to reconstruct
+            let block_subscription = late_peer_mailbox
+                .subscribe_block(DigestOrCommitment::Commitment(coded_block.commitment()))
+                .await;
+
+            // Use a timeout to detect the hang (would fail before the fix)
+            let result = context
+                .timeout(Duration::from_millis(500), block_subscription)
+                .await;
+
+            // With the fix, reconstruction should succeed immediately
+            let block = result
+                .expect("subscription should not timeout - reconstruction should happen immediately")
+                .expect("subscription channel should not be canceled");
+            assert_eq!(block.commitment(), coded_block.commitment());
+            assert_eq!(block.height(), coded_block.height());
         });
     }
 }
