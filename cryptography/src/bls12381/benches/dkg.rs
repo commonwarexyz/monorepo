@@ -113,10 +113,10 @@ impl Bench {
 cfg_if::cfg_if! {
     if #[cfg(full_bench)] {
         const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50, 100, 250, 500];
-        const CONCURRENCY: &[usize] = &[1, 8];
+        const CONCURRENCY: &[usize] = &[1, 4, 8];
     } else {
         const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50];
-        const CONCURRENCY: &[usize] = &[1, 8];
+        const CONCURRENCY: &[usize] = &[1];
     }
 }
 
