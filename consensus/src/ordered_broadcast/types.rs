@@ -645,14 +645,14 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
                 .ok_or(Error::ParentMissing)?,
             parent.digest,
         );
+        let parent_scheme = provider
+            .scoped(parent.epoch)
+            .ok_or(Error::UnknownScheme(parent.epoch))?;
         let ctx = AckSubject {
             chunk: &parent_chunk,
             epoch: parent.epoch,
         };
-        let scheme = provider
-            .scoped(parent.epoch)
-            .ok_or(Error::UnknownScheme(parent.epoch))?;
-        if !scheme.verify_certificate::<R, D>(rng, ctx, &parent.certificate) {
+        if !parent_scheme.verify_certificate::<R, D>(rng, ctx, &parent.certificate) {
             return Err(Error::InvalidCertificate);
         }
         Ok(Some(parent_chunk))
