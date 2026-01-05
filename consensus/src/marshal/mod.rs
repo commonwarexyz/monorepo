@@ -177,7 +177,7 @@ mod tests {
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
-        crate::types::Height,
+        Height,
     ) {
         let config = Config {
             provider,

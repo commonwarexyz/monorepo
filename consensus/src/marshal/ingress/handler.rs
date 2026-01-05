@@ -214,7 +214,7 @@ impl<B: Block> Hash for Request<B> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             Self::Block(commitment) => commitment.hash(state),
-            Self::Finalized { height } => height.get().hash(state),
+            Self::Finalized { height } => height.hash(state),
             Self::Notarized { round } => round.hash(state),
         }
     }
