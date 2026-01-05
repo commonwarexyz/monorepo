@@ -1,4 +1,4 @@
-use super::types::{Activity, Context, NodeSigner, NodeVerifier, SequencersProvider};
+use super::types::{Activity, ChunkSigner, ChunkVerifier, Context, SequencersProvider};
 use crate::{
     types::{Epoch, EpochDelta},
     Automaton, Monitor, Relay, Reporter,
@@ -20,14 +20,14 @@ pub struct Config<
 > {
     /// The signer used when this engine acts as a sequencer.
     ///
-    /// Create with `NodeSigner::new(namespace, signer)`.
-    pub sequencer_signer: Option<NodeSigner<C>>,
+    /// Create with `ChunkSigner::new(namespace, signer)`.
+    pub sequencer_signer: Option<ChunkSigner<C>>,
 
     /// Verifier for node signatures.
     ///
-    /// Create with `NodeVerifier::new(namespace)` using the same namespace
-    /// as the `NodeSigner`.
-    pub node_verifier: NodeVerifier,
+    /// Create with `ChunkVerifier::new(namespace)` using the same namespace
+    /// as the `ChunkSigner`.
+    pub chunk_verifier: ChunkVerifier,
 
     /// Provider for epoch-specific sequencers set.
     pub sequencers_provider: S,

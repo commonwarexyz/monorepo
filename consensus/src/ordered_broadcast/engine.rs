@@ -10,7 +10,7 @@
 use super::{
     metrics, scheme,
     types::{
-        Ack, Activity, Chunk, Context, Error, Lock, Node, NodeSigner, NodeVerifier, Parent,
+        Ack, Activity, Chunk, ChunkSigner, ChunkVerifier, Context, Error, Lock, Node, Parent,
         Proposal, SequencersProvider,
     },
     AckManager, Config, TipManager,
@@ -77,7 +77,7 @@ pub struct Engine<
     // Interfaces
     ////////////////////////////////////////
     context: ContextCell<E>,
-    sequencer_signer: Option<NodeSigner<C>>,
+    sequencer_signer: Option<ChunkSigner<C>>,
     sequencers_provider: S,
     validators_provider: P,
     automaton: A,
@@ -90,7 +90,7 @@ pub struct Engine<
     ////////////////////////////////////////
 
     // Verifier for chunk signatures.
-    node_verifier: NodeVerifier,
+    chunk_verifier: ChunkVerifier,
 
     ////////////////////////////////////////
     // Timeouts
@@ -224,7 +224,7 @@ impl<
             relay: cfg.relay,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
-            node_verifier: cfg.node_verifier,
+            chunk_verifier: cfg.chunk_verifier,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
@@ -883,7 +883,7 @@ impl<
         // Verify the node
         node.verify(
             &mut self.context,
-            &self.node_verifier,
+            &self.chunk_verifier,
             &self.validators_provider,
         )
     }

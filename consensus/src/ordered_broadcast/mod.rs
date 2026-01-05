@@ -74,7 +74,7 @@ pub mod mocks;
 mod tests {
     use super::{
         mocks,
-        types::{NodeSigner, NodeVerifier},
+        types::{ChunkSigner, ChunkVerifier},
         Config, Engine,
     };
     use crate::{
@@ -224,10 +224,10 @@ mod tests {
             assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));
 
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
-            let node_verifier = NodeVerifier::new(namespace);
+            let chunk_verifier = ChunkVerifier::new(namespace);
             let (reporter, reporter_mailbox) = mocks::Reporter::new(
                 context.clone(),
-                node_verifier.clone(),
+                chunk_verifier.clone(),
                 fixture.verifier.clone(),
                 misses_allowed,
             );
@@ -237,11 +237,11 @@ mod tests {
             let engine = Engine::new(
                 context.with_label("engine"),
                 Config {
-                    sequencer_signer: Some(NodeSigner::new(
+                    sequencer_signer: Some(ChunkSigner::new(
                         namespace,
                         fixture.private_keys[idx].clone(),
                     )),
-                    node_verifier,
+                    chunk_verifier,
                     sequencers_provider: sequencers,
                     validators_provider,
                     automaton: automaton.clone(),
@@ -745,10 +745,10 @@ mod tests {
                 validators_providers.insert(validator.clone(), validators_provider.clone());
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
-                let node_verifier = NodeVerifier::new(namespace);
+                let chunk_verifier = ChunkVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
-                    node_verifier.clone(),
+                    chunk_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
@@ -758,11 +758,11 @@ mod tests {
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
-                        sequencer_signer: Some(NodeSigner::new(
+                        sequencer_signer: Some(ChunkSigner::new(
                             namespace,
                             fixture.private_keys[idx].clone(),
                         )),
-                        node_verifier,
+                        chunk_verifier,
                         sequencers_provider: sequencers,
                         validators_provider,
                         relay: automaton.clone(),
@@ -901,10 +901,10 @@ mod tests {
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
 
-                let node_verifier = NodeVerifier::new(namespace);
+                let chunk_verifier = ChunkVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
-                    node_verifier.clone(),
+                    chunk_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
@@ -914,8 +914,8 @@ mod tests {
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
-                        sequencer_signer: None::<NodeSigner<PrivateKey>>, // Validators don't propose in this test
-                        node_verifier,
+                        sequencer_signer: None::<ChunkSigner<PrivateKey>>, // Validators don't propose in this test
+                        chunk_verifier,
                         sequencers_provider: sequencers,
                         validators_provider,
                         relay: automaton.clone(),
@@ -944,10 +944,10 @@ mod tests {
             {
                 let context = context.with_label("sequencer");
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
-                let node_verifier = NodeVerifier::new(namespace);
+                let chunk_verifier = ChunkVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
-                    node_verifier.clone(),
+                    chunk_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
@@ -962,8 +962,8 @@ mod tests {
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
-                        sequencer_signer: Some(NodeSigner::new(namespace, sequencer.clone())),
-                        node_verifier,
+                        sequencer_signer: Some(ChunkSigner::new(namespace, sequencer.clone())),
+                        chunk_verifier,
                         sequencers_provider: mocks::Sequencers::<PublicKey>::new(vec![
                             sequencer.public_key()
                         ]),
