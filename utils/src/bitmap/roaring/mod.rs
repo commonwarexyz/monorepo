@@ -76,6 +76,9 @@ pub use ops::{difference, intersection, union};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
+/// Maximum container key (high 48 bits of a u64).
+const MAX_KEY: u64 = (1u64 << 48) - 1;
+
 /// Extracts the high 48 bits (container key) from a 64-bit value.
 #[inline]
 const fn high_bits(value: u64) -> u64 {
@@ -337,6 +340,35 @@ impl Read for RoaringBitmap {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         // Use BTreeMap's codec which validates sorted/unique keys and bounds count
         let containers = BTreeMap::<u64, Container>::read_cfg(buf, &(*cfg, ((), ())))?;
+        Ok(Self { containers })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for RoaringBitmap {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let num_containers = u.int_in_range(0..=1000)?;
+        let mut containers = BTreeMap::new();
+        let mut prev_key = 0u64;
+
+        for _ in 0..num_containers {
+            // Generate increasing keys
+            let key = if containers.is_empty() {
+                u.int_in_range(0..=MAX_KEY)?
+            } else {
+                let remaining = MAX_KEY - prev_key;
+                if remaining == 0 {
+                    break;
+                }
+                prev_key.saturating_add(u.int_in_range(1..=remaining)?)
+            };
+            if key > MAX_KEY {
+                break;
+            }
+            containers.insert(key, Container::arbitrary(u)?);
+            prev_key = key;
+        }
+
         Ok(Self { containers })
     }
 }
@@ -608,5 +640,14 @@ mod tests {
         let inserted = bitmap.insert_range(start, end);
         assert_eq!(inserted, expected_len);
         assert_eq!(bitmap.len(), expected_len);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<super::RoaringBitmap>,
+        }
     }
 }

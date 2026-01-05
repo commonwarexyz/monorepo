@@ -389,6 +389,17 @@ impl Iterator for Iter<'_> {
 
 impl ExactSizeIterator for Iter<'_> {}
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Bitmap {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let mut words = [0u64; WORDS];
+        for word in &mut words {
+            *word = u.arbitrary()?;
+        }
+        Ok(Self::from_words(words))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,6 +615,15 @@ mod tests {
         assert_eq!(inserted, 16);
         for i in 48..64 {
             assert!(container.contains(i), "missing value {}", i);
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<super::Bitmap>,
         }
     }
 }

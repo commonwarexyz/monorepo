@@ -390,6 +390,32 @@ impl Iterator for Iter<'_> {
 
 impl ExactSizeIterator for Iter<'_> {}
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Run {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let num_runs = u.int_in_range(0..=MAX_RUNS)?;
+        let mut runs = BTreeMap::new();
+        let mut prev_end = 0u16;
+
+        for _ in 0..num_runs {
+            if prev_end == u16::MAX {
+                break;
+            }
+            // Leave gap of at least 2 between runs (so they're not adjacent)
+            let min_start = prev_end.saturating_add(2);
+            if min_start == u16::MAX {
+                break;
+            }
+            let start = u.int_in_range(min_start..=u16::MAX)?;
+            let end = u.int_in_range(start..=u16::MAX)?;
+            runs.insert(start, end);
+            prev_end = end;
+        }
+
+        Ok(Self { runs })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,5 +582,14 @@ mod tests {
         assert!(run.is_full());
         assert_eq!(run.run_count(), 1);
         assert_eq!(run.len(), 65536);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<super::Run>,
+        }
     }
 }

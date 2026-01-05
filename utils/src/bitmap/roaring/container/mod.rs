@@ -273,6 +273,18 @@ impl Read for Container {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Container {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let variant = u.int_in_range(0..=2)?;
+        match variant {
+            0 => Ok(Self::Array(Array::arbitrary(u)?)),
+            1 => Ok(Self::Bitmap(Box::new(Bitmap::arbitrary(u)?))),
+            _ => Ok(Self::Run(Run::arbitrary(u)?)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,5 +376,14 @@ mod tests {
 
         assert_eq!(container.min(), Some(10));
         assert_eq!(container.max(), Some(100));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<super::Container>,
+        }
     }
 }

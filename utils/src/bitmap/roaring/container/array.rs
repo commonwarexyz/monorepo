@@ -477,6 +477,26 @@ impl Read for Array {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Array {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let len = u.int_in_range(0..=MAX_CARDINALITY)?;
+        let mut values = Vec::with_capacity(len);
+        let mut prev = 0u16;
+        for i in 0..len {
+            // Generate sorted unique values by adding increments
+            let max_increment = (u16::MAX - prev) / (len - i) as u16;
+            if max_increment == 0 {
+                break;
+            }
+            let increment = u.int_in_range(1..=max_increment)?;
+            prev = prev.saturating_add(increment);
+            values.push(prev);
+        }
+        Ok(Self::from_sorted_vec(values))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,5 +581,14 @@ mod tests {
         let values: Vec<u16> = (0..MAX_CARDINALITY as u16).collect();
         let container = Array::from_sorted_vec(values);
         assert!(container.is_full());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<super::Array>,
+        }
     }
 }
