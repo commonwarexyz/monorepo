@@ -3,17 +3,17 @@
 use crate::{
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
-    mmr::{mem::Clean, Location},
+    mmr::Location,
     qmdb::{
         any::{
             init_fixed_authenticated_log, unordered, value::FixedEncoding, FixedConfig as Config,
             FixedValue,
         },
-        Error,
+        Durable, Error, Merkleized,
     },
     translator::Translator,
 };
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
@@ -25,11 +25,11 @@ pub type Operation<K, V> = unordered::Operation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S>;
+pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Db<E, K, V, H, T>
+    Db<E, K, V, H, T, Merkleized<H>, Durable>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -79,8 +79,8 @@ pub(super) mod test {
         mmr::{Position, StandardHasher},
         qmdb::{
             any::unordered::{fixed::Operation, Update},
-            store::{batch_tests, CleanStore as _},
-            verify_proof,
+            store::batch_tests,
+            verify_proof, NonDurable, Unmerkleized,
         },
         translator::TwoCap,
     };
@@ -115,7 +115,10 @@ pub(super) mod test {
     }
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    pub(crate) type AnyTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    pub(crate) type AnyTest =
+        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+    pub(crate) type DirtyAnyTest =
+        Db<Context, Digest, Digest, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
     #[inline]
     fn to_digest(i: u64) -> Digest {
@@ -171,7 +174,7 @@ pub(super) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
+    pub(crate) async fn apply_ops(db: &mut DirtyAnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
                 Operation::Update(Update(key, value)) => {
@@ -180,8 +183,8 @@ pub(super) mod test {
                 Operation::Delete(key) => {
                     db.delete(key).await.unwrap();
                 }
-                Operation::CommitFloor(metadata, _) => {
-                    db.commit(metadata).await.unwrap();
+                Operation::CommitFloor(_, _) => {
+                    panic!("CommitFloor not supported in apply_ops");
                 }
             }
         }
@@ -242,7 +245,7 @@ pub(super) mod test {
     fn test_any_fixed_db_log_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.clone()).await.into_mutable();
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
@@ -251,7 +254,7 @@ pub(super) mod test {
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(k, v).await.unwrap();
             }
-            db.commit(None).await.unwrap();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root = db.root();
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
@@ -280,14 +283,24 @@ pub(super) mod test {
         });
     }
 
+    // Test that merkleization state changes don't reset `steps`.
+    #[test_traced("DEBUG")]
+    fn test_any_unordered_fixed_db_steps_not_reset() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = open_db(context).await;
+            crate::qmdb::any::test::test_any_db_steps_not_reset(db).await;
+        });
+    }
+
     #[test]
     fn test_any_fixed_db_historical_proof_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await;
+            let mut db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
-            db.commit(None).await.unwrap();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root_hash = db.root();
             let original_op_count = db.op_count();
 
@@ -314,9 +327,10 @@ pub(super) mod test {
             ));
 
             // Add more operations to the database
+            let mut db = db.into_mutable();
             let more_ops = create_test_ops(5);
             apply_ops(&mut db, more_ops.clone()).await;
-            db.commit(None).await.unwrap();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
@@ -355,10 +369,10 @@ pub(super) mod test {
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await;
+            let mut db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(50);
             apply_ops(&mut db, ops.clone()).await;
-            db.commit(None).await.unwrap();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let mut hasher = StandardHasher::<Sha256>::new();
 
@@ -377,11 +391,10 @@ pub(super) mod test {
             );
             assert_eq!(single_ops.len(), 1);
 
-            // Create historical database with single operation
-            let mut single_db = create_test_db(context.clone()).await;
+            // Create historical database with single operation without committing it.
+            let mut single_db = create_test_db(context.clone()).await.into_mutable();
             apply_ops(&mut single_db, ops[0..1].to_vec()).await;
-            // Don't commit - this changes the root due to commit operations
-            single_db.sync().await.unwrap();
+            let single_db = single_db.into_merkleized();
             let single_root = single_db.root();
 
             assert!(verify_proof(
@@ -420,7 +433,10 @@ pub(super) mod test {
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
 
+            // Can't destroy the db unless it's durable, so we need to commit first.
+            let (single_db, _) = single_db.commit(None).await.unwrap();
             single_db.destroy().await.unwrap();
+
             db.destroy().await.unwrap();
         });
     }
@@ -429,10 +445,10 @@ pub(super) mod test {
     fn test_any_fixed_db_historical_proof_different_historical_sizes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await;
+            let mut db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
-            db.commit(None).await.unwrap();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let mut hasher = StandardHasher::<Sha256>::new();
 
@@ -449,10 +465,9 @@ pub(super) mod test {
                 assert_eq!(historical_proof.size, Position::try_from(end_loc).unwrap());
 
                 // Create reference database at the given historical size
-                let mut ref_db = create_test_db(context.clone()).await;
+                let mut ref_db = create_test_db(context.clone()).await.into_mutable();
                 apply_ops(&mut ref_db, ops[0..(*end_loc - 1) as usize].to_vec()).await;
-                // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
-                ref_db.sync().await.unwrap();
+                let ref_db = ref_db.into_merkleized();
 
                 let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
                 assert_eq!(ref_proof.size, historical_proof.size);
@@ -472,8 +487,9 @@ pub(super) mod test {
                     start_loc,
                     &historical_ops,
                     &ref_root
-                ),);
+                ));
 
+                let (ref_db, _) = ref_db.commit(None).await.unwrap();
                 ref_db.destroy().await.unwrap();
             }
 
@@ -485,10 +501,10 @@ pub(super) mod test {
     fn test_any_fixed_db_historical_proof_invalid() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await;
+            let mut db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(10);
             apply_ops(&mut db, ops).await;
-            db.commit(None).await.unwrap();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let historical_op_count = Location::new_unchecked(5);
             let historical_mmr_size = Position::try_from(historical_op_count).unwrap();
@@ -598,8 +614,8 @@ pub(super) mod test {
     }
 
     #[test_traced("DEBUG")]
-    fn test_batch() {
-        batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await });
+    fn test_any_unordered_fixed_batch() {
+        batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
     }
 
     // FromSyncTestable implementation for from_sync_result tests

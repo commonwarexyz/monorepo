@@ -6,7 +6,7 @@ use crate::{
     journal::{authenticated, contiguous::fixed},
     mmr::{mem::Clean, Location, Position, StandardHasher},
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
-    qmdb::{self, any::FixedValue},
+    qmdb::{self, any::FixedValue, Durable, Merkleized},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
@@ -19,7 +19,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
 use tracing::debug;
 
-impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T>
+impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -316,8 +316,10 @@ mod tests {
             AnyTest::init(ctx, config).await.unwrap()
         }
 
-        async fn apply_ops(db: &mut Self::Db, ops: Vec<Operation<Digest, Digest>>) {
-            apply_ops(db, ops).await
+        async fn apply_ops(db: Self::Db, ops: Vec<Operation<Digest, Digest>>) -> Self::Db {
+            let mut db = db.into_mutable();
+            apply_ops(&mut db, ops).await;
+            db.commit(None::<Digest>).await.unwrap().0.into_merkleized()
         }
     }
 

@@ -14,7 +14,7 @@ bytes.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-runtime.workspace = true
-commonware-storage = { workspace = true, features = ["std", "fuzzing"] }
+commonware-storage = { workspace = true, features = ["std", "fuzzing", "test-traits"] }
 commonware-utils.workspace = true
 futures.workspace = true
 libfuzzer-sys.workspace = true

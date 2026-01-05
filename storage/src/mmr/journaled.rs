@@ -24,7 +24,7 @@ use crate::{
         Error::{self, *},
         Proof,
     },
-    qmdb::any::unordered::fixed::sync::{init_journal, init_journal_at_size},
+    qmdb::any::unordered::fixed::sync::init_journal,
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
@@ -223,82 +223,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
 }
 
 impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
-    /// Initialize a new journaled MMR from an MMR's size and set of pinned nodes.
-    ///
-    /// This creates a journaled MMR that appears to have `mmr_size` elements, all of which
-    /// are pruned, leaving only the minimal set of `pinned_nodes` required for proof generation.
-    /// The next element added will be at position `mmr_size`.
-    ///
-    /// The returned MMR is functionally equivalent to a journaled MMR that was created,
-    /// populated, and then pruned up to its size.
-    ///
-    /// # Arguments
-    /// * `context` - Storage context
-    /// * `pinned_nodes` - Digest values in the order returned by `nodes_to_pin(mmr_size)`
-    /// * `mmr_size` - The logical size of the MMR (all elements before this are considered pruned)
-    /// * `config` - Journaled MMR configuration. Any data in the given journal and metadata
-    ///   partitions will be overwritten.
-    pub async fn init_from_pinned_nodes(
-        context: E,
-        pinned_nodes: Vec<D>,
-        mmr_size: Position,
-        config: Config,
-        hasher: &mut impl Hasher<D>,
-    ) -> Result<Self, Error> {
-        // Destroy any existing journal data
-        context.remove(&config.journal_partition, None).await.ok();
-        context.remove(&config.metadata_partition, None).await.ok();
-
-        // Create the journal with the desired size
-        let journal_cfg = JConfig {
-            partition: config.journal_partition.clone(),
-            items_per_blob: config.items_per_blob,
-            buffer_pool: config.buffer_pool.clone(),
-            write_buffer: config.write_buffer,
-        };
-        let journal =
-            init_journal_at_size(context.with_label("mmr_journal"), journal_cfg, *mmr_size).await?;
-
-        // Initialize metadata
-        let metadata_cfg = MConfig {
-            partition: config.metadata_partition.clone(),
-            codec_config: ((0..).into(), ()),
-        };
-        let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
-
-        // Store the pruning boundary in metadata
-        let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        metadata.put(pruning_boundary_key, mmr_size.to_be_bytes().into());
-
-        // Store the pinned nodes in metadata
-        let nodes_to_pin_positions = nodes_to_pin(mmr_size);
-        for (pos, digest) in nodes_to_pin_positions.zip(pinned_nodes.iter()) {
-            metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
-        }
-
-        // Sync metadata to disk
-        metadata.sync().await.map_err(Error::MetadataError)?;
-
-        // Create in-memory MMR in fully pruned state
-        let mem_mmr = MemMmr::init(
-            MemConfig {
-                nodes: vec![],
-                pruned_to_pos: mmr_size,
-                pinned_nodes,
-            },
-            hasher,
-        )?;
-
-        Ok(Self {
-            mem_mmr,
-            journal,
-            journal_size: mmr_size,
-            metadata,
-            pruned_to_pos: mmr_size,
-            pool: config.thread_pool,
-        })
-    }
-
     /// Initialize a new `Mmr` instance.
     pub async fn init(context: E, hasher: &mut impl Hasher<D>, cfg: Config) -> Result<Self, Error> {
         let journal_cfg = JConfig {
@@ -887,7 +811,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> Storage<D> for Mmr<E, D, Clean<D>> {
+impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for CleanMmr<E, D> {
     fn size(&self) -> Position {
         self.size()
     }
@@ -1679,198 +1603,6 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_journaled_mmr_init_from_pinned_nodes() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-
-            // Create an in-memory MMR with some elements
-            let mut original_mmr = Mmr::init(
-                context.clone(),
-                &mut hasher,
-                Config {
-                    journal_partition: "original_journal".into(),
-                    metadata_partition: "original_metadata".into(),
-                    items_per_blob: NZU64!(7),
-                    write_buffer: NZUsize!(1024),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Add some elements and prune to the size of the MMR
-            const NUM_ELEMENTS: u64 = 1_000;
-            for i in 0..NUM_ELEMENTS {
-                original_mmr
-                    .add(&mut hasher, &test_digest(i as usize))
-                    .await
-                    .unwrap();
-            }
-            original_mmr.sync().await.unwrap();
-            let original_size = original_mmr.size();
-            original_mmr.prune_to_pos(original_size).await.unwrap();
-
-            // Get the journal digest
-            let mut hasher = Standard::<Sha256>::new();
-            let original_journal_digest = original_mmr.root();
-
-            // Get the pinned nodes
-            let pinned_nodes_map = original_mmr.get_pinned_nodes();
-            let pinned_nodes: Vec<_> = nodes_to_pin(original_size)
-                .map(|pos| pinned_nodes_map[&pos])
-                .collect();
-
-            // Create a journaled MMR from the pinned nodes
-            let new_mmr_config = Config {
-                journal_partition: "new_journal".into(),
-                metadata_partition: "new_metadata".into(),
-                items_per_blob: NZU64!(7),
-                write_buffer: NZUsize!(1024),
-                thread_pool: None,
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            };
-            let mut new_mmr =
-                Mmr::<_, sha256::Digest, Clean<sha256::Digest>>::init_from_pinned_nodes(
-                    context.clone(),
-                    pinned_nodes,
-                    original_size,
-                    new_mmr_config.clone(),
-                    &mut hasher,
-                )
-                .await
-                .unwrap();
-
-            // Verify the journaled MMR has the same properties as the original MMR
-            assert_eq!(new_mmr.size(), original_size);
-            assert_eq!(new_mmr.pruned_to_pos(), original_size);
-            assert_eq!(new_mmr.oldest_retained_pos(), None);
-            // Verify the roots match
-            let new_journal_digest = new_mmr.root();
-            assert_eq!(new_journal_digest, original_journal_digest);
-
-            // Insert a new element into the new journaled MMR and the original MMR
-            let new_element = test_digest(10);
-
-            let original_mmr_pos = original_mmr.add(&mut hasher, &new_element).await.unwrap();
-            assert_eq!(original_mmr_pos, original_size);
-
-            let new_mmr_pos = new_mmr.add(&mut hasher, &new_element).await.unwrap();
-            assert_eq!(new_mmr_pos, original_size); // New element is added at the end
-
-            // Verify the roots still match
-            let original_mmr_root = original_mmr.root();
-            let new_mmr_root = new_mmr.root();
-            assert_eq!(new_mmr_root, original_mmr_root);
-
-            // Drop and re-open the journaled MMR
-            new_mmr.sync().await.unwrap();
-            drop(new_mmr);
-            let new_mmr = Mmr::<_, sha256::Digest, Clean<sha256::Digest>>::init(
-                context.clone(),
-                &mut hasher,
-                new_mmr_config,
-            )
-            .await
-            .unwrap();
-
-            // Root should be unchanged
-            let new_mmr_root = new_mmr.root();
-            assert_eq!(new_mmr_root, original_mmr_root);
-
-            // Size and other metadata should be unchanged
-            assert_eq!(new_mmr.size(), original_size + 1); // +1 for element we just added
-            assert_eq!(new_mmr.pruned_to_pos(), original_size);
-            assert_eq!(new_mmr.oldest_retained_pos(), Some(original_size)); // Element we just added is the oldest retained
-
-            // Proofs generated from the journaled MMR should be the same as the proofs generated from the original MMR
-            let proof = new_mmr
-                .proof(Location::new_unchecked(NUM_ELEMENTS))
-                .await
-                .unwrap();
-            let original_proof = original_mmr
-                .proof(Location::new_unchecked(NUM_ELEMENTS))
-                .await
-                .unwrap();
-            assert_eq!(proof.digests, original_proof.digests);
-            assert_eq!(proof.size, original_proof.size);
-
-            original_mmr.destroy().await.unwrap();
-            new_mmr.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_journaled_mmr_init_from_pinned_nodes_edge_cases() {
-        use crate::mmr::mem::CleanMmr as CleanMemMmr;
-
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-
-            // === TEST 1: Empty MMR (size 0) ===
-            let mut empty_mmr =
-                Mmr::<_, sha256::Digest, Clean<sha256::Digest>>::init_from_pinned_nodes(
-                    context.clone(),
-                    vec![],           // No pinned nodes
-                    Position::new(0), // Size 0
-                    Config {
-                        journal_partition: "empty_journal".into(),
-                        metadata_partition: "empty_metadata".into(),
-                        items_per_blob: NZU64!(7),
-                        write_buffer: NZUsize!(1024),
-                        thread_pool: None,
-                        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-                    },
-                    &mut hasher,
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(empty_mmr.size(), 0);
-            assert_eq!(empty_mmr.pruned_to_pos(), Position::new(0));
-            assert_eq!(empty_mmr.oldest_retained_pos(), None);
-
-            // Should be able to add first element at position 0
-            let pos = empty_mmr.add(&mut hasher, &test_digest(0)).await.unwrap();
-            assert_eq!(pos, 0);
-            assert_eq!(empty_mmr.size(), 1);
-
-            empty_mmr.destroy().await.unwrap();
-
-            // === TEST 2: Single element MMR ===
-            let mut single_mem_mmr = CleanMemMmr::new(&mut hasher);
-            single_mem_mmr.add(&mut hasher, &test_digest(42));
-            let single_size = single_mem_mmr.size();
-            let single_root = single_mem_mmr.root();
-            let single_pinned = single_mem_mmr.node_digests_to_pin(single_size);
-
-            let single_journaled_mmr =
-                Mmr::<_, sha256::Digest, Clean<sha256::Digest>>::init_from_pinned_nodes(
-                    context.clone(),
-                    single_pinned,
-                    single_size,
-                    Config {
-                        journal_partition: "single_journal".into(),
-                        metadata_partition: "single_metadata".into(),
-                        items_per_blob: NZU64!(7),
-                        write_buffer: NZUsize!(1024),
-                        thread_pool: None,
-                        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-                    },
-                    &mut hasher,
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(single_journaled_mmr.size(), single_size);
-            assert_eq!(single_journaled_mmr.root(), *single_root);
-
-            single_journaled_mmr.destroy().await.unwrap();
-        });
-    }
     // Test `init_sync` when there is no persisted data.
     #[test_traced]
     fn test_journaled_mmr_init_sync_empty() {

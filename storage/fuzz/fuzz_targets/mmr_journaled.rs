@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::mmr::{
     journaled::{CleanMmr, Config, DirtyMmr, Mmr, SyncConfig},
@@ -55,9 +55,6 @@ enum MmrJournaledOperation {
     GetPrunedToPos,
     GetOldestRetainedPos,
     Reinit,
-    InitFromPinnedNodes {
-        size: u64,
-    },
     InitSync {
         lower_bound_seed: u16,
         upper_bound_seed: u16,
@@ -443,41 +440,6 @@ fn fuzz(input: FuzzInput) {
                     leaves.clear();
                     historical_sizes.clear();
                     MmrState::Clean(new_mmr)
-                }
-
-                MmrJournaledOperation::InitFromPinnedNodes { size } => {
-                    let mmr_size = match &mmr {
-                        MmrState::Clean(m) => m.size(),
-                        MmrState::Dirty(m) => m.size(),
-                    };
-
-                    if mmr_size > 0 {
-                        // Ensure limited_size doesn't exceed current MMR size
-                        let size = size.min(*mmr_size);
-
-                        // Create a reasonable number of pinned nodes - use a simple heuristic
-                        // For small MMRs, we need fewer pinned nodes; for larger ones, we need more
-                        let estimated_pins = ((size as f64).log2().ceil() as usize).max(1);
-
-                        let pinned_nodes: Vec<_> = (0..estimated_pins)
-                            .map(|i| Sha256::hash(&(i as u32).to_be_bytes()))
-                            .collect();
-
-                        if let Ok(new_mmr) = Mmr::init_from_pinned_nodes(
-                            context.clone(),
-                            pinned_nodes.clone(),
-                            size.into(),
-                            test_config("pinned"),
-                            &mut hasher,
-                        )
-                        .await
-                        {
-                            assert_eq!(new_mmr.size(), size);
-                            assert_eq!(new_mmr.pruned_to_pos(), size);
-                            new_mmr.destroy().await.unwrap();
-                        }
-                    }
-                    mmr
                 }
 
                 MmrJournaledOperation::InitSync {

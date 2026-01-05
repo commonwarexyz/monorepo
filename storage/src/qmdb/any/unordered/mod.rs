@@ -1,29 +1,28 @@
 use crate::{
-    journal::{
-        contiguous::{Contiguous, MutableContiguous},
-        Error as JournalError,
-    },
+    index::Unordered as Index,
+    journal::contiguous::{Contiguous, MutableContiguous},
     kv::{self, Batchable},
-    mmr::{
-        mem::{Dirty, State},
-        Location,
-    },
+    mmr::Location,
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
-            CleanAny, DirtyAny, ValueEncoding,
+            ValueEncoding,
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
         operation::{Committable as _, Operation as OperationTrait},
-        update_key, update_known_loc, Error, Index,
+        update_key, update_known_loc, DurabilityState, Durable, Error, MerkleizationState,
+        Merkleized, NonDurable, Unmerkleized,
     },
+};
+#[cfg(any(test, feature = "test-traits"))]
+use crate::{
+    qmdb::any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
     Persistable,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-use core::ops::Range;
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
 
@@ -42,8 +41,9 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        S: State<DigestOf<H>>,
-    > Db<E, C, I, H, Update<K, V>, S>
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
 {
@@ -83,8 +83,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        S: State<DigestOf<H>>,
-    > Db<E, C, I, H, Update<K, V>, S>
+    > Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
 {
@@ -95,7 +94,7 @@ where
             return Ok(None);
         };
         self.log.append(Operation::Delete(key)).await?;
-        self.steps += 1;
+        self.durable_state.steps += 1;
         self.active_keys -= 1;
 
         Ok(Some(loc))
@@ -115,7 +114,7 @@ where
             .append(Operation::Update(Update(key, value)))
             .await?;
         if res.is_some() {
-            self.steps += 1;
+            self.durable_state.steps += 1;
         } else {
             self.active_keys += 1;
         }
@@ -214,7 +213,7 @@ where
                 callback(false, Some(old_loc));
                 self.active_keys -= 1;
             }
-            self.steps += 1;
+            self.durable_state.steps += 1;
         }
 
         // Process the creates.
@@ -241,7 +240,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > Db<E, C, I, H, Update<K, V>>
+    > Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
 where
     Operation<K, V>: Codec,
 {
@@ -263,7 +262,7 @@ where
             inactivity_floor_loc,
             snapshot,
             last_commit_loc,
-            steps: 0,
+            durable_state: Durable {},
             active_keys,
             _update: core::marker::PhantomData,
         })
@@ -277,7 +276,9 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > kv::Gettable for Db<E, C, I, H, Update<K, V>>
+        M: MerkleizationState<DigestOf<H>>,
+        D: DurabilityState,
+    > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
 {
@@ -297,7 +298,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > kv::Updatable for Db<E, C, I, H, Update<K, V>>
+    > kv::Updatable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
 {
@@ -313,7 +314,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > kv::Deletable for Db<E, C, I, H, Update<K, V>>
+    > kv::Deletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
 {
@@ -322,97 +323,7 @@ where
     }
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > Persistable for Db<E, C, I, H, Update<K, V>>
-where
-    Operation<K, V>: Codec,
-{
-    type Error = Error;
-
-    async fn commit(&mut self) -> Result<(), Error> {
-        self.commit(None).await.map(|_| ())
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
-    }
-
-    async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = JournalError>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > CleanAny for Db<E, C, I, H, Update<K, V>>
-where
-    Operation<K, V>: Codec,
-{
-    type Key = K;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
-        self.get(key).await
-    }
-
-    async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
-        self.commit(metadata).await
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
-    }
-
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
-    }
-
-    async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > DirtyAny for Db<E, C, I, H, Update<K, V>, Dirty>
-where
-    Operation<K, V>: Codec,
-{
-    type Key = K;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
-        self.get(key).await
-    }
-
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Error> {
-        self.update(key, value).await
-    }
-
-    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Error> {
-        self.create(key, value).await
-    }
-
-    async fn delete(&mut self, key: Self::Key) -> Result<bool, Error> {
-        self.delete(key).await
-    }
-}
-
-impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>>
+impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -430,20 +341,123 @@ where
     }
 }
 
+#[cfg(any(test, feature = "test-traits"))]
+impl<E, K, V, C, I, H> CleanAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    I: Index<Value = Location>,
+    H: Hasher,
+    Operation<K, V>: Codec,
+{
+    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
+
+    fn into_mutable(self) -> Self::Mutable {
+        self.into_mutable()
+    }
+}
+
+#[cfg(any(test, feature = "test-traits"))]
+impl<E, K, V, C, I, H> UnmerkleizedDurableAny
+    for Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    I: Index<Value = Location>,
+    H: Hasher,
+    Operation<K, V>: Codec,
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
+    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
+
+    fn into_mutable(self) -> Self::Mutable {
+        self.into_mutable()
+    }
+
+    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
+        Ok(self.into_merkleized())
+    }
+}
+
+#[cfg(any(test, feature = "test-traits"))]
+impl<E, K, V, C, I, H> MerkleizedNonDurableAny
+    for Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    I: Index<Value = Location>,
+    H: Hasher,
+    Operation<K, V>: Codec,
+{
+    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
+    type Durable = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
+
+    async fn commit(
+        self,
+        metadata: Option<V::Value>,
+    ) -> Result<(Self::Durable, core::ops::Range<Location>), Error> {
+        self.commit(metadata).await
+    }
+
+    fn into_mutable(self) -> Self::Mutable {
+        self.into_mutable()
+    }
+}
+
+#[cfg(any(test, feature = "test-traits"))]
+impl<E, K, V, C, I, H> MutableAny for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    I: Index<Value = Location>,
+    H: Hasher,
+    Operation<K, V>: Codec,
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+    type Durable = Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>;
+    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>;
+
+    async fn commit(
+        self,
+        metadata: Option<V::Value>,
+    ) -> Result<(Self::Durable, core::ops::Range<Location>), Error> {
+        self.commit(metadata).await
+    }
+
+    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
+        Ok(self.into_merkleized())
+    }
+
+    fn steps(&self) -> u64 {
+        self.durable_state.steps
+    }
+}
+
 // pub(super) so helpers can be used by the sync module.
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
     use crate::{
+        kv::{Deletable as _, Gettable as _, Updatable as _},
         mmr::StandardHasher,
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
-            store::{DirtyStore as _, LogStore as _},
+            store::{LogStore, MerkleizedStore},
             verify_proof,
         },
         translator::TwoCap,
     };
-    use commonware_codec::Encode;
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -455,10 +469,22 @@ pub(super) mod test {
     use std::collections::HashMap;
 
     /// A type alias for the concrete [fixed::Db] type used in these unit tests.
-    type FixedDb = fixed::Db<Context, Digest, Digest, Sha256, TwoCap>;
+    type FixedDb = fixed::Db<Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
 
     /// A type alias for the concrete [variable::Db] type used in these unit tests.
-    type VariableDb = variable::Db<Context, Digest, Digest, Sha256, TwoCap>;
+    type VariableDb =
+        variable::Db<Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+
+    /// Helper trait for testing Any databases that cycle through all four states.
+    pub(crate) trait TestableAnyDb<V>:
+        CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
+    {
+    }
+
+    impl<T, V> TestableAnyDb<V> for T where
+        T: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
+    {
+    }
 
     /// Return an `Any` database initialized with a fixed config.
     pub(crate) async fn open_fixed_db(context: Context) -> FixedDb {
@@ -474,13 +500,11 @@ pub(super) mod test {
             .unwrap()
     }
 
-    async fn test_any_db_empty<D>(
+    async fn test_any_db_empty<D: TestableAnyDb<Digest>>(
         context: Context,
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn std::future::Future<Output = D> + Send>>,
-    ) where
-        D: CleanAny<Key = Digest, Value = Digest, Digest = Digest>,
-    {
+    ) {
         assert_eq!(db.op_count(), 1);
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
         assert!(db.get_metadata().await.unwrap().is_none());
@@ -491,15 +515,24 @@ pub(super) mod test {
 
         // Make sure closing/reopening gets us back to the same state, even after adding an
         // uncommitted op, and even without a clean shutdown.
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         db.update(k1, v1).await.unwrap();
-        let mut db = reopen_db(context.clone()).await;
+        drop(db);
+        let db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), empty_root);
 
         // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
-        let range = db.commit(Some(metadata)).await.unwrap();
+        let db = db.into_mutable();
+        // into_merkleized() -> MerkleizedNonDurable, then commit() -> MerkleizedDurable
+        let (mut db, range) = db
+            .into_merkleized()
+            .await
+            .unwrap()
+            .commit(Some(metadata))
+            .await
+            .unwrap();
         assert_eq!(range.start, 1);
         assert_eq!(range.end, 2);
         assert_eq!(db.op_count(), 2); // another commit op added
@@ -508,6 +541,7 @@ pub(super) mod test {
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
+        drop(db);
         let db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
@@ -515,21 +549,32 @@ pub(super) mod test {
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
         // non-empty db.
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         db.update(k1, v1).await.unwrap();
         for _ in 1..100 {
-            let mut clean_db = db.merkleize().await.unwrap();
-            clean_db.commit(None).await.unwrap();
-            db = clean_db.into_dirty();
+            let (clean_db, _) = db
+                .into_merkleized()
+                .await
+                .unwrap()
+                .commit(None)
+                .await
+                .unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
             // referencing the previous commit operation.
+            assert!(clean_db.op_count() - clean_db.inactivity_floor_loc() <= 3);
+            db = clean_db.into_mutable();
             assert!(db.op_count() - db.inactivity_floor_loc() <= 3);
         }
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.delete(k1).await.unwrap();
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        let (db, _) = db
+            .into_merkleized()
+            .await
+            .unwrap()
+            .commit(None)
+            .await
+            .unwrap();
         assert!(db.is_empty());
         assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
 
@@ -554,19 +599,20 @@ pub(super) mod test {
         });
     }
 
-    /// Shared test: build a db with mixed updates/deletes, verify state, proofs, reopen.
-    pub(crate) async fn test_any_db_build_and_authenticate<D, V>(
+    pub(crate) async fn test_any_db_build_and_authenticate<
+        D: TestableAnyDb<V>,
+        V: Codec + Clone + Eq + std::hash::Hash + std::fmt::Debug,
+    >(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest, Value = V, Digest = Digest, Operation: Encode>,
-        V: Clone + Eq + std::hash::Hash + std::fmt::Debug + Codec,
+        <D as MerkleizedStore>::Operation: Codec,
     {
         const ELEMENTS: u64 = 1000;
 
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         let mut map = HashMap::<Digest, V>::default();
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
@@ -600,8 +646,8 @@ pub(super) mod test {
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
 
         // Commit + sync with pruning raises inactivity floor.
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        let (db, _) = db.commit(None).await.unwrap();
+        let mut db = db.into_merkleized().await.unwrap();
         db.sync().await.unwrap();
         db.prune(db.inactivity_floor_loc()).await.unwrap();
         assert_eq!(db.op_count(), Location::new_unchecked(1957));
@@ -640,14 +686,12 @@ pub(super) mod test {
     }
 
     /// Test basic CRUD and commit behavior.
-    pub(crate) async fn test_any_db_basic<D>(
+    pub(crate) async fn test_any_db_basic<D: TestableAnyDb<Digest>>(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
-    ) where
-        D: CleanAny<Key = Digest, Value = Digest, Digest = Digest>,
-    {
-        let mut db = db.into_dirty();
+    ) {
+        let mut db = db.into_mutable();
 
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
         // expected.
@@ -679,9 +723,8 @@ pub(super) mod test {
 
         assert_eq!(db.op_count(), 6); // 4 updates, 1 deletion + initial commit.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
-        let mut db = db.into_dirty();
+        let (db, _) = db.commit(None).await.unwrap();
+        let mut db = db.into_mutable();
 
         // Make sure create won't modify active keys.
         assert!(!db.create(d1, v1).await.unwrap());
@@ -699,9 +742,8 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 12); // 2 new delete ops.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(7));
 
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
-        let mut db = db.into_dirty();
+        let (db, _) = db.commit(None).await.unwrap();
+        let mut db = db.into_mutable();
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(12));
         assert_eq!(db.op_count(), 13); // only commit should remain.
 
@@ -715,15 +757,21 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 13);
 
         // Make sure closing/reopening gets us back to the same state.
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        let db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
         assert_eq!(db.op_count(), 14);
         let root = db.root();
         drop(db);
         let db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 14);
         assert_eq!(db.root(), root);
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
 
         // Re-activate the keys by updating them.
         db.update(d1, v1).await.unwrap();
@@ -733,20 +781,34 @@ pub(super) mod test {
         db.update(d1, v2).await.unwrap();
 
         // Make sure last_commit is updated by changing the metadata back to None.
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        let db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
 
         // Confirm close/reopen gets us back to the same state.
         assert_eq!(db.op_count(), 23);
         let root = db.root();
-        let mut db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.clone()).await;
 
         assert_eq!(db.root(), root);
         assert_eq!(db.op_count(), 23);
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
-        db.commit(None).await.unwrap();
+        let db = db.into_mutable();
+        let mut db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
 
         assert!(db.root() != root);
 
@@ -777,25 +839,28 @@ pub(super) mod test {
     }
 
     /// Test recovery on non-empty db.
-    pub(crate) async fn test_any_db_non_empty_recovery<D, V>(
+    pub(crate) async fn test_any_db_non_empty_recovery<D: TestableAnyDb<V>, V: Clone>(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
-    ) where
-        D: CleanAny<Key = Digest, Value = V, Digest = Digest>,
-        V: Clone,
-    {
+    ) {
         const ELEMENTS: u64 = 1000;
 
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value(i * 1000);
             db.update(k, v).await.unwrap();
         }
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        let mut db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
         db.prune(db.inactivity_floor_loc()).await.unwrap();
         let root = db.root();
         let op_count = db.op_count();
@@ -806,7 +871,7 @@ pub(super) mod test {
         assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_eq!(db.root(), root);
 
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
@@ -817,7 +882,7 @@ pub(super) mod test {
         assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_eq!(db.root(), root);
 
-        let mut dirty = db.into_dirty();
+        let mut dirty = db.into_mutable();
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
@@ -827,7 +892,7 @@ pub(super) mod test {
         assert_eq!(db.op_count(), op_count);
         assert_eq!(db.root(), root);
 
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         for _ in 0..3 {
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
@@ -839,14 +904,13 @@ pub(super) mod test {
         assert_eq!(db.op_count(), op_count);
         assert_eq!(db.root(), root);
 
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
             db.update(k, v).await.unwrap();
         }
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        let _ = db.commit(None).await.unwrap();
         let db = reopen_db(context.clone()).await;
         assert!(db.op_count() > op_count);
         assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
@@ -856,22 +920,19 @@ pub(super) mod test {
     }
 
     /// Test recovery on empty db.
-    pub(crate) async fn test_any_db_empty_recovery<D, V>(
+    pub(crate) async fn test_any_db_empty_recovery<D: TestableAnyDb<V>, V: Clone>(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
-    ) where
-        D: CleanAny<Key = Digest, Value = V, Digest = Digest>,
-        V: Clone,
-    {
+    ) {
         let root = db.root();
 
         let db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         for i in 0u64..1000 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
@@ -881,17 +942,18 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         for i in 0u64..1000 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
             db.update(k, v).await.unwrap();
         }
+        drop(db);
         let db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         for _ in 0..3 {
             for i in 0u64..1000 {
                 let k = Sha256::hash(&i.to_be_bytes());
@@ -899,18 +961,26 @@ pub(super) mod test {
                 db.update(k, v).await.unwrap();
             }
         }
+        drop(db);
         let db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         for i in 0u64..1000 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
             db.update(k, v).await.unwrap();
         }
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        let db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
+        drop(db);
         let db = reopen_db(context.clone()).await;
         assert!(db.op_count() > 1);
         assert_ne!(db.root(), root);
@@ -919,19 +989,18 @@ pub(super) mod test {
     }
 
     /// Test making multiple commits, one of which deletes a key from a previous commit.
-    pub(crate) async fn test_any_db_multiple_commits_delete_replayed<D, V>(
+    pub(crate) async fn test_any_db_multiple_commits_delete_replayed<D: TestableAnyDb<V>, V>(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest, Value = V, Digest = Digest>,
         V: Clone + Eq + std::fmt::Debug,
     {
         let mut map = HashMap::<Digest, V>::default();
         const ELEMENTS: u64 = 10;
         let metadata_value = make_value(42);
-        let mut db = db.into_dirty();
+        let mut db = db.into_mutable();
         let key_at = |j: u64, i: u64| Sha256::hash(&(j * 1000 + i).to_be_bytes());
         for j in 0u64..ELEMENTS {
             for i in 0u64..ELEMENTS {
@@ -940,16 +1009,15 @@ pub(super) mod test {
                 db.update(k, v.clone()).await.unwrap();
                 map.insert(k, v);
             }
-            let mut clean_db = db.merkleize().await.unwrap();
-            clean_db.commit(Some(metadata_value.clone())).await.unwrap();
-            db = clean_db.into_dirty();
+            let (clean_db, _) = db.commit(Some(metadata_value.clone())).await.unwrap();
+            db = clean_db.into_merkleized().await.unwrap().into_mutable();
         }
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
         let k = key_at(ELEMENTS - 1, ELEMENTS - 1);
 
         db.delete(k).await.unwrap();
-        let mut db = db.merkleize().await.unwrap();
-        db.commit(None).await.unwrap();
+        let (db, _) = db.commit(None).await.unwrap();
+        let db = db.into_merkleized().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert!(db.get(&k).await.unwrap().is_none());
 

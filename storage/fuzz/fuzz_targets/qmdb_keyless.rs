@@ -43,10 +43,7 @@ enum Operation {
         start_offset: u32,
         max_ops: u16,
     },
-    SimulateFailure {
-        sync_log: bool,
-        sync_mmr: bool,
-    },
+    SimulateFailure {},
 }
 
 impl<'a> Arbitrary<'a> for Operation {
@@ -99,11 +96,7 @@ impl<'a> Arbitrary<'a> for Operation {
                     max_ops,
                 })
             }
-            12 => {
-                let sync_log: bool = u.arbitrary()?;
-                let sync_mmr: bool = u.arbitrary()?;
-                Ok(Operation::SimulateFailure { sync_log, sync_mmr })
-            }
+            12 => Ok(Operation::SimulateFailure {}),
             _ => unreachable!(),
         }
     }
@@ -127,6 +120,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: usize = 128;
 const PAGE_CACHE_SIZE: usize = 8;
 
+type CleanDb = Keyless<deterministic::Context, Vec<u8>, Sha256>;
+
 fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
@@ -148,12 +143,11 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut db =
-            Keyless::<_, _, Sha256, _>::init(context.clone(), test_config("keyless_fuzz_test"))
-                .await
-                .expect("Failed to init keyless db");
+        let mut db = CleanDb::init(context.clone(), test_config("keyless_fuzz_test"))
+            .await
+            .expect("Failed to init keyless db")
+            .into_mutable();
 
-        let mut has_uncommitted = false;
 
         for op in &input.ops {
             match op {
@@ -161,14 +155,13 @@ fn fuzz(input: FuzzInput) {
                     db.append(value_bytes.clone())
                         .await
                         .expect("Append should not fail");
-                    has_uncommitted = true;
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    db.commit(metadata_bytes.clone())
+                    let (durable_db, _) = db.commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
-                    has_uncommitted = false;
+                    db = durable_db.into_mutable();
                 }
 
                 Operation::Get { loc_offset } => {
@@ -184,13 +177,18 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Prune => {
-                    db.prune(db.last_commit_loc())
+                    let mut merkleized_db = db.into_merkleized();
+                    merkleized_db.prune(merkleized_db.last_commit_loc())
                         .await
                         .expect("Prune should not fail");
+                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::Sync => {
-                    db.sync().await.expect("Sync should not fail");
+                    let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
+                    let mut clean_db = durable_db.into_merkleized();
+                    clean_db.sync().await.expect("Sync should not fail");
+                    db = clean_db.into_mutable();
                 }
 
                 Operation::OpCount => {
@@ -206,9 +204,9 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Root => {
-                    if !has_uncommitted {
-                        let _ = db.root();
-                    }
+                    let merkleized_db = db.into_merkleized();
+                    let _ = merkleized_db.root();
+                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::Proof {
@@ -216,18 +214,21 @@ fn fuzz(input: FuzzInput) {
                     max_ops,
                 } => {
                     let op_count = db.op_count();
-                    if op_count > 0 && !has_uncommitted {
-                        let start_loc = (*start_offset as u64) % op_count.as_u64();
-                        let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
-                        let start_loc = Location::new(start_loc).unwrap();
-                        let root = db.root();
-                        if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
+                    if op_count == 0 {
+                        continue;
+                    }
+                    let merkleized_db = db.into_merkleized();
+                    let start_loc = (*start_offset as u64) % op_count.as_u64();
+                    let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
+                    let start_loc = Location::new(start_loc).unwrap();
+                    let root = merkleized_db.root();
+                    if let Ok((proof, ops)) = merkleized_db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
                                 "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                             );
-                        }
                     }
+                    db = merkleized_db.into_mutable();
                 }
 
                 Operation::HistoricalProof {
@@ -235,46 +236,42 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
-                    db.sync().await.expect("Sync should not fail");
                     let op_count = db.op_count();
-                    if op_count > 0 && !has_uncommitted {
-                        let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
-                        let size = Location::new(size).unwrap();
-                        let start_loc = (*start_offset as u64) % *size;
-                        let start_loc = Location::new(start_loc).unwrap();
-                        let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
-                        let root = db.root();
-                        if let Ok((proof, ops)) = db
-                            .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
+                    if op_count == 0 {
+                        continue;
+                    }
+                    let merkleized_db = db.into_merkleized();
+                    let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
+                    let size = Location::new(size).unwrap();
+                    let start_loc = (*start_offset as u64) % *size;
+                    let start_loc = Location::new(start_loc).unwrap();
+                    let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
+                    let root = merkleized_db.root();
+                    if let Ok((proof, ops)) = merkleized_db
+                        .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
                                 "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
                             );
                         }
-                    }
+                        db = merkleized_db.into_mutable();
                 }
 
-                Operation::SimulateFailure {
-                    sync_log,
-                    sync_mmr,
-                } => {
-                    db.simulate_failure(*sync_log, *sync_mmr)
-                        .await
-                        .expect("Simulate failure should not fail");
+                Operation::SimulateFailure{} => {
+                    drop(db);
 
-                    db = Keyless::init(
-                        context.clone(),
-                        test_config("keyless_fuzz_test"),
-                    )
-                    .await
-                    .expect("Failed to init keyless db");
-                    has_uncommitted = false;
+                    db = CleanDb::init(context.clone(), test_config("keyless_fuzz_test"))
+                        .await
+                        .expect("Failed to init keyless db")
+                        .into_mutable();
                 }
             }
         }
 
-        db.destroy().await.expect("Destroy should not fail");
+        let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
+        let clean_db = durable_db.into_merkleized();
+        clean_db.destroy().await.expect("Destroy should not fail");
     });
 }
 
