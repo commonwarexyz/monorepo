@@ -85,6 +85,22 @@ impl<T> Secret<T> {
     pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a T) -> R) -> R {
         f(&self.0)
     }
+
+    /// Consumes the [Secret] and returns the inner value, zeroizing the original
+    /// memory location.
+    ///
+    /// Use this when you need to transfer ownership of the secret value (e.g.,
+    /// for APIs that consume the value).
+    #[inline]
+    pub fn expose_unwrap(mut self) -> T {
+        // SAFETY: self.0 is initialized
+        let value = unsafe { ManuallyDrop::take(&mut self.0) };
+        // SAFETY: self.0 memory is still allocated, just logically moved-from
+        unsafe { zeroize_ptr(&mut self.0 as *mut _ as *mut T) };
+        // Prevent Secret::drop from running (would double-zeroize)
+        core::mem::forget(self);
+        value
+    }
 }
 
 impl<T> Drop for Secret<T> {
@@ -187,6 +203,13 @@ mod tests {
         secret.expose(|v| {
             assert_eq!(v, &[1u8, 2, 3, 4]);
         });
+    }
+
+    #[test]
+    fn test_expose_unwrap() {
+        let secret = Secret::new([1u8, 2, 3, 4]);
+        let value = secret.expose_unwrap();
+        assert_eq!(value, [1u8, 2, 3, 4]);
     }
 
     #[test]

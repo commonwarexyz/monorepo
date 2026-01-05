@@ -1180,7 +1180,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             // `Poly::new_with_constant` requires an owned value. The extracted scalar is
             // scoped to this function and will be zeroized on drop (i.e. the secret is
             // only exposed for the duration of this function).
-            share.map(|x| x.private.expose(|private| private.clone())),
+            share.map(|x| x.private.expose_unwrap()),
         )?;
         let my_poly = Poly::new_with_constant(&mut rng, info.degree(), share);
         let priv_msgs = info
@@ -1490,7 +1490,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
                 let share = self
                     .view
                     .get(dealer)
-                    .map(|(_, priv_msg)| priv_msg.share.expose(|share| share.clone()))
+                    .map(|(_, priv_msg)| priv_msg.share.clone().expose_unwrap())
                     .unwrap_or_else(|| {
                         log.get_reveal(&self.me_pub).map_or_else(
                             || {
@@ -1498,7 +1498,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
                                     "select didn't check dealer reveal, or we're not a player?"
                                 )
                             },
-                            |priv_msg| priv_msg.share.expose(|share| share.clone()),
+                            |priv_msg| priv_msg.share.clone().expose_unwrap(),
                         )
                     });
                 (dealer.clone(), share)
@@ -1944,7 +1944,7 @@ mod test_plan {
                             let share = info
                                 .unwrap_or_random_share(
                                     &mut rng,
-                                    share.map(|s| s.private.expose(|private| private.clone())),
+                                    share.map(|s| s.private.expose_unwrap()),
                                 )
                                 .expect("Failed to generate dealer share");
 
