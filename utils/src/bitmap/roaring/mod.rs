@@ -189,7 +189,21 @@ impl RoaringBitmap {
         // Fast path: entire range fits in a single container
         if start_key == end_key {
             let container_start = low_bits(start);
-            let container_end = low_bits(end.saturating_sub(1)).saturating_add(1);
+            let last_value = low_bits(end.saturating_sub(1));
+
+            // Handle the case where the range ends at u16::MAX
+            // We can't represent container_end = 65536 in u16, so we need
+            // to insert the range [start, 65535) plus 65535 separately
+            if last_value == u16::MAX {
+                let container = self.containers.entry(start_key).or_default();
+                let mut inserted = container.insert_range(container_start, u16::MAX) as u64;
+                if container.insert(u16::MAX) {
+                    inserted += 1;
+                }
+                return inserted;
+            }
+
+            let container_end = last_value.saturating_add(1);
             return self
                 .containers
                 .entry(start_key)
@@ -202,28 +216,33 @@ impl RoaringBitmap {
 
         for key in start_key..=end_key {
             let container_start = if key == start_key { low_bits(start) } else { 0 };
-            let container_end = if key == end_key {
-                low_bits(end.saturating_sub(1)).saturating_add(1)
-            } else {
-                0
-            };
 
-            let (range_start, range_end) = if key == end_key {
-                (container_start, container_end)
-            } else if container_end == 0 && key != start_key {
-                (0u16, 0u16)
+            // Determine if this is a "full container" case (insert all 65536 values)
+            // This happens for middle containers, or the end container when end
+            // is exactly on a container boundary (low_bits(end) == 0)
+            let is_full_container = if key == end_key {
+                low_bits(end) == 0
             } else {
-                (container_start, container_end)
+                key != start_key
             };
 
             let container = self.containers.entry(key).or_default();
-            if range_end == 0 && key != end_key {
-                inserted += container.insert_range(range_start, u16::MAX) as u64;
+            if is_full_container {
+                // Insert full range [container_start, 65535] for this container
+                inserted += container.insert_range(container_start, u16::MAX) as u64;
                 if container.insert(u16::MAX) {
                     inserted += 1;
                 }
+            } else if key == end_key {
+                // End container with partial range
+                let container_end = low_bits(end.saturating_sub(1)).saturating_add(1);
+                inserted += container.insert_range(container_start, container_end) as u64;
             } else {
-                inserted += container.insert_range(range_start, range_end) as u64;
+                // Start container (key == start_key && key != end_key already handled)
+                inserted += container.insert_range(container_start, u16::MAX) as u64;
+                if container.insert(u16::MAX) {
+                    inserted += 1;
+                }
             }
         }
 
@@ -540,5 +559,54 @@ mod tests {
         // Should fail with limit < 3
         let result = RoaringBitmap::decode_cfg(encoded, &(..=2).into());
         assert!(matches!(result, Err(Error::InvalidLength(3))));
+    }
+
+    #[test]
+    fn test_insert_range_at_container_boundary_regression() {
+        // Regression test for bug where insert_range failed when the range
+        // ended exactly at a container boundary (low_bits(end-1) == u16::MAX).
+        // The bug was that saturating_add(1) on u16::MAX saturates to u16::MAX
+        // instead of wrapping to 0, causing incorrect range insertion.
+        //
+        // Original crash input: InsertRange { start: 18446744071497449473, len: 65535 }
+
+        // Test case 1: Range ending at first container boundary (65535)
+        let mut bitmap = RoaringBitmap::new();
+        let inserted = bitmap.insert_range(0, 65536);
+        assert_eq!(inserted, 65536);
+        assert_eq!(bitmap.len(), 65536);
+        for i in 0u64..65536 {
+            assert!(bitmap.contains(i), "missing value {}", i);
+        }
+        assert!(!bitmap.contains(65536));
+
+        // Test case 2: Range ending at container boundary within a single container
+        let mut bitmap = RoaringBitmap::new();
+        let inserted = bitmap.insert_range(65000, 65536);
+        assert_eq!(inserted, 536);
+        assert_eq!(bitmap.len(), 536);
+        for i in 65000u64..65536 {
+            assert!(bitmap.contains(i), "missing value {}", i);
+        }
+
+        // Test case 3: Range spanning containers ending at boundary
+        let mut bitmap = RoaringBitmap::new();
+        let inserted = bitmap.insert_range(65530, 131072);
+        assert_eq!(inserted, 65542);
+        assert_eq!(bitmap.len(), 65542);
+        for i in 65530u64..131072 {
+            assert!(bitmap.contains(i), "missing value {}", i);
+        }
+
+        // Test case 4: The actual fuzzer crash input (large values near u64::MAX)
+        let start: u64 = 18446744071497449473;
+        let len: u16 = 65535;
+        let end = start.saturating_add(len as u64);
+        let expected_len = end - start;
+
+        let mut bitmap = RoaringBitmap::new();
+        let inserted = bitmap.insert_range(start, end);
+        assert_eq!(inserted, expected_len);
+        assert_eq!(bitmap.len(), expected_len);
     }
 }

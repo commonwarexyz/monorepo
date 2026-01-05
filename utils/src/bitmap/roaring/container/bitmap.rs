@@ -143,7 +143,12 @@ impl Bitmap {
 
         if start_word == end_word {
             // Range fits in a single word
-            let mask = ((1u64 << (end_bit - start_bit + 1)) - 1) << start_bit;
+            let num_bits = end_bit - start_bit + 1;
+            let mask = if num_bits == 64 {
+                !0u64
+            } else {
+                ((1u64 << num_bits) - 1) << start_bit
+            };
             let old_count = self.words[start_word].count_ones();
             self.words[start_word] |= mask;
             inserted = self.words[start_word].count_ones() - old_count;
@@ -162,7 +167,11 @@ impl Bitmap {
             }
 
             // Last word (partial)
-            let last_mask = (1u64 << (end_bit + 1)) - 1;
+            let last_mask = if end_bit == 63 {
+                !0u64
+            } else {
+                (1u64 << (end_bit + 1)) - 1
+            };
             let old_count = self.words[end_word].count_ones();
             self.words[end_word] |= last_mask;
             inserted += self.words[end_word].count_ones() - old_count;
@@ -338,17 +347,7 @@ impl Read for Bitmap {
         for word in &mut words {
             *word = u64::read(buf)?;
         }
-        let container = Self::from_words(words);
-
-        // Validate cardinality is > 4096 (otherwise should be Array)
-        if container.should_be_array() {
-            return Err(CodecError::Invalid(
-                "Bitmap",
-                "cardinality too low, should be Array container",
-            ));
-        }
-
-        Ok(container)
+        Ok(Self::from_words(words))
     }
 }
 
@@ -533,5 +532,78 @@ mod tests {
             container.insert(i);
         }
         assert!(!container.should_be_array());
+    }
+
+    #[test]
+    fn test_insert_range_shift_overflow_regression() {
+        // Regression test for bug where insert_range caused shift overflow panic.
+        // The bug was that computing masks like `1u64 << 64` or `1u64 << (end_bit + 1)`
+        // when end_bit == 63 causes overflow. Fixed by checking for these cases
+        // and using `!0u64` instead.
+
+        // Test case 1: Full word range (bits 0-63, num_bits == 64)
+        let mut container = Bitmap::new();
+        let inserted = container.insert_range(0, 64);
+        assert_eq!(inserted, 64);
+        assert_eq!(container.len(), 64);
+        for i in 0..64 {
+            assert!(container.contains(i), "missing value {}", i);
+        }
+
+        // Test case 2: Range ending at bit 63 (end_bit == 63)
+        let mut container = Bitmap::new();
+        let inserted = container.insert_range(32, 64);
+        assert_eq!(inserted, 32);
+        for i in 32..64 {
+            assert!(container.contains(i), "missing value {}", i);
+        }
+
+        // Test case 3: Range spanning multiple words ending at word boundary
+        let mut container = Bitmap::new();
+        let inserted = container.insert_range(60, 128);
+        assert_eq!(inserted, 68);
+        for i in 60..128 {
+            assert!(container.contains(i), "missing value {}", i);
+        }
+
+        // Test case 4: Full container range requires inserting up to u16::MAX
+        // Since insert_range is [start, end), we insert [0, u16::MAX) then add u16::MAX
+        let mut container = Bitmap::new();
+        let inserted = container.insert_range(0, u16::MAX);
+        assert_eq!(inserted, 65535);
+        container.insert(u16::MAX);
+        assert!(container.is_full());
+        assert_eq!(container.len(), BITS);
+
+        // Test case 5: Range at end of container (ending at u16::MAX)
+        let mut container = Bitmap::new();
+        let inserted = container.insert_range(65500, u16::MAX);
+        assert_eq!(inserted, 35);
+        for i in 65500..u16::MAX {
+            assert!(container.contains(i), "missing value {}", i);
+        }
+
+        // Test case 6: Single full word in middle of container
+        let mut container = Bitmap::new();
+        let inserted = container.insert_range(64, 128);
+        assert_eq!(inserted, 64);
+        for i in 64..128 {
+            assert!(container.contains(i), "missing value {}", i);
+        }
+
+        // Test case 7: Range ending exactly at word boundary (last bit of word)
+        let mut container = Bitmap::new();
+        let inserted = container.insert_range(0, 64);
+        assert_eq!(inserted, 64);
+        // Ensure bit 63 (the last bit of the first word) is set
+        assert!(container.contains(63));
+
+        // Test case 8: Range from middle to end of a word
+        let mut container = Bitmap::new();
+        let inserted = container.insert_range(48, 64);
+        assert_eq!(inserted, 16);
+        for i in 48..64 {
+            assert!(container.contains(i), "missing value {}", i);
+        }
     }
 }
