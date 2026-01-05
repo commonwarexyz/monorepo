@@ -125,13 +125,14 @@ where
                     }
 
                     // Update the highest contiguous height
-                    let mut next_contiguous = self.contiguous.map(|c| c.get() + 1).unwrap_or(0);
-                    while self.digests.contains_key(&Height::new(next_contiguous)) {
-                        next_contiguous += 1;
+                    let mut next_contiguous =
+                        self.contiguous.map(|c| c.next()).unwrap_or(Height::zero());
+                    while self.digests.contains_key(&next_contiguous) {
+                        next_contiguous = next_contiguous.next();
                     }
-                    if next_contiguous > 0 {
+                    if !next_contiguous.is_zero() {
                         self.contiguous =
-                            Some(Height::new(next_contiguous.checked_sub(1).unwrap()));
+                            Some(next_contiguous.previous().unwrap());
                     }
                 }
                 Message::Tip(height) => {
