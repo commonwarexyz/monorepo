@@ -1567,7 +1567,7 @@ mod tests {
 
         // Verify the decoded proposal
         let verifier = node_verifier();
-        assert!(verifier.verify(ChunkSubject::new(&decoded.chunk), &decoded.signature));
+        assert!(decoded.verify(&verifier));
     }
 
     fn lock_encode_decode<S, F>(fixture: F)
@@ -1806,11 +1806,11 @@ mod tests {
 
         // Verify proposal
         let verifier = node_verifier();
-        assert!(verifier.verify(ChunkSubject::new(&proposal.chunk), &proposal.signature));
+        assert!(proposal.verify(&verifier));
 
         // Test that verification fails with wrong namespace
         let wrong_verifier = NodeVerifier::new(b"wrong");
-        assert!(!wrong_verifier.verify(ChunkSubject::new(&proposal.chunk), &proposal.signature));
+        assert!(!proposal.verify(&wrong_verifier));
     }
 
     fn node_verify_invalid_signature<S, F>(fixture: F)
@@ -2104,11 +2104,11 @@ mod tests {
 
         // Verify with correct namespace - should pass
         let verifier = node_verifier();
-        assert!(verifier.verify(ChunkSubject::new(&proposal.chunk), &proposal.signature));
+        assert!(proposal.verify(&verifier));
 
         // Verify with wrong namespace - should fail
         let wrong_verifier = NodeVerifier::new(b"wrong_namespace");
-        assert!(!wrong_verifier.verify(ChunkSubject::new(&proposal.chunk), &proposal.signature));
+        assert!(!proposal.verify(&wrong_verifier));
     }
 
     #[test]
@@ -2127,7 +2127,7 @@ mod tests {
 
         // Verification should fail because the signature doesn't match the sequencer's public key
         let verifier = node_verifier();
-        assert!(!verifier.verify(ChunkSubject::new(&proposal.chunk), &proposal.signature));
+        assert!(!proposal.verify(&verifier));
     }
 
     fn node_genesis_with_parent_fails<S, F>(fixture: F)
