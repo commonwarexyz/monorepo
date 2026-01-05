@@ -634,7 +634,7 @@ impl<
                 .metrics
                 .sequencer_heights
                 .get_or_create(&metrics::SequencerLabel::from(&node.chunk.sequencer))
-                .try_set(node.chunk.height.get() as i64);
+                .try_set(node.chunk.height.get());
 
             // Append to journal if the `Node` is new, making sure to sync the journal
             // to prevent sending two conflicting chunks to the automaton, even if
