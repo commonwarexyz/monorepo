@@ -2726,62 +2726,42 @@ mod tests {
         (mailbox, batcher_receiver, relay)
     }
 
-    /// Helper to advance past view 1 (which times out immediately on startup).
+    /// Helper to advance to a specific view by sending a finalization for the previous view.
     async fn advance_to_view<S: Scheme<Sha256Digest>>(
         mailbox: &mut Mailbox<S, Sha256Digest>,
         batcher_receiver: &mut mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
         schemes: &[S],
         quorum: u32,
-    ) -> (View, Sha256Digest) {
-        // Get initial view
-        let current_view = match batcher_receiver.next().await.unwrap() {
-            batcher::Message::Update {
-                current, active, ..
-            } => {
-                active.send(true).unwrap();
-                current
-            }
-            _ => panic!("expected Update message"),
-        };
-
-        // Wait for view 1's immediate nullify
-        loop {
-            match batcher_receiver.next().await.unwrap() {
-                batcher::Message::Constructed(Vote::Nullify(n)) if n.view() == current_view => {
-                    break
-                }
-                batcher::Message::Update { active, .. } => active.send(true).unwrap(),
-                _ => {}
-            }
-        }
-
-        // Advance to view 2 via finalization
-        let prev_payload = Sha256::hash(b"v0");
-        let prev_proposal = Proposal::new(
-            Round::new(Epoch::new(333), current_view),
-            View::zero(),
-            prev_payload,
+        target: View,
+    ) -> Sha256Digest {
+        let prev_view = target.previous().expect("target view must be > 0");
+        let payload = Sha256::hash(prev_view.get().to_be_bytes().as_slice());
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(333), prev_view),
+            prev_view.previous().unwrap_or(View::zero()),
+            payload,
         );
-        let (_, finalization) = build_finalization(schemes, &prev_proposal, quorum);
+        let (_, finalization) = build_finalization(schemes, &proposal, quorum);
         mailbox
             .resolved(Certificate::Finalization(finalization))
             .await;
 
-        // Wait for view 2 update
-        let new_view = loop {
+        // Wait for target view update
+        loop {
             match batcher_receiver.next().await.unwrap() {
                 batcher::Message::Update {
                     current, active, ..
-                } if current > current_view => {
+                } if current >= target => {
                     active.send(true).unwrap();
-                    break current;
+                    assert_eq!(current, target);
+                    break;
                 }
                 batcher::Message::Update { active, .. } => active.send(true).unwrap(),
                 batcher::Message::Constructed(_) => {}
             }
-        };
+        }
 
-        (new_view, prev_payload)
+        payload
     }
 
     /// Tests that certification can proceed even after timeout triggers nullify.
@@ -2834,49 +2814,19 @@ mod tests {
             )
             .await;
 
-            let (current_view, _) = advance_to_view(
+            // Advance to view 3 where we're a follower.
+            // With RoundRobin, epoch=333, n=5: leader = (333 + view) % 5
+            // View 3: leader = 1 (not us)
+            let target_view = View::new(3);
+            advance_to_view(
                 &mut mailbox,
                 &mut batcher_receiver,
                 &schemes,
                 quorum,
+                target_view,
             )
             .await;
 
-            // After advance_to_view we're at view 2.
-            // With RoundRobin, epoch=333, n=5: leader = (333 + view) % 5
-            // View 2: leader = 0 (us), View 3: leader = 1 (not us)
-            assert_eq!(current_view, View::new(2));
-            assert_eq!(
-                built_elector.elect(Round::new(Epoch::new(333), current_view), None),
-                0,
-                "we should be leader at view 2"
-            );
-
-            // Advance one more view so we're a follower.
-            let view2_proposal = Proposal::new(
-                Round::new(Epoch::new(333), current_view),
-                current_view.previous().unwrap(),
-                Sha256::hash(current_view.get().to_be_bytes().as_slice()),
-            );
-            let (_, finalization) = build_finalization(&schemes, &view2_proposal, quorum);
-            mailbox
-                .resolved(Certificate::Finalization(finalization))
-                .await;
-
-            let target_view = loop {
-                match batcher_receiver.next().await.unwrap() {
-                    batcher::Message::Update {
-                        current, active, ..
-                    } if current > current_view => {
-                        active.send(true).unwrap();
-                        break current;
-                    }
-                    batcher::Message::Update { active, .. } => active.send(true).unwrap(),
-                    batcher::Message::Constructed(_) => {}
-                }
-            };
-
-            assert_eq!(target_view, View::new(3));
             assert_ne!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
                 0,
@@ -2981,49 +2931,19 @@ mod tests {
             )
             .await;
 
-            let (current_view, _) = advance_to_view(
+            // Advance to view 3 where we're a follower.
+            // With RoundRobin, epoch=333, n=5: leader = (333 + view) % 5
+            // View 3: leader = 1 (not us)
+            let target_view = View::new(3);
+            let parent_payload = advance_to_view(
                 &mut mailbox,
                 &mut batcher_receiver,
                 &schemes,
                 quorum,
+                target_view,
             )
             .await;
 
-            // After advance_to_view we're at view 2.
-            // With RoundRobin, epoch=333, n=5: leader = (333 + view) % 5
-            // View 2: leader = 0 (us), View 3: leader = 1 (not us)
-            assert_eq!(current_view, View::new(2));
-            assert_eq!(
-                built_elector.elect(Round::new(Epoch::new(333), current_view), None),
-                0,
-                "we should be leader at view 2"
-            );
-
-            // Advance one more view so we're a follower.
-            let view2_proposal = Proposal::new(
-                Round::new(Epoch::new(333), current_view),
-                current_view.previous().unwrap(),
-                Sha256::hash(current_view.get().to_be_bytes().as_slice()),
-            );
-            let (_, finalization) = build_finalization(&schemes, &view2_proposal, quorum);
-            mailbox
-                .resolved(Certificate::Finalization(finalization))
-                .await;
-
-            let target_view = loop {
-                match batcher_receiver.next().await.unwrap() {
-                    batcher::Message::Update {
-                        current, active, ..
-                    } if current > current_view => {
-                        active.send(true).unwrap();
-                        break current;
-                    }
-                    batcher::Message::Update { active, .. } => active.send(true).unwrap(),
-                    batcher::Message::Constructed(_) => {}
-                }
-            };
-
-            assert_eq!(target_view, View::new(3));
             assert_ne!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
                 0,
@@ -3037,7 +2957,7 @@ mod tests {
                 Sha256::hash(b"follower_test"),
             );
             let leader = participants[1].clone();
-            let contents = (proposal.round, view2_proposal.payload, 0u64).encode();
+            let contents = (proposal.round, parent_payload, 0u64).encode();
             relay
                 .broadcast(&leader, (proposal.payload, contents.into()))
                 .await;
@@ -3163,18 +3083,19 @@ mod tests {
             )
             .await;
 
-            let (target_view, _) = advance_to_view(
+            // Advance to view 2 where we ARE the leader.
+            // With RoundRobin, epoch=333, n=5: leader = (333 + view) % 5
+            // View 2: leader = 0 (us)
+            let target_view = View::new(2);
+            advance_to_view(
                 &mut mailbox,
                 &mut batcher_receiver,
                 &schemes,
                 quorum,
+                target_view,
             )
             .await;
 
-            // After advance_to_view we're at view 2.
-            // With RoundRobin, epoch=333, n=5: leader = (333 + view) % 5
-            // View 2: leader = 0 (us) - we're already the leader!
-            assert_eq!(target_view, View::new(2));
             assert_eq!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
                 0,
