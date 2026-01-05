@@ -81,6 +81,8 @@
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //! * Immediately broadcast `nullify(v)` if the leader's proposal fails verification (rather than waiting for a
 //!   timeout to fire).
+//! * Require broadcasting `notarize(c,v)` and `notarization(c,v)` before broadcasting `finalize(c,v)` to ensure
+//!   participants contribute to notarization before finalization.
 //!
 //! ## Architecture
 //!
