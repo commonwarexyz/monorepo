@@ -6,11 +6,6 @@
 //!
 //! Uses an auto-merge approach: adjacent and overlapping runs are
 //! automatically merged during insertion.
-//!
-//! # References
-//!
-//! - [Roaring Bitmap Paper](https://arxiv.org/pdf/1402.6407)
-//! - [Roaring Bitmap Format Specification](https://github.com/RoaringBitmap/RoaringFormatSpec)
 
 use super::bitmap;
 #[cfg(not(feature = "std"))]

@@ -28,9 +28,9 @@
 //!
 //! # References
 //!
-//! - [Roaring Bitmap Paper](https://arxiv.org/pdf/1402.6407)
-//! - [Roaring Bitmap Format Specification](https://github.com/RoaringBitmap/RoaringFormatSpec)
-//! - [roaring-rs Crate](https://github.com/RoaringBitmap/roaring-rs)
+//! * <https://arxiv.org/pdf/1402.6407>: Better bitmap performance with Roaring bitmaps
+//! * <https://github.com/RoaringBitmap/RoaringFormatSpec>: Roaring Bitmap Format Specification
+//! * <https://github.com/RoaringBitmap/roaring-rs>: roaring-rs Crate
 
 pub mod container;
 mod ops;

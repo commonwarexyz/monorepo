@@ -6,11 +6,6 @@
 //!
 //! When the container becomes fully saturated (cardinality == 65536), it
 //! should be converted to a `Run` with a single run \[0, 65535\].
-//!
-//! # References
-//!
-//! - [Roaring Bitmap Paper](https://arxiv.org/pdf/1402.6407)
-//! - [Roaring Bitmap Format Specification](https://github.com/RoaringBitmap/RoaringFormatSpec)
 
 use super::array;
 use bytes::{Buf, BufMut};

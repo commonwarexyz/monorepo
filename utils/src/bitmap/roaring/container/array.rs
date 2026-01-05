@@ -2,11 +2,6 @@
 //!
 //! Stores up to 4096 sorted u16 values. When the cardinality exceeds this
 //! threshold, the container should be converted to a `Bitmap`.
-//!
-//! # References
-//!
-//! - [Roaring Bitmap Paper](https://arxiv.org/pdf/1402.6407)
-//! - [Roaring Bitmap Format Specification](https://github.com/RoaringBitmap/RoaringFormatSpec)
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
