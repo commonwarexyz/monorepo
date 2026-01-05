@@ -16,7 +16,7 @@ pub struct Config<H: Hasher> {
     /// Hashing scheme to use.
     pub hasher: H,
 
-    /// Pre-configured signing scheme for this network.
+    /// Signing scheme for this network.
     pub scheme: Scheme,
 
     /// Number of messages from consensus to hold in our backlog

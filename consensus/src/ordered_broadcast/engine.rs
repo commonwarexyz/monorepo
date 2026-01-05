@@ -89,7 +89,7 @@ pub struct Engine<
     // Namespace Constants
     ////////////////////////////////////////
 
-    // Pre-configured verifier for chunk signatures.
+    // Verifier for chunk signatures.
     node_verifier: NodeVerifier,
 
     ////////////////////////////////////////
