@@ -1,4 +1,4 @@
-use crate::Error;
+use crate::{Error, Header};
 use commonware_utils::{hex, StableBuf};
 use std::{fs::File, os::unix::fs::FileExt, sync::Arc};
 use tokio::task;
@@ -8,19 +8,25 @@ pub struct Blob {
     partition: String,
     name: Vec<u8>,
     file: Arc<File>,
+    header: Header,
 }
 
 impl Blob {
-    pub fn new(partition: String, name: &[u8], file: File) -> Self {
+    pub fn new(partition: String, name: &[u8], file: File, header: Header) -> Self {
         Self {
             partition,
             name: name.into(),
             file: Arc::new(file),
+            header,
         }
     }
 }
 
 impl crate::Blob for Blob {
+    fn header(&self) -> Header {
+        self.header
+    }
+
     async fn read_at(
         &self,
         buf: impl Into<StableBuf> + Send,
@@ -28,6 +34,9 @@ impl crate::Blob for Blob {
     ) -> Result<StableBuf, Error> {
         let mut buf = buf.into();
         let file = self.file.clone();
+        let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
         task::spawn_blocking(move || {
             file.read_exact_at(buf.as_mut(), offset)?;
             Ok(buf)
@@ -39,6 +48,9 @@ impl crate::Blob for Blob {
     async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
         let buf = buf.into();
         let file = self.file.clone();
+        let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
         task::spawn_blocking(move || {
             file.write_all_at(buf.as_ref(), offset)?;
             Ok(())
@@ -49,6 +61,9 @@ impl crate::Blob for Blob {
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let file = self.file.clone();
+        let len = len
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
         task::spawn_blocking(move || file.set_len(len))
             .await
             .map_err(|e| e.into())

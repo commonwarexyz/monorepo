@@ -793,7 +793,7 @@ mod tests {
     use bytes::BufMut;
     use commonware_cryptography::{Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, Error as RError, Header, Runner, Storage};
     use commonware_utils::{NZUsize, StableBuf};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::registry::Metric;
@@ -1861,6 +1861,10 @@ mod tests {
     struct MockBlob {}
 
     impl Blob for MockBlob {
+        fn header(&self) -> Header {
+            Header::default()
+        }
+
         async fn read_at(
             &self,
             buf: impl Into<StableBuf> + Send,

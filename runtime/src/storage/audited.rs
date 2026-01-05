@@ -1,4 +1,4 @@
-use crate::{deterministic::Auditor, Error};
+use crate::{deterministic::Auditor, Error, Header};
 use commonware_utils::StableBuf;
 use sha2::digest::Update;
 use std::sync::Arc;
@@ -63,6 +63,10 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
+    fn header(&self) -> Header {
+        self.inner.header()
+    }
+
     async fn read_at(&self, buf: impl Into<StableBuf>, offset: u64) -> Result<StableBuf, Error> {
         let buf = buf.into();
         self.auditor.event(b"read_at", |hasher| {

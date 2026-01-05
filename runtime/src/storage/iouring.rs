@@ -22,7 +22,7 @@
 
 use crate::{
     iouring::{self, should_retry},
-    Blob as _, Error,
+    Error, Header,
 };
 use commonware_utils::{from_hex, hex, StableBuf};
 use futures::{
@@ -34,7 +34,7 @@ use io_uring::{opcode, types};
 use prometheus_client::registry::Registry;
 use std::{
     fs::{self, File},
-    io::Error as IoError,
+    io::{Error as IoError, Read, Seek, SeekFrom, Write},
     os::fd::AsRawFd,
     path::{Path, PathBuf},
     sync::Arc,
@@ -115,7 +115,7 @@ impl crate::Storage for Storage {
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
         // Open the file, creating it if it doesn't exist
-        let file = fs::OpenOptions::new()
+        let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -124,27 +124,47 @@ impl crate::Storage for Storage {
             .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
 
         // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
-        let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
-        let newly_created = len == 0;
+        let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
-        // Create the blob
-        let blob = Blob::new(partition.into(), name, file, self.io_sender.clone());
+        // Handle header: new/corrupted blobs get a fresh header written,
+        // existing blobs have their header read.
+        let (header, logical_len) = if raw_len < Header::SIZE_U64 {
+            // New (or corrupted) blob - truncate and write header
+            file.set_len(Header::SIZE_U64)
+                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e))?;
+            file.seek(SeekFrom::Start(0))
+                .map_err(|_| Error::WriteFailed)?;
+            file.write_all(&Header::default().bytes)
+                .map_err(|_| Error::WriteFailed)?;
+            file.sync_all()
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
 
-        // Only sync if we created a new file
-        if newly_created {
-            // Sync the blob to ensure it is durably created
-            blob.sync().await?;
-
-            // Sync the parent directory to ensure the directory entry is durable
-            sync_dir(parent)?;
-
-            // Sync storage directory if parent directory did not exist
-            if !parent_existed {
-                sync_dir(&self.storage_directory)?;
+            // For new files, sync the parent directory to ensure the directory entry is durable.
+            if raw_len == 0 {
+                sync_dir(parent)?;
+                if !parent_existed {
+                    sync_dir(&self.storage_directory)?;
+                }
             }
-        }
 
-        Ok((blob, len))
+            (Header::default(), 0)
+        } else {
+            // Existing blob - read header from first 32 bytes
+            file.seek(SeekFrom::Start(0))
+                .map_err(|_| Error::ReadFailed)?;
+            let mut header_bytes = [0u8; Header::SIZE];
+            file.read_exact(&mut header_bytes)
+                .map_err(|_| Error::ReadFailed)?;
+            (
+                Header {
+                    bytes: header_bytes,
+                },
+                raw_len - Header::SIZE_U64,
+            )
+        };
+
+        let blob = Blob::new(partition.into(), name, file, self.io_sender.clone(), header);
+        Ok((blob, logical_len))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -203,6 +223,8 @@ pub struct Blob {
     file: Arc<File>,
     /// Where to send IO operations to be executed
     io_sender: mpsc::Sender<iouring::Op>,
+    /// The blob's header
+    header: Header,
 }
 
 impl Clone for Blob {
@@ -212,6 +234,7 @@ impl Clone for Blob {
             name: self.name.clone(),
             file: self.file.clone(),
             io_sender: self.io_sender.clone(),
+            header: self.header,
         }
     }
 }
@@ -222,17 +245,23 @@ impl Blob {
         name: &[u8],
         file: File,
         io_sender: mpsc::Sender<iouring::Op>,
+        header: Header,
     ) -> Self {
         Self {
             partition,
             name: name.to_vec(),
             file: Arc::new(file),
             io_sender,
+            header,
         }
     }
 }
 
 impl crate::Blob for Blob {
+    fn header(&self) -> Header {
+        self.header
+    }
+
     async fn read_at(
         &self,
         buf: impl Into<StableBuf> + Send,
@@ -243,6 +272,9 @@ impl crate::Blob for Blob {
         let mut bytes_read = 0;
         let buf_len = buf.len();
         let mut io_sender = self.io_sender.clone();
+        let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
         while bytes_read < buf_len {
             // Figure out how much is left to read and where to read into.
             //
@@ -299,6 +331,9 @@ impl crate::Blob for Blob {
         let mut bytes_written = 0;
         let buf_len = buf.len();
         let mut io_sender = self.io_sender.clone();
+        let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
         while bytes_written < buf_len {
             // Figure out how much is left to write and where to write from.
             //
@@ -348,6 +383,9 @@ impl crate::Blob for Blob {
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
+        let len = len
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
         self.file.set_len(len).map_err(|e| {
             Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), IoError::other(e))
         })
@@ -430,5 +468,102 @@ mod tests {
         let (storage, storage_directory) = create_test_storage();
         run_storage_tests(storage).await;
         let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_header_handling() {
+        use crate::{Blob, Header, Storage as _};
+
+        let (storage, storage_directory) = create_test_storage();
+
+        // Test 1: New blob returns logical size 0 and has default header
+        let (blob, size) = storage.open("partition", b"test").await.unwrap();
+        assert_eq!(size, 0, "new blob should have logical size 0");
+        assert_eq!(
+            blob.header(),
+            Header::default(),
+            "new blob should have default header"
+        );
+
+        // Verify raw file has 32 bytes (header only)
+        let file_path = storage_directory.join("partition").join(hex(b"test"));
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            Header::SIZE_U64,
+            "raw file should have 32-byte header"
+        );
+
+        // Test 2: Logical offset handling - write at offset 0 stores at raw offset 32
+        let data = b"hello world";
+        blob.write_at(data.to_vec(), 0).await.unwrap();
+        blob.sync().await.unwrap();
+
+        // Verify raw file size
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(metadata.len(), Header::SIZE_U64 + data.len() as u64);
+
+        // Verify raw file layout
+        let raw_content = std::fs::read(&file_path).unwrap();
+        assert_eq!(&raw_content[..Header::SIZE], &[0u8; Header::SIZE]);
+        assert_eq!(&raw_content[Header::SIZE..], data);
+
+        // Test 3: Read at logical offset 0 returns data from raw offset 32
+        let read_buf = blob.read_at(vec![0u8; data.len()], 0).await.unwrap();
+        assert_eq!(read_buf.as_ref(), data);
+
+        // Test 4: Resize with logical length
+        blob.resize(5).await.unwrap();
+        blob.sync().await.unwrap();
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            Header::SIZE_U64 + 5,
+            "resize(5) should result in 37 raw bytes"
+        );
+
+        // resize(0) should leave only header
+        blob.resize(0).await.unwrap();
+        blob.sync().await.unwrap();
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            Header::SIZE_U64,
+            "resize(0) should leave only header"
+        );
+
+        // Test 5: Reopen existing blob preserves header and returns correct logical size
+        blob.write_at(b"test data".to_vec(), 0).await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
+        assert_eq!(size2, 9, "reopened blob should have logical size 9");
+        assert_eq!(blob2.header(), Header::default());
+        let read_buf = blob2.read_at(vec![0u8; 9], 0).await.unwrap();
+        assert_eq!(read_buf.as_ref(), b"test data");
+        drop(blob2);
+
+        // Test 6: Corrupted blob recovery (0 < raw_size < 32)
+        // Manually create a corrupted file with only 10 bytes
+        let corrupted_path = storage_directory.join("partition").join(hex(b"corrupted"));
+        std::fs::write(&corrupted_path, vec![0u8; 10]).unwrap();
+
+        // Opening should truncate and write fresh header
+        let (blob3, size3) = storage.open("partition", b"corrupted").await.unwrap();
+        assert_eq!(size3, 0, "corrupted blob should return logical size 0");
+        assert_eq!(blob3.header(), Header::default());
+
+        // Verify raw file now has proper 32-byte header
+        let metadata = std::fs::metadata(&corrupted_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            Header::SIZE_U64,
+            "corrupted blob should be reset to header-only"
+        );
+
+        // Cleanup
+        drop(blob3);
+        let _ = std::fs::remove_dir_all(&storage_directory);
     }
 }

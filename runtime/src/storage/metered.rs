@@ -1,4 +1,4 @@
-use crate::Error;
+use crate::{Error, Header};
 use commonware_utils::StableBuf;
 use prometheus_client::{
     metrics::{counter::Counter, gauge::Gauge},
@@ -123,6 +123,10 @@ impl Drop for MetricsHandle {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
+    fn header(&self) -> Header {
+        self.inner.header()
+    }
+
     async fn read_at(
         &self,
         buf: impl Into<StableBuf> + Send,

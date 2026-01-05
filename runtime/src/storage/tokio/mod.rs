@@ -1,9 +1,13 @@
-use crate::Error;
+use crate::{Error, Header};
 use commonware_utils::{from_hex, hex};
 #[cfg(unix)]
 use std::path::Path;
 use std::{path::PathBuf, sync::Arc};
-use tokio::{fs, sync::Mutex};
+use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::Mutex,
+};
 
 #[cfg(not(unix))]
 mod fallback;
@@ -127,18 +131,52 @@ impl crate::Storage for Storage {
         // Set the maximum buffer size
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
 
+        // Handle header: new/corrupted blobs get a fresh header written,
+        // existing blobs have their header read.
+        let (header, logical_size) = if len < Header::SIZE_U64 {
+            // New or corrupted blob - truncate and write default header
+            file.set_len(Header::SIZE_U64)
+                .await
+                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e))?;
+            file.write_all(&Header::default().bytes)
+                .await
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+            file.sync_all()
+                .await
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+            (Header::default(), 0)
+        } else {
+            // Existing blob - read header from first 32 bytes
+            let mut header_bytes = [0u8; Header::SIZE];
+            file.read_exact(&mut header_bytes)
+                .await
+                .map_err(|_| Error::ReadFailed)?;
+            (
+                Header {
+                    bytes: header_bytes,
+                },
+                len - Header::SIZE_U64,
+            )
+        };
+
         #[cfg(unix)]
         {
             // Convert to a blocking std::fs::File
             let file = file.into_std().await;
 
             // Construct the blob
-            Ok((Self::Blob::new(partition.into(), name, file), len))
+            Ok((
+                Self::Blob::new(partition.into(), name, file, header),
+                logical_size,
+            ))
         }
         #[cfg(not(unix))]
         {
             // Construct the blob
-            Ok((Self::Blob::new(partition.into(), name, file), len))
+            Ok((
+                Self::Blob::new(partition.into(), name, file, header),
+                logical_size,
+            ))
         }
     }
 
@@ -215,5 +253,106 @@ mod tests {
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
         let storage = Storage::new(config);
         run_storage_tests(storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_blob_header_handling() {
+        use crate::{Blob, Header, Storage as _};
+
+        let mut rng = rand::rngs::StdRng::from_entropy();
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_header_{}", rng.gen::<u64>()));
+        let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
+        let storage = Storage::new(config);
+
+        // Test 1: New blob returns logical size 0 and has default header
+        let (blob, size) = storage.open("partition", b"test").await.unwrap();
+        assert_eq!(size, 0, "new blob should have logical size 0");
+        assert_eq!(
+            blob.header(),
+            Header::default(),
+            "new blob should have default header"
+        );
+
+        // Verify raw file has 32 bytes (header only)
+        let file_path = storage_directory.join("partition").join(hex(b"test"));
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            Header::SIZE_U64,
+            "raw file should have 32-byte header"
+        );
+
+        // Test 2: Logical offset handling - write at offset 0 stores at raw offset 32
+        let data = b"hello world";
+        blob.write_at(data.to_vec(), 0).await.unwrap();
+        blob.sync().await.unwrap();
+
+        // Verify raw file size
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(metadata.len(), Header::SIZE_U64 + data.len() as u64);
+
+        // Verify raw file layout
+        let raw_content = std::fs::read(&file_path).unwrap();
+        assert_eq!(&raw_content[..Header::SIZE], &[0u8; Header::SIZE]);
+        assert_eq!(&raw_content[Header::SIZE..], data);
+
+        // Test 3: Read at logical offset 0 returns data from raw offset 32
+        let read_buf = blob.read_at(vec![0u8; data.len()], 0).await.unwrap();
+        assert_eq!(read_buf.as_ref(), data);
+
+        // Test 4: Resize with logical length
+        blob.resize(5).await.unwrap();
+        blob.sync().await.unwrap();
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            Header::SIZE_U64 + 5,
+            "resize(5) should result in 37 raw bytes"
+        );
+
+        // resize(0) should leave only header
+        blob.resize(0).await.unwrap();
+        blob.sync().await.unwrap();
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            Header::SIZE_U64,
+            "resize(0) should leave only header"
+        );
+
+        // Test 5: Reopen existing blob preserves header and returns correct logical size
+        blob.write_at(b"test data".to_vec(), 0).await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
+        assert_eq!(size2, 9, "reopened blob should have logical size 9");
+        assert_eq!(blob2.header(), Header::default());
+        let read_buf = blob2.read_at(vec![0u8; 9], 0).await.unwrap();
+        assert_eq!(read_buf.as_ref(), b"test data");
+        drop(blob2);
+
+        // Test 6: Corrupted blob recovery (0 < raw_size < 32)
+        // Manually create a corrupted file with only 10 bytes
+        let corrupted_path = storage_directory.join("partition").join(hex(b"corrupted"));
+        std::fs::write(&corrupted_path, vec![0u8; 10]).unwrap();
+
+        // Opening should truncate and write fresh header
+        let (blob3, size3) = storage.open("partition", b"corrupted").await.unwrap();
+        assert_eq!(size3, 0, "corrupted blob should return logical size 0");
+        assert_eq!(blob3.header(), Header::default());
+
+        // Verify raw file now has proper 32-byte header
+        let metadata = std::fs::metadata(&corrupted_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            Header::SIZE_U64,
+            "corrupted blob should be reset to header-only"
+        );
+
+        // Cleanup
+        drop(blob3);
+        let _ = std::fs::remove_dir_all(&storage_directory);
     }
 }

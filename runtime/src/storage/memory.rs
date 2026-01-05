@@ -1,3 +1,4 @@
+use crate::Header;
 use commonware_utils::{hex, StableBuf};
 use std::{
     collections::BTreeMap,
@@ -27,14 +28,34 @@ impl crate::Storage for Storage {
         let mut partitions = self.partitions.lock().unwrap();
         let partition_entry = partitions.entry(partition.into()).or_default();
         let content = partition_entry.entry(name.into()).or_default();
+
+        let raw_len = content.len() as u64;
+        let (header, logical_len) = if raw_len < Header::SIZE_U64 {
+            // New or corrupted blob - truncate and write default header
+            content.clear();
+            content.resize(Header::SIZE, 0);
+            (Header::default(), 0)
+        } else {
+            // Existing blob - read header from first 32 bytes
+            let mut header_bytes = [0u8; Header::SIZE];
+            header_bytes.copy_from_slice(&content[..Header::SIZE]);
+            (
+                Header {
+                    bytes: header_bytes,
+                },
+                raw_len - Header::SIZE_U64,
+            )
+        };
+
         Ok((
             Blob::new(
                 self.partitions.clone(),
                 partition.into(),
                 name,
                 content.clone(),
+                header,
             ),
-            content.len() as u64,
+            logical_len,
         ))
     }
 
@@ -83,6 +104,7 @@ pub struct Blob {
     partition: String,
     name: Vec<u8>,
     content: Arc<RwLock<Vec<u8>>>,
+    header: Header,
 }
 
 impl Blob {
@@ -91,17 +113,23 @@ impl Blob {
         partition: String,
         name: &[u8],
         content: Vec<u8>,
+        header: Header,
     ) -> Self {
         Self {
             partitions,
             partition,
             name: name.into(),
             content: Arc::new(RwLock::new(content)),
+            header,
         }
     }
 }
 
 impl crate::Blob for Blob {
+    fn header(&self) -> Header {
+        self.header
+    }
+
     async fn read_at(
         &self,
         buf: impl Into<StableBuf> + Send,
@@ -109,6 +137,9 @@ impl crate::Blob for Blob {
     ) -> Result<StableBuf, crate::Error> {
         let mut buf = buf.into();
         let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(crate::Error::OffsetOverflow)?;
+        let offset: usize = offset
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
         let content = self.content.read().unwrap();
@@ -127,6 +158,9 @@ impl crate::Blob for Blob {
     ) -> Result<(), crate::Error> {
         let buf = buf.into();
         let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(crate::Error::OffsetOverflow)?;
+        let offset: usize = offset
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
         let mut content = self.content.write().unwrap();
@@ -139,7 +173,10 @@ impl crate::Blob for Blob {
     }
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {
-        let len = len.try_into().map_err(|_| crate::Error::OffsetOverflow)?;
+        let len = len
+            .checked_add(Header::SIZE_U64)
+            .ok_or(crate::Error::OffsetOverflow)?;
+        let len: usize = len.try_into().map_err(|_| crate::Error::OffsetOverflow)?;
         let mut content = self.content.write().unwrap();
         content.resize(len, 0);
         Ok(())
@@ -174,5 +211,118 @@ mod tests {
     async fn test_memory_storage() {
         let storage = Storage::default();
         run_storage_tests(storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_blob_header_handling() {
+        use crate::{Blob, Header, Storage as _};
+
+        let storage = Storage::default();
+
+        // Test 1: New blob returns logical size 0 and has default header
+        let (blob, size) = storage.open("partition", b"test").await.unwrap();
+        assert_eq!(size, 0, "new blob should have logical size 0");
+        assert_eq!(
+            blob.header(),
+            Header::default(),
+            "new blob should have default header"
+        );
+
+        // Verify raw storage has 32 bytes (header only)
+        {
+            let partitions = storage.partitions.lock().unwrap();
+            let partition = partitions.get("partition").unwrap();
+            let raw_content = partition.get(&b"test".to_vec()).unwrap();
+            assert_eq!(
+                raw_content.len(),
+                Header::SIZE,
+                "raw storage should have 32-byte header"
+            );
+        }
+
+        // Test 2: Logical offset handling - write at offset 0 stores at raw offset 32
+        let data = b"hello world";
+        blob.write_at(data.to_vec(), 0).await.unwrap();
+        blob.sync().await.unwrap();
+
+        // Verify raw storage layout
+        {
+            let partitions = storage.partitions.lock().unwrap();
+            let partition = partitions.get("partition").unwrap();
+            let raw_content = partition.get(&b"test".to_vec()).unwrap();
+            assert_eq!(raw_content.len(), Header::SIZE + data.len());
+            // First 32 bytes should be header (zeros)
+            assert_eq!(&raw_content[..Header::SIZE], &[0u8; Header::SIZE]);
+            // Data should start at offset 32
+            assert_eq!(&raw_content[Header::SIZE..], data);
+        }
+
+        // Test 3: Read at logical offset 0 returns data from raw offset 32
+        let read_buf = blob.read_at(vec![0u8; data.len()], 0).await.unwrap();
+        assert_eq!(read_buf.as_ref(), data);
+
+        // Test 4: Resize with logical length
+        blob.resize(5).await.unwrap();
+        blob.sync().await.unwrap();
+        {
+            let partitions = storage.partitions.lock().unwrap();
+            let partition = partitions.get("partition").unwrap();
+            let raw_content = partition.get(&b"test".to_vec()).unwrap();
+            assert_eq!(
+                raw_content.len(),
+                Header::SIZE + 5,
+                "resize(5) should result in 37 raw bytes"
+            );
+        }
+
+        // resize(0) should leave only header
+        blob.resize(0).await.unwrap();
+        blob.sync().await.unwrap();
+        {
+            let partitions = storage.partitions.lock().unwrap();
+            let partition = partitions.get("partition").unwrap();
+            let raw_content = partition.get(&b"test".to_vec()).unwrap();
+            assert_eq!(
+                raw_content.len(),
+                Header::SIZE,
+                "resize(0) should leave only header"
+            );
+        }
+
+        // Test 5: Reopen existing blob preserves header and returns correct logical size
+        blob.write_at(b"test data".to_vec(), 0).await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
+        assert_eq!(size2, 9, "reopened blob should have logical size 9");
+        assert_eq!(blob2.header(), Header::default());
+        let read_buf = blob2.read_at(vec![0u8; 9], 0).await.unwrap();
+        assert_eq!(read_buf.as_ref(), b"test data");
+
+        // Test 6: Corrupted blob recovery (0 < raw_size < 32)
+        // Manually corrupt the raw storage to have only 10 bytes
+        {
+            let mut partitions = storage.partitions.lock().unwrap();
+            let partition = partitions.get_mut("partition").unwrap();
+            partition.insert(b"corrupted".to_vec(), vec![0u8; 10]);
+        }
+
+        // Opening should truncate and write fresh header
+        let (blob3, size3) = storage.open("partition", b"corrupted").await.unwrap();
+        assert_eq!(size3, 0, "corrupted blob should return logical size 0");
+        assert_eq!(blob3.header(), Header::default());
+
+        // Verify raw storage now has proper 32-byte header
+        {
+            let partitions = storage.partitions.lock().unwrap();
+            let partition = partitions.get("partition").unwrap();
+            let raw_content = partition.get(&b"corrupted".to_vec()).unwrap();
+            assert_eq!(
+                raw_content.len(),
+                Header::SIZE,
+                "corrupted blob should be reset to header-only"
+            );
+        }
     }
 }

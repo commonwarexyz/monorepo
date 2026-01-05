@@ -540,6 +540,23 @@ pub trait Storage: Clone + Send + Sync + 'static {
     fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
 }
 
+/// Fixed-size header at the start of each [Blob].
+///
+/// This space is reserved for future use.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Header {
+    /// Reserved bytes for future use.
+    pub bytes: [u8; Self::SIZE],
+}
+
+impl Header {
+    /// Size of the header in bytes.
+    pub const SIZE: usize = 32;
+
+    /// Size of the header as u64 for offset calculations.
+    pub const SIZE_U64: u64 = Self::SIZE as u64;
+}
+
 /// Interface to read and write to a blob.
 ///
 /// To support blob implementations that enable concurrent reads and
@@ -554,8 +571,18 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// When a blob is dropped, any unsynced changes may be discarded. Implementations
 /// may attempt to sync during drop but errors will go unhandled. Call `sync`
 /// before dropping to ensure all changes are durably persisted.
+///
+/// # Header
+///
+/// All blobs have a 32-byte [`Header`] at the start. The header is read on open
+/// (for existing blobs) or written (for new blobs). All I/O operations use logical
+/// offsets that start after the header; the header offset is handled internally.
+/// The header is currently unused and reserved for future use.
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
+    /// Returns the blob's header.
+    fn header(&self) -> Header;
+
     /// Read from the blob at the given offset.
     ///
     /// `read_at` does not return the number of bytes read because it

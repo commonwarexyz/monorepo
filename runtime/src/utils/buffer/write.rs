@@ -1,4 +1,4 @@
-use crate::{buffer::tip::Buffer, Blob, Error, RwLock};
+use crate::{buffer::tip::Buffer, Blob, Error, Header, RwLock};
 use commonware_utils::StableBuf;
 use std::{num::NonZeroUsize, sync::Arc};
 
@@ -69,6 +69,10 @@ impl<B: Blob> Write<B> {
 }
 
 impl<B: Blob> Blob for Write<B> {
+    fn header(&self) -> Header {
+        self.blob.header()
+    }
+
     async fn read_at(
         &self,
         buf: impl Into<StableBuf> + Send,

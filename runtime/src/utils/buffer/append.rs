@@ -1,6 +1,6 @@
 use crate::{
     buffer::{tip::Buffer, PoolRef},
-    Blob, Error, RwLock,
+    Blob, Error, Header, RwLock,
 };
 use commonware_utils::{NZUsize, StableBuf};
 use std::{num::NonZeroUsize, sync::Arc};
@@ -141,6 +141,10 @@ impl<B: Blob> Append<B> {
 }
 
 impl<B: Blob> Blob for Append<B> {
+    fn header(&self) -> Header {
+        self.blob.header()
+    }
+
     async fn read_at(
         &self,
         buf: impl Into<StableBuf> + Send,
