@@ -8,7 +8,7 @@ use super::{
     RoaringBitmap,
 };
 #[cfg(not(feature = "std"))]
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 

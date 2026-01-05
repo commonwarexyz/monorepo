@@ -68,7 +68,7 @@ pub mod container;
 mod ops;
 
 #[cfg(not(feature = "std"))]
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::collections::BTreeMap;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 pub use container::{Array, Bitmap, Container, Run};

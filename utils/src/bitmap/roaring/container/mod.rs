@@ -14,6 +14,8 @@ pub mod array;
 pub mod bitmap;
 pub mod run;
 
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
 pub use array::Array;
 pub use bitmap::Bitmap;
 use bytes::{Buf, BufMut};
@@ -194,7 +196,7 @@ impl Container {
 /// Iterator over values in a container.
 pub enum Iter<'a> {
     /// Iterator over an Array container.
-    Array(std::iter::Copied<std::slice::Iter<'a, u16>>),
+    Array(core::iter::Copied<core::slice::Iter<'a, u16>>),
     /// Iterator over a Bitmap container.
     Bitmap(bitmap::Iter<'a>),
     /// Iterator over a Run container.

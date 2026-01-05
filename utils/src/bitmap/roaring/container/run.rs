@@ -339,6 +339,9 @@ impl Read for Run {
 
 /// Iterator over values in a run container.
 pub struct Iter<'a> {
+    #[cfg(not(feature = "std"))]
+    runs_iter: alloc::collections::btree_map::Iter<'a, u16, u16>,
+    #[cfg(feature = "std")]
     runs_iter: std::collections::btree_map::Iter<'a, u16, u16>,
     current_run: Option<(u16, u16)>,
     current_value: Option<u16>,
