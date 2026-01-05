@@ -56,8 +56,8 @@ where
     type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
     type Elector: Elector<Self::Scheme>;
     fn fixture(
-        namespace: &[u8],
         context: &mut deterministic::Context,
+        namespace: &[u8],
         n: u32,
     ) -> Fixture<Self::Scheme>;
 }
@@ -166,7 +166,7 @@ fn run<P: Simplex>(input: FuzzInput) {
             schemes,
             verifier: _,
             ..
-        } = P::fixture(NAMESPACE, &mut context, n);
+        } = P::fixture(&mut context, NAMESPACE, n);
 
         let mut registrations = register(&mut oracle, &participants).await;
 

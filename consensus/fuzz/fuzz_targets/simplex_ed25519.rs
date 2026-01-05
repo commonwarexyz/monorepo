@@ -13,11 +13,11 @@ impl Simplex for SimplexEd25519 {
     type Elector = RoundRobin;
 
     fn fixture(
-        namespace: &[u8],
         context: &mut deterministic::Context,
+        namespace: &[u8],
         n: u32,
     ) -> Fixture<Self::Scheme> {
-        ed25519::fixture(namespace, context, n)
+        ed25519::fixture(context, namespace, n)
     }
 }
 

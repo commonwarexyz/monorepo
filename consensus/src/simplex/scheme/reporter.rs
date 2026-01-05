@@ -170,13 +170,13 @@ mod tests {
     fn test_invalid_peer_activity_dropped() {
         // Invalid peer activities should be dropped when verification is enabled
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { verifier, .. } = ed25519::fixture(NAMESPACE, &mut rng, 4);
+        let Fixture { verifier, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
 
         // Create a scheme with wrong namespace to generate invalid signatures
         let Fixture {
             schemes: wrong_schemes,
             ..
-        } = ed25519::fixture(b"wrong-namespace", &mut rng, 4);
+        } = ed25519::fixture(&mut rng, b"wrong-namespace", 4);
 
         assert!(
             ed25519::Scheme::is_attributable(),
@@ -209,13 +209,13 @@ mod tests {
     fn test_skip_verification() {
         // When verification is disabled, invalid activities pass through
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { verifier, .. } = ed25519::fixture(NAMESPACE, &mut rng, 4);
+        let Fixture { verifier, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
 
         // Create a scheme with wrong namespace to generate invalid signatures
         let Fixture {
             schemes: wrong_schemes,
             ..
-        } = ed25519::fixture(b"wrong-namespace", &mut rng, 4);
+        } = ed25519::fixture(&mut rng, b"wrong-namespace", 4);
 
         assert!(
             ed25519::Scheme::is_attributable(),
@@ -257,7 +257,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold::fixture::<MinPk, _>(NAMESPACE, &mut rng, 4);
+        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
 
         assert!(
             !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
@@ -304,7 +304,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold::fixture::<MinPk, _>(NAMESPACE, &mut rng, 4);
+        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
 
         assert!(
             !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
@@ -340,7 +340,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             schemes, verifier, ..
-        } = ed25519::fixture(NAMESPACE, &mut rng, 4);
+        } = ed25519::fixture(&mut rng, NAMESPACE, 4);
 
         assert!(
             ed25519::Scheme::is_attributable(),

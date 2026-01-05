@@ -1,6 +1,6 @@
 use clap::{value_parser, Arg, Command};
 use commonware_bridge::{
-    application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
+    application, Scheme, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
@@ -218,17 +218,18 @@ fn main() {
 
         // Initialize application
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
+        let this_network =
+            Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
+                .expect("share must be in participants");
+        let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
         let (application, scheme, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 indexer,
-                namespace: consensus_namespace.clone(),
-                identity,
-                other_public,
                 hasher: Sha256::default(),
+                this_network,
+                other_network,
                 mailbox_size: 1024,
-                participants: validators.clone(),
-                share,
             },
         );
 

@@ -109,7 +109,7 @@ mod tests {
     fn certificate_forwarding_from_network<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum = quorum(n) as usize;
@@ -133,7 +133,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -270,7 +270,7 @@ mod tests {
     fn quorum_votes_construct_certificate<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -294,7 +294,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -415,7 +415,7 @@ mod tests {
     fn votes_and_certificate_deduplication<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -439,7 +439,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -606,7 +606,7 @@ mod tests {
     fn conflicting_votes_dont_produce_invalid_certificate<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 7;
         let namespace = b"batcher_test".to_vec();
@@ -629,7 +629,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -809,7 +809,7 @@ mod tests {
     fn proposal_forwarded_after_leader_set<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let namespace = b"batcher_test".to_vec();
@@ -832,7 +832,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -935,7 +935,7 @@ mod tests {
     fn proposal_forwarded_before_leader_set<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let namespace = b"batcher_test".to_vec();
@@ -958,7 +958,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -1062,7 +1062,7 @@ mod tests {
     fn leader_activity_detection<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let namespace = b"batcher_test".to_vec();
@@ -1086,7 +1086,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -1210,7 +1210,7 @@ mod tests {
     fn votes_skipped_for_finalized_views<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&[u8], &mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -1234,7 +1234,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&namespace, &mut context, n);
+            } = fixture(&mut context, &namespace, n);
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {

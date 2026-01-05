@@ -16,11 +16,11 @@ impl Simplex for SimplexBls12381MultisigMinPk {
     type Elector = RoundRobin;
 
     fn fixture(
-        namespace: &[u8],
         context: &mut deterministic::Context,
+        namespace: &[u8],
         n: u32,
     ) -> Fixture<Self::Scheme> {
-        bls12381_multisig::fixture::<MinPk, _>(namespace, context, n)
+        bls12381_multisig::fixture::<MinPk, _>(context, namespace, n)
     }
 }
 

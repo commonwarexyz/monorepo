@@ -493,16 +493,16 @@ mod macros {
             #[cfg(feature = "mocks")]
             #[allow(dead_code)]
             pub fn fixture<R>(
-                namespace: &[u8],
                 rng: &mut R,
+                namespace: &[u8],
                 n: u32,
             ) -> $crate::certificate::mocks::Fixture<Scheme>
             where
                 R: rand::RngCore + rand::CryptoRng,
             {
                 $crate::ed25519::certificate::mocks::fixture(
-                    namespace,
                     rng,
+                    namespace,
                     n,
                     Scheme::signer,
                     Scheme::verifier,

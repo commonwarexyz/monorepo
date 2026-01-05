@@ -298,7 +298,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             schemes, verifier, ..
-        } = ed25519::fixture(NAMESPACE, &mut rng, 5);
+        } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         (schemes, verifier)
     }
 

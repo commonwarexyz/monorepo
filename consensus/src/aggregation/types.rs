@@ -477,10 +477,10 @@ mod tests {
     fn codec<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let fixture = fixture(NAMESPACE, &mut rng, 4);
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
         let schemes = &fixture.schemes;
         let item = Item {
             index: 100,
@@ -572,9 +572,9 @@ mod tests {
     fn activity_invalid_enum<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest>,
-        F: FnOnce(&[u8], &mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = fixture(NAMESPACE, &mut test_rng(), 4);
+        let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut buf = BytesMut::new();
         3u8.write(&mut buf); // Invalid discriminant
 

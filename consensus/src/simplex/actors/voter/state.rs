@@ -609,7 +609,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&namespace, &mut context, 4);
+            } = ed25519::fixture(&mut context, &namespace, 4);
             let mut state = State::new(
                 context,
                 Config {
@@ -685,7 +685,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
-            let Fixture { schemes, .. } = ed25519::fixture(&namespace, &mut context, 4);
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
             let local_scheme = schemes[0].clone(); // leader of view 1
             let retry = Duration::from_secs(3);
             let cfg = Config {
@@ -744,7 +744,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&namespace, &mut context, 4);
+            } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
@@ -799,7 +799,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&namespace, &mut context, 4);
+            } = ed25519::fixture(&mut context, &namespace, 4);
             let local_scheme = schemes[2].clone(); // leader of view 1
             let cfg = Config {
                 scheme: local_scheme,
@@ -856,7 +856,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&namespace, &mut context, 4);
+            } = ed25519::fixture(&mut context, &namespace, 4);
             let local_scheme = schemes[1].clone(); // leader of view 2
             let cfg = Config {
                 scheme: local_scheme,
@@ -916,7 +916,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&namespace, &mut context, 4);
+            } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: verifier.clone(),
                 elector: <RoundRobin>::default(),
@@ -962,7 +962,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&namespace, &mut context, 4);
+            } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: verifier.clone(),
                 elector: <RoundRobin>::default(),
@@ -1005,7 +1005,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&namespace, &mut context, 4);
+            } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: verifier.clone(),
                 elector: <RoundRobin>::default(),
@@ -1049,7 +1049,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&namespace, &mut context, 4);
+            } = ed25519::fixture(&mut context, &namespace, 4);
             let mut scheme_iter = schemes.into_iter();
             let local_scheme = scheme_iter.next().unwrap();
             let other_schemes: Vec<_> = scheme_iter.collect();
@@ -1118,7 +1118,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
-            let Fixture { schemes, .. } = ed25519::fixture(&namespace, &mut context, 4);
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),

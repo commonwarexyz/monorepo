@@ -30,8 +30,8 @@ const GENESIS: &[u8] = b"commonware is neat";
 pub struct Application<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> {
     context: R,
     indexer: (Sender<Si>, Receiver<St>),
-    public: <MinSig as Variant>::Public,
-    other_certificate_verifier: Scheme,
+    this_network: <MinSig as Variant>::Public,
+    other_network: Scheme,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
@@ -40,25 +40,17 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
     /// Create a new application actor.
     pub fn new(context: R, config: Config<H, Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let this_network = *config.this_network.identity();
         (
             Self {
                 context,
                 indexer: config.indexer,
-                public: *config.identity.public(),
-                other_certificate_verifier: Scheme::certificate_verifier(
-                    &config.namespace,
-                    config.other_public,
-                ),
+                this_network,
+                other_network: config.other_network,
                 hasher: config.hasher,
                 mailbox,
             },
-            Scheme::signer(
-                &config.namespace,
-                config.participants,
-                config.identity,
-                config.share,
-            )
-            .expect("share must be in participants"),
+            config.this_network,
             Mailbox::new(sender),
         )
     }
@@ -88,7 +80,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                             // Fetch a certificate from the indexer for the other network
                             let msg =
                                 Inbound::GetFinalization::<H::Digest>(inbound::GetFinalization {
-                                    network: *self.other_certificate_verifier.identity(),
+                                    network: *self.other_network.identity(),
                                 })
                                 .encode();
                             indexer_sender
@@ -112,8 +104,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
 
                             // Verify certificate
                             assert!(
-                                finalization
-                                    .verify(&mut self.context, &self.other_certificate_verifier),
+                                finalization.verify(&mut self.context, &self.other_network),
                                 "indexer is corrupt"
                             );
 
@@ -129,7 +120,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
 
                     // Publish to indexer
                     let msg = Inbound::PutBlock::<H::Digest>(inbound::PutBlock {
-                        network: self.public,
+                        network: self.this_network,
                         block,
                     })
                     .encode();
@@ -157,7 +148,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                 Message::Verify { payload, response } => {
                     // Fetch payload from indexer
                     let msg = Inbound::GetBlock(inbound::GetBlock {
-                        network: self.public,
+                        network: self.this_network,
                         digest: payload,
                     })
                     .encode();
@@ -186,8 +177,8 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                             let _ = response.send(true);
                         }
                         BlockFormat::Bridge(finalization) => {
-                            let result = finalization
-                                .verify(&mut self.context, &self.other_certificate_verifier);
+                            let result =
+                                finalization.verify(&mut self.context, &self.other_network);
                             let _ = response.send(result);
                         }
                     }
@@ -210,7 +201,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                             // Post finalization
                             let msg =
                                 Inbound::PutFinalization::<H::Digest>(inbound::PutFinalization {
-                                    network: self.public,
+                                    network: self.this_network,
                                     finalization,
                                 })
                                 .encode();
