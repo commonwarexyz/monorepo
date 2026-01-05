@@ -192,14 +192,14 @@ fn main() {
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
+        let scheme = application::Scheme::signer(&namespace, validators.clone(), signer.clone())
+            .expect("private key must be in participants");
         let (application, scheme, reporter, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 hasher: Sha256::default(),
-                namespace: namespace.clone(),
+                scheme,
                 mailbox_size: 1024,
-                participants: validators.clone(),
-                private_key: signer.clone(),
             },
         );
 

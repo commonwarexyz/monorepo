@@ -81,7 +81,7 @@ mod tests {
         height: u64,
         payload: &str,
     ) -> Node<PublicKey, S, Sha256Digest> {
-        use crate::ordered_broadcast::types::chunk_namespace;
+        use crate::ordered_broadcast::types::NodeSigner;
         use commonware_codec::Encode;
 
         let sequencer = fixture.participants[sequencer_idx].clone();
@@ -92,9 +92,9 @@ mod tests {
         // which is ed25519::Signature for our PublicKey type)
         let mut rng = StdRng::seed_from_u64(sequencer_idx as u64);
         let private_key = commonware_cryptography::ed25519::PrivateKey::random(&mut rng);
-        let namespace = chunk_namespace(b"test");
+        let mut signer = NodeSigner::new(b"test", private_key);
         let message = chunk.encode();
-        let signature = private_key.sign(namespace.as_ref(), &message);
+        let signature = signer.sign(&message);
 
         Node::new(chunk, signature, None)
     }

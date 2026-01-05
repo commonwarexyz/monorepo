@@ -2,11 +2,7 @@
 //! This includes things like how to produce/verify blocks and how to identify which
 //! participants are active at a given view.
 
-use commonware_cryptography::{
-    ed25519::{PrivateKey, PublicKey},
-    Hasher,
-};
-use commonware_utils::ordered::Set;
+use commonware_cryptography::Hasher;
 
 mod actor;
 pub use actor::Application;
@@ -20,14 +16,8 @@ pub struct Config<H: Hasher> {
     /// Hashing scheme to use.
     pub hasher: H,
 
-    /// Namespace for domain separation.
-    pub namespace: Vec<u8>,
-
-    /// Participants active in consensus.
-    pub participants: Set<PublicKey>,
-
-    /// Our private key.
-    pub private_key: PrivateKey,
+    /// Pre-configured signing scheme for this network.
+    pub scheme: Scheme,
 
     /// Number of messages from consensus to hold in our backlog
     /// before blocking.

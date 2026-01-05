@@ -158,7 +158,7 @@ pub const ACK_SUFFIX: &[u8] = b"_ACK";
 /// This provides domain separation for signatures, preventing cross-protocol attacks
 /// by ensuring signatures for chunks cannot be reused for other message types.
 #[inline]
-pub fn chunk_namespace(namespace: &[u8]) -> Vec<u8> {
+fn chunk_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, CHUNK_SUFFIX)
 }
 
@@ -169,6 +169,68 @@ pub fn chunk_namespace(namespace: &[u8]) -> Vec<u8> {
 #[inline]
 pub fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, ACK_SUFFIX)
+}
+
+/// Wrapper that bakes chunk namespace into node signing operations.
+///
+/// This provides a certificate-scheme-like interface for sequencer signing,
+/// where the namespace is pre-computed at construction time.
+#[derive(Clone)]
+pub struct NodeSigner<C: Signer> {
+    signer: C,
+    chunk_namespace: Vec<u8>,
+}
+
+impl<C: Signer> NodeSigner<C> {
+    /// Creates a new NodeSigner with the given namespace and signer.
+    ///
+    /// The chunk namespace is pre-computed from the base namespace.
+    pub fn new(namespace: &[u8], signer: C) -> Self {
+        Self {
+            signer,
+            chunk_namespace: chunk_namespace(namespace),
+        }
+    }
+
+    /// Returns the public key of the underlying signer.
+    pub fn public_key(&self) -> C::PublicKey {
+        self.signer.public_key()
+    }
+
+    /// Signs a message using the pre-computed chunk namespace.
+    pub fn sign(&mut self, message: &[u8]) -> C::Signature {
+        self.signer.sign(&self.chunk_namespace, message)
+    }
+}
+
+/// Wrapper that bakes chunk namespace into node verification operations.
+///
+/// This provides a certificate-scheme-like interface for verifying sequencer
+/// signatures, where the namespace is pre-computed at construction time.
+#[derive(Clone)]
+pub struct NodeVerifier {
+    chunk_namespace: Vec<u8>,
+}
+
+impl NodeVerifier {
+    /// Creates a new NodeVerifier with the given namespace.
+    ///
+    /// The chunk namespace is pre-computed from the base namespace.
+    pub fn new(namespace: &[u8]) -> Self {
+        Self {
+            chunk_namespace: chunk_namespace(namespace),
+        }
+    }
+
+    /// Verifies a signature using the pre-computed chunk namespace.
+    pub fn verify<P: PublicKey>(
+        &self,
+        public_key: &P,
+        message: &[u8],
+        signature: &P::Signature,
+    ) -> bool {
+        public_key.verify(&self.chunk_namespace, message, signature)
+    }
 }
 
 /// Used as the [crate::Automaton::Context] type.
@@ -465,7 +527,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     pub fn verify<R>(
         &self,
         rng: &mut R,
-        namespace: &[u8],
+        verifier: &NodeVerifier,
         provider: &impl Provider<Scope = Epoch, Scheme = S>,
     ) -> Result<Option<Chunk<P, D>>, Error>
     where
@@ -473,13 +535,8 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         S: scheme::Scheme<P, D>,
     {
         // Verify chunk
-        let chunk_namespace = chunk_namespace(namespace);
         let message = self.chunk.encode();
-        if !self
-            .chunk
-            .sequencer
-            .verify(chunk_namespace.as_ref(), &message, &self.signature)
-        {
+        if !verifier.verify(&self.chunk.sequencer, &message, &self.signature) {
             return Err(Error::InvalidSequencerSignature);
         }
         let Some(parent) = &self.parent else {
@@ -515,8 +572,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     /// This is used by sequencers to create and sign new nodes for broadcast.
     /// For non-genesis nodes (height > 0), a parent with a certificate must be provided.
     pub fn sign<C>(
-        namespace: &[u8],
-        signer: &mut C,
+        signer: &mut NodeSigner<C>,
         height: u64,
         payload: D,
         parent: Option<Parent<S, D>>,
@@ -524,10 +580,9 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     where
         C: Signer<PublicKey = P, Signature = P::Signature>,
     {
-        let chunk_namespace = chunk_namespace(namespace);
         let pub_key = signer.public_key();
         let chunk = Chunk::new(pub_key, height, payload);
-        let signature = signer.sign(chunk_namespace.as_ref(), &chunk.encode());
+        let signature = signer.sign(&chunk.encode());
         Self::new(chunk, signature, parent)
     }
 
@@ -894,13 +949,9 @@ impl<P: PublicKey, D: Digest> Proposal<P, D> {
     ///
     /// This ensures that the sequencer's signature over the chunk is valid.
     /// Returns true if the signature is valid, false otherwise.
-    pub fn verify(&self, namespace: &[u8]) -> bool {
-        // Verify chunk
-        let chunk_namespace = chunk_namespace(namespace);
+    pub fn verify(&self, verifier: &NodeVerifier) -> bool {
         let message = self.chunk.encode();
-        self.chunk
-            .sequencer
-            .verify(chunk_namespace.as_ref(), &message, &self.signature)
+        verifier.verify(&self.chunk.sequencer, &message, &self.signature)
     }
 }
 
@@ -1074,6 +1125,14 @@ mod tests {
     use std::panic::catch_unwind;
 
     const NAMESPACE: &[u8] = b"test";
+
+    fn node_verifier() -> NodeVerifier {
+        NodeVerifier::new(NAMESPACE)
+    }
+
+    fn node_signer(signer: PrivateKey) -> NodeSigner<PrivateKey> {
+        NodeSigner::new(NAMESPACE, signer)
+    }
 
     // Helper function to create a sample digest
     fn sample_digest(v: u8) -> Sha256Digest {
@@ -1461,7 +1520,7 @@ mod tests {
         assert_eq!(decoded.signature, proposal.signature);
 
         // Verify the decoded proposal
-        assert!(decoded.verify(NAMESPACE));
+        assert!(decoded.verify(&node_verifier()));
     }
 
     fn lock_encode_decode<S, F>(fixture: F)
@@ -1522,20 +1581,16 @@ mod tests {
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 4);
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
+        let mut signer = node_signer(scheme);
+        let verifier = node_verifier();
         let quorum = commonware_utils::quorum(fixture.schemes.len() as u32) as usize;
 
         // Test genesis node (no parent)
-        let node = Node::<PublicKey, S, Sha256Digest>::sign(
-            NAMESPACE,
-            &mut scheme,
-            0,
-            sample_digest(1),
-            None,
-        );
+        let node = Node::<PublicKey, S, Sha256Digest>::sign(&mut signer, 0, sample_digest(1), None);
         let provider = ConstantProvider::new(fixture.verifier.clone());
-        let result = node.verify(&mut rng, NAMESPACE, &provider);
+        let result = node.verify(&mut rng, &verifier, &provider);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
 
@@ -1561,15 +1616,10 @@ mod tests {
             parent_epoch,
             parent_certificate,
         ));
-        let node = Node::<PublicKey, S, Sha256Digest>::sign(
-            NAMESPACE,
-            &mut scheme,
-            1,
-            sample_digest(2),
-            parent,
-        );
+        let node =
+            Node::<PublicKey, S, Sha256Digest>::sign(&mut signer, 1, sample_digest(2), parent);
 
-        let result = node.verify(&mut rng, NAMESPACE, &provider);
+        let result = node.verify(&mut rng, &verifier, &provider);
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
     }
@@ -1707,10 +1757,10 @@ mod tests {
         let proposal = Proposal::<PublicKey, Sha256Digest>::new(chunk, signature);
 
         // Verify proposal
-        assert!(proposal.verify(NAMESPACE));
+        assert!(proposal.verify(&node_verifier()));
 
         // Test that verification fails with wrong namespace
-        assert!(!proposal.verify(b"wrong"));
+        assert!(!proposal.verify(&NodeVerifier::new(b"wrong")));
     }
 
     fn node_verify_invalid_signature<S, F>(fixture: F)
@@ -1736,7 +1786,8 @@ mod tests {
 
         // Verification should succeed
         let provider = ConstantProvider::new(fixture.verifier);
-        assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
+        let verifier = node_verifier();
+        assert!(node.verify(&mut rng, &verifier, &provider).is_ok());
 
         // Now create a node with invalid signature
         let tampered_signature = scheme.sign(chunk_namespace.as_ref(), &node.encode());
@@ -1744,7 +1795,7 @@ mod tests {
 
         // Verification should fail
         assert!(matches!(
-            invalid_node.verify(&mut rng, NAMESPACE, &provider),
+            invalid_node.verify(&mut rng, &verifier, &provider),
             Err(Error::InvalidSequencerSignature)
         ));
     }
@@ -1803,7 +1854,8 @@ mod tests {
 
         // Verification should succeed
         let provider = ConstantProvider::new(fixture.verifier.clone());
-        assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
+        let verifier = node_verifier();
+        assert!(node.verify(&mut rng, &verifier, &provider).is_ok());
 
         // Now create a parent with invalid certificate
         // Generate certificate with the wrong keys (sign with schemes[1..] but pretend it's from schemes[0..])
@@ -1832,7 +1884,7 @@ mod tests {
 
         // Verification should fail because the parent certificate was signed for different epoch
         assert!(matches!(
-            node.verify(&mut rng, NAMESPACE, &provider),
+            node.verify(&mut rng, &verifier, &provider),
             Err(Error::InvalidCertificate)
         ));
     }
@@ -2001,10 +2053,10 @@ mod tests {
         let proposal = Proposal::<PublicKey, Sha256Digest>::new(chunk, signature);
 
         // Verify with correct namespace - should pass
-        assert!(proposal.verify(NAMESPACE));
+        assert!(proposal.verify(&node_verifier()));
 
         // Verify with wrong namespace - should fail
-        assert!(!proposal.verify(b"wrong_namespace"));
+        assert!(!proposal.verify(&NodeVerifier::new(b"wrong_namespace")));
     }
 
     #[test]
@@ -2022,7 +2074,7 @@ mod tests {
         let proposal = Proposal::<PublicKey, Sha256Digest>::new(chunk, signature);
 
         // Verification should fail because the signature doesn't match the sequencer's public key
-        assert!(!proposal.verify(NAMESPACE));
+        assert!(!proposal.verify(&node_verifier()));
     }
 
     fn node_genesis_with_parent_fails<S, F>(fixture: F)

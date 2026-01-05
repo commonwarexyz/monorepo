@@ -72,7 +72,11 @@ pub mod mocks;
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, Config, Engine};
+    use super::{
+        mocks,
+        types::{NodeSigner, NodeVerifier},
+        Config, Engine,
+    };
     use crate::{
         ordered_broadcast::scheme::{
             bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme,
@@ -220,9 +224,10 @@ mod tests {
             assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));
 
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
+            let node_verifier = NodeVerifier::new(namespace);
             let (reporter, reporter_mailbox) = mocks::Reporter::new(
                 context.clone(),
-                namespace,
+                node_verifier.clone(),
                 fixture.verifier.clone(),
                 misses_allowed,
             );
@@ -232,14 +237,17 @@ mod tests {
             let engine = Engine::new(
                 context.with_label("engine"),
                 Config {
-                    sequencer_signer: Some(fixture.private_keys[idx].clone()),
+                    sequencer_signer: Some(NodeSigner::new(
+                        namespace,
+                        fixture.private_keys[idx].clone(),
+                    )),
+                    node_verifier,
                     sequencers_provider: sequencers,
                     validators_provider,
                     automaton: automaton.clone(),
                     relay: automaton.clone(),
                     reporter: reporters.get(validator).unwrap().clone(),
                     monitor,
-                    namespace: namespace.to_vec(),
                     priority_proposals: false,
                     priority_acks: false,
                     rebroadcast_timeout,
@@ -737,9 +745,10 @@ mod tests {
                 validators_providers.insert(validator.clone(), validators_provider.clone());
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
+                let node_verifier = NodeVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
-                    namespace,
+                    node_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
@@ -749,14 +758,17 @@ mod tests {
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
-                        sequencer_signer: Some(fixture.private_keys[idx].clone()),
+                        sequencer_signer: Some(NodeSigner::new(
+                            namespace,
+                            fixture.private_keys[idx].clone(),
+                        )),
+                        node_verifier,
                         sequencers_provider: sequencers,
                         validators_provider,
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(validator).unwrap().clone(),
                         monitor,
-                        namespace: namespace.to_vec(),
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         height_bound: 2,
                         rebroadcast_timeout: Duration::from_secs(1),
@@ -889,9 +901,10 @@ mod tests {
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
 
+                let node_verifier = NodeVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
-                    namespace,
+                    node_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
@@ -901,14 +914,14 @@ mod tests {
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
-                        sequencer_signer: None::<PrivateKey>, // Validators don't propose in this test
+                        sequencer_signer: None::<NodeSigner<PrivateKey>>, // Validators don't propose in this test
+                        node_verifier,
                         sequencers_provider: sequencers,
                         validators_provider,
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(validator).unwrap().clone(),
                         monitor,
-                        namespace: namespace.to_vec(),
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         height_bound: 2,
                         rebroadcast_timeout: Duration::from_secs(5),
@@ -931,9 +944,10 @@ mod tests {
             {
                 let context = context.with_label("sequencer");
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
+                let node_verifier = NodeVerifier::new(namespace);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
-                    namespace,
+                    node_verifier.clone(),
                     fixture.verifier.clone(),
                     Some(5),
                 );
@@ -948,7 +962,8 @@ mod tests {
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
-                        sequencer_signer: Some(sequencer.clone()),
+                        sequencer_signer: Some(NodeSigner::new(namespace, sequencer.clone())),
+                        node_verifier,
                         sequencers_provider: mocks::Sequencers::<PublicKey>::new(vec![
                             sequencer.public_key()
                         ]),
@@ -957,7 +972,6 @@ mod tests {
                         automaton,
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
                         monitor: mocks::Monitor::new(epoch),
-                        namespace: namespace.to_vec(),
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         height_bound: 2,
                         rebroadcast_timeout: Duration::from_secs(5),
