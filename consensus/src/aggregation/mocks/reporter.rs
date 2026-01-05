@@ -131,8 +131,7 @@ where
                         next_contiguous = next_contiguous.next();
                     }
                     if !next_contiguous.is_zero() {
-                        self.contiguous =
-                            Some(next_contiguous.previous().unwrap());
+                        self.contiguous = Some(next_contiguous.previous().unwrap());
                     }
                 }
                 Message::Tip(height) => {
