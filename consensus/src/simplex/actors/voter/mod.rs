@@ -2894,17 +2894,150 @@ mod tests {
         certification_after_timeout::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
+    /// Helper to set up a voter actor for certification-after-timeout tests.
+    async fn setup_voter_for_certification_test<S, L>(
+        context: &mut deterministic::Context,
+        oracle: &commonware_p2p::simulated::Oracle<S::PublicKey, deterministic::Context>,
+        participants: &[S::PublicKey],
+        schemes: &[S],
+        elector: L,
+    ) -> (
+        Mailbox<S, Sha256Digest>,
+        mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
+        Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
+    )
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        L: ElectorConfig<S>,
+    {
+        let signing = schemes[0].clone();
+        let me = participants[0].clone();
+        let reporter_cfg = mocks::reporter::Config {
+            participants: participants.to_vec().try_into().unwrap(),
+            scheme: signing.clone(),
+            elector: elector.clone(),
+        };
+        let reporter = mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+        let relay = Arc::new(mocks::relay::Relay::new());
+
+        let application_cfg = mocks::application::Config {
+            hasher: Sha256::default(),
+            relay: relay.clone(),
+            me: me.clone(),
+            propose_latency: (1.0, 0.0),
+            verify_latency: (1.0, 0.0),
+            certify_latency: (1.0, 0.0),
+            should_certify: mocks::application::Certifier::Always,
+        };
+        let (actor, application) =
+            mocks::application::Application::new(context.with_label("app"), application_cfg);
+        actor.start();
+
+        let voter_cfg = Config {
+            scheme: signing.clone(),
+            elector,
+            blocker: oracle.control(me.clone()),
+            automaton: application.clone(),
+            relay: application.clone(),
+            reporter,
+            partition: format!("voter_cert_test_{me}"),
+            epoch: Epoch::new(333),
+            mailbox_size: 128,
+            leader_timeout: Duration::from_secs(10),
+            notarization_timeout: Duration::from_secs(10),
+            nullify_retry: Duration::from_secs(100),
+            activity_timeout: ViewDelta::new(10),
+            replay_buffer: NZUsize!(10240),
+            write_buffer: NZUsize!(10240),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        };
+        let (voter, mailbox) = Actor::new(context.clone(), voter_cfg);
+
+        let (resolver_sender, _) = mpsc::channel(2);
+        let (batcher_sender, batcher_receiver) = mpsc::channel(16);
+
+        let (vote_sender, _) = oracle
+            .control(me.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
+        let (certificate_sender, _) = oracle
+            .control(me.clone())
+            .register(1, TEST_QUOTA)
+            .await
+            .unwrap();
+
+        voter.start(
+            batcher::Mailbox::new(batcher_sender),
+            resolver::Mailbox::new(resolver_sender),
+            vote_sender,
+            certificate_sender,
+        );
+
+        (mailbox, batcher_receiver, relay)
+    }
+
+    /// Helper to advance past view 1 (which times out immediately on startup).
+    async fn advance_past_initial_timeout<S: Scheme<Sha256Digest>>(
+        mailbox: &mut Mailbox<S, Sha256Digest>,
+        batcher_receiver: &mut mpsc::Receiver<batcher::Message<S, Sha256Digest>>,
+        schemes: &[S],
+        quorum: u32,
+    ) -> (View, Sha256Digest) {
+        // Get initial view
+        let current_view = match batcher_receiver.next().await.unwrap() {
+            batcher::Message::Update {
+                current, active, ..
+            } => {
+                active.send(true).unwrap();
+                current
+            }
+            _ => panic!("expected Update message"),
+        };
+
+        // Wait for view 1's immediate nullify
+        loop {
+            match batcher_receiver.next().await.unwrap() {
+                batcher::Message::Constructed(Vote::Nullify(n)) if n.view() == current_view => {
+                    break
+                }
+                batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                _ => {}
+            }
+        }
+
+        // Advance to view 2 via finalization
+        let prev_payload = Sha256::hash(b"v0");
+        let prev_proposal = Proposal::new(
+            Round::new(Epoch::new(333), current_view),
+            View::zero(),
+            prev_payload,
+        );
+        let (_, finalization) = build_finalization(schemes, &prev_proposal, quorum);
+        mailbox
+            .resolved(Certificate::Finalization(finalization))
+            .await;
+
+        // Wait for view 2 update
+        let new_view = loop {
+            match batcher_receiver.next().await.unwrap() {
+                batcher::Message::Update {
+                    current, active, ..
+                } if current > current_view => {
+                    active.send(true).unwrap();
+                    break current;
+                }
+                batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                batcher::Message::Constructed(_) => {}
+            }
+        };
+
+        (new_view, prev_payload)
+    }
+
     /// Tests certification after: notarize -> timeout -> receive notarization -> certify.
-    ///
-    /// Scenario:
-    /// 1. Voter receives proposal and votes notarize
-    /// 2. Voter times out waiting for notarization -> broadcasts nullify
-    /// 3. Later receives a notarization certificate
-    /// 4. Certification should still happen and view should advance
-    ///
-    /// This tests a different path than certification_after_timeout: here the voter
-    /// has already voted notarize before timing out.
-    fn certification_after_notarize_and_timeout<S, F, L>(mut fixture: F)
+    /// This test runs when we are NOT the leader (receiving proposal from another participant).
+    fn certification_after_notarize_timeout_as_follower<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -2913,10 +3046,8 @@ mod tests {
         let n = 5;
         let quorum = quorum(n);
         let namespace = b"consensus".to_vec();
-        let activity_timeout = ViewDelta::new(10);
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            // Create simulated network
             let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
@@ -2927,229 +3058,122 @@ mod tests {
             );
             network.start();
 
-            // Get participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Use participant[0] as the voter
-            let signing = schemes[0].clone();
-            let me = participants[0].clone();
             let elector = L::default();
-            let reporter_cfg = mocks::reporter::Config {
-                participants: participants.clone().try_into().unwrap(),
-                scheme: signing.clone(),
-                elector: elector.clone(),
-            };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let built_elector = elector
+                .clone()
+                .build(&participants.clone().try_into().unwrap());
+            let (mut mailbox, mut batcher_receiver, relay) = setup_voter_for_certification_test(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+            )
+            .await;
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: me.clone(),
-                propose_latency: (1.0, 0.0),
-                verify_latency: (1.0, 0.0),
-                certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Always,
-            };
-            let (actor, application) =
-                mocks::application::Application::new(context.with_label("app"), application_cfg);
-            actor.start();
+            let (mut current_view, mut parent_payload) = advance_past_initial_timeout(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+            )
+            .await;
 
-            // Timeouts: use long leader_timeout (10s) so we have time to send proposal,
-            // but short notarization_timeout (1s after proposal) so we timeout waiting
-            // for notarization certificate
-            // leader_timeout must be <= notarization_timeout
-            let voter_cfg = Config {
-                scheme: signing.clone(),
-                elector: elector.clone(),
-                blocker: oracle.control(me.clone()),
-                automaton: application.clone(),
-                relay: application.clone(),
-                reporter: reporter.clone(),
-                partition: format!("voter_notarize_timeout_{me}"),
-                epoch: Epoch::new(333),
-                mailbox_size: 128,
-                leader_timeout: Duration::from_secs(10),
-                notarization_timeout: Duration::from_secs(10),
-                nullify_retry: Duration::from_secs(100),
-                activity_timeout,
-                replay_buffer: NZUsize!(10240),
-                write_buffer: NZUsize!(10240),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
-
-            // Resolver and batcher mailboxes
-            let (resolver_sender, _resolver_receiver) = mpsc::channel(2);
-            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(16);
-            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
-
-            // Register network channels for the validator
-            let (vote_sender, _vote_receiver) = oracle
-                .control(me.clone())
-                .register(0, TEST_QUOTA)
-                .await
-                .unwrap();
-            let (certificate_sender, _certificate_receiver) = oracle
-                .control(me.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
-
-            // Start the actor
-            voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
-
-            // Wait for initial batcher update (view 1)
-            // Note: The voter actor expires the initial view immediately on startup,
-            // so view 1 will timeout right away. We need to advance to view 2+.
-            let (mut current_view, _initial_leader) =
-                match batcher_receiver.next().await.unwrap() {
-                    batcher::Message::Update {
-                        current,
-                        leader,
-                        active,
-                        ..
-                    } => {
-                        active.send(true).unwrap();
-                        (current, leader)
-                    }
-                    _ => panic!("expected Update message"),
-                };
-
-            // View 1 times out immediately - wait for nullify and consume it
-            loop {
-                match batcher_receiver.next().await.unwrap() {
-                    batcher::Message::Constructed(Vote::Nullify(nullify))
-                        if nullify.view() == current_view =>
-                    {
-                        break;
-                    }
-                    batcher::Message::Update { active, .. } => active.send(true).unwrap(),
-                    _ => {}
-                }
-            }
-
-            // Advance through views until we find one where we're NOT the leader
-            // Send finalization to advance views
-            let mut prev_proposal = Proposal::new(
-                Round::new(Epoch::new(333), current_view),
-                View::zero(),
-                Sha256::hash(b"v0"),
-            );
-
+            // Find a view where we're NOT the leader (leader != 0)
             let (target_view, leader_idx) = loop {
+                let round = Round::new(Epoch::new(333), current_view);
+                let leader = built_elector.elect(round, None);
+                if leader != 0 {
+                    break (current_view, leader);
+                }
+
+                // We're the leader, advance to next view
+                let prev_proposal = Proposal::new(
+                    round,
+                    current_view.previous().unwrap(),
+                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                );
+                parent_payload = prev_proposal.payload;
                 let (_, finalization) = build_finalization(&schemes, &prev_proposal, quorum);
                 mailbox
                     .resolved(Certificate::Finalization(finalization))
                     .await;
 
-                let (new_view, leader) = loop {
+                current_view = loop {
                     match batcher_receiver.next().await.unwrap() {
-                        batcher::Message::Update {
-                            current,
-                            leader,
-                            active,
-                            ..
-                        } => {
+                        batcher::Message::Update { current, active, .. }
+                            if current > current_view =>
+                        {
                             active.send(true).unwrap();
-                            if current > current_view {
-                                break (current, leader);
-                            }
+                            break current;
                         }
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
                         batcher::Message::Constructed(_) => {}
                     }
                 };
-
-                current_view = new_view;
-
-                // Check if we're NOT the leader for this view
-                if leader != 0 {
-                    break (current_view, leader);
-                }
-
-                prev_proposal = Proposal::new(
-                    Round::new(Epoch::new(333), current_view),
-                    current_view.previous().unwrap(),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
-                );
             };
 
-            // Create proposal for the target view and send it IMMEDIATELY
-            // (we're now in a fresh view with full timeouts)
+            // Create and send proposal as if from the leader
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"test_proposal"),
+                Sha256::hash(b"follower_test"),
             );
             let leader = participants[leader_idx as usize].clone();
-
-            // Broadcast the payload contents so verification can complete
-            // Use prev_proposal.payload as parent since that's what was finalized
-            let contents = (proposal.round, prev_proposal.payload, 0u64).encode();
+            let contents = (proposal.round, parent_payload, 0u64).encode();
             relay
                 .broadcast(&leader, (proposal.payload, contents.into()))
                 .await;
-
-            // Send the proposal to the voter
             mailbox.proposal(proposal.clone()).await;
 
-            // Wait for notarize vote (proving we voted for the proposal)
+            // Wait for notarize vote
             loop {
                 select! {
                     msg = batcher_receiver.next() => {
                         match msg.unwrap() {
-                            batcher::Message::Constructed(Vote::Notarize(notarize)) if notarize.view() == target_view => {
-                                break;
-                            }
+                            batcher::Message::Constructed(Vote::Notarize(n)) if n.view() == target_view => break,
                             batcher::Message::Update { active, .. } => active.send(true).unwrap(),
                             _ => {}
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("expected notarize vote for view {} within 5s", target_view);
+                        panic!("expected notarize vote");
                     },
                 }
             }
 
-            // Sleep past notarization_timeout (10s) to trigger nullify
+            // Trigger timeout
             context.sleep(Duration::from_secs(11)).await;
 
-            // Collect the nullify vote (should have been emitted due to timeout)
+            // Wait for nullify vote
             loop {
                 select! {
                     msg = batcher_receiver.next() => {
                         match msg.unwrap() {
-                            batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
-                                break;
-                            }
+                            batcher::Message::Constructed(Vote::Nullify(n)) if n.view() == target_view => break,
                             batcher::Message::Update { active, .. } => active.send(true).unwrap(),
                             _ => {}
                         }
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
-                        panic!("expected nullify vote for view {} after timeout", target_view);
+                        panic!("expected nullify vote");
                     },
                 }
             }
 
-            // Now send the notarization certificate (simulating delayed network delivery)
+            // Send notarization certificate
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Notarization(notarization))
                 .await;
 
-            // Wait for view to advance (certification should happen despite timeout)
+            // Verify view advances
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.next() => {
@@ -3165,29 +3189,189 @@ mod tests {
                     },
                 }
             };
+            assert!(advanced, "view should advance after certification (follower case)");
+        });
+    }
 
-            assert!(
-                advanced,
-                "view should have advanced after receiving notarization (even after notarize+timeout)"
+    /// Tests certification after: notarize -> timeout -> receive notarization -> certify.
+    /// This test runs when we ARE the leader (proposing ourselves).
+    fn certification_after_notarize_timeout_as_leader<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: ElectorConfig<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
             );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let elector = L::default();
+            let built_elector = elector
+                .clone()
+                .build(&participants.clone().try_into().unwrap());
+            let (mut mailbox, mut batcher_receiver, _relay) = setup_voter_for_certification_test(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+            )
+            .await;
+
+            let (mut current_view, _) = advance_past_initial_timeout(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+            )
+            .await;
+
+            // Find a view where we ARE the leader (leader == 0)
+            let target_view = loop {
+                let round = Round::new(Epoch::new(333), current_view);
+                let leader = built_elector.elect(round, None);
+                if leader == 0 {
+                    break current_view;
+                }
+
+                // We're not the leader, advance to next view
+                let prev_proposal = Proposal::new(
+                    round,
+                    current_view.previous().unwrap(),
+                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                );
+                let (_, finalization) = build_finalization(&schemes, &prev_proposal, quorum);
+                mailbox
+                    .resolved(Certificate::Finalization(finalization))
+                    .await;
+
+                current_view = loop {
+                    match batcher_receiver.next().await.unwrap() {
+                        batcher::Message::Update { current, active, .. }
+                            if current > current_view =>
+                        {
+                            active.send(true).unwrap();
+                            break current;
+                        }
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                        batcher::Message::Constructed(_) => {}
+                    }
+                };
+            };
+
+            // As leader, wait for our own notarize vote (automaton will propose)
+            let proposal = loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Notarize(n)) if n.view() == target_view => {
+                                break n.proposal.clone();
+                            }
+                            batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected notarize vote as leader");
+                    },
+                }
+            };
+
+            // Trigger timeout
+            context.sleep(Duration::from_secs(11)).await;
+
+            // Wait for nullify vote
+            loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Nullify(n)) if n.view() == target_view => break,
+                            batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(1)) => {
+                        panic!("expected nullify vote");
+                    },
+                }
+            }
+
+            // Send notarization certificate (as if other participants formed it)
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .recovered(Certificate::Notarization(notarization))
+                .await;
+
+            // Verify view advances
+            let advanced = loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        if let batcher::Message::Update { current, active, .. } = msg.unwrap() {
+                            active.send(true).unwrap();
+                            if current > target_view {
+                                break true;
+                            }
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        break false;
+                    },
+                }
+            };
+            assert!(advanced, "view should advance after certification (leader case)");
         });
     }
 
     #[test_traced]
-    fn test_certification_after_notarize_and_timeout() {
-        certification_after_notarize_and_timeout::<_, _, Random>(
+    fn test_certification_after_notarize_timeout_as_follower() {
+        certification_after_notarize_timeout_as_follower::<_, _, RoundRobin>(
             bls12381_threshold::fixture::<MinPk, _>,
         );
-        certification_after_notarize_and_timeout::<_, _, Random>(
+        certification_after_notarize_timeout_as_follower::<_, _, RoundRobin>(
             bls12381_threshold::fixture::<MinSig, _>,
         );
-        certification_after_notarize_and_timeout::<_, _, RoundRobin>(
+        certification_after_notarize_timeout_as_follower::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
         );
-        certification_after_notarize_and_timeout::<_, _, RoundRobin>(
+        certification_after_notarize_timeout_as_follower::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
         );
-        certification_after_notarize_and_timeout::<_, _, RoundRobin>(ed25519::fixture);
-        certification_after_notarize_and_timeout::<_, _, RoundRobin>(secp256r1::fixture);
+        certification_after_notarize_timeout_as_follower::<_, _, RoundRobin>(ed25519::fixture);
+        certification_after_notarize_timeout_as_follower::<_, _, RoundRobin>(secp256r1::fixture);
+    }
+
+    #[test_traced]
+    fn test_certification_after_notarize_timeout_as_leader() {
+        certification_after_notarize_timeout_as_leader::<_, _, RoundRobin>(
+            bls12381_threshold::fixture::<MinPk, _>,
+        );
+        certification_after_notarize_timeout_as_leader::<_, _, RoundRobin>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        certification_after_notarize_timeout_as_leader::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        certification_after_notarize_timeout_as_leader::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        certification_after_notarize_timeout_as_leader::<_, _, RoundRobin>(ed25519::fixture);
+        certification_after_notarize_timeout_as_leader::<_, _, RoundRobin>(secp256r1::fixture);
     }
 }
