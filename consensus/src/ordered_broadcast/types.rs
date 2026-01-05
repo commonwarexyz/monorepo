@@ -642,7 +642,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             self.chunk
                 .height
                 .checked_sub(1)
-                .expect("non-genesis nodes should have height > 0"),
+                .ok_or(Error::ParentMissing)?,
             parent.digest,
         );
         let ctx = AckSubject {
