@@ -449,14 +449,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         round.set_certify_handle(handle);
     }
 
-    /// Clear the certification handle, allowing certification to be retried.
-    pub fn retry_certification(&mut self, view: View) {
-        let Some(round) = self.views.get_mut(&view) else {
-            return;
-        };
-        round.unset_certify_handle();
-    }
-
     /// Marks proposal certification as complete and returns the notarization.
     ///
     /// Returns `None` if the view was already pruned. Otherwise returns the notarization

@@ -146,11 +146,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.certify_handle = Some(handle);
     }
 
-    /// Clears the handle for the certification request.
-    pub fn unset_certify_handle(&mut self) {
-        self.certify_handle = None;
-    }
-
     /// Returns the elected leader (if any) for this round.
     pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
         self.leader.clone()
