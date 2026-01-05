@@ -548,9 +548,9 @@ impl<
         // Increase the tip if needed
         if height == self.tip {
             // Compute the next tip
-            let mut new_tip = height.saturating_add(HeightDelta::new(1));
+            let mut new_tip = height.next();
             while self.confirmed.contains_key(&new_tip) && new_tip.get() < u64::MAX {
-                new_tip = new_tip.saturating_add(HeightDelta::new(1));
+                new_tip = new_tip.next();
             }
 
             // If the next tip is larger, try to fast-forward the tip (may not be possible)
@@ -632,13 +632,11 @@ impl<
         }
 
         // If the height is above the tip (and the window), ignore for now
-        // Compare gap (ack.height - tip) against window
         if ack
             .item
             .height
-            .get()
-            .checked_sub(self.tip.get())
-            .is_some_and(|d| d >= self.window.get())
+            .delta_from(self.tip)
+            .is_some_and(|d| d >= self.window)
         {
             return Err(Error::AckHeight(ack.item.height));
         }

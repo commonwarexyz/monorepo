@@ -16,7 +16,7 @@ use crate::{
         scheme::Scheme,
         types::{Finalization, Notarization},
     },
-    types::{Epoch, Epocher, Height, HeightDelta, Round, ViewDelta},
+    types::{Epoch, Epocher, Height, Round, ViewDelta},
     Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
@@ -756,9 +756,7 @@ where
             return;
         }
 
-        let next_height = self
-            .last_processed_height
-            .saturating_add(HeightDelta::new(1));
+        let next_height = self.last_processed_height.next();
         let Some(block) = self.get_finalized_block(next_height).await else {
             return;
         };
@@ -975,9 +973,7 @@ where
         resolver: &mut impl Resolver<Key = Request<B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
-        let start = self
-            .last_processed_height
-            .saturating_add(HeightDelta::new(1));
+        let start = self.last_processed_height.next();
         'cache_repair: loop {
             let (gap_start, Some(gap_end)) = self.finalized_blocks.next_gap(start) else {
                 // No gaps detected
@@ -993,9 +989,7 @@ where
             // Compute the lower bound of the recursive repair. `gap_start` is `Some`
             // if `start` is not in a gap. We add one to it to ensure we don't
             // re-persist it to the database in the repair loop below.
-            let gap_start = gap_start
-                .map(|s| s.saturating_add(HeightDelta::new(1)))
-                .unwrap_or(start);
+            let gap_start = gap_start.map(|s| s.next()).unwrap_or(start);
 
             // Iterate backwards, repairing blocks as we go.
             while cursor.height() > gap_start {
