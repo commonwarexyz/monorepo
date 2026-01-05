@@ -544,10 +544,8 @@ pub trait Storage: Clone + Send + Sync + 'static {
 ///
 /// This space is reserved for future use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Header {
-    /// Reserved bytes for future use.
-    pub bytes: [u8; Self::SIZE],
-}
+#[repr(transparent)]
+pub struct Header([u8; Self::SIZE]);
 
 impl Header {
     /// Size of the header in bytes.
@@ -555,6 +553,12 @@ impl Header {
 
     /// Size of the header as u64 for offset calculations.
     pub const SIZE_U64: u64 = Self::SIZE as u64;
+}
+
+impl AsRef<[u8]> for Header {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 /// Interface to read and write to a blob.

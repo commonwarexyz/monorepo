@@ -134,7 +134,7 @@ impl crate::Storage for Storage {
                 .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e))?;
             file.seek(SeekFrom::Start(0))
                 .map_err(|_| Error::WriteFailed)?;
-            file.write_all(&Header::default().bytes)
+            file.write_all(Header::default().as_ref())
                 .map_err(|_| Error::WriteFailed)?;
             file.sync_all()
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
@@ -156,9 +156,7 @@ impl crate::Storage for Storage {
             file.read_exact(&mut header_bytes)
                 .map_err(|_| Error::ReadFailed)?;
             (
-                Header {
-                    bytes: header_bytes,
-                },
+                Header(header_bytes),
                 raw_len - Header::SIZE_U64,
             )
         };

@@ -39,12 +39,7 @@ impl crate::Storage for Storage {
             // Existing blob - read header from first 32 bytes
             let mut header_bytes = [0u8; Header::SIZE];
             header_bytes.copy_from_slice(&content[..Header::SIZE]);
-            (
-                Header {
-                    bytes: header_bytes,
-                },
-                raw_len - Header::SIZE_U64,
-            )
+            (Header(header_bytes), raw_len - Header::SIZE_U64)
         };
 
         Ok((
