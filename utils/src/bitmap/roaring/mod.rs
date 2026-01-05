@@ -267,22 +267,13 @@ impl RoaringBitmap {
 
 impl Write for RoaringBitmap {
     fn write(&self, buf: &mut impl BufMut) {
-        (self.containers.len()).write(buf);
-        for (&key, container) in &self.containers {
-            key.write(buf);
-            container.write(buf);
-        }
+        self.containers.write(buf);
     }
 }
 
 impl EncodeSize for RoaringBitmap {
     fn encode_size(&self) -> usize {
-        self.containers.len().encode_size()
-            + self
-                .containers
-                .values()
-                .map(|c| 8 + c.encode_size())
-                .sum::<usize>()
+        self.containers.encode_size()
     }
 }
 
