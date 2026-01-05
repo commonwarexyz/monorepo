@@ -8,11 +8,39 @@
 //!
 //! # Architecture
 //!
+//! Each 64-bit value is split into a high 48-bit key (selecting a container) and
+//! a low 16-bit index (stored within that container):
+//!
 //! ```text
-//! 64-bit value: [high 48 bits (key)] [low 16 bits (container value)]
-//!               |                    |
-//!               v                    v
-//!          BTreeMap key         Container storage
+//! 64-bit value
+//! +-----------------------------------------------+---------------+
+//! |            high 48 bits (key)                 | low 16 bits   |
+//! +-----------------------------------------------+---------------+
+//!                      |                                 |
+//!                      v                                 v
+//!               BTreeMap key                     Container index
+//! ```
+//!
+//! The bitmap stores containers in a sorted map, where each container holds
+//! values in the range `[key * 2^16, (key + 1) * 2^16)`:
+//!
+//! ```text
+//! RoaringBitmap
+//! +------------------------------------------------------------------+
+//! |                     BTreeMap<u64, Container>                     |
+//! +------------------------------------------------------------------+
+//! |  Key 0          |  Key 1          |  Key 2          |    ...     |
+//! |  [0, 65535]     |  [65536, 131071]|  [131072, ...]  |            |
+//! +-----------------+-----------------+-----------------+------------+
+//!         |                 |                 |
+//!         v                 v                 v
+//! +--------------+  +--------------+  +--------------+
+//! |    Array     |  |    Bitmap    |  |     Run      |
+//! | [3, 7, 42,   |  | 1011010...   |  | [0-65535]    |
+//! |  100, 8000]  |  | (8KB bits)   |  | (full range) |
+//! +--------------+  +--------------+  +--------------+
+//!   Sparse data       Dense data      Consecutive
+//!   <= 4096 vals    4096 < n < 65536   n == 65536
 //! ```
 //!
 //! # Container Types
@@ -24,7 +52,11 @@
 //! | Run | Consecutive sequences | `BTreeMap<start, end>` | cardinality == 65536 |
 //!
 //! Containers automatically convert between types during insertion to maintain
-//! optimal memory usage.
+//! optimal memory usage:
+//!
+//! ```text
+//! Array --[> 4096 values]--> Bitmap --[fully saturated]--> Run
+//! ```
 //!
 //! # References
 //!
