@@ -297,10 +297,12 @@ pub fn dial_end<P: PublicKey>(
     {
         return Err(Error::HandshakeFailed);
     }
-    let Some(secret) = esk.exchange(&msg.epk) else {
+    let Some(shared) = esk.exchange(&msg.epk) else {
         return Err(Error::HandshakeFailed);
     };
-    transcript.commit(secret.as_ref());
+    shared
+        .secret
+        .expose(|secret| transcript.commit(secret.as_ref()));
     let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_L2D));
     let send = SendCipher::new(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
@@ -350,10 +352,12 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         .commit(current_time.encode())
         .commit(epk.encode())
         .sign(&my_identity);
-    let Some(secret) = esk.exchange(&msg.epk) else {
+    let Some(shared) = esk.exchange(&msg.epk) else {
         return Err(Error::HandshakeFailed);
     };
-    transcript.commit(secret.as_ref());
+    shared
+        .secret
+        .expose(|secret| transcript.commit(secret.as_ref()));
     let send = SendCipher::new(transcript.noise(LABEL_CIPHER_L2D));
     let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
