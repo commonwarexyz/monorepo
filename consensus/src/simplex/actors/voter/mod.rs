@@ -240,12 +240,14 @@ mod tests {
             match batcher_receiver.next().await.unwrap() {
                 batcher::Message::Update {
                     current, active, ..
-                } if current >= target => {
+                } => {
                     active.send(true).unwrap();
+                    if current < target {
+                        continue;
+                    }
                     assert_eq!(current, target);
                     break;
                 }
-                batcher::Message::Update { active, .. } => active.send(true).unwrap(),
                 batcher::Message::Constructed(_) => {}
             }
         }
@@ -2568,7 +2570,6 @@ mod tests {
                 target_view,
             )
             .await;
-
             assert_ne!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
                 0,
@@ -2692,7 +2693,6 @@ mod tests {
                 target_view,
             )
             .await;
-
             assert_ne!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
                 0,
@@ -2851,7 +2851,6 @@ mod tests {
                 target_view,
             )
             .await;
-
             assert_eq!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
                 0,
