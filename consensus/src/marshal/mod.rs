@@ -183,7 +183,6 @@ mod tests {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             mailbox_size: 100,
-            namespace: NAMESPACE.to_vec(),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             block_codec_config: (),
@@ -313,7 +312,7 @@ mod tests {
         let finalizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
-            .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
         // Generate certificate signatures
@@ -325,7 +324,7 @@ mod tests {
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
-            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
         // Generate certificate signatures
@@ -419,7 +418,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
@@ -564,7 +563,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
@@ -731,7 +730,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -786,7 +785,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -862,7 +861,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -930,7 +929,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -1041,7 +1040,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Single validator actor
             let me = participants[0].clone();
@@ -1101,7 +1100,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Single validator actor
             let me = participants[0].clone();
@@ -1183,7 +1182,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (application, mut actor, _processed_height) = setup_validator(
@@ -1242,7 +1241,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_application, mut actor, _processed_height) = setup_validator(
@@ -1300,7 +1299,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_application, mut actor, _processed_height) = setup_validator(
@@ -1358,7 +1357,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Register the initial peer set
             let mut manager = oracle.manager();
@@ -1440,7 +1439,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_application, mut actor, _processed_height) = setup_validator(
@@ -1525,7 +1524,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_base_app, marshal, _processed_height) = setup_validator(
@@ -1657,7 +1656,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Set up two validators
             let mut actors = Vec::new();
@@ -1769,7 +1768,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Test 1: Fresh init should return processed height 0
             let me = participants[0].clone();
@@ -1904,7 +1903,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_base_app, marshal, _processed_height) = setup_validator(
@@ -1969,7 +1968,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NUM_VALIDATORS);
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Set up one validator
             let (i, validator) = participants.iter().enumerate().next().unwrap();

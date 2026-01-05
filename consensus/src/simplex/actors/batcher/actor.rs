@@ -43,7 +43,6 @@ pub struct Actor<
     activity_timeout: ViewDelta,
     skip_timeout: ViewDelta,
     epoch: Epoch,
-    namespace: Vec<u8>,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -114,7 +113,6 @@ impl<
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
                 epoch: cfg.epoch,
-                namespace: cfg.namespace,
 
                 mailbox_receiver: receiver,
 
@@ -285,7 +283,6 @@ impl<
                             if !notarization.verify(
                                 &mut self.context,
                                 &self.scheme,
-                                &self.namespace,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid notarization");
                                 self.blocker.block(sender).await;
@@ -312,7 +309,6 @@ impl<
                             if !nullification.verify::<_, D>(
                                 &mut self.context,
                                 &self.scheme,
-                                &self.namespace,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid nullification");
                                 self.blocker.block(sender).await;
@@ -339,7 +335,6 @@ impl<
                             if !finalization.verify(
                                 &mut self.context,
                                 &self.scheme,
-                                &self.namespace,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid finalization");
                                 self.blocker.block(sender).await;
@@ -443,11 +438,11 @@ impl<
             // Batch verify votes if ready
             let mut timer = self.verify_latency.timer();
             let verified = if round.ready_notarizes() {
-                Some(round.verify_notarizes(&mut self.context, &self.namespace))
+                Some(round.verify_notarizes(&mut self.context))
             } else if round.ready_nullifies() {
-                Some(round.verify_nullifies(&mut self.context, &self.namespace))
+                Some(round.verify_nullifies(&mut self.context))
             } else if round.ready_finalizes() {
-                Some(round.verify_finalizes(&mut self.context, &self.namespace))
+                Some(round.verify_finalizes(&mut self.context))
             } else {
                 None
             };

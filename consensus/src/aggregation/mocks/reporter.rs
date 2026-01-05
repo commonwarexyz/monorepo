@@ -30,9 +30,6 @@ pub struct Reporter<R: CryptoRngCore, S: Scheme, D: Digest> {
     // RNG used for signature verification with scheme.
     rng: R,
 
-    // Application namespace
-    namespace: Vec<u8>,
-
     // Signing scheme for verification
     scheme: S,
 
@@ -58,13 +55,12 @@ where
     S: scheme::Scheme<D>,
     D: Digest,
 {
-    pub fn new(rng: R, namespace: &[u8], scheme: S) -> (Self, Mailbox<S, D>) {
+    pub fn new(rng: R, scheme: S) -> (Self, Mailbox<S, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
             Self {
                 mailbox: receiver,
                 rng,
-                namespace: namespace.to_vec(),
                 scheme,
                 acks: HashSet::new(),
                 digests: BTreeMap::new(),
@@ -81,7 +77,7 @@ where
             match msg {
                 Message::Ack(ack) => {
                     // Verify properly constructed (not needed in production)
-                    assert!(ack.verify(&mut self.rng, &self.scheme, &self.namespace));
+                    assert!(ack.verify(&mut self.rng, &self.scheme));
 
                     // Test encoding/decoding
                     let encoded = ack.encode();
@@ -95,7 +91,7 @@ where
                 }
                 Message::Certified(certificate) => {
                     // Verify certificate
-                    assert!(certificate.verify(&mut self.rng, &self.scheme, &self.namespace));
+                    assert!(certificate.verify(&mut self.rng, &self.scheme));
 
                     // Test encoding/decoding
                     let encoded = certificate.encode();

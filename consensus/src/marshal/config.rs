@@ -30,9 +30,6 @@ where
     /// Useful for keeping around information that peers may desire to have.
     pub view_retention_timeout: ViewDelta,
 
-    /// Namespace for proofs.
-    pub namespace: Vec<u8>,
-
     /// Prunable archive partition prefix.
     pub prunable_items_per_section: NonZeroU64,
 

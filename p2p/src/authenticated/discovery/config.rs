@@ -121,6 +121,9 @@ pub struct Config<C: Signer> {
     /// This is used to prevent malicious peers from sending us a large number of peers at one time (each
     /// of which requires a signature verification).
     pub peer_gossip_max_count: usize,
+
+    /// Duration after which a blocked peer is allowed to reconnect.
+    pub block_duration: Duration,
 }
 
 impl<C: Signer> Config<C> {
@@ -158,6 +161,7 @@ impl<C: Signer> Config<C> {
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(50),
             peer_gossip_max_count: 32,
+            block_duration: Duration::from_hours(4),
         }
     }
 
@@ -200,6 +204,7 @@ impl<C: Signer> Config<C> {
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
             peer_gossip_max_count: 32,
+            block_duration: Duration::from_hours(1),
         }
     }
 
@@ -235,6 +240,7 @@ impl<C: Signer> Config<C> {
             max_peer_set_size: 1 << 8, // 2^8
             gossip_bit_vec_frequency: Duration::from_secs(1),
             peer_gossip_max_count: 32,
+            block_duration: Duration::from_mins(1),
         }
     }
 }

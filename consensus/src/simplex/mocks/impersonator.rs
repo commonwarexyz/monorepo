@@ -14,14 +14,11 @@ use tracing::debug;
 
 pub struct Config<S: Scheme> {
     pub scheme: S,
-    pub namespace: Vec<u8>,
 }
 
 pub struct Impersonator<E: Clock + CryptoRngCore + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
-
-    namespace: Vec<u8>,
 
     _hasher: PhantomData<H>,
 }
@@ -33,8 +30,6 @@ impl<E: Clock + CryptoRngCore + Spawner, S: scheme::Scheme<H::Digest>, H: Hasher
         Self {
             context: ContextCell::new(context),
             scheme: cfg.scheme,
-
-            namespace: cfg.namespace,
 
             _hasher: PhantomData,
         }
@@ -60,8 +55,7 @@ impl<E: Clock + CryptoRngCore + Spawner, S: scheme::Scheme<H::Digest>, H: Hasher
             match msg {
                 Vote::Notarize(notarize) => {
                     // Notarize received digest
-                    let mut n =
-                        Notarize::sign(&self.scheme, &self.namespace, notarize.proposal).unwrap();
+                    let mut n = Notarize::sign(&self.scheme, notarize.proposal).unwrap();
 
                     // Manipulate index
                     if n.attestation.signer == 0 {
@@ -76,8 +70,7 @@ impl<E: Clock + CryptoRngCore + Spawner, S: scheme::Scheme<H::Digest>, H: Hasher
                 }
                 Vote::Finalize(finalize) => {
                     // Finalize provided digest
-                    let mut f =
-                        Finalize::sign(&self.scheme, &self.namespace, finalize.proposal).unwrap();
+                    let mut f = Finalize::sign(&self.scheme, finalize.proposal).unwrap();
 
                     // Manipulate signature
                     if f.attestation.signer == 0 {

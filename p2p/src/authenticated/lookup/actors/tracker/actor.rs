@@ -68,6 +68,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             allow_private_ips: cfg.allow_private_ips,
             allow_dns: cfg.allow_dns,
             bypass_ip_check: cfg.bypass_ip_check,
+            block_duration: cfg.block_duration,
         };
 
         // Create the mailboxes
@@ -107,6 +108,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             self.context,
             on_stopped => {
                 debug!("context shutdown, stopping tracker");
+            },
+            _ = self.directory.wait_for_unblock() => {
+                if self.directory.unblock_expired() {
+                    let _ = self.listener.send(self.directory.listenable()).await;
+                }
             },
             msg = self.receiver.next() => {
                 let Some(msg) = msg else {
@@ -255,6 +261,7 @@ mod tests {
                 allow_dns: true,
                 bypass_ip_check,
                 listener: registered_ips_sender,
+                block_duration: Duration::from_secs(100),
             },
             registered_ips_receiver,
         )

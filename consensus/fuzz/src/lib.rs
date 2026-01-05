@@ -55,7 +55,11 @@ where
 {
     type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
     type Elector: Elector<Self::Scheme>;
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme>;
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +147,6 @@ impl Arbitrary<'_> for FuzzInput {
 fn run<P: Simplex>(input: FuzzInput) {
     let (n, _, f) = input.configuration;
     let containers = input.containers;
-    let namespace = NAMESPACE.to_vec();
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
 
@@ -163,7 +166,7 @@ fn run<P: Simplex>(input: FuzzInput) {
             schemes,
             verifier: _,
             ..
-        } = P::fixture(&mut context, n);
+        } = P::fixture(&mut context, NAMESPACE, n);
 
         let mut registrations = register(&mut oracle, &participants).await;
 
@@ -197,7 +200,6 @@ fn run<P: Simplex>(input: FuzzInput) {
                     .clone()
                     .try_into()
                     .expect("public keys are unique"),
-                namespace.clone(),
                 input.clone(),
             );
             disrupter.start(vote_network, certificate_network);
@@ -208,7 +210,6 @@ fn run<P: Simplex>(input: FuzzInput) {
             let context = context.with_label(&format!("validator_{validator}"));
             let elector = P::Elector::default();
             let reporter_cfg = reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants
                     .clone()
                     .try_into()
@@ -245,7 +246,6 @@ fn run<P: Simplex>(input: FuzzInput) {
                 partition: validator.to_string(),
                 mailbox_size: 1024,
                 epoch: Epoch::new(EPOCH),
-                namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),

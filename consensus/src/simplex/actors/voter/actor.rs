@@ -169,7 +169,6 @@ impl<
             StateConfig {
                 scheme: cfg.scheme,
                 elector: cfg.elector,
-                namespace: cfg.namespace.clone(),
                 epoch: cfg.epoch,
                 activity_timeout: cfg.activity_timeout,
                 leader_timeout: cfg.leader_timeout,
