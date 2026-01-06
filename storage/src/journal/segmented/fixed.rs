@@ -147,7 +147,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
             let size = blob.size().await;
-            blob_info.push((section, blob.clone_blob(), size));
+            blob_info.push((section, blob.clone(), size));
         }
 
         Ok(
