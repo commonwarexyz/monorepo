@@ -17,7 +17,8 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::{DigestOf, Hasher as CHasher};
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_parallel::ThreadPool;
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod ordered;

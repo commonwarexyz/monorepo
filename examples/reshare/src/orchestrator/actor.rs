@@ -19,6 +19,7 @@ use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
     Blocker, Receiver, Sender,
 };
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
@@ -29,7 +30,7 @@ use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
 use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
-pub struct Config<B, V, C, H, A, S, L>
+pub struct Config<B, V, C, H, A, S, L, St>
 where
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
@@ -39,10 +40,11 @@ where
         + Relay<Digest = H::Digest>,
     S: Scheme,
     L: Elector<S>,
+    St: Strategy,
 {
     pub oracle: B,
     pub application: A,
-    pub provider: Provider<S, C>,
+    pub provider: Provider<S, C, St>,
     pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
 
     pub muxer_size: usize,
@@ -54,7 +56,7 @@ where
     pub _phantom: PhantomData<L>,
 }
 
-pub struct Actor<E, B, V, C, H, A, S, L>
+pub struct Actor<E, B, V, C, H, A, S, L, St>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -65,7 +67,9 @@ where
         + Relay<Digest = H::Digest>,
     S: Scheme,
     L: Elector<S>,
-    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    St: Strategy,
+    Provider<S, C, St>:
+        EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
 {
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
@@ -73,7 +77,7 @@ where
 
     oracle: B,
     marshal: marshal::Mailbox<S, Block<H, C, V>>,
-    provider: Provider<S, C>,
+    provider: Provider<S, C, St>,
 
     muxer_size: usize,
     partition_prefix: String,
@@ -81,7 +85,7 @@ where
     _phantom: PhantomData<L>,
 }
 
-impl<E, B, V, C, H, A, S, L> Actor<E, B, V, C, H, A, S, L>
+impl<E, B, V, C, H, A, S, L, St> Actor<E, B, V, C, H, A, S, L, St>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -92,11 +96,13 @@ where
         + Relay<Digest = H::Digest>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
-    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    St: Strategy,
+    Provider<S, C, St>:
+        EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
 {
     pub fn new(
         context: E,
-        config: Config<B, V, C, H, A, S, L>,
+        config: Config<B, V, C, H, A, S, L, St>,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         let pool_ref = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));

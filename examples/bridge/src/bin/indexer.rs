@@ -5,22 +5,27 @@ use commonware_bridge::{
         inbound::{self, Inbound},
         outbound::Outbound,
     },
-    Scheme, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{simplex::types::Finalization, types::View, Viewable};
+use commonware_consensus::{
+    simplex::{scheme::bls12381_threshold, types::Finalization},
+    types::View,
+    Viewable,
+};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::G2,
         variant::{MinSig, Variant},
     },
-    ed25519::{self},
+    ed25519::{self, PublicKey},
     sha256::Digest as Sha256Digest,
     Digest, Hasher, Sha256, Signer as _,
 };
-use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
+use commonware_parallel::Rayon;
+use commonware_runtime::{tokio, Listener, Metrics, Network, RayonPoolSpawner, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{from_hex, ordered::Set, union, TryCollect};
+use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -31,6 +36,8 @@ use std::{
     time::Duration,
 };
 use tracing::{debug, info};
+
+type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig, Rayon>;
 
 #[allow(clippy::large_enum_variant)]
 enum Message<D: Digest> {
@@ -126,19 +133,29 @@ fn main() {
     if networks.len() == 0 {
         panic!("Please provide at least one network");
     }
-    for network in networks {
-        let network = from_hex(network).expect("Network not well-formed");
-        let public =
-            <MinSig as Variant>::Public::decode(network.as_ref()).expect("Network not well-formed");
-        let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        verifiers.insert(public, Scheme::certificate_verifier(&namespace, public));
-        blocks.insert(public, HashMap::new());
-        finalizations.insert(public, BTreeMap::new());
-    }
 
     // Create context
     let executor = tokio::Runner::default();
     executor.start(|context| async move {
+        let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
+
+        for network in networks {
+            let network = from_hex(network).expect("Network not well-formed");
+            let public = <MinSig as Variant>::Public::decode(network.as_ref())
+                .expect("Network not well-formed");
+            let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
+            verifiers.insert(
+                public,
+                bls12381_threshold::Scheme::certificate_verifier(
+                    &namespace,
+                    public,
+                    strategy.clone(),
+                ),
+            );
+            blocks.insert(public, HashMap::new());
+            finalizations.insert(public, BTreeMap::new());
+        }
+
         // Create message handler
         let (handler, mut receiver) = mpsc::unbounded();
 
