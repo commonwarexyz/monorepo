@@ -94,24 +94,17 @@
 //! });
 //! ```
 
+use super::blob_manager::{BlobManager, Config as BlobManagerConfig};
 use crate::journal::Error;
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
     buffer::{Append, PoolRef, Read},
-    telemetry::metrics::status::GaugeExt,
     Blob, Error as RError, Metrics, Storage,
 };
-use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::{
-    collections::{btree_map::Entry, BTreeMap},
-    io::Cursor,
-    marker::PhantomData,
-    num::NonZeroUsize,
-};
-use tracing::{debug, trace, warn};
+use std::{io::Cursor, marker::PhantomData, num::NonZeroUsize};
+use tracing::{trace, warn};
 use zstd::{bulk::compress, decode_all};
 
 /// Configuration for `Journal` storage.
@@ -132,6 +125,16 @@ pub struct Config<C> {
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
+}
+
+impl<C: Clone> Config<C> {
+    fn to_blob_manager_config(&self) -> BlobManagerConfig {
+        BlobManagerConfig {
+            partition: self.partition.clone(),
+            buffer_pool: self.buffer_pool.clone(),
+            write_buffer: self.write_buffer,
+        }
+    }
 }
 
 pub(crate) const ITEM_ALIGNMENT: u64 = 16;
@@ -156,21 +159,15 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
 
 /// Implementation of `Journal` storage.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
-    pub(crate) context: E,
-    pub(crate) cfg: Config<V::Cfg>,
+    manager: BlobManager<E>,
 
-    pub(crate) blobs: BTreeMap<u64, Append<E::Blob>>,
+    /// Compression level (if enabled).
+    compression: Option<u8>,
 
-    /// A section number before which all sections have been pruned. This value is not persisted,
-    /// and is initialized to 0 at startup. It's updated only during calls to `prune` during the
-    /// current execution, and therefore provides only a best effort lower-bound on the true value.
-    pub(crate) oldest_retained_section: u64,
+    /// Codec configuration.
+    codec_config: V::Cfg,
 
-    pub(crate) tracked: Gauge,
-    pub(crate) synced: Counter,
-    pub(crate) pruned: Counter,
-
-    pub(crate) _phantom: PhantomData<V>,
+    _phantom: PhantomData<V>,
 }
 
 impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
@@ -180,55 +177,15 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// initialization. The `replay` method can be used
     /// to iterate over all items in the `Journal`.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        // Iterate over blobs in partition
-        let mut blobs = BTreeMap::new();
-        let stored_blobs = match context.scan(&cfg.partition).await {
-            Ok(blobs) => blobs,
-            Err(RError::PartitionMissing(_)) => Vec::new(),
-            Err(err) => return Err(Error::Runtime(err)),
-        };
-        for name in stored_blobs {
-            let (blob, size) = context.open(&cfg.partition, &name).await?;
-            let hex_name = hex(&name);
-            let section = match name.try_into() {
-                Ok(section) => u64::from_be_bytes(section),
-                Err(_) => return Err(Error::InvalidBlobName(hex_name)),
-            };
-            debug!(section, blob = hex_name, size, "loaded section");
-            let blob = Append::new(blob, size, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
-            blobs.insert(section, blob);
-        }
+        let blob_cfg = cfg.to_blob_manager_config();
+        let manager = BlobManager::init(context, blob_cfg).await?;
 
-        // Initialize metrics
-        let tracked = Gauge::default();
-        let synced = Counter::default();
-        let pruned = Counter::default();
-        context.register("tracked", "Number of blobs", tracked.clone());
-        context.register("synced", "Number of syncs", synced.clone());
-        context.register("pruned", "Number of blobs pruned", pruned.clone());
-        let _ = tracked.try_set(blobs.len());
-
-        // Create journal instance
         Ok(Self {
-            context,
-            cfg,
-            blobs,
-            oldest_retained_section: 0,
-            tracked,
-            synced,
-            pruned,
-
+            manager,
+            compression: cfg.compression,
+            codec_config: cfg.codec_config,
             _phantom: PhantomData,
         })
-    }
-
-    /// Ensures that a section pruned during the current execution is not accessed.
-    const fn prune_guard(&self, section: u64) -> Result<(), Error> {
-        if section < self.oldest_retained_section {
-            Err(Error::AlreadyPrunedToSection(self.oldest_retained_section))
-        } else {
-            Ok(())
-        }
     }
 
     /// Reads an item from the blob at the given offset.
@@ -369,14 +326,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
-        let codec_config = self.cfg.codec_config.clone();
-        let compressed = self.cfg.compression.is_some();
-        let mut blobs = Vec::with_capacity(self.blobs.len());
-        for (section, blob) in self.blobs.range(start_section..) {
+        let codec_config = self.codec_config.clone();
+        let compressed = self.compression.is_some();
+        let mut blobs = Vec::new();
+        for (&section, blob) in self.manager.sections_from(start_section) {
             let blob_size = blob.size().await;
             let max_offset = compute_next_offset(blob_size)?;
             blobs.push((
-                *section,
+                section,
                 blob.clone(),
                 max_offset,
                 blob_size,
@@ -508,12 +465,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// the checksum verification). It is recommended to call `replay` before calling
     /// `append` to prevent this.
     pub async fn append(&mut self, section: u64, item: V) -> Result<(u32, u32), Error> {
-        // Check last pruned
-        self.prune_guard(section)?;
-
         // Create item
         let encoded = item.encode();
-        let encoded = if let Some(compression) = self.cfg.compression {
+        let encoded = if let Some(compression) = self.compression {
             compress(&encoded, compression as i32).map_err(|_| Error::CompressionFailed)?
         } else {
             encoded.into()
@@ -528,23 +482,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let size_len = UInt(item_len).encode_size();
         let entry_len = size_len + item_len as usize + 4;
 
-        // Get existing blob or create new one
-        let blob = match self.blobs.entry(section) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                let name = section.to_be_bytes();
-                let (blob, size) = self.context.open(&self.cfg.partition, &name).await?;
-                let blob = Append::new(
-                    blob,
-                    size,
-                    self.cfg.write_buffer,
-                    self.cfg.buffer_pool.clone(),
-                )
-                .await?;
-                self.tracked.inc();
-                entry.insert(blob)
-            }
-        };
+        // Get or create blob
+        let blob = self.manager.get_or_create(section).await?;
 
         // Calculate alignment
         let cursor = blob.size().await;
@@ -587,20 +526,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///    previously appended item) will result in an error, with the specific type being
     ///    undefined.
     pub async fn get(&self, section: u64, offset: u32) -> Result<V, Error> {
-        self.prune_guard(section)?;
-        let blob = match self.blobs.get(&section) {
-            Some(blob) => blob,
-            None => return Err(Error::SectionOutOfRange(section)),
-        };
+        let blob = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
 
         // Perform a multi-op read.
-        let (_, _, item) = Self::read(
-            self.cfg.compression.is_some(),
-            &self.cfg.codec_config,
-            blob,
-            offset,
-        )
-        .await?;
+        let (_, _, item) =
+            Self::read(self.compression.is_some(), &self.codec_config, blob, offset).await?;
         Ok(item)
     }
 
@@ -608,11 +541,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// Returns 0 if the section does not exist.
     pub async fn size(&self, section: u64) -> Result<u64, Error> {
-        self.prune_guard(section)?;
-        match self.blobs.get(&section) {
-            Some(blob) => Ok(blob.size().await),
-            None => Ok(0),
-        }
+        self.manager.size(section).await
     }
 
     /// Rewinds the journal to the given `section` and `offset`, removing any data beyond it.
@@ -623,7 +552,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// * This operation is not atomic, but it will always leave the journal in a consistent state
     ///   in the event of failure since blobs are always removed in reverse order of section.
     pub async fn rewind_to_offset(&mut self, section: u64, offset: u32) -> Result<(), Error> {
-        self.rewind(section, offset as u64 * ITEM_ALIGNMENT).await
+        self.manager
+            .rewind(section, offset as u64 * ITEM_ALIGNMENT)
+            .await
     }
 
     /// Rewinds the journal to the given `section` and `size`.
@@ -636,48 +567,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// * This operation is not atomic, but it will always leave the journal in a consistent state
     ///   in the event of failure since blobs are always removed in reverse order of section.
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.prune_guard(section)?;
-
-        // Remove any sections beyond the given section
-        let trailing: Vec<u64> = self
-            .blobs
-            .range((
-                std::ops::Bound::Excluded(section),
-                std::ops::Bound::Unbounded,
-            ))
-            .map(|(&section, _)| section)
-            .collect();
-        for index in trailing.iter().rev() {
-            // Remove the underlying blob from storage.
-            let blob = self.blobs.remove(index).unwrap();
-
-            // Destroy the blob
-            drop(blob);
-            self.context
-                .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
-                .await?;
-            debug!(section = index, "removed section");
-            self.tracked.dec();
-        }
-
-        // If the section exists, truncate it to the given offset
-        let blob = match self.blobs.get_mut(&section) {
-            Some(blob) => blob,
-            None => return Ok(()),
-        };
-        let current = blob.size().await;
-        if size >= current {
-            return Ok(()); // Already smaller than or equal to target size
-        }
-        blob.resize(size).await?;
-        debug!(
-            section,
-            from = current,
-            to = size,
-            ?trailing,
-            "rewound journal"
-        );
-        Ok(())
+        self.manager.rewind(section, size).await
     }
 
     /// Rewinds the `section` to the given `size`.
@@ -688,102 +578,59 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// This operation is not guaranteed to survive restarts until sync is called.
     pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.prune_guard(section)?;
-
-        // Get the blob at the given section
-        let blob = match self.blobs.get_mut(&section) {
-            Some(blob) => blob,
-            None => return Ok(()),
-        };
-
-        // Truncate the blob to the given size
-        let current = blob.size().await;
-        if size >= current {
-            return Ok(()); // Already smaller than or equal to target size
-        }
-        blob.resize(size).await?;
-        debug!(section, from = current, to = size, "rewound section");
-        Ok(())
+        self.manager.rewind_section(section, size).await
     }
 
     /// Ensures that all data in a given `section` is synced to the underlying store.
     ///
     /// If the `section` does not exist, no error will be returned.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
-        self.prune_guard(section)?;
-        let blob = match self.blobs.get(&section) {
-            Some(blob) => blob,
-            None => return Ok(()),
-        };
-        self.synced.inc();
-        blob.sync().await.map_err(Error::Runtime)
+        self.manager.sync(section).await
     }
 
     /// Syncs all open sections.
     pub async fn sync_all(&self) -> Result<(), Error> {
-        for blob in self.blobs.values() {
-            self.synced.inc();
-            blob.sync().await.map_err(Error::Runtime)?;
-        }
-        Ok(())
+        self.manager.sync_all().await
     }
 
     /// Prunes all `sections` less than `min`. Returns true if any sections were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        // Prune any blobs that are smaller than the minimum
-        let mut pruned = false;
-        while let Some((&section, _)) = self.blobs.first_key_value() {
-            // Stop pruning if we reach the minimum
-            if section >= min {
-                break;
-            }
-
-            // Remove blob from journal
-            let blob = self.blobs.remove(&section).unwrap();
-            let size = blob.size().await;
-            drop(blob);
-
-            // Remove blob from storage
-            self.context
-                .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
-                .await?;
-            pruned = true;
-
-            debug!(blob = section, size, "pruned blob");
-            self.tracked.dec();
-            self.pruned.inc();
-        }
-
-        if pruned {
-            self.oldest_retained_section = min;
-        }
-
-        Ok(pruned)
+        self.manager.prune(min).await
     }
 
     /// Returns the number of the oldest section in the journal.
     pub fn oldest_section(&self) -> Option<u64> {
-        self.blobs.first_key_value().map(|(section, _)| *section)
+        self.manager.oldest_section()
+    }
+
+    /// Returns the number of the newest section in the journal.
+    pub fn newest_section(&self) -> Option<u64> {
+        self.manager.newest_section()
+    }
+
+    /// Returns true if no sections exist.
+    pub fn is_empty(&self) -> bool {
+        self.manager.is_empty()
+    }
+
+    /// Returns the number of sections.
+    pub fn num_sections(&self) -> usize {
+        self.manager.num_sections()
     }
 
     /// Removes any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        for (i, blob) in self.blobs.into_iter() {
-            let size = blob.size().await;
-            drop(blob);
-            debug!(blob = i, size, "destroyed blob");
-            self.context
-                .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
-                .await?;
-        }
-        match self.context.remove(&self.cfg.partition, None).await {
-            Ok(()) => {}
-            Err(RError::PartitionMissing(_)) => {
-                // Partition already removed or never existed.
-            }
-            Err(err) => return Err(Error::Runtime(err)),
-        }
-        Ok(())
+        self.manager.destroy().await
+    }
+
+    /// Returns a reference to the underlying blobs map.
+    ///
+    /// This is primarily intended for conformance testing where raw access
+    /// to blob data is needed.
+    pub const fn blobs(
+        &self,
+    ) -> &std::collections::BTreeMap<u64, commonware_runtime::buffer::Append<E::Blob>> {
+        self.manager.blobs()
     }
 }
 
@@ -794,7 +641,7 @@ mod tests {
     use commonware_cryptography::{Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
-    use commonware_utils::{NZUsize, StableBuf};
+    use commonware_utils::{hex, NZUsize, StableBuf};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::registry::Metric;
 
@@ -1059,14 +906,8 @@ mod tests {
                 journal.sync(section).await.expect("Failed to sync");
             }
 
-            // Verify initial oldest_retained_section is 0
-            assert_eq!(journal.oldest_retained_section, 0);
-
             // Prune sections < 3
             journal.prune(3).await.expect("Failed to prune");
-
-            // Verify oldest_retained_section is updated
-            assert_eq!(journal.oldest_retained_section, 3);
 
             // Test that accessing pruned sections returns the correct error
 
@@ -1126,7 +967,6 @@ mod tests {
 
             // Prune more sections
             journal.prune(5).await.expect("Failed to prune");
-            assert_eq!(journal.oldest_retained_section, 5);
 
             // Verify sections 3 and 4 are now pruned
             match journal.get(3, 0).await {
@@ -1172,7 +1012,6 @@ mod tests {
                 }
 
                 journal.prune(3).await.expect("Failed to prune");
-                assert_eq!(journal.oldest_retained_section, 3);
             }
 
             // Second session: verify oldest_retained_section is reset
@@ -1180,10 +1019,6 @@ mod tests {
                 let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to re-initialize journal");
-
-                // After restart, oldest_retained_section should be back to 0
-                // since it's not persisted
-                assert_eq!(journal.oldest_retained_section, 0);
 
                 // But the actual sections 1 and 2 should be gone from storage
                 // so get should return SectionOutOfRange, not AlreadyPrunedToSection

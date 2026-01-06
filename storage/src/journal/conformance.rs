@@ -93,14 +93,14 @@ impl Conformance for VariableJournal {
             journal.sync().await.unwrap();
 
             assert_eq!(
-                journal.data.blobs.len(),
+                journal.data.blobs().len(),
                 data_len.div_ceil(ITEMS_PER_BLOB.get() as usize),
             );
 
             let mut contents: Vec<u8> = Vec::with_capacity(data_flat_len);
 
             // Read all of the data journal's blobs into the buffer.
-            for (_, blob) in journal.data.blobs.iter() {
+            for (_, blob) in journal.data.blobs().iter() {
                 let buf = vec![0u8; blob.size().await as usize];
                 contents.extend(blob.read_at(buf, 0).await.unwrap().as_ref());
             }

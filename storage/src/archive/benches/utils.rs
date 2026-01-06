@@ -349,10 +349,7 @@ pub async fn append_random_large(archive: &mut LargeArchive, count: u64) -> Vec<
         let key = Key::new(key_buf);
         keys.push(key.clone());
         rng.fill_bytes(val_buf.as_mut());
-        archive
-            .put(i, key, LargeVal::new(*val_buf))
-            .await
-            .unwrap();
+        archive.put(i, key, LargeVal::new(*val_buf)).await.unwrap();
     }
     archive.sync().await.unwrap();
     keys

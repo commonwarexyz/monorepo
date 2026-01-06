@@ -191,9 +191,7 @@ impl<E: Storage + Metrics, V: Codec> Blob<E, V> {
         let size_usize = size as usize;
 
         // Read via buffered writer (handles read-through for buffered data)
-        let buf = writer
-            .read_at(vec![0u8; size_usize], offset as u64)
-            .await?;
+        let buf = writer.read_at(vec![0u8; size_usize], offset as u64).await?;
         let buf = buf.as_ref();
 
         // Entry format: [compressed_data] [crc32 (4 bytes)]
