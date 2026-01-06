@@ -46,6 +46,7 @@ use core::{
     ptr,
 };
 use rand_core::CryptoRngCore;
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
@@ -286,7 +287,7 @@ impl Scalar {
     }
 
     /// Encodes the scalar into a byte array.
-    pub(crate) fn as_slice(&self) -> [u8; Self::SIZE] {
+    fn as_slice(&self) -> [u8; Self::SIZE] {
         let mut slice = [0u8; Self::SIZE];
         // SAFETY: All pointers valid; blst_bendian_from_scalar writes exactly 32 bytes.
         unsafe {
@@ -348,6 +349,14 @@ impl Hash for Scalar {
         state.write(&slice);
     }
 }
+
+impl PartialEq for Secret<Scalar> {
+    fn eq(&self, other: &Self) -> bool {
+        self.expose(|a| other.expose(|b| a.0.l.ct_eq(&b.0.l)).into())
+    }
+}
+
+impl Eq for Secret<Scalar> {}
 
 impl PartialOrd for Scalar {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
@@ -1137,8 +1146,9 @@ impl HashToGroup for G2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bls12381::primitives::group::Scalar;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_math::algebra::test_suites;
+    use commonware_math::algebra::{test_suites, Random};
     use commonware_utils::test_rng;
     use proptest::prelude::*;
     use std::collections::{BTreeSet, HashMap};
@@ -1538,6 +1548,23 @@ mod tests {
             Scalar::zero(),
             "Hash should not produce zero scalar"
         );
+    }
+
+    #[test]
+    fn test_secret_scalar_equality() {
+        let mut rng = test_rng();
+        let scalar1 = Scalar::random(&mut rng);
+        let scalar2 = scalar1.clone();
+        let scalar3 = Scalar::random(&mut rng);
+
+        let s1 = Secret::new(scalar1);
+        let s2 = Secret::new(scalar2);
+        let s3 = Secret::new(scalar3);
+
+        // Same scalar should be equal
+        assert_eq!(s1, s2);
+        // Different scalars should (very likely) be different
+        assert_ne!(s1, s3);
     }
 
     #[cfg(feature = "arbitrary")]

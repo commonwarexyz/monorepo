@@ -14,13 +14,12 @@
 //! metadata (pointer, length, capacity) zeroized, the referenced data remains
 //! intact. Do not use `Secret` with types that contain pointers.
 
-use crate::bls12381::primitives::group::Scalar;
 use core::{
     fmt::{Debug, Display, Formatter},
     mem::ManuallyDrop,
 };
 use subtle::ConstantTimeEq;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Zeroize memory at the given pointer using volatile writes.
 ///
@@ -132,26 +131,9 @@ impl<const N: usize> PartialEq for Secret<[u8; N]> {
 
 impl<const N: usize> Eq for Secret<[u8; N]> {}
 
-impl PartialEq for Secret<Scalar> {
-    fn eq(&self, other: &Self) -> bool {
-        self.expose(|a| {
-            other.expose(|b| {
-                let a = Zeroizing::new(a.as_slice());
-                let b = Zeroizing::new(b.as_slice());
-                a.ct_eq(&*b).into()
-            })
-        })
-    }
-}
-
-impl Eq for Secret<Scalar> {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::primitives::group::Scalar;
-    use commonware_math::algebra::Random;
-    use commonware_utils::test_rng;
 
     #[test]
     fn test_debug_redacted() {
@@ -213,22 +195,5 @@ mod tests {
         secret.expose(|v| {
             assert_eq!(v[31], 42);
         });
-    }
-
-    #[test]
-    fn test_scalar_equality() {
-        let mut rng = test_rng();
-        let scalar1 = Scalar::random(&mut rng);
-        let scalar2 = scalar1.clone();
-        let scalar3 = Scalar::random(&mut rng);
-
-        let s1 = Secret::new(scalar1);
-        let s2 = Secret::new(scalar2);
-        let s3 = Secret::new(scalar3);
-
-        // Same scalar should be equal
-        assert_eq!(s1, s2);
-        // Different scalars should (very likely) be different
-        assert_ne!(s1, s3);
     }
 }
