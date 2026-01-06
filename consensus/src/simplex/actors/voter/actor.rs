@@ -35,8 +35,6 @@ use futures::{
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand_core::CryptoRngCore;
 use std::{
-    collections::BTreeSet,
-    mem::take,
     num::NonZeroUsize,
     pin::Pin,
     task::{self, Poll},
@@ -114,7 +112,6 @@ pub struct Actor<
     write_buffer: NonZeroUsize,
     buffer_pool: PoolRef,
     journal: Option<Journal<E, Artifact<S, D>>>,
-    certification_candidates: BTreeSet<View>,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -191,7 +188,6 @@ impl<
                 write_buffer: cfg.write_buffer,
                 buffer_pool: cfg.buffer_pool,
                 journal: None,
-                certification_candidates: BTreeSet::new(),
 
                 mailbox_receiver,
 
@@ -338,7 +334,7 @@ impl<
                 Some(Request(proposal.round, receiver))
             }
             CertifyResult::Pending => {
-                self.certification_candidates.insert(view);
+                self.state.add_certification_candidate(view);
                 None
             }
             CertifyResult::Skip => None,
@@ -422,7 +418,7 @@ impl<
         let artifact = Artifact::Notarization(notarization.clone());
         let (added, equivocator) = self.state.add_notarization(notarization);
         if added {
-            self.certification_candidates.insert(view);
+            self.state.add_certification_candidate(view);
             self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
@@ -439,9 +435,6 @@ impl<
     ) -> Option<Notarization<S, D>> {
         // Get the notarization before advancing state
         let notarization = self.state.certified(view, success)?;
-
-        // Remove from candidates since certification is complete
-        self.certification_candidates.remove(&view);
 
         // Persist certification result for recovery
         let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
@@ -466,14 +459,6 @@ impl<
             self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
-
-        // Prune certification candidates that are no longer needed. This also
-        // bounds the size of certification_candidates during replay (views are
-        // added when notarizations are replayed, then removed here when
-        // finalizations are replayed).
-        let last_finalized = self.state.last_finalized();
-        self.certification_candidates
-            .retain(|v| *v > last_finalized);
     }
 
     /// Build, persist, and broadcast a notarize vote when this view is ready.
@@ -853,16 +838,13 @@ impl<
             }
 
             // Attempt to certify any views that we have notarizations for.
-            // Use split_off to only process views above last_finalized to handle edge cases
-            // where finalization arrives between iterations.
-            for v in take(&mut self.certification_candidates)
-                .split_off(&self.state.last_finalized().next())
-            {
+            for v in self.state.take_certification_candidates() {
                 if let Some(Request(ctx, receiver)) = self.try_certify(v).await {
                     debug!(%v, "attempting certification");
                     let view = ctx.view();
                     let handle = certify_pool.push(async move { (ctx, receiver.await) });
                     self.state.set_certify_handle(view, handle);
+                    self.state.add_outstanding_certification(view);
                 }
             }
 

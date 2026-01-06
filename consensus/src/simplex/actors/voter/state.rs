@@ -18,8 +18,8 @@ use commonware_utils::futures::Aborter;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use std::{
-    collections::BTreeMap,
-    mem::replace,
+    collections::{BTreeMap, BTreeSet},
+    mem::{replace, take},
     sync::atomic::AtomicI64,
     time::{Duration, SystemTime},
 };
@@ -57,6 +57,9 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
 
+    certification_candidates: BTreeSet<View>,
+    outstanding_certifications: BTreeSet<View>,
+
     current_view: Gauge,
     tracked_views: Gauge,
     skipped_views: Counter,
@@ -89,6 +92,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
+            certification_candidates: BTreeSet::new(),
+            outstanding_certifications: BTreeSet::new(),
             current_view,
             tracked_views,
             skipped_views,
@@ -254,6 +259,17 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let view = finalization.view();
         if view > self.last_finalized {
             self.last_finalized = view;
+
+            // Prune certification candidates at or below finalized view
+            self.certification_candidates.retain(|v| *v > view);
+
+            // Abort outstanding certifications at or below finalized view
+            let keep = self.outstanding_certifications.split_off(&view.next());
+            for v in replace(&mut self.outstanding_certifications, keep) {
+                if let Some(round) = self.views.get_mut(&v) {
+                    round.abort_certify();
+                }
+            }
         }
 
         self.enter_view(view.next());
@@ -449,6 +465,23 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         round.set_certify_handle(handle);
     }
 
+    /// Adds a view to the set of certification candidates if it's above last finalized.
+    pub fn add_certification_candidate(&mut self, view: View) {
+        if view > self.last_finalized {
+            self.certification_candidates.insert(view);
+        }
+    }
+
+    /// Takes all certification candidates, returning them and clearing the set.
+    pub fn take_certification_candidates(&mut self) -> BTreeSet<View> {
+        take(&mut self.certification_candidates)
+    }
+
+    /// Adds a view to the set of outstanding certifications.
+    pub fn add_outstanding_certification(&mut self, view: View) {
+        self.outstanding_certifications.insert(view);
+    }
+
     /// Marks proposal certification as complete and returns the notarization.
     ///
     /// Returns `None` if the view was already pruned. Otherwise returns the notarization
@@ -456,6 +489,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn certified(&mut self, view: View, is_success: bool) -> Option<Notarization<S, D>> {
         let round = self.views.get_mut(&view)?;
         round.certified(is_success);
+
+        // Remove from outstanding since certification is complete
+        self.outstanding_certifications.remove(&view);
 
         // Get notarization before advancing state
         let notarization = round

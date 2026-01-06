@@ -146,6 +146,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.certify_handle = Some(handle);
     }
 
+    /// Aborts the in-flight certification request by dropping the handle.
+    pub fn abort_certify(&mut self) {
+        self.certify_handle = None;
+    }
+
     /// Returns the elected leader (if any) for this round.
     pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
         self.leader.clone()
