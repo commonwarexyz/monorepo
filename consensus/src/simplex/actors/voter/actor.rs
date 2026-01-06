@@ -819,11 +819,11 @@ impl<
 
             // Attempt to certify any views that we have notarizations for.
             for proposal in self.state.certify_candidates() {
-                let ctx = proposal.round;
-                debug!(view = %ctx.view(), "attempting certification");
+                let round = proposal.round;
+                let view = round.view();
+                debug!(%view, "attempting certification");
                 let receiver = self.automaton.certify(proposal.payload).await;
-                let view = ctx.view();
-                let handle = certify_pool.push(async move { (ctx, receiver.await) });
+                let handle = certify_pool.push(async move { (round, receiver.await) });
                 self.state.set_certify_handle(view, handle);
             }
 
