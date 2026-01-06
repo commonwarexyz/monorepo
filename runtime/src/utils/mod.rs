@@ -216,8 +216,11 @@ impl Blocker {
 
 impl ArcWake for Blocker {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        let mut signaled = arc_self.state.lock().unwrap();
-        *signaled = true;
+        // Mark as signaled (and release lock before notifying).
+        {
+            let mut signaled = arc_self.state.lock().unwrap();
+            *signaled = true;
+        }
 
         // Notify a single waiter so the blocked thread re-checks the flag.
         arc_self.cv.notify_one();
