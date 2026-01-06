@@ -7,8 +7,8 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig},
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
+use std::num::NonZeroUsize;
 
 mod common;
 use common::{
@@ -46,13 +46,13 @@ enum FuzzOperation {
         public_key: G1,
         messages: Vec<(Vec<u8>, Vec<u8>)>,
         signature: G2,
-        parallel: bool,
+        concurrency: usize,
     },
     VerifySameSignerMinSig {
         public_key: G2,
         messages: Vec<(Vec<u8>, Vec<u8>)>,
         signature: G1,
-        parallel: bool,
+        concurrency: usize,
     },
 }
 
@@ -87,15 +87,15 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             6 => Ok(FuzzOperation::VerifySameSignerMinPk {
                 public_key: arbitrary_g1(u)?,
-                messages: arbitrary_messages(u, 0, 20)?,
+                messages: arbitrary_messages(u, 1, 20)?,
                 signature: arbitrary_g2(u)?,
-                parallel: u.arbitrary()?,
+                concurrency: u.int_in_range(1..=8)?,
             }),
             7 => Ok(FuzzOperation::VerifySameSignerMinSig {
                 public_key: arbitrary_g2(u)?,
-                messages: arbitrary_messages(u, 0, 20)?,
+                messages: arbitrary_messages(u, 1, 20)?,
                 signature: arbitrary_g1(u)?,
-                parallel: u.arbitrary()?,
+                concurrency: u.int_in_range(1..=8)?,
             }),
             _ => Ok(FuzzOperation::CombinePublicKeysMinPk {
                 public_keys: Vec::new(),
@@ -164,48 +164,42 @@ fn fuzz(op: FuzzOperation) {
             public_key,
             messages,
             signature,
-            parallel,
+            concurrency,
         } => {
-            if !messages.is_empty() {
-                let messages_refs: Vec<(&[u8], &[u8])> = messages
-                    .iter()
-                    .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
-                    .collect();
+            let messages_refs: Vec<(&[u8], &[u8])> = messages
+                .iter()
+                .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
+                .collect();
 
-                let combined_msg = if parallel {
-                    let strategy = Rayon::new(NZUsize!(4)).unwrap();
-                    aggregate::combine_messages::<MinPk, _>(&messages_refs, &strategy)
-                } else {
-                    aggregate::combine_messages::<MinPk, _>(&messages_refs, &Sequential)
-                };
-                let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
-                let _ =
-                    aggregate::verify_same_signer::<MinPk>(&public_key, &combined_msg, &agg_sig);
-            }
+            let combined_msg = if concurrency > 1 {
+                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                aggregate::combine_messages::<MinPk, _>(&messages_refs, &strategy)
+            } else {
+                aggregate::combine_messages::<MinPk, _>(&messages_refs, &Sequential)
+            };
+            let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
+            let _ = aggregate::verify_same_signer::<MinPk>(&public_key, &combined_msg, &agg_sig);
         }
 
         FuzzOperation::VerifySameSignerMinSig {
             public_key,
             messages,
             signature,
-            parallel,
+            concurrency,
         } => {
-            if !messages.is_empty() {
-                let messages_refs: Vec<(&[u8], &[u8])> = messages
-                    .iter()
-                    .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
-                    .collect();
+            let messages_refs: Vec<(&[u8], &[u8])> = messages
+                .iter()
+                .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
+                .collect();
 
-                let combined_msg = if parallel {
-                    let strategy = Rayon::new(NZUsize!(4)).unwrap();
-                    aggregate::combine_messages::<MinSig, _>(&messages_refs, &strategy)
-                } else {
-                    aggregate::combine_messages::<MinSig, _>(&messages_refs, &Sequential)
-                };
-                let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
-                let _ =
-                    aggregate::verify_same_signer::<MinSig>(&public_key, &combined_msg, &agg_sig);
-            }
+            let combined_msg = if concurrency > 1 {
+                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                aggregate::combine_messages::<MinSig, _>(&messages_refs, &strategy)
+            } else {
+                aggregate::combine_messages::<MinSig, _>(&messages_refs, &Sequential)
+            };
+            let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
+            let _ = aggregate::verify_same_signer::<MinSig>(&public_key, &combined_msg, &agg_sig);
         }
     }
 }

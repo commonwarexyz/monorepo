@@ -1204,12 +1204,10 @@ dependencies = [
  "commonware-cryptography",
  "commonware-math",
  "commonware-parallel",
- "commonware-utils",
  "ed25519-zebra",
  "libfuzzer-sys",
  "p256",
  "rand 0.8.5",
- "rayon",
  "sha2 0.10.9",
  "zeroize",
 ]
