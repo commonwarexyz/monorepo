@@ -1,4 +1,4 @@
-use super::round::{CertifyResult, Round};
+use super::round::Round;
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
@@ -18,8 +18,8 @@ use commonware_utils::futures::Aborter;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use std::{
-    collections::BTreeMap,
-    mem::replace,
+    collections::{BTreeMap, BTreeSet},
+    mem::{replace, take},
     sync::atomic::AtomicI64,
     time::{Duration, SystemTime},
 };
@@ -57,6 +57,9 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
 
+    certification_candidates: BTreeSet<View>,
+    outstanding_certifications: BTreeSet<View>,
+
     current_view: Gauge,
     tracked_views: Gauge,
     skipped_views: Counter,
@@ -89,6 +92,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
+            certification_candidates: BTreeSet::new(),
+            outstanding_certifications: BTreeSet::new(),
             current_view,
             tracked_views,
             skipped_views,
@@ -115,6 +120,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Returns the highest finalized view we have observed.
     pub const fn last_finalized(&self) -> View {
         self.last_finalized
+    }
+
+    /// Returns true if the view is eligible for certification (not yet finalized).
+    #[inline]
+    fn is_certify_candidate(&self, view: View) -> bool {
+        view > self.last_finalized
     }
 
     /// Returns the lowest view that must remain in memory to satisfy the activity timeout.
@@ -227,6 +238,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Inserts a notarization certificate and prepares the next view's leader.
     ///
     /// Does not advance into the next view until certification passes.
+    /// Automatically adds to certification candidates if successful.
     pub fn add_notarization(
         &mut self,
         notarization: Notarization<S, D>,
@@ -234,7 +246,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let view = notarization.view();
         // Do not advance to the next view until the certification passes
         self.set_leader(view.next(), Some(&notarization.certificate));
-        self.create_round(view).add_notarization(notarization)
+        let result = self.create_round(view).add_notarization(notarization);
+        if result.0 && self.is_certify_candidate(view) {
+            self.certification_candidates.insert(view);
+        }
+        result
     }
 
     /// Inserts a nullification certificate and advances into the next view.
@@ -254,6 +270,17 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let view = finalization.view();
         if view > self.last_finalized {
             self.last_finalized = view;
+
+            // Prune certification candidates at or below finalized view
+            self.certification_candidates.retain(|v| *v > view);
+
+            // Abort outstanding certifications at or below finalized view
+            let keep = self.outstanding_certifications.split_off(&view.next());
+            for v in replace(&mut self.outstanding_certifications, keep) {
+                if let Some(round) = self.views.get_mut(&v) {
+                    round.abort_certify();
+                }
+            }
         }
 
         self.enter_view(view.next());
@@ -433,20 +460,37 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .unwrap_or(false)
     }
 
-    /// Attempt to certify a view's proposal.
-    pub fn try_certify(&mut self, view: View) -> CertifyResult<Proposal<D>> {
-        let Some(round) = self.views.get_mut(&view) else {
-            return CertifyResult::Skip;
-        };
-        round.should_certify()
-    }
-
     /// Store the abort handle for an in-flight certification request.
     pub fn set_certify_handle(&mut self, view: View, handle: Aborter) {
         let Some(round) = self.views.get_mut(&view) else {
             return;
         };
         round.set_certify_handle(handle);
+        self.outstanding_certifications.insert(view);
+    }
+
+    /// Takes all certification candidates and returns proposals ready for certification.
+    ///
+    /// Views that are pending (have notarization but no proposal yet) are re-added
+    /// to candidates for later retry.
+    pub fn certify_candidates(&mut self) -> Vec<Proposal<D>> {
+        let candidates = take(&mut self.certification_candidates);
+        let mut ready = Vec::new();
+        for view in candidates {
+            if !self.is_certify_candidate(view) {
+                continue;
+            }
+            let Some(round) = self.views.get_mut(&view) else {
+                continue;
+            };
+            let (proposal, pending) = round.try_certify();
+            if let Some(proposal) = proposal {
+                ready.push(proposal);
+            } else if pending {
+                self.certification_candidates.insert(view);
+            }
+        }
+        ready
     }
 
     /// Marks proposal certification as complete and returns the notarization.
@@ -456,6 +500,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn certified(&mut self, view: View, is_success: bool) -> Option<Notarization<S, D>> {
         let round = self.views.get_mut(&view)?;
         round.certified(is_success);
+
+        // Remove from outstanding since certification is complete
+        self.outstanding_certifications.remove(&view);
 
         // Get notarization before advancing state
         let notarization = round
@@ -1102,6 +1149,72 @@ mod tests {
 
             // Shouldn't finalize the certificate's proposal (proposal_b)
             assert!(restarted.construct_finalize(view).is_none());
+        });
+    }
+
+    #[test]
+    fn certify_candidates_blocked_when_finalized() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: verifier.clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            // Add notarization for view 3
+            let view3 = View::new(3);
+            let proposal3 = Proposal::new(
+                Rnd::new(Epoch::new(1), view3),
+                GENESIS_VIEW,
+                Sha256Digest::from([3u8; 32]),
+            );
+            let notarize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal3.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter()).unwrap();
+            state.add_notarization(notarization);
+
+            // certify_candidates should return view 3's proposal before finalization
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].round.view(), view3);
+
+            // Re-add view 3 to candidates for the next test
+            state.add_notarization(
+                Notarization::from_notarizes(&verifier, notarize_votes.iter()).unwrap(),
+            );
+
+            // Add finalization for view 5 (which finalizes everything up to and including 5)
+            let view5 = View::new(5);
+            let proposal5 = Proposal::new(
+                Rnd::new(Epoch::new(1), view5),
+                GENESIS_VIEW,
+                Sha256Digest::from([5u8; 32]),
+            );
+            let finalize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, proposal5.clone()).unwrap())
+                .collect();
+            let finalization =
+                Finalization::from_finalizes(&verifier, finalize_votes.iter()).unwrap();
+            state.add_finalization(finalization);
+
+            // certify_candidates should return empty (view 3 is finalized, pruned from candidates)
+            let candidates = state.certify_candidates();
+            assert!(candidates.is_empty());
         });
     }
 
