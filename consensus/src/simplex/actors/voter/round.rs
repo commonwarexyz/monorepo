@@ -138,21 +138,28 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Attempt to certify this round's proposal.
     pub fn try_certify(&mut self) -> CertifyResult<D> {
-        if self.notarization.is_none() {
+        let Some(notarization) = self.notarization.as_ref() else {
             return CertifyResult::Skip;
-        }
+        };
         match self.certify {
             CertifyState::Ready => {}
             CertifyState::Outstanding(_) | CertifyState::Certified(_) | CertifyState::Aborted => {
                 return CertifyResult::Skip;
             }
         }
-        // Proposal comes from the notarization certificate. If unavailable, it's
-        // due to equivocation which is permanent - skip rather than retry.
-        self.proposal
+
+        // The proposal must match the notarization's proposal (which
+        // is overwritten, regardless of our own initial vote, during
+        // processing).
+        let proposal = self
+            .proposal
             .proposal()
-            .cloned()
-            .map_or(CertifyResult::Skip, CertifyResult::Ready)
+            .expect("proposal must be set if notarization is set");
+        assert_eq!(
+            proposal, &notarization.proposal,
+            "slot proposal must match notarization proposal"
+        );
+        CertifyResult::Ready(proposal.clone())
     }
 
     /// Sets the handle for the certification request.
