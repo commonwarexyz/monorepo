@@ -43,9 +43,7 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
         let encoded = message.encode();
-        self.sender
-            .send(recipients, encoded.freeze(), priority)
-            .await
+        self.sender.send(recipients, encoded, priority).await
     }
 
     /// Check if a message can be sent to a set of recipients, returning a [CheckedWrappedSender]
@@ -77,7 +75,7 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'a> as CheckedSender>::Error> {
         let encoded = message.encode();
-        self.sender.send(encoded.freeze(), priority).await
+        self.sender.send(encoded, priority).await
     }
 }
 

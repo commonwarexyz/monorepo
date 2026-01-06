@@ -95,7 +95,7 @@ mod tests {
             channel: 7,
             message: Bytes::from_static(b"ping"),
         });
-        let encoded = payload.encode().freeze();
+        let encoded = payload.encode();
 
         let decoded = Message::decode_cfg(encoded, &4).expect("within limit");
         match decoded {
@@ -113,7 +113,7 @@ mod tests {
             channel: 9,
             message: Bytes::from_static(b"hello"),
         });
-        let encoded = payload.encode().freeze();
+        let encoded = payload.encode();
 
         let result = Message::decode_cfg(encoded, &4);
         assert!(matches!(result, Err(Error::InvalidLength(5))));

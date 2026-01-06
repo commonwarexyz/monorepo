@@ -140,8 +140,8 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
 
             // Broadcast payloads via relay so nodes can verify
             let me = &self.scheme.participants()[self.scheme.me().unwrap() as usize];
-            self.relay.broadcast(me, (digest_a, payload_a.into())).await;
-            self.relay.broadcast(me, (digest_b, payload_b.into())).await;
+            self.relay.broadcast(me, (digest_a, payload_a)).await;
+            self.relay.broadcast(me, (digest_b, payload_b)).await;
 
             // Notarize proposal A and send it to victim only
             let notarize_a = Notarize::<S, _>::sign(&self.scheme, proposal_a).expect("sign failed");

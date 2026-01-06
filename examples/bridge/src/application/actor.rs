@@ -82,8 +82,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                                 Inbound::GetFinalization::<H::Digest>(inbound::GetFinalization {
                                     network: *self.other_network.identity(),
                                 })
-                                .encode()
-                                .freeze();
+                                .encode();
                             indexer_sender
                                 .send(msg)
                                 .await
@@ -124,8 +123,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                         network: self.this_network,
                         block,
                     })
-                    .encode()
-                    .freeze();
+                    .encode();
                     indexer_sender
                         .send(msg)
                         .await
@@ -153,8 +151,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                         network: self.this_network,
                         digest: payload,
                     })
-                    .encode()
-                    .freeze();
+                    .encode();
                     indexer_sender
                         .send(msg)
                         .await
@@ -207,8 +204,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                                     network: self.this_network,
                                     finalization,
                                 })
-                                .encode()
-                                .freeze();
+                                .encode();
                             indexer_sender
                                 .send(msg)
                                 .await

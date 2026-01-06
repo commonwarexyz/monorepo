@@ -260,7 +260,7 @@ impl<
                     // the full timeout)
                     return;
                 };
-                let _ = response.send(certificate.encode().freeze());
+                let _ = response.send(certificate.encode());
             }
         }
     }

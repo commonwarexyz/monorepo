@@ -356,7 +356,7 @@ where
                                             )
                                             .await;
                                         if let Some(ack) = response {
-                                            let payload = Message::<V, C::PublicKey>::Ack(ack).encode().freeze();
+                                            let payload = Message::<V, C::PublicKey>::Ack(ack).encode();
                                             if let Err(e) = round_sender
                                                 .send(Recipients::One(sender_pk.clone()), payload, true)
                                                 .await
@@ -574,9 +574,7 @@ where
             }
 
             // Send to remote player
-            let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg)
-                .encode()
-                .freeze();
+            let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg).encode();
             match sender
                 .send(Recipients::One(player.clone()), payload, true)
                 .await

@@ -21,7 +21,7 @@ pub async fn send_frame<S: Sink>(
 
     // Prefix `buf` with its varint-encoded length and send it
     let len = UInt(n as u32);
-    let data = len.encode().freeze().chain(buf);
+    let data = len.encode().chain(buf);
     sink.send(data).await.map_err(Error::SendFailed)
 }
 

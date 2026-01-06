@@ -285,8 +285,7 @@ fn main() {
                                     .await
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
-                                let msg =
-                                    Outbound::<Sha256Digest>::Success(success).encode().freeze();
+                                let msg = Outbound::<Sha256Digest>::Success(success).encode();
                                 if sender.send(msg).await.is_err() {
                                     debug!(?peer, "failed to send message");
                                     return;
@@ -304,16 +303,14 @@ fn main() {
                                 let response = receiver.await.expect("failed to receive response");
                                 match response {
                                     Some(block) => {
-                                        let msg = Outbound::Block(block).encode().freeze();
+                                        let msg = Outbound::Block(block).encode();
                                         if sender.send(msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
                                         }
                                     }
                                     None => {
-                                        let msg = Outbound::<Sha256Digest>::Success(false)
-                                            .encode()
-                                            .freeze();
+                                        let msg = Outbound::<Sha256Digest>::Success(false).encode();
                                         if sender.send(msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
@@ -331,8 +328,7 @@ fn main() {
                                     .await
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
-                                let msg =
-                                    Outbound::<Sha256Digest>::Success(success).encode().freeze();
+                                let msg = Outbound::<Sha256Digest>::Success(success).encode();
                                 if sender.send(msg).await.is_err() {
                                     debug!(?peer, "failed to send message");
                                     return;
@@ -350,16 +346,14 @@ fn main() {
                                 let response = receiver.await.expect("failed to receive response");
                                 match response {
                                     Some(data) => {
-                                        let msg = Outbound::Finalization(data).encode().freeze();
+                                        let msg = Outbound::Finalization(data).encode();
                                         if sender.send(msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
                                         }
                                     }
                                     None => {
-                                        let msg = Outbound::<Sha256Digest>::Success(false)
-                                            .encode()
-                                            .freeze();
+                                        let msg = Outbound::<Sha256Digest>::Success(false).encode();
                                         if sender.send(msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;

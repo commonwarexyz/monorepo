@@ -359,7 +359,7 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
         self.inner
-            .send(subchannel.encode().freeze().chain(message), priority)
+            .send(subchannel.encode().chain(message), priority)
             .await
     }
 }
