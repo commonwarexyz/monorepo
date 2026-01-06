@@ -31,7 +31,7 @@ use prometheus_client::{
     registry::{Metric, Registry},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
-use rayon::ThreadPoolBuildError;
+use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     env,
     future::Future,
@@ -522,18 +522,18 @@ impl crate::Spawner for Context {
 
 impl crate::RayonPoolSpawner for Context {
     fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
-        commonware_parallel::create_pool_with(concurrency, |builder| {
-            builder
-                .spawn_handler(move |thread| {
-                    // Tasks spawned in a thread pool are expected to run longer than any single
-                    // task and thus should be provisioned as a dedicated thread.
-                    self.with_label("rayon_thread")
-                        .dedicated()
-                        .spawn(move |_| async move { thread.run() });
-                    Ok(())
-                })
-                .build()
-        })
+        ThreadPoolBuilder::new()
+            .num_threads(concurrency.get())
+            .spawn_handler(move |thread| {
+                // Tasks spawned in a thread pool are expected to run longer than any single
+                // task and thus should be provisioned as a dedicated thread.
+                self.with_label("rayon_thread")
+                    .dedicated()
+                    .spawn(move |_| async move { thread.run() });
+                Ok(())
+            })
+            .build()
+            .map(Arc::new)
     }
 }
 

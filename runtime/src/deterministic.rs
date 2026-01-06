@@ -77,7 +77,7 @@ use prometheus_client::{
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
-use rayon::ThreadPoolBuildError;
+use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
@@ -1064,22 +1064,23 @@ impl crate::Spawner for Context {
 
 impl crate::RayonPoolSpawner for Context {
     fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
-        commonware_parallel::create_pool_with(concurrency, |mut builder| {
-            if rayon::current_thread_index().is_none() {
-                builder = builder.use_current_thread()
-            }
+        let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
 
-            builder
-                .spawn_handler(move |thread| {
-                    // Tasks spawned in a thread pool are expected to run longer than any single
-                    // task and thus should be provisioned as a dedicated thread.
-                    self.with_label("rayon_thread")
-                        .dedicated()
-                        .spawn(move |_| async move { thread.run() });
-                    Ok(())
-                })
-                .build()
-        })
+        if rayon::current_thread_index().is_none() {
+            builder = builder.use_current_thread()
+        }
+
+        builder
+            .spawn_handler(move |thread| {
+                // Tasks spawned in a thread pool are expected to run longer than any single
+                // task and thus should be provisioned as a dedicated thread.
+                self.with_label("rayon_thread")
+                    .dedicated()
+                    .spawn(move |_| async move { thread.run() });
+                Ok(())
+            })
+            .build()
+            .map(Arc::new)
     }
 }
 

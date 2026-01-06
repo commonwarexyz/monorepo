@@ -479,14 +479,13 @@ mod tests {
         )
         .expect("Verification with namespaced messages should succeed");
 
-        let pool = commonware_parallel::create_pool(NZUsize!(4)).unwrap();
-        let parallel = Rayon::new(pool);
+        let strategy = Rayon::new(NZUsize!(4)).unwrap();
         batch_verify_same_signer::<_, V, _, _>(
             &mut rng,
             &public,
             signer.index,
             &entries,
-            &parallel,
+            &strategy,
         )
         .expect("Verification with parallel strategy should succeed");
 
@@ -607,8 +606,7 @@ mod tests {
         ops::verify_message::<V>(sharing.public(), b"test", b"payload1", &sig_1).unwrap();
         ops::verify_message::<V>(sharing.public(), b"test", b"payload2", &sig_2).unwrap();
 
-        let pool = commonware_parallel::create_pool(NZUsize!(4)).unwrap();
-        let parallel = Rayon::new(pool);
+        let parallel = Rayon::new(NZUsize!(4)).unwrap();
         let (sig_1_par, sig_2_par) =
             recover_pair::<V, _, _>(&sharing, &partials_1, &partials_2, &parallel).unwrap();
 

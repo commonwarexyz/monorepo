@@ -130,7 +130,7 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
         let t = quorum(n);
         let bench = Bench::new(&mut rng, reshare, n);
         for &concurrency in CONCURRENCY {
-            let pool = commonware_parallel::create_pool(NZUsize!(concurrency)).unwrap();
+            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
             c.bench_function(
                 &format!(
                     "{}{}/n={} t={} conc={}",
@@ -145,9 +145,7 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
                         || bench.pre_finalize(),
                         |(player, logs)| {
                             if concurrency > 1 {
-                                black_box(
-                                    player.finalize(logs, &Rayon::new(pool.clone())).unwrap(),
-                                );
+                                black_box(player.finalize(logs, &strategy).unwrap());
                             } else {
                                 black_box(player.finalize(logs, &Sequential).unwrap());
                             }

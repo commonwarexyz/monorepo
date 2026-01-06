@@ -20,7 +20,7 @@ pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                     minimum_shards: min as u16,
                     extra_shards: (chunks - min) as u16,
                 };
-                let pool = commonware_parallel::create_pool(NZUsize!(conc)).unwrap();
+                let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 c.bench_function(
                     &format!("{name}/msg_len={data_length} chunks={chunks} conc={conc}"),
                     |b| {
@@ -33,8 +33,7 @@ pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                             },
                             |data| {
                                 if conc > 1 {
-                                    S::encode(&config, data.as_slice(), &Rayon::new(pool.clone()))
-                                        .unwrap()
+                                    S::encode(&config, data.as_slice(), &strategy).unwrap()
                                 } else {
                                     S::encode(&config, data.as_slice(), &Sequential).unwrap()
                                 }
@@ -59,7 +58,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                     minimum_shards: min as u16,
                     extra_shards: (chunks - min) as u16,
                 };
-                let pool = commonware_parallel::create_pool(NZUsize!(conc)).unwrap();
+                let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 c.bench_function(
                     &format!("{name}/msg_len={data_length} chunks={chunks} conc={conc}"),
                     |b| {
@@ -71,8 +70,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
 
                                 // Encode data
                                 let (commitment, mut shards) = if conc > 1 {
-                                    S::encode(&config, data.as_slice(), &Rayon::new(pool.clone()))
-                                        .unwrap()
+                                    S::encode(&config, data.as_slice(), &strategy).unwrap()
                                 } else {
                                     S::encode(&config, data.as_slice(), &Sequential).unwrap()
                                 };
@@ -120,7 +118,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                         &commitment,
                                         checking_data,
                                         &checked_shards,
-                                        &Rayon::new(pool.clone()),
+                                        &strategy,
                                     )
                                     .unwrap()
                                 } else {

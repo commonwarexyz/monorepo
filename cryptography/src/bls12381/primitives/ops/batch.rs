@@ -181,9 +181,8 @@ mod tests {
         verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &Sequential)
             .expect("valid signatures should be accepted");
 
-        let pool = commonware_parallel::create_pool(NZUsize!(4)).unwrap();
-        let parallel = Rayon::new(pool);
-        verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &parallel)
+        let strategy = Rayon::new(NZUsize!(4)).unwrap();
+        verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &strategy)
             .expect("valid signatures should be accepted with parallel strategy");
     }
 

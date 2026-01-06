@@ -246,7 +246,7 @@ pub trait RayonPoolSpawner: Spawner + Metrics {
     /// A `Result` containing the configured [Rayon] strategy or a [rayon::ThreadPoolBuildError] if the pool cannot be
     /// built.
     fn create_strategy(&self, concurrency: NonZeroUsize) -> Result<Rayon, ThreadPoolBuildError> {
-        self.create_pool(concurrency).map(Rayon::new)
+        self.create_pool(concurrency).map(Rayon::with_pool)
     }
 }
 

@@ -332,6 +332,9 @@ impl Strategy for Sequential {
 
 cfg_if! {
     if #[cfg(feature = "std")] {
+        /// A clone-able wrapper around a [rayon]-compatible thread pool.
+        pub type ThreadPool = Arc<RThreadPool>;
+
         /// A parallel execution strategy backed by a rayon thread pool.
         ///
         /// This strategy executes fold operations in parallel across multiple threads.
@@ -377,8 +380,17 @@ cfg_if! {
         }
 
         impl Rayon {
+            /// Creates a [`Rayon`] strategy with a [`ThreadPool`] that is configured with the given
+            /// number of threads.
+            pub fn new(num_threads: NonZeroUsize) -> Result<Self, ThreadPoolBuildError> {
+                ThreadPoolBuilder::new()
+                    .num_threads(num_threads.get())
+                    .build()
+                    .map(|pool| Self::with_pool(Arc::new(pool)))
+            }
+
             /// Creates a new [`Rayon`] strategy with the given [`ThreadPool`].
-            pub const fn new(thread_pool: ThreadPool) -> Self {
+            pub const fn with_pool(thread_pool: ThreadPool) -> Self {
                 Self { thread_pool }
             }
         }
@@ -425,35 +437,17 @@ cfg_if! {
                 })
             }
         }
-
-        /// A clone-able wrapper around a [rayon]-compatible thread pool.
-        pub type ThreadPool = Arc<RThreadPool>;
-
-        /// Creates a [`ThreadPool`] with the given number of threads.
-        pub fn create_pool(num_threads: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
-            create_pool_with(num_threads, ThreadPoolBuilder::build)
-        }
-
-        /// Creates a [`ThreadPool`] with custom configuration.
-        pub fn create_pool_with(
-            num_threads: NonZeroUsize,
-            build: impl FnOnce(ThreadPoolBuilder) -> Result<RThreadPool, ThreadPoolBuildError>,
-        ) -> Result<ThreadPool, ThreadPoolBuildError> {
-            let builder = ThreadPoolBuilder::new().num_threads(num_threads.get());
-            build(builder).map(Arc::new)
-        }
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{create_pool, Rayon, Sequential, Strategy};
+    use crate::{Rayon, Sequential, Strategy};
     use core::num::NonZeroUsize;
     use proptest::prelude::*;
 
     fn parallel_strategy() -> Rayon {
-        let thread_pool = create_pool(NonZeroUsize::new(4).unwrap()).unwrap();
-        Rayon::new(thread_pool)
+        Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap()
     }
 
     proptest! {

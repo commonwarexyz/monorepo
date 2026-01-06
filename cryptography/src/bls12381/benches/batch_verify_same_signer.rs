@@ -14,8 +14,7 @@ fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
             msgs.push(msg);
         }
         for concurrency in [1, 8] {
-            let pool =
-                commonware_parallel::create_pool(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+            let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
             c.bench_function(
                 &format!("{}/conc={} msgs={}", module_path!(), concurrency, n),
                 |b| {
@@ -37,7 +36,7 @@ fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
                                     &mut thread_rng(),
                                     &public,
                                     &entries,
-                                    &Rayon::new(pool.clone()),
+                                    &strategy,
                                 )
                                 .unwrap();
                             } else {

@@ -391,14 +391,9 @@ fn fuzz(op: FuzzOperation) {
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();
-                let pool =
-                    commonware_parallel::create_pool(NonZeroUsize::new(concurrency).unwrap())
-                        .unwrap();
-                let _ = threshold::recover_multiple::<MinPk, _, _>(
-                    &sharing,
-                    groups_refs,
-                    &Rayon::new(pool),
-                );
+                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                let _ =
+                    threshold::recover_multiple::<MinPk, _, _>(&sharing, groups_refs, &strategy);
             }
         }
 
@@ -412,14 +407,9 @@ fn fuzz(op: FuzzOperation) {
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();
-                let pool =
-                    commonware_parallel::create_pool(NonZeroUsize::new(concurrency).unwrap())
-                        .unwrap();
-                let _ = threshold::recover_multiple::<MinSig, _, _>(
-                    &sharing,
-                    groups_refs,
-                    &Rayon::new(pool),
-                );
+                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                let _ =
+                    threshold::recover_multiple::<MinSig, _, _>(&sharing, groups_refs, &strategy);
             }
         }
 

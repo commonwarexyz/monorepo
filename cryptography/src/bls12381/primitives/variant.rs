@@ -444,8 +444,7 @@ mod tests {
         )
         .expect("valid batch should pass");
 
-        let pool = commonware_parallel::create_pool(NZUsize!(2)).unwrap();
-        let parallel = Rayon::new(pool);
+        let parallel = Rayon::new(NZUsize!(2)).unwrap();
         V::batch_verify(
             &mut rng,
             &[public1, public2, public3],
