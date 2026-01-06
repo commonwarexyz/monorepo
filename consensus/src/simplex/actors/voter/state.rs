@@ -460,6 +460,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// If certification is pending (has notarization but no proposal yet),
     /// the view is automatically re-added to candidates for later retry.
     pub fn try_certify(&mut self, view: View) -> Option<Proposal<D>> {
+        // Skip if already finalized past this view
+        if view <= self.last_finalized {
+            return None;
+        }
         let round = self.views.get_mut(&view)?;
         if let Some(proposal) = round.try_certify() {
             return Some(proposal);
@@ -480,9 +484,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.outstanding_certifications.insert(view);
     }
 
-    /// Takes all certification candidates, returning them and clearing the set.
-    pub fn take_certification_candidates(&mut self) -> BTreeSet<View> {
-        take(&mut self.certification_candidates)
+    /// Takes all certification candidates, returning an iterator and clearing the set.
+    pub fn take_certification_candidates(&mut self) -> impl Iterator<Item = View> {
+        take(&mut self.certification_candidates).into_iter()
     }
 
     /// Marks proposal certification as complete and returns the notarization.
@@ -1141,6 +1145,67 @@ mod tests {
 
             // Shouldn't finalize the certificate's proposal (proposal_b)
             assert!(restarted.construct_finalize(view).is_none());
+        });
+    }
+
+    #[test]
+    fn try_certify_blocked_when_finalized() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: verifier.clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            // Add notarization for view 3
+            let view3 = View::new(3);
+            let proposal3 = Proposal::new(
+                Rnd::new(Epoch::new(1), view3),
+                GENESIS_VIEW,
+                Sha256Digest::from([3u8; 32]),
+            );
+            let notarize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal3.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter()).unwrap();
+            state.add_notarization(notarization);
+
+            // try_certify should succeed before finalization
+            assert!(state.try_certify(view3).is_some());
+
+            // Add finalization for view 5 (which finalizes everything up to and including 5)
+            let view5 = View::new(5);
+            let proposal5 = Proposal::new(
+                Rnd::new(Epoch::new(1), view5),
+                GENESIS_VIEW,
+                Sha256Digest::from([5u8; 32]),
+            );
+            let finalize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, proposal5.clone()).unwrap())
+                .collect();
+            let finalization =
+                Finalization::from_finalizes(&verifier, finalize_votes.iter()).unwrap();
+            state.add_finalization(finalization);
+
+            // try_certify for view 3 should now return None (view 3 <= last_finalized 5)
+            assert!(state.try_certify(view3).is_none());
+
+            // try_certify for view 5 should also return None (view 5 <= last_finalized 5)
+            assert!(state.try_certify(view5).is_none());
         });
     }
 
