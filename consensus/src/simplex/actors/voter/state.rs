@@ -122,6 +122,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.last_finalized
     }
 
+    /// Returns true if the view is eligible for certification (not yet finalized).
+    #[inline]
+    fn is_certify_candidate(&self, view: View) -> bool {
+        view > self.last_finalized
+    }
+
     /// Returns the lowest view that must remain in memory to satisfy the activity timeout.
     pub const fn min_active(&self) -> View {
         min_active(self.activity_timeout, self.last_finalized)
@@ -241,7 +247,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         // Do not advance to the next view until the certification passes
         self.set_leader(view.next(), Some(&notarization.certificate));
         let result = self.create_round(view).add_notarization(notarization);
-        if result.0 && view > self.last_finalized {
+        if result.0 && self.is_certify_candidate(view) {
             self.certification_candidates.insert(view);
         }
         result
@@ -460,8 +466,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// If certification is pending (has notarization but no proposal yet),
     /// the view is automatically re-added to candidates for later retry.
     pub fn try_certify(&mut self, view: View) -> Option<Proposal<D>> {
-        // Skip if already finalized past this view
-        if view <= self.last_finalized {
+        if !self.is_certify_candidate(view) {
             return None;
         }
         let round = self.views.get_mut(&view)?;
