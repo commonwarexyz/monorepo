@@ -25,9 +25,12 @@ const PAGE_SIZE: NonZeroUsize = NZUsize!(16_384);
 /// The number of pages to cache in the buffer pool.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
-/// Fixed-length key and value types.
+/// Fixed-length key and value types (small values for baseline).
 pub type Key = FixedBytes<64>;
 pub type Val = FixedBytes<32>;
+
+/// Large value type (64KB - larger than typical page size).
+pub type LargeVal = FixedBytes<65536>;
 
 /// Archive variant to benchmark.
 #[derive(Debug, Clone, Copy)]
@@ -194,6 +197,160 @@ pub async fn append_random(archive: &mut Archive, count: u64) -> Vec<Key> {
         keys.push(key.clone());
         rng.fill_bytes(&mut val_buf);
         archive.put(i, key, Val::new(val_buf)).await.unwrap();
+    }
+    archive.sync().await.unwrap();
+    keys
+}
+
+/// Concrete archive types with large values (64KB).
+#[allow(clippy::large_enum_variant)]
+pub enum LargeArchive {
+    Immutable(immutable::Archive<Context, Key, LargeVal>),
+    Prunable(prunable::Archive<TwoCap, Context, Key, LargeVal>),
+}
+
+impl LargeArchive {
+    /// Initialize a new archive based on variant
+    pub async fn init(ctx: Context, variant: Variant, compression: Option<u8>) -> Self {
+        match variant {
+            Variant::Immutable => {
+                let cfg = immutable::Config {
+                    metadata_partition: "archive_bench_large_metadata".into(),
+                    freezer_table_partition: "archive_bench_large_table".into(),
+                    freezer_table_initial_size: 131_072,
+                    freezer_table_resize_frequency: 4,
+                    freezer_table_resize_chunk_size: 1024,
+                    freezer_journal_partition: "archive_bench_large_journal".into(),
+                    freezer_journal_target_size: 1024 * 1024 * 100, // 100MB for large values
+                    freezer_journal_compression: compression,
+                    freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    ordinal_partition: "archive_bench_large_ordinal".into(),
+                    items_per_section: NZU64!(ITEMS_PER_SECTION),
+                    write_buffer: NZUsize!(WRITE_BUFFER),
+                    replay_buffer: NZUsize!(REPLAY_BUFFER),
+                    codec_config: (),
+                };
+                Self::Immutable(immutable::Archive::init(ctx, cfg).await.unwrap())
+            }
+            Variant::Prunable => {
+                let cfg = prunable::Config {
+                    partition: "archive_bench_large_partition".into(),
+                    translator: TwoCap,
+                    compression,
+                    codec_config: (),
+                    items_per_section: NZU64!(ITEMS_PER_SECTION),
+                    write_buffer: NZUsize!(WRITE_BUFFER),
+                    replay_buffer: NZUsize!(REPLAY_BUFFER),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                Self::Prunable(prunable::Archive::init(ctx, cfg).await.unwrap())
+            }
+        }
+    }
+}
+
+impl ArchiveTrait for LargeArchive {
+    type Key = Key;
+    type Value = LargeVal;
+
+    async fn put(
+        &mut self,
+        index: u64,
+        key: Key,
+        value: LargeVal,
+    ) -> Result<(), commonware_storage::archive::Error> {
+        match self {
+            Self::Immutable(a) => a.put(index, key, value).await,
+            Self::Prunable(a) => a.put(index, key, value).await,
+        }
+    }
+
+    async fn get(
+        &self,
+        identifier: Identifier<'_, Key>,
+    ) -> Result<Option<LargeVal>, commonware_storage::archive::Error> {
+        match self {
+            Self::Immutable(a) => a.get(identifier).await,
+            Self::Prunable(a) => a.get(identifier).await,
+        }
+    }
+
+    async fn has(
+        &self,
+        identifier: Identifier<'_, Key>,
+    ) -> Result<bool, commonware_storage::archive::Error> {
+        match self {
+            Self::Immutable(a) => a.has(identifier).await,
+            Self::Prunable(a) => a.has(identifier).await,
+        }
+    }
+
+    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        match self {
+            Self::Immutable(a) => a.next_gap(index),
+            Self::Prunable(a) => a.next_gap(index),
+        }
+    }
+
+    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        match self {
+            Self::Immutable(a) => a.missing_items(index, max),
+            Self::Prunable(a) => a.missing_items(index, max),
+        }
+    }
+
+    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        match self {
+            Self::Immutable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
+            Self::Prunable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
+        }
+    }
+
+    fn first_index(&self) -> Option<u64> {
+        match self {
+            Self::Immutable(a) => a.first_index(),
+            Self::Prunable(a) => a.first_index(),
+        }
+    }
+
+    fn last_index(&self) -> Option<u64> {
+        match self {
+            Self::Immutable(a) => a.last_index(),
+            Self::Prunable(a) => a.last_index(),
+        }
+    }
+
+    async fn sync(&mut self) -> Result<(), commonware_storage::archive::Error> {
+        match self {
+            Self::Immutable(a) => a.sync().await,
+            Self::Prunable(a) => a.sync().await,
+        }
+    }
+
+    async fn destroy(self) -> Result<(), commonware_storage::archive::Error> {
+        match self {
+            Self::Immutable(a) => a.destroy().await,
+            Self::Prunable(a) => a.destroy().await,
+        }
+    }
+}
+
+/// Append `count` random (index,key,large_value) triples and sync once.
+pub async fn append_random_large(archive: &mut LargeArchive, count: u64) -> Vec<Key> {
+    let mut rng = StdRng::seed_from_u64(0);
+    let mut key_buf = [0u8; 64];
+    let mut val_buf = Box::new([0u8; 65536]);
+
+    let mut keys = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        rng.fill_bytes(&mut key_buf);
+        let key = Key::new(key_buf);
+        keys.push(key.clone());
+        rng.fill_bytes(val_buf.as_mut());
+        archive
+            .put(i, key, LargeVal::new(*val_buf))
+            .await
+            .unwrap();
     }
     archive.sync().await.unwrap();
     keys
