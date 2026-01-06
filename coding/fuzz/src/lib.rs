@@ -1,9 +1,9 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_coding::{Config, Scheme};
-use commonware_parallel::Sequential;
+use commonware_parallel::ParallelNone;
 use std::iter;
 
-const STRATEGY: Sequential = Sequential;
+const STRATEGY: ParallelNone = ParallelNone;
 
 #[derive(Debug)]
 struct Shuffle {

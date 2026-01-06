@@ -125,7 +125,7 @@ use commonware_math::{
     fields::goldilocks::F,
     ntt::{EvaluationVector, Matrix},
 };
-use commonware_parallel::Strategy;
+use commonware_parallel::Parallel;
 use commonware_storage::mmr::{
     mem::DirtyMmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
 };
@@ -621,7 +621,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
 
     type Error = Error;
 
-    fn encode<S: Strategy>(
+    fn encode<S: Parallel>(
         config: &Config,
         data: impl bytes::Buf,
         strategy: &S,
@@ -726,7 +726,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         checking_data.check(index, &reshard)
     }
 
-    fn decode<S: Strategy>(
+    fn decode<S: Parallel>(
         _config: &Config,
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
@@ -779,9 +779,9 @@ mod tests {
     use super::*;
     use crate::{CodecConfig, Config};
     use commonware_cryptography::Sha256;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::ParallelNone;
 
-    const STRATEGY: Sequential = Sequential;
+    const STRATEGY: ParallelNone = ParallelNone;
 
     #[test]
     fn topology_reckon_handles_small_extra_shards() {

@@ -20,7 +20,7 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::{Parallel, ParallelNone};
 use commonware_utils::{ordered::Map, union_unique};
 use rand_core::CryptoRngCore;
 
@@ -132,7 +132,7 @@ where
     R: CryptoRngCore,
     V: Variant,
     I: IntoIterator<Item = &'a (&'a [u8], &'a [u8], PartialSignature<V>)>,
-    S: Strategy,
+    S: Parallel,
 {
     // Verify all signatures have the correct index and build combined entries
     let combined: Vec<_> = entries
@@ -252,7 +252,7 @@ where
     let evals = prepare_evaluations::<V>(sharing.required(), partials)?;
     sharing
         .interpolator(evals.keys())?
-        .interpolate(&evals, &Sequential)
+        .interpolate(&evals, &ParallelNone)
         .ok_or(Error::InvalidRecovery)
 }
 
@@ -277,7 +277,7 @@ where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
-    S: Strategy,
+    S: Parallel,
 {
     let prepared_evals = many_evals
         .into_iter()
@@ -320,7 +320,7 @@ where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
-    S: Strategy,
+    S: Parallel,
 {
     let mut sigs = recover_multiple::<V, _, _>(sharing, vec![first, second], strategy)?;
     let second_sig = sigs.pop().unwrap();
@@ -342,7 +342,7 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
     use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
-    use commonware_parallel::{Parallel, Sequential};
+    use commonware_parallel::{ParallelNone, ParallelRayon};
     use commonware_utils::{quorum, test_rng, union_unique, NZUsize, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -475,12 +475,12 @@ mod tests {
             &public,
             signer.index,
             &entries,
-            &Sequential,
+            &ParallelNone,
         )
         .expect("Verification with namespaced messages should succeed");
 
         let pool = commonware_parallel::create_pool(NZUsize!(4)).unwrap();
-        let parallel = Parallel::new(pool);
+        let parallel = ParallelRayon::new(pool);
         batch_verify_same_signer::<_, V, _, _>(
             &mut rng,
             &public,
@@ -501,7 +501,7 @@ mod tests {
             &public,
             signer.index,
             &entries_alt_ns,
-            &Sequential,
+            &ParallelNone,
         )
         .expect("Verification with alternate namespace messages should succeed");
 
@@ -516,12 +516,12 @@ mod tests {
             &public,
             signer.index,
             &entries_mixed,
-            &Sequential,
+            &ParallelNone,
         )
         .expect("Verification with mixed namespaces should succeed");
 
         assert!(matches!(
-            batch_verify_same_signer::<_, V, _, _>(&mut rng, &public, 1, &entries, &Sequential),
+            batch_verify_same_signer::<_, V, _, _>(&mut rng, &public, 1, &entries, &ParallelNone),
             Err(Error::InvalidSignature)
         ));
 
@@ -535,7 +535,7 @@ mod tests {
                 &public,
                 signer.index,
                 &entries_swapped,
-                &Sequential,
+                &ParallelNone,
             )
             .is_err(),
             "Verification with swapped signatures should fail"
@@ -551,7 +551,7 @@ mod tests {
                 &public,
                 signer.index,
                 &entries_mixed_signers,
-                &Sequential,
+                &ParallelNone,
             ),
             Err(Error::InvalidSignature)
         ));
@@ -602,13 +602,13 @@ mod tests {
             .collect();
 
         let (sig_1, sig_2) =
-            recover_pair::<V, _, _>(&sharing, &partials_1, &partials_2, &Sequential).unwrap();
+            recover_pair::<V, _, _>(&sharing, &partials_1, &partials_2, &ParallelNone).unwrap();
 
         ops::verify_message::<V>(sharing.public(), b"test", b"payload1", &sig_1).unwrap();
         ops::verify_message::<V>(sharing.public(), b"test", b"payload2", &sig_2).unwrap();
 
         let pool = commonware_parallel::create_pool(NZUsize!(4)).unwrap();
-        let parallel = Parallel::new(pool);
+        let parallel = ParallelRayon::new(pool);
         let (sig_1_par, sig_2_par) =
             recover_pair::<V, _, _>(&sharing, &partials_1, &partials_2, &parallel).unwrap();
 
@@ -1008,7 +1008,7 @@ mod tests {
 
             let points: Vec<_> = recovery_partials.iter().map(|p| p.value).collect();
             let derived =
-                <<V as Variant>::Signature as Space<Scalar>>::msm(&points, &weights, &Sequential);
+                <<V as Variant>::Signature as Space<Scalar>>::msm(&points, &weights, &ParallelNone);
             let derived = PartialSignature {
                 index: target,
                 value: derived,
@@ -1159,7 +1159,7 @@ mod tests {
             &sharing,
             signer.index,
             &forged_entries,
-            &Sequential,
+            &ParallelNone,
         );
         assert!(
             result.is_err(),
@@ -1172,7 +1172,7 @@ mod tests {
             &sharing,
             signer.index,
             &valid_entries,
-            &Sequential,
+            &ParallelNone,
         )
         .expect("secure function should accept valid partial signatures");
     }

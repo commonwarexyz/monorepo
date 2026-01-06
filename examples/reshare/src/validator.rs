@@ -14,7 +14,7 @@ use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
 use commonware_p2p::authenticated::discovery;
-use commonware_parallel::Parallel;
+use commonware_parallel::ParallelRayon;
 use commonware_runtime::{create_pool, tokio, Metrics, Quota};
 use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
@@ -43,11 +43,11 @@ pub async fn run<S, L>(
 ) where
     S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
     L: Elector<S>,
-    Provider<S, ed25519::PrivateKey, Parallel>: EpochProvider<
+    Provider<S, ed25519::PrivateKey, ParallelRayon>: EpochProvider<
         Variant = MinSig,
         PublicKey = ed25519::PublicKey,
         Scheme = S,
-        Strategy = Parallel,
+        Strategy = ParallelRayon,
     >,
 {
     // Load the participant configuration.
@@ -122,7 +122,7 @@ pub async fn run<S, L>(
     let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
     let thread_pool = create_pool(context.clone(), NZUsize!(2)).unwrap();
-    let strategy = Parallel::new(thread_pool);
+    let strategy = ParallelRayon::new(thread_pool);
     let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
         context.with_label("engine"),
         engine::Config {
@@ -182,7 +182,7 @@ mod test {
         utils::mux,
         Message, Receiver,
     };
-    use commonware_parallel::Sequential;
+    use commonware_parallel::ParallelNone;
     use commonware_runtime::{
         deterministic::{self, Runner},
         Clock, Handle, Quota, Runner as _, Spawner,
@@ -336,11 +336,11 @@ mod test {
         ) where
             S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = PublicKey>,
             L: Elector<S>,
-            Provider<S, PrivateKey, Sequential>: EpochProvider<
+            Provider<S, PrivateKey, ParallelNone>: EpochProvider<
                 Variant = MinSig,
                 PublicKey = PublicKey,
                 Scheme = S,
-                Strategy = Sequential,
+                Strategy = ParallelNone,
             >,
         {
             if let Some(handle) = self.handles.remove(&pk) {
@@ -399,7 +399,7 @@ mod test {
                     partition_prefix: format!("validator_{}", &pk),
                     freezer_table_initial_size: 1024, // 1mb
                     peer_config: self.peer_config.clone(),
-                    strategy: Sequential,
+                    strategy: ParallelNone,
                 },
             )
             .await;
@@ -429,7 +429,7 @@ mod test {
                 self.start_one::<EdScheme, RoundRobin>(ctx, oracle, updates, pk)
                     .await;
             } else {
-                self.start_one::<ThresholdScheme<MinSig, Sequential>, Random>(
+                self.start_one::<ThresholdScheme<MinSig, ParallelNone>, Random>(
                     ctx, oracle, updates, pk,
                 )
                 .await;
@@ -726,7 +726,7 @@ mod test {
                         if team.output.is_none() {
                             team.start_one::<EdScheme, RoundRobin>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         } else {
-                            team.start_one::<ThresholdScheme<MinSig, Sequential>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                            team.start_one::<ThresholdScheme<MinSig, ParallelNone>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         }
                     },
                     _ = crash_receiver.next() => {

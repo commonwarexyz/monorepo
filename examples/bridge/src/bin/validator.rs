@@ -16,7 +16,7 @@ use commonware_cryptography::{
     ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
-use commonware_parallel::Parallel;
+use commonware_parallel::ParallelRayon;
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio, Metrics, Network, Quota, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU32};
@@ -219,7 +219,7 @@ fn main() {
 
         // Initialize application
         let thread_pool = create_pool(context.clone(), NZUsize!(2)).unwrap();
-        let strategy = Parallel::new(thread_pool);
+        let strategy = ParallelRayon::new(thread_pool);
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let this_network = Scheme::signer(
             &consensus_namespace,

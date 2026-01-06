@@ -22,7 +22,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
     Digest, Hasher, Sha256, Signer as _,
 };
-use commonware_parallel::Parallel;
+use commonware_parallel::ParallelRayon;
 use commonware_runtime::{create_pool, tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect};
@@ -37,7 +37,7 @@ use std::{
 };
 use tracing::{debug, info};
 
-type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig, Parallel>;
+type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig, ParallelRayon>;
 
 #[allow(clippy::large_enum_variant)]
 enum Message<D: Digest> {
@@ -138,7 +138,7 @@ fn main() {
     let executor = tokio::Runner::default();
     executor.start(|context| async move {
         let thread_pool = create_pool(context.clone(), NZUsize!(2)).unwrap();
-        let strategy = Parallel::new(thread_pool);
+        let strategy = ParallelRayon::new(thread_pool);
 
         for network in networks {
             let network = from_hex(network).expect("Network not well-formed");

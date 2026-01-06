@@ -1,5 +1,5 @@
 use commonware_coding::{Config, Scheme};
-use commonware_parallel::{Parallel, Sequential};
+use commonware_parallel::{ParallelNone, ParallelRayon};
 use commonware_utils::NZUsize;
 use criterion::{criterion_main, BatchSize, Criterion};
 use rand::{RngCore, SeedableRng as _};
@@ -36,10 +36,10 @@ pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                     S::encode(
                                         &config,
                                         data.as_slice(),
-                                        &Parallel::new(pool.clone()),
+                                        &ParallelRayon::new(pool.clone()),
                                     )
                                 } else {
-                                    S::encode(&config, data.as_slice(), &Sequential)
+                                    S::encode(&config, data.as_slice(), &ParallelNone)
                                 }
                             },
                             BatchSize::SmallInput,
@@ -77,11 +77,11 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                     S::encode(
                                         &config,
                                         data.as_slice(),
-                                        &Parallel::new(pool.clone()),
+                                        &ParallelRayon::new(pool.clone()),
                                     )
                                     .unwrap()
                                 } else {
-                                    S::encode(&config, data.as_slice(), &Sequential).unwrap()
+                                    S::encode(&config, data.as_slice(), &ParallelNone).unwrap()
                                 };
 
                                 let my_shard = shards.pop().unwrap();
@@ -127,7 +127,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                         &commitment,
                                         checking_data,
                                         &checked_shards,
-                                        &Parallel::new(pool.clone()),
+                                        &ParallelRayon::new(pool.clone()),
                                     )
                                 } else {
                                     S::decode(
@@ -135,7 +135,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                         &commitment,
                                         checking_data,
                                         &checked_shards,
-                                        &Sequential,
+                                        &ParallelNone,
                                     )
                                 }
                             },

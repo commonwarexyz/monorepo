@@ -18,7 +18,7 @@ use commonware_codec::{
     varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
 use commonware_math::algebra::{HashToGroup, Random as _, Space};
-use commonware_parallel::Strategy;
+use commonware_parallel::Parallel;
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
@@ -59,7 +59,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     ) -> Result<(), Error>;
 
     /// Verify a batch of signatures from the provided public keys and pre-hashed messages.
-    fn batch_verify<R: CryptoRngCore, S: Strategy>(
+    fn batch_verify<R: CryptoRngCore, S: Parallel>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
@@ -146,7 +146,7 @@ impl Variant for MinPk {
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify<R: CryptoRngCore, S: Strategy>(
+    fn batch_verify<R: CryptoRngCore, S: Parallel>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
@@ -293,7 +293,7 @@ impl Variant for MinSig {
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify<R: CryptoRngCore, S: Strategy>(
+    fn batch_verify<R: CryptoRngCore, S: Parallel>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
@@ -414,7 +414,7 @@ mod tests {
     use super::*;
     use crate::bls12381::primitives::{group::Scalar, ops};
     use commonware_math::algebra::{CryptoGroup, Random};
-    use commonware_parallel::{Parallel, Sequential};
+    use commonware_parallel::{ParallelNone, ParallelRayon};
     use commonware_utils::{test_rng, NZUsize};
 
     fn batch_verify_correct<V: Variant>() {
@@ -440,12 +440,12 @@ mod tests {
             &[public1, public2, public3],
             &[hm1, hm2, hm3],
             &[sig1, sig2, sig3],
-            &Sequential,
+            &ParallelNone,
         )
         .expect("valid batch should pass");
 
         let pool = commonware_parallel::create_pool(NZUsize!(2)).unwrap();
-        let parallel = Parallel::new(pool);
+        let parallel = ParallelRayon::new(pool);
         V::batch_verify(
             &mut rng,
             &[public1, public2, public3],
@@ -504,7 +504,7 @@ mod tests {
             &[public1, public2],
             &[hm1, hm2],
             &[forged_sig1, forged_sig2],
-            &Sequential,
+            &ParallelNone,
         );
         assert!(
             result.is_err(),
@@ -517,7 +517,7 @@ mod tests {
             &[public1, public2],
             &[hm1, hm2],
             &[sig1, sig2],
-            &Sequential,
+            &ParallelNone,
         )
         .expect("valid signatures should pass batch_verify");
     }

@@ -2,7 +2,7 @@ use crate::{Config, Scheme};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
+use commonware_parallel::Parallel;
 use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
 use std::{collections::HashSet, marker::PhantomData};
@@ -179,7 +179,7 @@ fn extract_data(shards: Vec<&[u8]>, k: usize) -> Vec<u8> {
 type Encoding<H> = (bmt::Tree<H>, Vec<Vec<u8>>);
 
 /// Inner logic for [encode()]
-fn encode_inner<H: Hasher, S: Strategy>(
+fn encode_inner<H: Hasher, S: Parallel>(
     total: u16,
     min: u16,
     data: Vec<u8>,
@@ -242,7 +242,7 @@ fn encode_inner<H: Hasher, S: Strategy>(
 ///
 /// - `root`: The root of the [bmt].
 /// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
-fn encode<H: Hasher, S: Strategy>(
+fn encode<H: Hasher, S: Parallel>(
     total: u16,
     min: u16,
     data: Vec<u8>,
@@ -278,7 +278,7 @@ fn encode<H: Hasher, S: Strategy>(
 /// # Returns
 ///
 /// - `data`: The decoded data.
-fn decode<H: Hasher, S: Strategy>(
+fn decode<H: Hasher, S: Parallel>(
     total: u16,
     min: u16,
     root: &H::Digest,
@@ -477,7 +477,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 
     type Error = Error;
 
-    fn encode<S: Strategy>(
+    fn encode<S: Parallel>(
         config: &Config,
         mut data: impl Buf,
         strategy: &S,
@@ -518,7 +518,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         Ok(reshard)
     }
 
-    fn decode<S: Strategy>(
+    fn decode<S: Parallel>(
         config: &Config,
         commitment: &Self::Commitment,
         _checking_data: Self::CheckingData,
@@ -539,9 +539,9 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 mod tests {
     use super::*;
     use commonware_cryptography::Sha256;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::ParallelNone;
 
-    const STRATEGY: Sequential = Sequential;
+    const STRATEGY: ParallelNone = ParallelNone;
 
     #[test]
     fn test_recovery() {

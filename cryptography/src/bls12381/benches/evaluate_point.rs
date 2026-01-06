@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::primitives::group::{Scalar, G1};
 use commonware_math::{algebra::Random, poly::Poly};
-use commonware_parallel::{Parallel, Sequential};
+use commonware_parallel::{ParallelNone, ParallelRayon};
 use commonware_utils::{quorum, NZUsize};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
@@ -24,10 +24,10 @@ fn benchmark_evaluate_point(c: &mut Criterion) {
                         |(scalar, polynomial)| {
                             if concurrency > 1 {
                                 black_box(
-                                    polynomial.eval_msm(&scalar, &Parallel::new(pool.clone())),
+                                    polynomial.eval_msm(&scalar, &ParallelRayon::new(pool.clone())),
                                 );
                             } else {
-                                black_box(polynomial.eval_msm(&scalar, &Sequential));
+                                black_box(polynomial.eval_msm(&scalar, &ParallelNone));
                             }
                         },
                         BatchSize::SmallInput,

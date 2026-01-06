@@ -4,7 +4,7 @@
 //! so that the familiar `+`, `+=`, etc. operators can be used. The traits are also
 //! designed with performant implementations in mind, so implementations try to
 //! use methods which don't require copying unnecessarily.
-use commonware_parallel::Strategy as ParStrategy;
+use commonware_parallel::Parallel as ParStrategy;
 use core::{
     fmt::Debug,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
@@ -491,10 +491,10 @@ pub mod test_suites {
     }
 
     fn check_msm_eq_naive<R, K: Space<R>>(points: &[K], scalars: &[R]) -> TestResult {
-        use commonware_parallel::Sequential;
+        use commonware_parallel::ParallelNone;
         prop_assert_eq!(
             msm_naive(points, scalars),
-            K::msm(points, scalars, &Sequential)
+            K::msm(points, scalars, &ParallelNone)
         );
         Ok(())
     }
@@ -592,7 +592,7 @@ pub mod test_suites {
 mod test {
     use super::*;
     use crate::fields::goldilocks::F;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::ParallelNone;
     use proptest::prelude::*;
 
     proptest! {
@@ -632,7 +632,7 @@ mod test {
 
         #[test]
         fn test_msm_2(a: [F; 2], b: [F; 2]) {
-            assert_eq!(F::msm(&a, &b, &Sequential), a[0] * b[0] + a[1] * b[1]);
+            assert_eq!(F::msm(&a, &b, &ParallelNone), a[0] * b[0] + a[1] * b[1]);
         }
     }
 }

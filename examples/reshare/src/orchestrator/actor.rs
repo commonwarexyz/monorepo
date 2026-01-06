@@ -19,7 +19,7 @@ use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
     Blocker, Receiver, Sender,
 };
-use commonware_parallel::Strategy;
+use commonware_parallel::Parallel;
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
@@ -40,7 +40,7 @@ where
         + Relay<Digest = H::Digest>,
     S: Scheme,
     L: Elector<S>,
-    St: Strategy,
+    St: Parallel,
 {
     pub oracle: B,
     pub application: A,
@@ -67,7 +67,7 @@ where
         + Relay<Digest = H::Digest>,
     S: Scheme,
     L: Elector<S>,
-    St: Strategy,
+    St: Parallel,
     Provider<S, C, St>:
         EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
 {
@@ -96,7 +96,7 @@ where
         + Relay<Digest = H::Digest>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
-    St: Strategy,
+    St: Parallel,
     Provider<S, C, St>:
         EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
 {

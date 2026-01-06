@@ -264,7 +264,7 @@
 //! for (player_pk, player) in players {
 //!     let (output, share) = player.finalize(
 //!       dealer_logs.clone(),
-//!       &commonware_parallel::Sequential,
+//!       &commonware_parallel::ParallelNone,
 //!     )?;
 //!     println!("Player {:?} got share at index {}", player_pk, share.index);
 //!     player_shares.insert(player_pk, share);
@@ -274,7 +274,7 @@
 //! let observer_output = observe::<MinSig, ed25519::PublicKey, _>(
 //!     info,
 //!     dealer_logs,
-//!     &commonware_parallel::Sequential,
+//!     &commonware_parallel::ParallelNone,
 //! )?;
 //! println!("DKG completed with threshold {}", observer_output.quorum());
 //! # Ok(())
@@ -297,7 +297,7 @@ use commonware_math::{
     algebra::{Additive, CryptoGroup, Random},
     poly::{Interpolator, Poly},
 };
-use commonware_parallel::{Sequential, Strategy as ParStrategy};
+use commonware_parallel::{Parallel as ParStrategy, ParallelNone};
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
     TryCollect, NZU32,
@@ -565,7 +565,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         let Ok(scalar) = self.player_scalar(player) else {
             return false;
         };
-        let expected = pub_msg.commitment.eval_msm(&scalar, &Sequential);
+        let expected = pub_msg.commitment.eval_msm(&scalar, &ParallelNone);
         expected == V::Public::generator() * &priv_msg.share
     }
 }
@@ -1184,7 +1184,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
                     DealerPrivMsg {
                         share: my_poly.eval_msm(
                             &info.player_scalar(pk).expect("player should exist"),
-                            &Sequential,
+                            &ParallelNone,
                         ),
                     },
                 )
@@ -1541,7 +1541,7 @@ pub fn deal<V: Variant, P: Clone + Ord>(
             let i = i as u32;
             let eval = private.eval_msm(
                 &mode.scalar(n, i).expect("player index should be valid"),
-                &Sequential,
+                &ParallelNone,
             );
             let share = Share {
                 index: i,
@@ -1958,7 +1958,7 @@ mod test_plan {
                                     DealerPrivMsg {
                                         share: my_poly.eval_msm(
                                             &info.player_scalar(pk).expect("player should exist"),
-                                            &Sequential,
+                                            &ParallelNone,
                                         ),
                                     },
                                 )
@@ -2091,7 +2091,7 @@ mod test_plan {
                     }
                 }
                 // Run observer
-                let observe_result = observe(info.clone(), dealer_logs.clone(), &Sequential);
+                let observe_result = observe(info.clone(), dealer_logs.clone(), &ParallelNone);
                 if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
@@ -2176,7 +2176,7 @@ mod test_plan {
                 // Finalize each player
                 for (player_pk, player) in players.into_iter() {
                     let (player_output, share) = player
-                        .finalize(dealer_logs.clone(), &Sequential)
+                        .finalize(dealer_logs.clone(), &ParallelNone)
                         .expect("Player finalize should succeed");
 
                     assert_eq!(

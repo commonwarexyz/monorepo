@@ -2,7 +2,7 @@ use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ri
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
-use commonware_parallel::Strategy as ParStrategy;
+use commonware_parallel::Parallel as ParStrategy;
 use commonware_utils::{non_empty_vec, ordered::Map, vec::NonEmptyVec, TryCollect};
 use core::{
     fmt::Debug,
@@ -371,17 +371,17 @@ impl<G: CryptoGroup> Poly<G> {
 ///
 /// ```
 /// # use commonware_math::{fields::goldilocks::F, poly::{Poly, Interpolator}};
-/// # use commonware_parallel::Sequential;
+/// # use commonware_parallel::ParallelNone;
 /// # use commonware_utils::TryCollect;
 /// # fn example(f: Poly<F>, g: Poly<F>, p0: F, p1: F) {
 ///     let interpolator = Interpolator::new([(0, p0), (1, p1)]);
 ///     assert_eq!(
 ///         Some(*f.constant()),
-///         interpolator.interpolate(&[(0, f.eval(&p0)), (1, f.eval(&p1))].into_iter().try_collect().unwrap(), &Sequential)
+///         interpolator.interpolate(&[(0, f.eval(&p0)), (1, f.eval(&p1))].into_iter().try_collect().unwrap(), &ParallelNone)
 ///     );
 ///     assert_eq!(
 ///         Some(*g.constant()),
-///         interpolator.interpolate(&[(1, g.eval(&p1)), (0, g.eval(&p0))].into_iter().try_collect().unwrap(), &Sequential)
+///         interpolator.interpolate(&[(1, g.eval(&p1)), (0, g.eval(&p0))].into_iter().try_collect().unwrap(), &ParallelNone)
 ///     );
 /// # }
 /// ```
@@ -532,23 +532,23 @@ mod test {
 
         #[test]
         fn test_eval_msm(f: Poly<F>, x: F) {
-            use commonware_parallel::Sequential;
-            assert_eq!(f.eval(&x), f.eval_msm(&x, &Sequential));
+            use commonware_parallel::ParallelNone;
+            assert_eq!(f.eval(&x), f.eval_msm(&x, &ParallelNone));
         }
 
         #[test]
         fn test_interpolate(f: Poly<F>) {
-            use commonware_parallel::Sequential;
+            use commonware_parallel::ParallelNone;
             // Make sure this isn't the zero polynomial.
             prop_assume!(f != Poly::zero());
             prop_assume!(f.required().get() < F::MAX as u32);
             let mut points = (0..f.required().get()).map(|i| F::from((i + 1) as u8)).collect::<Vec<_>>();
             let interpolator = Interpolator::new(points.iter().copied().enumerate());
             let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
-            let recovered = interpolator.interpolate(&evals, &Sequential);
+            let recovered = interpolator.interpolate(&evals, &ParallelNone);
             assert_eq!(recovered.as_ref(), Some(f.constant()));
             points.pop();
-            assert!(interpolator.interpolate(&Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate()), &Sequential).is_none());
+            assert!(interpolator.interpolate(&Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate()), &ParallelNone).is_none());
         }
 
         #[test]

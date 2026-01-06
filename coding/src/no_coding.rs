@@ -1,7 +1,7 @@
 use crate::Config;
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
+use commonware_parallel::Parallel;
 use std::marker::PhantomData;
 use thiserror::Error;
 
@@ -93,7 +93,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
 
     type Error = Error;
 
-    fn encode<S: Strategy>(
+    fn encode<S: Parallel>(
         config: &crate::Config,
         mut data: impl bytes::Buf,
         _strategy: &S,
@@ -129,7 +129,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         Ok(())
     }
 
-    fn decode<S: Strategy>(
+    fn decode<S: Parallel>(
         _config: &Config,
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,

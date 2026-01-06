@@ -22,7 +22,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
-use commonware_parallel::Sequential;
+use commonware_parallel::ParallelNone;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage as RuntimeStorage,
 };
@@ -458,7 +458,7 @@ where
                             let logs = storage.logs(epoch);
                             let (success, next_round, next_output, next_share) =
                                 if let Some(ps) = player_state.take() {
-                                    match ps.finalize(logs, &Sequential) {
+                                    match ps.finalize(logs, &ParallelNone) {
                                         Ok((new_output, new_share)) => (
                                             true,
                                             epoch_state.round + 1,
@@ -473,7 +473,7 @@ where
                                         ),
                                     }
                                 } else {
-                                    match observe(round.clone(), logs, &Sequential) {
+                                    match observe(round.clone(), logs, &ParallelNone) {
                                         Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                         Err(_) => (
                                             false,

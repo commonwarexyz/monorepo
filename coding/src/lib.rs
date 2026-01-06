@@ -12,7 +12,7 @@
 
 use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
-use commonware_parallel::Strategy;
+use commonware_parallel::Parallel;
 use std::fmt::Debug;
 
 mod reed_solomon;
@@ -84,9 +84,9 @@ pub struct CodecConfig {
 /// ```
 /// use commonware_coding::{Config, ReedSolomon, Scheme as _};
 /// use commonware_cryptography::Sha256;
-/// use commonware_parallel::Sequential;
+/// use commonware_parallel::ParallelNone;
 ///
-/// const STRATEGY: Sequential = Sequential;
+/// const STRATEGY: ParallelNone = ParallelNone;
 ///
 /// type RS = ReedSolomon<Sha256>;
 ///
@@ -147,7 +147,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// Each shard and proof is intended for exactly one participant. The number of shards returned
     /// should equal `config.minimum_shards + config.extra_shards`.
     #[allow(clippy::type_complexity)]
-    fn encode<S: Strategy>(
+    fn encode<S: Parallel>(
         config: &Config,
         data: impl Buf,
         strategy: &S,
@@ -194,7 +194,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// In other words, when using the decoding function in a broader system, you
     /// get a guarantee that every participant decoding will see the same final
     /// data, even if they receive different shards, or receive them in a different order.
-    fn decode<S: Strategy>(
+    fn decode<S: Parallel>(
         config: &Config,
         commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
@@ -216,7 +216,7 @@ mod test {
     use crate::reed_solomon::ReedSolomon;
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::ParallelNone;
     use std::cmp::Reverse;
 
     const MAX_DATA_BYTES: usize = 1 << 31;
@@ -251,7 +251,7 @@ mod test {
         let read_cfg = CodecConfig {
             maximum_shard_size: MAX_DATA_BYTES,
         };
-        let (commitment, shards) = S::encode(&config, data, &Sequential).unwrap();
+        let (commitment, shards) = S::encode(&config, data, &ParallelNone).unwrap();
         // Pick out the packets we want, in reverse order.
         let ((_, _, checking_data, my_checked_shard, _), other_packets) = {
             let mut out = shards
@@ -285,7 +285,7 @@ mod test {
             &commitment,
             checking_data,
             &checked_shards,
-            &Sequential,
+            &ParallelNone,
         )
         .unwrap();
         assert_eq!(&decoded, data, "{name} failed");

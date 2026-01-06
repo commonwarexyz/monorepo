@@ -21,7 +21,7 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_math::algebra::{Additive, Random, Space};
-use commonware_parallel::Strategy;
+use commonware_parallel::Parallel;
 use rand_core::CryptoRngCore;
 
 /// Verifies multiple signatures over the same message from different public keys,
@@ -125,7 +125,7 @@ where
     R: CryptoRngCore,
     V: Variant,
     I: IntoIterator<Item = &'a (&'a [u8], &'a [u8], V::Signature)>,
-    S: Strategy,
+    S: Parallel,
 {
     let entries: Vec<_> = entries.into_iter().collect();
 
@@ -161,7 +161,7 @@ mod tests {
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
     use commonware_math::algebra::{CryptoGroup, Random};
-    use commonware_parallel::{Parallel, Sequential};
+    use commonware_parallel::{ParallelNone, ParallelRayon};
     use commonware_utils::{test_rng, NZUsize};
 
     fn verify_same_signer_correct<V: Variant>() {
@@ -178,11 +178,11 @@ mod tests {
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(&private, ns, msg)))
             .collect();
 
-        verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &Sequential)
+        verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &ParallelNone)
             .expect("valid signatures should be accepted");
 
         let pool = commonware_parallel::create_pool(NZUsize!(4)).unwrap();
-        let parallel = Parallel::new(pool);
+        let parallel = ParallelRayon::new(pool);
         verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &parallel)
             .expect("valid signatures should be accepted with parallel strategy");
     }
@@ -210,7 +210,7 @@ mod tests {
         let random_scalar = Scalar::random(&mut rng);
         entries[1].2 += &(V::Signature::generator() * &random_scalar);
 
-        let result = verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &Sequential);
+        let result = verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &ParallelNone);
         assert!(result.is_err(), "corrupted signature should be rejected");
     }
 
@@ -267,7 +267,7 @@ mod tests {
             (namespace, msg2, forged_sig2),
         ];
         let result =
-            verify_same_signer::<_, V, _, _>(&mut rng, &public, &forged_entries, &Sequential);
+            verify_same_signer::<_, V, _, _>(&mut rng, &public, &forged_entries, &ParallelNone);
         assert!(
             result.is_err(),
             "batch verification should reject forged signatures"
@@ -276,7 +276,7 @@ mod tests {
         // Batch verification accepts valid signatures
         let valid_entries: Vec<(&[u8], &[u8], _)> =
             vec![(namespace, msg1, sig1), (namespace, msg2, sig2)];
-        verify_same_signer::<_, V, _, _>(&mut rng, &public, &valid_entries, &Sequential)
+        verify_same_signer::<_, V, _, _>(&mut rng, &public, &valid_entries, &ParallelNone)
             .expect("batch verification should accept valid signatures");
     }
 

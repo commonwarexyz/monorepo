@@ -141,7 +141,7 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, Encode, Error as CodecError, ReadExt};
     use commonware_math::algebra::CryptoGroup;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::ParallelNone;
     use commonware_utils::{from_hex_formatted, test_rng, union_unique};
     use rand::rngs::OsRng;
     use rstest::rstest;
@@ -319,11 +319,13 @@ mod tests {
             assert!(verify::<MinSig>(&public, DST, &message, &signature).is_err());
         }
 
-        assert!(MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures, &Sequential).is_ok());
+        assert!(
+            MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures, &ParallelNone).is_ok()
+        );
 
         signatures[0] += &<MinSig as Variant>::Signature::generator();
         assert!(
-            MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures, &Sequential).is_err()
+            MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures, &ParallelNone).is_err()
         );
     }
 
@@ -360,10 +362,14 @@ mod tests {
             assert!(verify::<MinPk>(&public, DST, &message, &signature).is_err());
         }
 
-        assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures, &Sequential).is_ok());
+        assert!(
+            MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures, &ParallelNone).is_ok()
+        );
 
         signatures[0] += &<MinPk as Variant>::Signature::generator();
-        assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures, &Sequential).is_err());
+        assert!(
+            MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures, &ParallelNone).is_err()
+        );
     }
 
     fn parse_sign_vector(
@@ -502,7 +508,7 @@ mod tests {
                 &[public_key],
                 &[hm],
                 &[signature],
-                &Sequential,
+                &ParallelNone,
             )
             .is_ok();
 
@@ -575,7 +581,7 @@ mod tests {
             &valid_publics,
             &valid_hms,
             &valid_signatures,
-            &Sequential,
+            &ParallelNone,
         )
         .expect("batch verify of valid vectors should succeed");
 
@@ -584,7 +590,7 @@ mod tests {
             &all_publics,
             &all_hms,
             &all_signatures,
-            &Sequential,
+            &ParallelNone,
         )
         .is_err());
     }
