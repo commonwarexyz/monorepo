@@ -1,4 +1,4 @@
-//! In-process deterministic DKG setup for the simulation.
+//! In-process seeded DKG setup for the simulation.
 //!
 //! This example uses the BLS12-381 threshold signing scheme used by threshold-simplex. For
 //! simplicity, we run a dealer-based DKG locally to derive per-node signing shares.

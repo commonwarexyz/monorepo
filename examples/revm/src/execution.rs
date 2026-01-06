@@ -27,7 +27,7 @@ use alloy_evm::{
 use anyhow::Context as _;
 use std::collections::BTreeMap;
 
-/// Example chain id used by the deterministic simulation.
+/// Example chain id used by the simulation.
 pub const CHAIN_ID: u64 = 1337;
 pub const SEED_PRECOMPILE_ADDRESS_BYTES: [u8; 20] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

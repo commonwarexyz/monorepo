@@ -1,6 +1,6 @@
 //! Handle for interacting with the application state.
 //!
-//! The deterministic simulation harness uses this handle to:
+//! The simulation harness uses this handle to:
 //! - submit transactions into the node-local mempool, and
 //! - query state at a finalized digest for assertions.
 

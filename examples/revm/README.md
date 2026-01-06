@@ -9,7 +9,7 @@ REVM-based example chain driven by threshold-simplex (`commonware_consensus::sim
 - Threshold-simplex orders opaque 32-byte digests; full blocks are disseminated and backfilled by `commonware_consensus::marshal` over `commonware_p2p::simulated`.
 - Blocks carry a batch of EVM transactions plus an advertised 32-byte `state_root` commitment.
 - Validators re-execute proposed blocks with `alloy-evm` / `revm` and reject proposals whose `state_root` mismatches.
-- State is kept in REVM's in-memory DB (`alloy_evm::revm::database::InMemoryDB`) behind the `Database + DatabaseCommit` seam.
+- State is persisted in QMDB and exposed to REVM via `WrapDatabaseAsync` + `CacheDB` (QMDB is the base store; CacheDB is the speculative overlay).
 - State commitment is deterministic and does not require iterating the whole DB:
   - `delta = keccak256(Encode(StateChanges))`
   - `new_root = keccak256(prev_root || delta)`
@@ -22,7 +22,7 @@ REVM-based example chain driven by threshold-simplex (`commonware_consensus::sim
 - `src/application/`: proposal/verification logic (marshaled), shared state (mempool + DB snapshots), reporters, and query handle.
 - `src/execution.rs`: EVM execution (`EthEvmBuilder`) and the seed precompile.
 - `src/commitment.rs`: canonical `StateChanges` encoding and rolling `StateRoot` commitment.
-- `src/sim/`: deterministic, single-process simulation harness (N nodes, simulated P2P).
+- `src/sim/`: tokio, single-process simulation harness (N nodes, simulated P2P).
 
 ## How It Works
 
@@ -54,7 +54,7 @@ The main glue points are `src/sim/node.rs` (wiring) and `src/application/` (appl
 - The next block uses the parent digest's stored seed hash as `prevrandao` (EIP-4399).
 - The seed precompile returns the current block's `prevrandao` so contracts can read it.
 
-## Run (Deterministic Simulation)
+## Run (Tokio Simulation)
 
 ```sh
 cargo run -p commonware-revm --release -- --nodes 4 --blocks 5 --seed 1
@@ -64,9 +64,9 @@ Flags:
 
 - `--nodes`: number of validators (default: 4)
 - `--blocks`: number of finalized blocks to wait for per node (default: 3)
-- `--seed`: deterministic simulation seed (default: 1)
+- `--seed`: seeded DKG + demo inputs (default: 1)
 
-Expected output is deterministic for a given `--seed` and includes:
+Expected output is consistent for a given `--seed` and includes:
 
 - Finalized head digest (agreed by consensus)
 - Final `state_root` commitment
@@ -84,4 +84,4 @@ cargo test -p commonware-revm
 - This is intentionally minimal and does not implement an Ethereum trie; `state_root` is a rolling commitment over per-tx state deltas.
 - Transactions are built directly as EVM call environments (no signature/fee market modeling); gas price is set to 0.
 - The demo block stream is minimal (a single transfer is injected early); extend `src/application/` to add more tx generation.
-- A future persistent backend can be implemented by adapting a Commonware storage primitive to the `Database` / `DatabaseCommit` seam (note the async/sync impedance mismatch).
+- The example now uses a QMDB-backed persistence layer with per-finalized-block batch commits.

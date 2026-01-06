@@ -101,7 +101,7 @@ pub struct TxCfg {
 /// Minimal transaction type for the example.
 ///
 /// This is not a signed Ethereum transaction. It is just enough information to build a `TxEnv`
-/// for REVM execution in a deterministic simulation.
+/// for REVM execution in the simulation.
 pub struct Tx {
     pub from: Address,
     pub to: Address,

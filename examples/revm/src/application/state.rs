@@ -4,10 +4,10 @@
 //! disseminated/backfilled by `commonware_consensus::marshal`. This module holds the minimal
 //! shared state needed by the example:
 //! - a mempool of submitted transactions,
-//! - per-block execution snapshots (`InMemoryDB`) keyed by the consensus digest, and
+//! - per-block execution snapshots (CacheDB overlay over QMDB) keyed by the consensus digest, and
 //! - a per-digest seed hash used to populate the next block's `prevrandao`.
 //!
-//! The deterministic simulation queries this state through `crate::application::NodeHandle`.
+//! The simulation harness queries this state through `crate::application::NodeHandle`.
 
 use crate::{
     qmdb::{QmdbChanges, QmdbConfig, QmdbState, RevmDb},
