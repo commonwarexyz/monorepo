@@ -37,7 +37,7 @@ use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
     glob::{Config as GlobConfig, Glob},
 };
-use crate::journal::Error;
+use crate::{align, journal::Error};
 use commonware_codec::{Codec, CodecFixed};
 use commonware_runtime::{Metrics, Storage};
 use futures::{future::join, stream::Stream};
@@ -50,12 +50,14 @@ use tracing::{debug, warn};
 /// and a way to set the location when appending.
 pub trait OversizedEntry: CodecFixed<Cfg = ()> + Clone {
     /// Returns `(value_offset, value_size)` for crash recovery validation.
-    fn value_location(&self) -> (u64, u64);
+    ///
+    /// Offsets are aligned (see `glob::ENTRY_ALIGNMENT`) so u32 can address ~16TB per section.
+    fn value_location(&self) -> (u32, u32);
 
     /// Returns a new entry with the value location set.
     ///
     /// Called during `append` after the value is written to glob storage.
-    fn with_location(self, offset: u64, size: u64) -> Self;
+    fn with_location(self, offset: u32, size: u32) -> Self;
 }
 
 /// Configuration for oversized journal.
@@ -149,8 +151,9 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
             let last_pos = (entry_count - 1) as u32;
             match self.index.get(section, last_pos).await {
                 Ok(entry) => {
-                    let (value_offset, value_size) = entry.value_location();
-                    let entry_end = value_offset + value_size;
+                    let (aligned_offset, value_size) = entry.value_location();
+                    let byte_offset = align::from_aligned(aligned_offset);
+                    let entry_end = byte_offset + value_size as u64;
 
                     if entry_end <= glob_size {
                         // Last entry valid - all entries in this section are valid
@@ -167,8 +170,9 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
                     for pos in (0..last_pos).rev() {
                         match self.index.get(section, pos).await {
                             Ok(entry) => {
-                                let (offset, size) = entry.value_location();
-                                if offset + size <= glob_size {
+                                let (aligned_off, size) = entry.value_location();
+                                let byte_off = align::from_aligned(aligned_off);
+                                if byte_off + size as u64 <= glob_size {
                                     valid_count = pos + 1;
                                     break;
                                 }
@@ -196,8 +200,9 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
                     for pos in (0..last_pos).rev() {
                         match self.index.get(section, pos).await {
                             Ok(entry) => {
-                                let (offset, size) = entry.value_location();
-                                if offset + size <= glob_size {
+                                let (aligned_off, size) = entry.value_location();
+                                let byte_off = align::from_aligned(aligned_off);
+                                if byte_off + size as u64 <= glob_size {
                                     valid_count = pos + 1;
                                     break;
                                 }
@@ -222,14 +227,14 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
     ///
     /// Returns `(position, offset, size)` where:
     /// - `position`: Position in the index journal
-    /// - `offset`: Byte offset in glob where value is stored
+    /// - `offset`: Aligned offset in glob (multiply by `ENTRY_ALIGNMENT` for byte offset)
     /// - `size`: Size of value in glob (including checksum)
     pub async fn append(
         &mut self,
         section: u64,
         entry: I,
         value: &V,
-    ) -> Result<(u32, u64, u64), Error> {
+    ) -> Result<(u32, u32, u32), Error> {
         // Write value first (glob)
         let (offset, size) = self.values.append(section, value).await?;
 
@@ -246,7 +251,9 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
     }
 
     /// Get value using offset/size from entry.
-    pub async fn get_value(&self, section: u64, offset: u64, size: u64) -> Result<V, Error> {
+    ///
+    /// The offset should be the aligned offset from `append()` or from the entry's `value_location()`.
+    pub async fn get_value(&self, section: u64, offset: u32, size: u32) -> Result<V, Error> {
         self.values.get(section, offset, size).await
     }
 
@@ -337,16 +344,21 @@ mod tests {
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
     use commonware_utils::NZUsize;
 
+    /// Convert aligned offset + size to byte end position (for truncation tests).
+    fn byte_end(aligned_offset: u32, size: u32) -> u64 {
+        align::from_aligned(aligned_offset) + size as u64
+    }
+
     /// Test index entry that stores a u64 id and references a value.
     #[derive(Debug, Clone, PartialEq)]
     struct TestEntry {
         id: u64,
-        value_offset: u64,
-        value_size: u64,
+        value_offset: u32,
+        value_size: u32,
     }
 
     impl TestEntry {
-        fn new(id: u64, value_offset: u64, value_size: u64) -> Self {
+        fn new(id: u64, value_offset: u32, value_size: u32) -> Self {
             Self {
                 id,
                 value_offset,
@@ -368,8 +380,8 @@ mod tests {
 
         fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             let id = u64::read(buf)?;
-            let value_offset = u64::read(buf)?;
-            let value_size = u64::read(buf)?;
+            let value_offset = u32::read(buf)?;
+            let value_size = u32::read(buf)?;
             Ok(Self {
                 id,
                 value_offset,
@@ -379,15 +391,15 @@ mod tests {
     }
 
     impl FixedSize for TestEntry {
-        const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE;
+        const SIZE: usize = u64::SIZE + u32::SIZE + u32::SIZE;
     }
 
     impl OversizedEntry for TestEntry {
-        fn value_location(&self) -> (u64, u64) {
+        fn value_location(&self) -> (u32, u32) {
             (self.value_offset, self.value_size)
         }
 
-        fn with_location(mut self, offset: u64, size: u64) -> Self {
+        fn with_location(mut self, offset: u32, size: u32) -> Self {
             self.value_offset = offset;
             self.value_size = size;
             self
@@ -475,7 +487,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             // Calculate size to keep first 3 entries
-            let keep_size = locations[2].1 + locations[2].2;
+            let keep_size = byte_end(locations[2].1, locations[2].2);
             blob.resize(keep_size).await.expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
@@ -721,7 +733,7 @@ mod tests {
                 .open(&cfg.value_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let keep_size = section1_locations[0].1 + section1_locations[0].2;
+            let keep_size = byte_end(section1_locations[0].1, section1_locations[0].2);
             blob.resize(keep_size).await.expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
@@ -731,7 +743,7 @@ mod tests {
                 .open(&cfg.value_partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let keep_size = section2_locations[2].1 + section2_locations[2].2;
+            let keep_size = byte_end(section2_locations[2].1, section2_locations[2].2);
             blob.resize(keep_size).await.expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
@@ -946,7 +958,7 @@ mod tests {
             // Last entry needs: offset + size bytes
             // Truncate to offset + size - 1 (missing 1 byte)
             let last = &locations[2];
-            let truncate_to = last.1 + last.2 - 1;
+            let truncate_to = byte_end(last.1, last.2) - 1;
             blob.resize(truncate_to).await.expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
@@ -1042,7 +1054,7 @@ mod tests {
                 .open(&cfg.value_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let keep_size = locations[1].1 + locations[1].2;
+            let keep_size = byte_end(locations[1].1, locations[1].2);
             blob.resize(keep_size).await.expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
