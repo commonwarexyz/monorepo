@@ -1527,7 +1527,7 @@ mod tests {
                     sender
                         .send(
                             Recipients::One(me.clone()),
-                            Vote::Notarize(vote).encode().into(),
+                            Vote::Notarize(vote).encode(),
                             true,
                         )
                         .await
@@ -1577,7 +1577,7 @@ mod tests {
                 sender
                     .send(
                         Recipients::One(me.clone()),
-                        Vote::Notarize(late_vote).encode().into(),
+                        Vote::Notarize(late_vote).encode(),
                         true,
                     )
                     .await
@@ -1607,7 +1607,7 @@ mod tests {
                 sender
                     .send(
                         Recipients::One(me.clone()),
-                        Vote::Notarize(vote_v3).encode().into(),
+                        Vote::Notarize(vote_v3).encode(),
                         true,
                     )
                     .await
