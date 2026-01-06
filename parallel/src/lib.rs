@@ -1,8 +1,8 @@
 //! Abstract data parallelism over iterators and collections.
 //!
 //! This crate provides the [`Strategy`] trait, which abstracts over sequential and parallel
-//! execution of fold and join operations. This allows algorithms to be written once and
-//! executed either sequentially or in parallel depending on the chosen strategy.
+//! execution of fold operations. This allows algorithms to be written once and executed either
+//! sequentially or in parallel depending on the chosen strategy.
 //!
 //! # Overview
 //!
@@ -11,7 +11,6 @@
 //! **Core Operations:**
 //! - [`fold`](Strategy::fold): Reduces a collection to a single value
 //! - [`fold_init`](Strategy::fold_init): Like `fold`, but with per-partition initialization
-//! - [`join`](Strategy::join): Executes two closures, potentially in parallel
 //!
 //! **Convenience Methods:**
 //! - [`map_collect_vec`](Strategy::map_collect_vec): Maps elements and collects into a `Vec`
@@ -280,46 +279,6 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
             },
         )
     }
-
-    /// Executes two closures, potentially in parallel, and returns both results.
-    ///
-    /// For [`Sequential`], the closures are executed one after the other on the current
-    /// thread. For [`Parallel`], the closures may be executed concurrently on different
-    /// threads.
-    ///
-    /// This is useful for divide-and-conquer algorithms where two independent subproblems
-    /// can be solved in parallel.
-    ///
-    /// # Arguments
-    ///
-    /// - `left`: The first closure to execute
-    /// - `right`: The second closure to execute
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing the results of both closures: `(left_result, right_result)`
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use commonware_parallel::{Strategy, Sequential};
-    ///
-    /// let strategy = Sequential;
-    ///
-    /// let (sum, product) = strategy.join(
-    ///     || (1..=10).sum::<i32>(),
-    ///     || (1..=10).product::<i32>(),
-    /// );
-    ///
-    /// assert_eq!(sum, 55);
-    /// assert_eq!(product, 3628800);
-    /// ```
-    fn join<L, LO, R, RO>(&self, left: L, right: R) -> (LO, RO)
-    where
-        L: FnOnce() -> LO + Send,
-        R: FnOnce() -> RO + Send,
-        LO: Send,
-        RO: Send;
 }
 
 /// A sequential execution strategy.
@@ -368,24 +327,14 @@ impl Strategy for Sequential {
         iter.into_iter()
             .fold(identity(), |acc, item| fold_op(acc, &mut init_val, item))
     }
-
-    fn join<L, LO, R, RO>(&self, left: L, right: R) -> (LO, RO)
-    where
-        L: FnOnce() -> LO + Send,
-        R: FnOnce() -> RO + Send,
-        LO: Send,
-        RO: Send,
-    {
-        (left(), right())
-    }
 }
 
 cfg_if! {
     if #[cfg(feature = "std")] {
         /// A parallel execution strategy backed by a rayon thread pool.
         ///
-        /// This strategy executes fold and join operations in parallel across multiple
-        /// threads. It wraps a rayon [`ThreadPool`] and uses it to schedule work.
+        /// This strategy executes fold operations in parallel across multiple threads.
+        /// It wraps a rayon [`ThreadPool`] and uses it to schedule work.
         ///
         /// # Thread Pool Ownership
         ///
@@ -485,19 +434,9 @@ cfg_if! {
                     indexed_results
                         .into_iter()
                         .map(|(_, r)| r)
-                        .reduce(|a, b| reduce_op(a, b))
+                        .reduce(reduce_op)
                         .unwrap_or_else(identity)
                 })
-            }
-
-            fn join<L, LO, R, RO>(&self, left: L, right: R) -> (LO, RO)
-            where
-                L: FnOnce() -> LO + Send,
-                R: FnOnce() -> RO + Send,
-                LO: Send,
-                RO: Send,
-            {
-                self.thread_pool.install(|| rayon::join(left, right))
             }
         }
     }
@@ -663,69 +602,6 @@ mod test {
 
             prop_assert_eq!(seq_result, data.clone());
             prop_assert_eq!(par_result, data);
-        }
-
-        #[test]
-        fn join_results_match(a in any::<i32>(), b in any::<i32>()) {
-            let sequential = Sequential;
-            let parallel = parallel_strategy();
-
-            let (seq_left, seq_right) = sequential.join(
-                || a.wrapping_mul(2),
-                || b.wrapping_add(10),
-            );
-
-            let (par_left, par_right) = parallel.join(
-                || a.wrapping_mul(2),
-                || b.wrapping_add(10),
-            );
-
-            prop_assert_eq!(seq_left, par_left);
-            prop_assert_eq!(seq_right, par_right);
-        }
-
-        #[test]
-        fn join_nested_matches(data in prop::collection::vec(any::<i32>(), 0..100)) {
-            if data.len() < 2 {
-                return Ok(());
-            }
-
-            let sequential = Sequential;
-            let parallel = parallel_strategy();
-            let mid = data.len() / 2;
-            let (left, right) = data.split_at(mid);
-
-            // Use wrapping arithmetic to avoid overflow
-            let sum_slice = |slice: &[i32]| -> i32 {
-                slice.iter().fold(0i32, |a, &b| a.wrapping_add(b))
-            };
-
-            let (seq_left_sum, seq_right_sum) = sequential.join(
-                || sum_slice(left),
-                || sum_slice(right),
-            );
-
-            let (par_left_sum, par_right_sum) = parallel.join(
-                || sum_slice(left),
-                || sum_slice(right),
-            );
-
-            prop_assert_eq!(seq_left_sum, par_left_sum);
-            prop_assert_eq!(seq_right_sum, par_right_sum);
-        }
-
-        #[test]
-        fn join_executes_both(x in any::<u32>(), y in any::<u32>()) {
-            let sequential = Sequential;
-            let parallel = parallel_strategy();
-
-            let (seq_a, seq_b) = sequential.join(|| x, || y);
-            let (par_a, par_b) = parallel.join(|| x, || y);
-
-            prop_assert_eq!(seq_a, x);
-            prop_assert_eq!(seq_b, y);
-            prop_assert_eq!(par_a, x);
-            prop_assert_eq!(par_b, y);
         }
 
         #[test]
