@@ -933,6 +933,9 @@ impl<
                             }
                         }
                         Err(err) => {
+                            // Unlike propose/verify (where failing to act will lead to a timeout
+                            // and subsequent nullification), failing to certify can lead to a halt
+                            // because we'll never exit the view without a notarization + certification.
                             debug!(?err, ?round, "failed to certify proposal");
                         }
                     };
