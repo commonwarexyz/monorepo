@@ -160,7 +160,6 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             value_partition: cfg.value_partition,
             index_buffer_pool: cfg.index_buffer_pool,
             write_buffer: cfg.write_buffer,
-            replay_buffer: cfg.replay_buffer,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         };
@@ -250,7 +249,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Fetch value directly from blob storage (bypasses buffer pool)
         let section = self.section(index);
-        let value = self.oversized.get_value(section, value_offset, value_size).await?;
+        let value = self
+            .oversized
+            .get_value(section, value_offset, value_size)
+            .await?;
         Ok(Some(value))
     }
 
@@ -278,7 +280,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             // Get key from entry
             if entry.key.as_ref() == key.as_ref() {
                 // Fetch value directly from blob storage (bypasses buffer pool)
-                let value = self.oversized.get_value(section, value_offset, value_size).await?;
+                let value = self
+                    .oversized
+                    .get_value(section, value_offset, value_size)
+                    .await?;
                 return Ok(Some(value));
             }
             self.unnecessary_reads.inc();
@@ -366,7 +371,8 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
         // Write value and index entry atomically (glob first, then index)
         let section = self.section(index);
         let entry = IndexEntry::new(index, key.clone(), 0, 0);
-        let (position, value_offset, value_size) = self.oversized.append(section, entry, &data).await?;
+        let (position, value_offset, value_size) =
+            self.oversized.append(section, entry, &data).await?;
 
         // Store index location
         self.indices

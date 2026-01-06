@@ -40,8 +40,8 @@ use super::{
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed};
 use commonware_runtime::{Metrics, Storage};
-use futures::{future::join, pin_mut, stream::Stream, StreamExt};
-use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize};
+use futures::{future::join, stream::Stream};
+use std::{marker::PhantomData, num::NonZeroUsize};
 use tracing::{debug, warn};
 
 /// Trait for index entries that reference oversized values in glob storage.
@@ -72,9 +72,6 @@ pub struct Config<C> {
 
     /// Write buffer size for both journals.
     pub write_buffer: NonZeroUsize,
-
-    /// Replay buffer size for streaming entries.
-    pub replay_buffer: NonZeroUsize,
 
     /// Optional compression level for values (using zstd).
     pub compression: Option<u8>,
@@ -123,83 +120,96 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
         };
 
         // Perform crash recovery validation
-        oversized.recover(cfg.replay_buffer).await?;
+        oversized.recover().await?;
 
         Ok(oversized)
     }
 
     /// Perform crash recovery by validating index entries against glob sizes.
-    async fn recover(&mut self, replay_buffer: NonZeroUsize) -> Result<(), Error> {
-        // First pass: collect glob sizes for all sections
-        // We need to know glob sizes before we can validate entries
-        let mut glob_sizes: BTreeMap<u64, u64> = BTreeMap::new();
+    ///
+    /// Only checks the last entry in each section. Since entries are appended sequentially
+    /// and value offsets are monotonically increasing within a section, if the last entry
+    /// is valid then all earlier entries must be valid too.
+    async fn recover(&mut self) -> Result<(), Error> {
+        let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
 
-        // Track last valid index size per section
-        let mut valid_index_sizes: BTreeMap<u64, u64> = BTreeMap::new();
+        // Collect sections to avoid borrowing issues
+        let sections: Vec<u64> = self.index.sections().collect();
 
-        // Track sections that have invalid entries (need rewinding)
-        let mut invalid_sections: BTreeMap<u64, u64> = BTreeMap::new();
-
-        // Replay index entries and validate
-        // Collect all entries first to avoid borrow issues
-        let entries: Vec<(u64, u32, I)> = {
-            let stream = self.index.replay(0, replay_buffer).await?;
-            pin_mut!(stream);
-
-            let mut entries = Vec::new();
-            while let Some(result) = stream.next().await {
-                entries.push(result?);
+        for section in sections {
+            let index_size = self.index.size(section).await?;
+            if index_size == 0 {
+                continue;
             }
-            entries
-        };
 
-        // Now validate each entry
-        for (section, position, entry) in entries {
-            // Get or fetch glob size for this section
-            let glob_size = match glob_sizes.get(&section) {
-                Some(&size) => size,
-                None => {
-                    let size = self.values.size(section).await.unwrap_or(0);
-                    glob_sizes.insert(section, size);
-                    size
+            let glob_size = self.values.size(section).await.unwrap_or(0);
+            let entry_count = index_size / chunk_size;
+
+            // Check the LAST entry
+            let last_pos = (entry_count - 1) as u32;
+            match self.index.get(section, last_pos).await {
+                Ok(entry) => {
+                    let (value_offset, value_size) = entry.value_location();
+                    let entry_end = value_offset as u64 + value_size as u64;
+
+                    if entry_end <= glob_size {
+                        // Last entry valid - all entries in this section are valid
+                        continue;
+                    }
+
+                    // Last entry invalid - find last valid entry by scanning backwards
+                    warn!(
+                        section,
+                        last_pos, glob_size, entry_end, "invalid entry: glob truncated"
+                    );
+
+                    let mut valid_count: u32 = 0;
+                    for pos in (0..last_pos).rev() {
+                        match self.index.get(section, pos).await {
+                            Ok(entry) => {
+                                let (offset, size) = entry.value_location();
+                                if offset as u64 + size as u64 <= glob_size {
+                                    valid_count = pos + 1;
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                // Corrupted entry - continue scanning
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Rewind to last valid entry
+                    let valid_size = valid_count as u64 * chunk_size;
+                    debug!(section, index_size, valid_size, "rewinding index journal");
+                    self.index.rewind_section(section, valid_size).await?;
                 }
-            };
+                Err(_) => {
+                    // Last entry corrupted - need to scan backwards
+                    warn!(
+                        section,
+                        last_pos, "corrupted last entry, scanning backwards"
+                    );
 
-            // Skip entries in sections we've already marked as invalid
-            if invalid_sections.contains_key(&section) {
-                continue;
-            }
+                    let mut valid_count: u32 = 0;
+                    for pos in (0..last_pos).rev() {
+                        match self.index.get(section, pos).await {
+                            Ok(entry) => {
+                                let (offset, size) = entry.value_location();
+                                if offset as u64 + size as u64 <= glob_size {
+                                    valid_count = pos + 1;
+                                    break;
+                                }
+                            }
+                            Err(_) => continue,
+                        }
+                    }
 
-            // Validate entry's glob reference
-            let (value_offset, value_size) = entry.value_location();
-            let entry_end = value_offset as u64 + value_size as u64;
-
-            if entry_end > glob_size {
-                // Invalid entry - glob data doesn't exist
-                warn!(
-                    section,
-                    position, glob_size, entry_end, "invalid entry: glob truncated"
-                );
-
-                // Mark this section as needing rewind to last valid size
-                let rewind_to = valid_index_sizes.get(&section).copied().unwrap_or(0);
-                invalid_sections.insert(section, rewind_to);
-                continue;
-            }
-
-            // Valid entry - track its position
-            // Fixed journal stores: entry + CRC32 checksum (4 bytes)
-            let chunk_size = I::SIZE + std::mem::size_of::<u32>();
-            let valid_size = (position as u64 + 1) * chunk_size as u64;
-            valid_index_sizes.insert(section, valid_size);
-        }
-
-        // Rewind sections with trailing invalid entries
-        for (section, valid_size) in invalid_sections {
-            let current_size = self.index.size(section).await?;
-            if current_size > valid_size {
-                debug!(section, current_size, valid_size, "rewinding index journal");
-                self.index.rewind_section(section, valid_size).await?;
+                    let valid_size = valid_count as u64 * chunk_size;
+                    debug!(section, index_size, valid_size, "rewinding index journal");
+                    self.index.rewind_section(section, valid_size).await?;
+                }
             }
         }
 
@@ -390,7 +400,6 @@ mod tests {
             value_partition: "test_values".to_string(),
             index_buffer_pool: PoolRef::new(NZUsize!(64), NZUsize!(8)),
             write_buffer: NZUsize!(1024),
-            replay_buffer: NZUsize!(1024),
             compression: None,
             codec_config: (),
         }
@@ -569,6 +578,505 @@ mod tests {
             assert!(oversized.get(3, 0).await.is_ok());
             assert!(oversized.get(4, 0).await.is_ok());
             assert!(oversized.get(5, 0).await.is_ok());
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_empty_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create oversized journal
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            // Append to section 2 only (section 1 remains empty after being opened)
+            let value: TestValue = [42; 16];
+            let entry = TestEntry::new(1, 0, 0);
+            oversized
+                .append(2, entry, &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(2).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Reinitialize - recovery should handle the empty/non-existent section 1
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg)
+                    .await
+                    .expect("Failed to reinit");
+
+            // Section 2 entry should be valid
+            let entry = oversized.get(2, 0).await.expect("Failed to get");
+            assert_eq!(entry.id, 1);
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_all_entries_invalid() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            // Append 5 entries
+            for i in 0..5u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append");
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Truncate glob to 0 bytes - ALL entries become invalid
+            let (blob, _) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            blob.resize(0).await.expect("Failed to truncate");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Reinitialize - should recover and rewind index to 0
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg)
+                    .await
+                    .expect("Failed to reinit");
+
+            // No entries should be accessible
+            let result = oversized.get(1, 0).await;
+            assert!(result.is_err());
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_multiple_sections_mixed_validity() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate multiple sections
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            // Section 1: 3 entries
+            let mut section1_locations = Vec::new();
+            for i in 0..3u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                let loc = oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                section1_locations.push(loc);
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+
+            // Section 2: 5 entries
+            let mut section2_locations = Vec::new();
+            for i in 0..5u8 {
+                let value: TestValue = [10 + i; 16];
+                let entry = TestEntry::new(10 + i as u64, 0, 0);
+                let loc = oversized
+                    .append(2, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                section2_locations.push(loc);
+            }
+            oversized.sync(2).await.expect("Failed to sync");
+
+            // Section 3: 2 entries
+            for i in 0..2u8 {
+                let value: TestValue = [20 + i; 16];
+                let entry = TestEntry::new(20 + i as u64, 0, 0);
+                oversized
+                    .append(3, entry, &value)
+                    .await
+                    .expect("Failed to append");
+            }
+            oversized.sync(3).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Truncate section 1 glob to keep only first entry
+            let (blob, _) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            let keep_size = section1_locations[0].1 as u64 + section1_locations[0].2 as u64;
+            blob.resize(keep_size).await.expect("Failed to truncate");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Truncate section 2 glob to keep first 3 entries
+            let (blob, _) = context
+                .open(&cfg.value_partition, &2u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            let keep_size = section2_locations[2].1 as u64 + section2_locations[2].2 as u64;
+            blob.resize(keep_size).await.expect("Failed to truncate");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Section 3 remains intact
+
+            // Reinitialize
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg)
+                    .await
+                    .expect("Failed to reinit");
+
+            // Section 1: only position 0 valid
+            assert!(oversized.get(1, 0).await.is_ok());
+            assert!(oversized.get(1, 1).await.is_err());
+            assert!(oversized.get(1, 2).await.is_err());
+
+            // Section 2: positions 0,1,2 valid
+            assert!(oversized.get(2, 0).await.is_ok());
+            assert!(oversized.get(2, 1).await.is_ok());
+            assert!(oversized.get(2, 2).await.is_ok());
+            assert!(oversized.get(2, 3).await.is_err());
+            assert!(oversized.get(2, 4).await.is_err());
+
+            // Section 3: both positions valid
+            assert!(oversized.get(3, 0).await.is_ok());
+            assert!(oversized.get(3, 1).await.is_ok());
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_corrupted_last_index_entry() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            // Append 5 entries
+            for i in 0..5u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append");
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Corrupt the last index entry's checksum
+            let (blob, size) = context
+                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+
+            // Each entry is TestEntry::SIZE (16) + 4 (CRC32) = 20 bytes
+            // Corrupt the CRC of the last entry
+            let last_entry_crc_offset = size - 4;
+            blob.write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], last_entry_crc_offset)
+                .await
+                .expect("Failed to corrupt");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Reinitialize - should detect corruption and scan backwards
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg)
+                    .await
+                    .expect("Failed to reinit");
+
+            // First 4 entries should be valid
+            for i in 0..4u8 {
+                let entry = oversized.get(1, i as u32).await.expect("Failed to get");
+                assert_eq!(entry.id, i as u64);
+            }
+
+            // Entry 4 should be gone (corrupted and rewound)
+            assert!(oversized.get(1, 4).await.is_err());
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_all_entries_valid() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            // Append entries to multiple sections
+            for section in 1u64..=3 {
+                for i in 0..10u8 {
+                    let value: TestValue = [(section as u8) * 10 + i; 16];
+                    let entry = TestEntry::new(section * 100 + i as u64, 0, 0);
+                    oversized
+                        .append(section, entry, &value)
+                        .await
+                        .expect("Failed to append");
+                }
+                oversized.sync(section).await.expect("Failed to sync");
+            }
+            drop(oversized);
+
+            // Reinitialize with no corruption - should be fast
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg)
+                    .await
+                    .expect("Failed to reinit");
+
+            // All entries should be valid
+            for section in 1u64..=3 {
+                for i in 0..10u8 {
+                    let entry = oversized
+                        .get(section, i as u32)
+                        .await
+                        .expect("Failed to get");
+                    assert_eq!(entry.id, section * 100 + i as u64);
+                }
+            }
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_single_entry_invalid() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate with single entry
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            let value: TestValue = [42; 16];
+            let entry = TestEntry::new(1, 0, 0);
+            oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Truncate glob to 0 - single entry becomes invalid
+            let (blob, _) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            blob.resize(0).await.expect("Failed to truncate");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Reinitialize
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg)
+                    .await
+                    .expect("Failed to reinit");
+
+            // Entry should be gone
+            assert!(oversized.get(1, 0).await.is_err());
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_last_entry_off_by_one() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            let mut locations = Vec::new();
+            for i in 0..3u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                let loc = oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                locations.push(loc);
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Truncate glob to be off by 1 byte from last entry
+            let (blob, _) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+
+            // Last entry needs: offset + size bytes
+            // Truncate to offset + size - 1 (missing 1 byte)
+            let last = &locations[2];
+            let truncate_to = last.1 as u64 + last.2 as u64 - 1;
+            blob.resize(truncate_to).await.expect("Failed to truncate");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Reinitialize
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg)
+                    .await
+                    .expect("Failed to reinit");
+
+            // First 2 entries should be valid
+            assert!(oversized.get(1, 0).await.is_ok());
+            assert!(oversized.get(1, 1).await.is_ok());
+
+            // Entry 2 should be gone (truncated)
+            assert!(oversized.get(1, 2).await.is_err());
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_glob_missing_entirely() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            for i in 0..3u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append");
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Delete the glob file entirely
+            context
+                .remove(&cfg.value_partition, Some(&1u64.to_be_bytes()))
+                .await
+                .expect("Failed to remove");
+
+            // Reinitialize - glob size will be 0, all entries invalid
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg)
+                    .await
+                    .expect("Failed to reinit");
+
+            // All entries should be gone
+            assert!(oversized.get(1, 0).await.is_err());
+            assert!(oversized.get(1, 1).await.is_err());
+            assert!(oversized.get(1, 2).await.is_err());
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_can_append_after_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            let mut locations = Vec::new();
+            for i in 0..5u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                let loc = oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                locations.push(loc);
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Truncate glob to keep only first 2 entries
+            let (blob, _) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            let keep_size = locations[1].1 as u64 + locations[1].2 as u64;
+            blob.resize(keep_size).await.expect("Failed to truncate");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Reinitialize
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to reinit");
+
+            // Verify first 2 entries exist
+            assert!(oversized.get(1, 0).await.is_ok());
+            assert!(oversized.get(1, 1).await.is_ok());
+            assert!(oversized.get(1, 2).await.is_err());
+
+            // Append new entries after recovery
+            for i in 10..15u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append after recovery");
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+
+            // Verify new entries at positions 2, 3, 4, 5, 6
+            for i in 0..5u8 {
+                let entry = oversized
+                    .get(1, 2 + i as u32)
+                    .await
+                    .expect("Failed to get new entry");
+                assert_eq!(entry.id, (10 + i) as u64);
+            }
 
             oversized.destroy().await.expect("Failed to destroy");
         });

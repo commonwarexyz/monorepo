@@ -255,6 +255,11 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         self.manager.oldest_section()
     }
 
+    /// Returns an iterator over all section numbers.
+    pub fn sections(&self) -> impl Iterator<Item = u64> + '_ {
+        self.manager.sections_from(0).map(|(section, _)| *section)
+    }
+
     /// Returns the number of items in the given section.
     pub async fn section_len(&self, section: u64) -> Result<u32, Error> {
         let size = self.manager.size(section).await?;

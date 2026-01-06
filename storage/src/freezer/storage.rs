@@ -639,7 +639,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             value_partition: config.value_journal_partition.clone(),
             index_buffer_pool: config.key_index_buffer_pool.clone(),
             write_buffer: config.key_index_write_buffer,
-            replay_buffer: config.key_index_replay_buffer,
             compression: config.value_journal_compression,
             codec_config: config.codec_config,
         };
@@ -831,7 +830,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // If the current section has reached the target size, create a new section
         if value_size >= self.blob_target_size {
             self.current_section += 1;
-            debug!(size = value_size, section = self.current_section, "updated section");
+            debug!(
+                size = value_size,
+                section = self.current_section,
+                "updated section"
+            );
         }
 
         Ok(())

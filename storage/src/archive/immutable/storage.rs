@@ -129,7 +129,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
                 key_index_partition: cfg.freezer_key_index_partition,
                 key_index_write_buffer: cfg.write_buffer,
                 key_index_buffer_pool: cfg.freezer_key_index_buffer_pool,
-                key_index_replay_buffer: cfg.replay_buffer,
                 value_journal_partition: cfg.freezer_value_journal_partition,
                 value_journal_compression: cfg.freezer_value_journal_compression,
                 value_journal_write_buffer: cfg.write_buffer,
