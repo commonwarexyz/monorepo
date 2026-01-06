@@ -120,22 +120,19 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Attempt to certify this round's proposal.
     ///
-    /// Returns `Some(proposal)` if ready for certification, `None` otherwise.
-    pub fn try_certify(&mut self) -> Option<Proposal<D>> {
+    /// Returns `(Some(proposal), _)` if ready for certification.
+    /// Returns `(None, true)` if pending (has notarization but no proposal yet).
+    /// Returns `(None, false)` if not ready (no notarization, already certified, or handle exists).
+    pub fn try_certify(&mut self) -> (Option<Proposal<D>>, bool) {
         // Skip if no notarization, already certified, or handle exists
         if self.notarization.is_none() || self.certified.is_some() || self.certify_handle.is_some()
         {
-            return None;
+            return (None, false);
         }
-        self.proposal.proposal().cloned()
-    }
-
-    /// Returns true if certification is pending (has notarization but no proposal yet).
-    pub const fn certify_pending(&self) -> bool {
-        self.notarization.is_some()
-            && self.certified.is_none()
-            && self.certify_handle.is_none()
-            && self.proposal.proposal().is_none()
+        self.proposal
+            .proposal()
+            .cloned()
+            .map_or((None, true), |proposal| (Some(proposal), false))
     }
 
     /// Sets the handle for the certification request.
@@ -796,9 +793,10 @@ mod tests {
         assert!(round.set_proposal(proposal));
         assert!(round.verified());
 
-        // No notarization yet - should not certify
-        assert!(round.try_certify().is_none());
-        assert!(!round.certify_pending());
+        // No notarization yet - should not certify and not pending
+        let (proposal, pending) = round.try_certify();
+        assert!(proposal.is_none());
+        assert!(!pending);
     }
 
     #[test]
@@ -830,14 +828,15 @@ mod tests {
         assert!(added);
 
         // First try_certify should succeed
-        assert!(round.try_certify().is_some());
+        assert!(round.try_certify().0.is_some());
 
         // Mark as certified
         round.certified(true);
 
-        // Second try_certify should fail - already certified
-        assert!(round.try_certify().is_none());
-        assert!(!round.certify_pending());
+        // Second try_certify should fail - already certified, not pending
+        let (proposal, pending) = round.try_certify();
+        assert!(proposal.is_none());
+        assert!(!pending);
     }
 
     #[test]
@@ -869,16 +868,17 @@ mod tests {
         assert!(added);
 
         // First try_certify should succeed
-        assert!(round.try_certify().is_some());
+        assert!(round.try_certify().0.is_some());
 
         // Set a certify handle (simulating in-flight certification)
         let mut pool = commonware_utils::futures::AbortablePool::<()>::default();
         let handle = pool.push(futures::future::pending());
         round.set_certify_handle(handle);
 
-        // Second try_certify should fail - handle exists
-        assert!(round.try_certify().is_none());
-        assert!(!round.certify_pending());
+        // Second try_certify should fail - handle exists, not pending
+        let (proposal, pending) = round.try_certify();
+        assert!(proposal.is_none());
+        assert!(!pending);
     }
 
     #[test]
@@ -915,17 +915,17 @@ mod tests {
         round.set_certify_handle(handle);
 
         // try_certify blocked by handle
-        assert!(round.try_certify().is_none());
+        assert!(round.try_certify().0.is_none());
 
         // Abort clears the handle
         round.abort_certify();
 
         // Now try_certify should succeed again
-        assert!(round.try_certify().is_some());
+        assert!(round.try_certify().0.is_some());
     }
 
     #[test]
-    fn certify_pending_when_no_proposal() {
+    fn try_certify_returns_proposal_from_certificate() {
         let mut rng = StdRng::seed_from_u64(42);
         let namespace = b"ns";
         let Fixture {
@@ -951,9 +951,10 @@ mod tests {
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
-        // Has notarization but proposal came from certificate (verified via certificate)
+        // Has notarization and proposal came from certificate
         // try_certify returns the proposal from the certificate
-        assert!(round.try_certify().is_some());
-        assert!(!round.certify_pending());
+        let (result, pending) = round.try_certify();
+        assert!(result.is_some());
+        assert!(!pending);
     }
 }

@@ -825,7 +825,7 @@ impl<
             }
 
             // Attempt to certify any views that we have notarizations for.
-            for v in self.state.take_certification_candidates() {
+            for v in self.state.certify_candidates() {
                 if let Some(Request(ctx, receiver)) = self.try_certify(v).await {
                     debug!(%v, "attempting certification");
                     let view = ctx.view();

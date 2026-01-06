@@ -465,11 +465,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             return None;
         }
         let round = self.views.get_mut(&view)?;
-        if let Some(proposal) = round.try_certify() {
+        let (proposal, pending) = round.try_certify();
+        if let Some(proposal) = proposal {
             return Some(proposal);
         }
-        // Re-add to candidates if pending
-        if round.certify_pending() {
+        if pending {
             self.certification_candidates.insert(view);
         }
         None
@@ -485,7 +485,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Takes all certification candidates, returning an iterator and clearing the set.
-    pub fn take_certification_candidates(&mut self) -> impl Iterator<Item = View> {
+    pub fn certify_candidates(&mut self) -> impl Iterator<Item = View> {
         take(&mut self.certification_candidates).into_iter()
     }
 
