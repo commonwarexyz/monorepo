@@ -973,6 +973,12 @@ mod tests {
             // Verify peer is blocked
             assert_eq!(directory.blocked(), 1, "Should have one blocked peer");
 
+            // Get first expiry time
+            let first_expiry = directory
+                .blocked
+                .get(&pk_1)
+                .expect("peer should be blocked");
+
             // unblock_expired should return false before expiry
             assert!(
                 !directory.unblock_expired(),
@@ -993,6 +999,20 @@ mod tests {
 
             // Verify no more blocked peers
             assert_eq!(directory.blocked(), 0, "No more blocked peers");
+
+            // Re-block the peer and verify expiry time increased
+            directory.block(&pk_1);
+            assert_eq!(directory.blocked(), 1, "Should have one blocked peer again");
+
+            let second_expiry = directory
+                .blocked
+                .get(&pk_1)
+                .expect("peer should be blocked again");
+
+            assert!(
+                second_expiry > first_expiry,
+                "Re-blocking should have a later expiry time"
+            );
         });
     }
 
