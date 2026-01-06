@@ -125,7 +125,7 @@ use commonware_math::{
     fields::goldilocks::F,
     ntt::{EvaluationVector, Matrix},
 };
-use commonware_parallel::Parallel;
+use commonware_parallel::Strategy;
 use commonware_storage::mmr::{
     mem::DirtyMmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
 };
@@ -624,7 +624,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
     fn encode(
         config: &Config,
         data: impl bytes::Buf,
-        strategy: &impl Parallel,
+        strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
@@ -731,7 +731,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
-        _strategy: &impl Parallel,
+        _strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
         let Topology {
             encoded_rows,

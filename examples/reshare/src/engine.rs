@@ -22,7 +22,7 @@ use commonware_cryptography::{
     Hasher, Signer,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
-use commonware_parallel::Parallel;
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
@@ -55,7 +55,7 @@ where
     C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
-    St: Parallel,
+    St: Strategy,
 {
     pub signer: C,
     pub manager: P,
@@ -79,7 +79,7 @@ where
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
-    St: Parallel,
+    St: Strategy,
     Provider<S, C, St>:
         EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
 {
@@ -123,7 +123,7 @@ where
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
-    St: Parallel,
+    St: Strategy,
     Provider<S, C, St>:
         EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
 {

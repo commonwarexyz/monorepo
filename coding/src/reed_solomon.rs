@@ -2,7 +2,7 @@ use crate::{Config, Scheme};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
-use commonware_parallel::Parallel;
+use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
 use std::{collections::HashSet, marker::PhantomData};
@@ -179,7 +179,7 @@ fn extract_data(shards: Vec<&[u8]>, k: usize) -> Vec<u8> {
 type Encoding<H> = (bmt::Tree<H>, Vec<Vec<u8>>);
 
 /// Inner logic for [encode()]
-fn encode_inner<H: Hasher, S: Parallel>(
+fn encode_inner<H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     data: Vec<u8>,
@@ -242,7 +242,7 @@ fn encode_inner<H: Hasher, S: Parallel>(
 ///
 /// - `root`: The root of the [bmt].
 /// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
-fn encode<H: Hasher, S: Parallel>(
+fn encode<H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     data: Vec<u8>,
@@ -278,7 +278,7 @@ fn encode<H: Hasher, S: Parallel>(
 /// # Returns
 ///
 /// - `data`: The decoded data.
-fn decode<H: Hasher, S: Parallel>(
+fn decode<H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     root: &H::Digest,
@@ -480,7 +480,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     fn encode(
         config: &Config,
         mut data: impl Buf,
-        strategy: &impl Parallel,
+        strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         encode(total_shards(config)?, config.minimum_shards, data, strategy)
@@ -523,7 +523,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         commitment: &Self::Commitment,
         _checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
-        strategy: &impl Parallel,
+        strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
         decode(
             total_shards(config)?,

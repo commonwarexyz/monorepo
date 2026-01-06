@@ -29,7 +29,7 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Subject as CertificateSubject, Verification},
     Digest, PublicKey,
 };
-use commonware_parallel::{Parallel, Sequential};
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::ordered::Set;
 use rand_core::CryptoRngCore;
 use std::{
@@ -72,15 +72,15 @@ enum Role<P: PublicKey, V: Variant> {
 /// a verifier (with evaluated public polynomial), or an external verifier that
 /// only checks recovered certificates.
 ///
-/// The scheme is generic over a [`Parallel`] strategy which determines whether cryptographic
+/// The scheme is generic over a [`Strategy`] which determines whether cryptographic
 /// operations such as signature recovery and batch verification run sequentially or in parallel.
 #[derive(Clone, Debug)]
-pub struct Scheme<P: PublicKey, V: Variant, S: Parallel = Sequential> {
+pub struct Scheme<P: PublicKey, V: Variant, S: Strategy = Sequential> {
     role: Role<P, V>,
     strategy: S,
 }
 
-impl<P: PublicKey, V: Variant, S: Parallel> Scheme<P, V, S> {
+impl<P: PublicKey, V: Variant, S: Strategy> Scheme<P, V, S> {
     /// Constructs a signer instance with a private share and evaluated public polynomial.
     ///
     /// The participant identity keys are used for committee ordering and indexing.
@@ -468,7 +468,7 @@ fn seed_message_from_subject<D: Digest>(subject: &Subject<'_, D>) -> bytes::Byte
     }
 }
 
-impl<P: PublicKey, V: Variant, S: Parallel> certificate::Scheme for Scheme<P, V, S> {
+impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V, S> {
     type Subject<'a, D: Digest> = Subject<'a, D>;
     type PublicKey = P;
     type Signature = Signature<V>;

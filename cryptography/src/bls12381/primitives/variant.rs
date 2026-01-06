@@ -18,7 +18,7 @@ use commonware_codec::{
     varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
 use commonware_math::algebra::{HashToGroup, Random as _, Space};
-use commonware_parallel::Parallel;
+use commonware_parallel::Strategy;
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
@@ -59,7 +59,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     ) -> Result<(), Error>;
 
     /// Verify a batch of signatures from the provided public keys and pre-hashed messages.
-    fn batch_verify<R: CryptoRngCore, S: Parallel>(
+    fn batch_verify<R: CryptoRngCore, S: Strategy>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
@@ -146,7 +146,7 @@ impl Variant for MinPk {
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify<R: CryptoRngCore, S: Parallel>(
+    fn batch_verify<R: CryptoRngCore, S: Strategy>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
@@ -293,7 +293,7 @@ impl Variant for MinSig {
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify<R: CryptoRngCore, S: Parallel>(
+    fn batch_verify<R: CryptoRngCore, S: Strategy>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],

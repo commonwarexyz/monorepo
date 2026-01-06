@@ -20,7 +20,7 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
-use commonware_parallel::{Parallel, Sequential};
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{ordered::Map, union_unique};
 use rand_core::CryptoRngCore;
 
@@ -132,7 +132,7 @@ where
     R: CryptoRngCore,
     V: Variant,
     I: IntoIterator<Item = &'a (&'a [u8], &'a [u8], PartialSignature<V>)>,
-    S: Parallel,
+    S: Strategy,
 {
     // Verify all signatures have the correct index and build combined entries
     let combined: Vec<_> = entries
@@ -277,7 +277,7 @@ where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
-    S: Parallel,
+    S: Strategy,
 {
     let prepared_evals = many_evals
         .into_iter()
@@ -320,7 +320,7 @@ where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
-    S: Parallel,
+    S: Strategy,
 {
     let mut sigs = recover_multiple::<V, _, _>(sharing, vec![first, second], strategy)?;
     let second_sig = sigs.pop().unwrap();

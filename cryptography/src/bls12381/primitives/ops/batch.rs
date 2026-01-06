@@ -21,7 +21,7 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_math::algebra::{Additive, Random, Space};
-use commonware_parallel::Parallel;
+use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 
 /// Verifies multiple signatures over the same message from different public keys,
@@ -125,7 +125,7 @@ where
     R: CryptoRngCore,
     V: Variant,
     I: IntoIterator<Item = &'a (&'a [u8], &'a [u8], V::Signature)>,
-    S: Parallel,
+    S: Strategy,
 {
     let entries: Vec<_> = entries.into_iter().collect();
 

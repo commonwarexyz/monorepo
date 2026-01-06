@@ -36,7 +36,7 @@ use commonware_codec::{
 use commonware_math::algebra::{
     Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
 };
-use commonware_parallel::Parallel;
+use commonware_parallel::Strategy;
 use commonware_utils::hex;
 use core::{
     fmt::{Debug, Display, Formatter},
@@ -751,7 +751,7 @@ impl Space<Scalar> for G1 {
     ///
     /// Filters out pairs where the point is the identity element (infinity).
     /// Returns an error if the lengths of the input slices mismatch.
-    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Parallel) -> Self {
+    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
         // Assert input validity
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
 
@@ -1035,7 +1035,7 @@ impl Space<Scalar> for G2 {
     ///
     /// Filters out pairs where the point is the identity element (infinity).
     /// Returns an error if the lengths of the input slices mismatch.
-    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Parallel) -> Self {
+    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
         // Assert input validity
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
 

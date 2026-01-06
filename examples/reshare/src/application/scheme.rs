@@ -11,7 +11,7 @@ use commonware_cryptography::{
     certificate::{self, Scheme},
     ed25519, PublicKey, Signer,
 };
-use commonware_parallel::Parallel;
+use commonware_parallel::Strategy;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -26,7 +26,7 @@ pub type EdScheme = simplex::scheme::ed25519::Scheme;
 
 /// Provides signing schemes for different epochs.
 #[derive(Clone)]
-pub struct Provider<S: Scheme, C: Signer, St: Parallel> {
+pub struct Provider<S: Scheme, C: Signer, St: Strategy> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
     namespace: Vec<u8>,
     certificate_verifier: Option<Arc<S>>,
@@ -34,7 +34,7 @@ pub struct Provider<S: Scheme, C: Signer, St: Parallel> {
     strategy: St,
 }
 
-impl<S: Scheme, C: Signer, St: Parallel> Provider<S, C, St> {
+impl<S: Scheme, C: Signer, St: Strategy> Provider<S, C, St> {
     pub fn new(
         namespace: Vec<u8>,
         signer: C,
@@ -51,7 +51,7 @@ impl<S: Scheme, C: Signer, St: Parallel> Provider<S, C, St> {
     }
 }
 
-impl<S: Scheme, C: Signer, St: Parallel> Provider<S, C, St> {
+impl<S: Scheme, C: Signer, St: Strategy> Provider<S, C, St> {
     /// Registers a new signing scheme for the given epoch.
     ///
     /// Returns `false` if a scheme was already registered for the epoch.
@@ -69,7 +69,7 @@ impl<S: Scheme, C: Signer, St: Parallel> Provider<S, C, St> {
     }
 }
 
-impl<S: Scheme, C: Signer, St: Parallel> certificate::Provider for Provider<S, C, St> {
+impl<S: Scheme, C: Signer, St: Strategy> certificate::Provider for Provider<S, C, St> {
     type Scope = Epoch;
     type Scheme = S;
 
@@ -87,7 +87,7 @@ pub trait EpochProvider {
     type Variant: Variant;
     type PublicKey: PublicKey;
     type Scheme: Scheme;
-    type Strategy: Parallel;
+    type Strategy: Strategy;
 
     /// Returns a [Scheme] for the given [EpochTransition].
     fn scheme_for_epoch(
@@ -106,7 +106,7 @@ pub trait EpochProvider {
     ) -> Option<Self::Scheme>;
 }
 
-impl<V: Variant, St: Parallel> EpochProvider
+impl<V: Variant, St: Strategy> EpochProvider
     for Provider<ThresholdScheme<V, St>, ed25519::PrivateKey, St>
 {
     type Variant = V;
@@ -159,7 +159,7 @@ impl<V: Variant, St: Parallel> EpochProvider
     }
 }
 
-impl<St: Parallel> EpochProvider for Provider<EdScheme, ed25519::PrivateKey, St> {
+impl<St: Strategy> EpochProvider for Provider<EdScheme, ed25519::PrivateKey, St> {
     type Variant = MinSig;
     type PublicKey = ed25519::PublicKey;
     type Scheme = EdScheme;

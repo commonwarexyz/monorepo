@@ -12,7 +12,7 @@
 
 use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
-use commonware_parallel::Parallel;
+use commonware_parallel::Strategy;
 use std::fmt::Debug;
 
 mod reed_solomon;
@@ -150,7 +150,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     fn encode(
         config: &Config,
         data: impl Buf,
-        strategy: &impl Parallel,
+        strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
     /// Take your own shard, check it, and produce a [Scheme::ReShard] to forward to others.
@@ -199,7 +199,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
         commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
-        strategy: &impl Parallel,
+        strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error>;
 }
 

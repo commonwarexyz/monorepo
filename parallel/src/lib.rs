@@ -1,20 +1,20 @@
 //! Parallelize fold operations with pluggable execution strategies..
 //!
-//! This crate provides the [`Parallel`] trait, which abstracts over sequential and parallel
+//! This crate provides the [`Strategy`] trait, which abstracts over sequential and parallel
 //! execution of fold operations. This allows algorithms to be written once and executed either
 //! sequentially or in parallel depending on the chosen strategy.
 //!
 //! # Overview
 //!
-//! The core abstraction is the [`Parallel`] trait, which provides several operations:
+//! The core abstraction is the [`Strategy`] trait, which provides several operations:
 //!
 //! **Core Operations:**
-//! - [`fold`](Parallel::fold): Reduces a collection to a single value
-//! - [`fold_init`](Parallel::fold_init): Like `fold`, but with per-partition initialization
+//! - [`fold`](Strategy::fold): Reduces a collection to a single value
+//! - [`fold_init`](Strategy::fold_init): Like `fold`, but with per-partition initialization
 //!
 //! **Convenience Methods:**
-//! - [`map_collect_vec`](Parallel::map_collect_vec): Maps elements and collects into a `Vec`
-//! - [`map_init_collect_vec`](Parallel::map_init_collect_vec): Like `map_collect_vec` with
+//! - [`map_collect_vec`](Strategy::map_collect_vec): Maps elements and collects into a `Vec`
+//! - [`map_init_collect_vec`](Strategy::map_init_collect_vec): Like `map_collect_vec` with
 //!   per-partition initialization
 //!
 //! Two implementations are provided:
@@ -35,9 +35,9 @@
 //! and parallel execution:
 //!
 //! ```
-//! use commonware_parallel::{Parallel, Sequential};
+//! use commonware_parallel::{Strategy, Sequential};
 //!
-//! fn sum_of_squares(strategy: &impl Parallel, data: &[i64]) -> i64 {
+//! fn sum_of_squares(strategy: &impl Strategy, data: &[i64]) -> i64 {
 //!     strategy.fold(
 //!         data,
 //!         || 0i64,
@@ -76,7 +76,7 @@ cfg_if! {
 /// This trait abstracts over sequential and parallel execution, allowing algorithms
 /// to be written generically and then executed with different strategies depending
 /// on the use case (e.g., sequential for testing/debugging, parallel for production).
-pub trait Parallel: Clone + Send + Sync + fmt::Debug + 'static {
+pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
     /// Reduces a collection to a single value with per-partition initialization.
     ///
     /// Similar to [`fold`](Self::fold), but provides a separate initialization value
@@ -95,7 +95,7 @@ pub trait Parallel: Clone + Send + Sync + fmt::Debug + 'static {
     /// # Examples
     ///
     /// ```
-    /// use commonware_parallel::{Parallel, Sequential};
+    /// use commonware_parallel::{Strategy, Sequential};
     ///
     /// let strategy = Sequential;
     /// let data = vec![1u32, 2, 3, 4, 5];
@@ -151,7 +151,7 @@ pub trait Parallel: Clone + Send + Sync + fmt::Debug + 'static {
     /// ## Sum of Elements
     ///
     /// ```
-    /// use commonware_parallel::{Parallel, Sequential};
+    /// use commonware_parallel::{Strategy, Sequential};
     ///
     /// let strategy = Sequential;
     /// let numbers = vec![1, 2, 3, 4, 5];
@@ -197,7 +197,7 @@ pub trait Parallel: Clone + Send + Sync + fmt::Debug + 'static {
     /// # Examples
     ///
     /// ```
-    /// use commonware_parallel::{Parallel, Sequential};
+    /// use commonware_parallel::{Strategy, Sequential};
     ///
     /// let strategy = Sequential;
     /// let data = vec![1, 2, 3, 4, 5];
@@ -240,7 +240,7 @@ pub trait Parallel: Clone + Send + Sync + fmt::Debug + 'static {
     /// # Examples
     ///
     /// ```
-    /// use commonware_parallel::{Parallel, Sequential};
+    /// use commonware_parallel::{Strategy, Sequential};
     ///
     /// let strategy = Sequential;
     /// let data = vec![1, 2, 3, 4, 5];
@@ -295,7 +295,7 @@ pub trait Parallel: Clone + Send + Sync + fmt::Debug + 'static {
 /// # Examples
 ///
 /// ```
-/// use commonware_parallel::{Parallel, Sequential};
+/// use commonware_parallel::{Strategy, Sequential};
 ///
 /// let strategy = Sequential;
 /// let data = vec![1, 2, 3, 4, 5];
@@ -306,7 +306,7 @@ pub trait Parallel: Clone + Send + Sync + fmt::Debug + 'static {
 #[derive(Default, Debug, Clone)]
 pub struct Sequential;
 
-impl Parallel for Sequential {
+impl Strategy for Sequential {
     fn fold_init<I, INIT, T, R, ID, F, RD>(
         &self,
         iter: I,
@@ -359,8 +359,8 @@ cfg_if! {
         ///
         /// # Examples
         ///
-        /// ```
-        /// use commonware_parallel::{Parallel, Rayon};
+        /// ```rust
+        /// use commonware_parallel::{Strategy, Rayon};
         /// use rayon::ThreadPoolBuilder;
         /// use std::sync::Arc;
         ///
@@ -383,7 +383,7 @@ cfg_if! {
             }
         }
 
-        impl Parallel for Rayon {
+        impl Strategy for Rayon {
             fn fold_init<I, INIT, T, R, ID, F, RD>(
                 &self,
                 iter: I,
@@ -447,7 +447,7 @@ cfg_if! {
 
 #[cfg(test)]
 mod test {
-    use crate::{create_pool, Parallel, Rayon, Sequential};
+    use crate::{create_pool, Rayon, Sequential, Strategy};
     use core::num::NonZeroUsize;
     use proptest::prelude::*;
 

@@ -33,7 +33,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, PublicKey, Sha256,
 };
-use commonware_parallel::Parallel;
+use commonware_parallel::Strategy;
 use commonware_utils::{modulo, ordered::Set};
 use std::marker::PhantomData;
 
@@ -185,7 +185,7 @@ impl<P, V, S> Config<bls12381_threshold::Scheme<P, V, S>> for Random
 where
     P: PublicKey,
     V: Variant,
-    S: Parallel,
+    S: Strategy,
 {
     type Elector = RandomElector<bls12381_threshold::Scheme<P, V, S>>;
 
@@ -212,7 +212,7 @@ impl<P, V, S> Elector<bls12381_threshold::Scheme<P, V, S>>
 where
     P: PublicKey,
     V: Variant,
-    S: Parallel,
+    S: Strategy,
 {
     fn elect(&self, round: Round, certificate: Option<&bls12381_threshold::Signature<V>>) -> u32 {
         Random::select_leader::<V>(round, self.n, certificate.map(|c| c.seed_signature))

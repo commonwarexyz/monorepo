@@ -2,7 +2,7 @@ use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ri
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
-use commonware_parallel::Parallel as ParStrategy;
+use commonware_parallel::Strategy as ParStrategy;
 use commonware_utils::{non_empty_vec, ordered::Map, vec::NonEmptyVec, TryCollect};
 use core::{
     fmt::Debug,
