@@ -15,7 +15,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::authenticated::discovery;
 use commonware_parallel::ParallelRayon;
-use commonware_runtime::{create_pool, tokio, Metrics, Quota};
+use commonware_runtime::{tokio, Metrics, Quota, RayonPoolSpawner};
 use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
 use std::{
@@ -121,7 +121,7 @@ pub async fn run<S, L>(
     };
     let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
-    let thread_pool = create_pool(context.clone(), NZUsize!(2)).unwrap();
+    let thread_pool = context.clone().create_pool(NZUsize!(2)).unwrap();
     let strategy = ParallelRayon::new(thread_pool);
     let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
         context.with_label("engine"),

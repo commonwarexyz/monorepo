@@ -23,7 +23,7 @@ use commonware_cryptography::{
     Digest, Hasher, Sha256, Signer as _,
 };
 use commonware_parallel::ParallelRayon;
-use commonware_runtime::{create_pool, tokio, Listener, Metrics, Network, Runner, Spawner};
+use commonware_runtime::{tokio, Listener, Metrics, Network, RayonPoolSpawner, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect};
 use futures::{
@@ -137,7 +137,7 @@ fn main() {
     // Create context
     let executor = tokio::Runner::default();
     executor.start(|context| async move {
-        let thread_pool = create_pool(context.clone(), NZUsize!(2)).unwrap();
+        let thread_pool = context.clone().create_pool(NZUsize!(2)).unwrap();
         let strategy = ParallelRayon::new(thread_pool);
 
         for network in networks {

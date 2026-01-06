@@ -1,17 +1,13 @@
 //! Utility functions for interacting with any runtime.
 
 #[cfg(test)]
-use crate::Runner;
-use crate::{Metrics, Spawner};
-use commonware_parallel::ThreadPool;
+use crate::{Runner, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::task::ArcWake;
-use rayon::ThreadPoolBuildError;
 use std::{
     any::Any,
     future::Future,
-    num::NonZeroUsize,
     pin::Pin,
     sync::{Arc, Condvar, Mutex},
     task::{Context, Poll},
@@ -76,37 +72,6 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
         },
         |s| s.to_string(),
     )
-}
-
-/// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
-///
-/// # Arguments
-/// - `context`: The runtime context implementing the [Spawner] trait.
-/// - `concurrency`: The number of tasks to execute concurrently in the pool.
-///
-/// # Returns
-/// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot be built.
-pub fn create_pool<S: Spawner + Metrics>(
-    context: S,
-    concurrency: NonZeroUsize,
-) -> Result<ThreadPool, ThreadPoolBuildError> {
-    commonware_parallel::create_pool_with(concurrency, |mut builder| {
-        if rayon::current_thread_index().is_none() {
-            builder = builder.use_current_thread()
-        }
-
-        builder
-            .spawn_handler(move |thread| {
-                // Tasks spawned in a thread pool are expected to run longer than any single
-                // task and thus should be provisioned as a dedicated thread.
-                context
-                    .with_label("rayon_thread")
-                    .dedicated()
-                    .spawn(move |_| async move { thread.run() });
-                Ok(())
-            })
-            .build()
-    })
 }
 
 /// Async reader–writer lock.
@@ -277,46 +242,10 @@ pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, tokio, Metrics};
+    use crate::deterministic;
     use commonware_macros::test_traced;
-    use commonware_utils::NZUsize;
     use futures::task::waker;
-    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    #[test_traced]
-    fn test_create_pool_tokio() {
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            // Create a thread pool with 4 threads
-            let pool = create_pool(context.with_label("pool"), NZUsize!(4)).unwrap();
-
-            // Create a vector of numbers
-            let v: Vec<_> = (0..10000).collect();
-
-            // Use the thread pool to sum the numbers
-            pool.install(|| {
-                assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
-            });
-        });
-    }
-
-    #[test_traced]
-    fn test_create_pool_deterministic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create a thread pool with 4 threads
-            let pool = create_pool(context.with_label("pool"), NZUsize!(4)).unwrap();
-
-            // Create a vector of numbers
-            let v: Vec<_> = (0..10000).collect();
-
-            // Use the thread pool to sum the numbers
-            pool.install(|| {
-                assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
-            });
-        });
-    }
 
     #[test_traced]
     fn test_rwlock() {

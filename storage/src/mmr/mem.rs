@@ -808,7 +808,7 @@ mod tests {
         stability::ROOTS,
     };
     use commonware_cryptography::{sha256, Hasher, Sha256};
-    use commonware_runtime::{create_pool, deterministic, tokio, Runner};
+    use commonware_runtime::{deterministic, tokio, RayonPoolSpawner, Runner};
     use commonware_utils::{hex, NZUsize};
 
     /// Build the MMR corresponding to the stability test `ROOTS` and confirm the roots match.
@@ -1071,7 +1071,7 @@ mod tests {
     fn test_mem_mmr_root_stability_parallel() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let pool = commonware_runtime::create_pool(context, NZUsize!(4)).unwrap();
+            let pool = context.create_pool(NZUsize!(4)).unwrap();
             let mut hasher: Standard<Sha256> = Standard::new();
 
             let mmr = Mmr::init(
@@ -1250,7 +1250,7 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         let executor = tokio::Runner::default();
         executor.start(|ctx| async move {
-            let pool = create_pool(ctx, NZUsize!(4)).unwrap();
+            let pool = ctx.create_pool(NZUsize!(4)).unwrap();
             let mmr = Mmr::init(
                 Config {
                     nodes: Vec::new(),

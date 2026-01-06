@@ -51,12 +51,14 @@ use crate::{
         supervision::Tree,
         Panicker,
     },
-    validate_label, Clock, Error, Execution, Handle, ListenerOf, Panicked, METRICS_PREFIX,
+    validate_label, Clock, Error, Execution, Handle, ListenerOf, Metrics as _, Panicked,
+    Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_macros::select;
+use commonware_parallel::ThreadPool;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
@@ -75,11 +77,13 @@ use prometheus_client::{
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
+use rayon::ThreadPoolBuildError;
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
+    num::NonZeroUsize,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Weak},
@@ -1055,6 +1059,27 @@ impl crate::Spawner for Context {
         executor.auditor.event(b"stopped", |_| {});
         let stopped = executor.shutdown.lock().unwrap().stopped();
         stopped
+    }
+}
+
+impl crate::RayonPoolSpawner for Context {
+    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+        commonware_parallel::create_pool_with(concurrency, |mut builder| {
+            if rayon::current_thread_index().is_none() {
+                builder = builder.use_current_thread()
+            }
+
+            builder
+                .spawn_handler(move |thread| {
+                    // Tasks spawned in a thread pool are expected to run longer than any single
+                    // task and thus should be provisioned as a dedicated thread.
+                    self.with_label("rayon_thread")
+                        .dedicated()
+                        .spawn(move |_| async move { thread.run() });
+                    Ok(())
+                })
+                .build()
+        })
     }
 }
 

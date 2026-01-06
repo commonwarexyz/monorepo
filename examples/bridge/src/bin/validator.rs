@@ -17,7 +17,9 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{authenticated, Manager};
 use commonware_parallel::ParallelRayon;
-use commonware_runtime::{buffer::PoolRef, create_pool, tokio, Metrics, Network, Quota, Runner};
+use commonware_runtime::{
+    buffer::PoolRef, tokio, Metrics, Network, Quota, RayonPoolSpawner, Runner,
+};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU32};
 use std::{
@@ -218,7 +220,7 @@ fn main() {
         );
 
         // Initialize application
-        let thread_pool = create_pool(context.clone(), NZUsize!(2)).unwrap();
+        let thread_pool = context.clone().create_pool(NZUsize!(2)).unwrap();
         let strategy = ParallelRayon::new(thread_pool);
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let this_network = Scheme::signer(

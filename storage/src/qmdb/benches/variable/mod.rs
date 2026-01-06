@@ -2,7 +2,7 @@
 
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context};
+use commonware_runtime::{buffer::PoolRef, tokio::Context, RayonPoolSpawner};
 use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
     qmdb::{
@@ -83,13 +83,13 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
 }
 
 async fn get_any_unordered(ctx: Context) -> UVariableDb {
-    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let pool = ctx.clone().create_pool(THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     UVariableDb::init(ctx, any_cfg).await.unwrap()
 }
 
 async fn get_any_ordered(ctx: Context) -> OVariableDb {
-    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let pool = ctx.clone().create_pool(THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     OVariableDb::init(ctx, any_cfg).await.unwrap()
 }
