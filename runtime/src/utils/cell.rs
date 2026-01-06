@@ -1,10 +1,13 @@
 use crate::{signal, Error, Handle, SinkOf, StreamOf};
+use commonware_parallel::ThreadPool;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
+use rayon::ThreadPoolBuildError;
 use std::{
     future::Future,
     net::SocketAddr,
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 
@@ -136,6 +139,15 @@ where
 
     fn stopped(&self) -> signal::Signal {
         self.as_present().stopped()
+    }
+}
+
+impl<C> crate::RayonPoolSpawner for Cell<C>
+where
+    C: crate::RayonPoolSpawner,
+{
+    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+        self.as_present().create_pool(concurrency)
     }
 }
 

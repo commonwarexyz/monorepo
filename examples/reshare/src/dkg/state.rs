@@ -24,6 +24,7 @@ use commonware_cryptography::{
     transcript::{Summary, Transcript},
     PublicKey, Signer,
 };
+use commonware_parallel::Strategy;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage as RuntimeStorage};
 use commonware_storage::journal::{
     contiguous::variable::{Config as CVConfig, Journal as CVJournal},
@@ -655,9 +656,9 @@ impl<V: Variant, C: Signer> Player<V, C> {
     pub fn finalize(
         self,
         logs: BTreeMap<C::PublicKey, DealerLog<V, C::PublicKey>>,
-        threshold: usize,
+        strategy: &impl Strategy,
     ) -> Result<(Output<V, C::PublicKey>, Share), commonware_cryptography::bls12381::dkg::Error>
     {
-        self.player.finalize(logs, threshold)
+        self.player.finalize(logs, strategy)
     }
 }

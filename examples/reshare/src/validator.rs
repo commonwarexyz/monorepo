@@ -14,8 +14,9 @@ use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Metrics, Quota};
-use commonware_utils::{union, union_unique, NZU32};
+use commonware_parallel::Rayon;
+use commonware_runtime::{tokio, Metrics, Quota, RayonPoolSpawner};
+use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -42,8 +43,12 @@ pub async fn run<S, L>(
 ) where
     S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
     L: Elector<S>,
-    Provider<S, ed25519::PrivateKey>:
-        EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
+    Provider<S, ed25519::PrivateKey, Rayon>: EpochProvider<
+        Variant = MinSig,
+        PublicKey = ed25519::PublicKey,
+        Scheme = S,
+        Strategy = Rayon,
+    >,
 {
     // Load the participant configuration.
     let config_str = std::fs::read_to_string(&args.config_path)
@@ -116,7 +121,8 @@ pub async fn run<S, L>(
     };
     let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
-    let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L>::new(
+    let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
+    let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
         context.with_label("engine"),
         engine::Config {
             signer: config.signing_key.clone(),
@@ -128,6 +134,7 @@ pub async fn run<S, L>(
             partition_prefix: "engine".to_string(),
             freezer_table_initial_size: 1024 * 1024, // 100mb
             peer_config,
+            strategy,
         },
     )
     .await;
@@ -174,6 +181,7 @@ mod test {
         utils::mux,
         Message, Receiver,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Runner},
         Clock, Handle, Quota, Runner as _, Spawner,
@@ -327,8 +335,12 @@ mod test {
         ) where
             S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = PublicKey>,
             L: Elector<S>,
-            Provider<S, PrivateKey>:
-                EpochProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
+            Provider<S, PrivateKey, Sequential>: EpochProvider<
+                Variant = MinSig,
+                PublicKey = PublicKey,
+                Scheme = S,
+                Strategy = Sequential,
+            >,
         {
             if let Some(handle) = self.handles.remove(&pk) {
                 handle.abort();
@@ -374,7 +386,7 @@ mod test {
                 priority_responses: false,
             };
             let marshal = marshal_resolver::init(ctx, resolver_cfg, marshal);
-            let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L>::new(
+            let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
                 ctx.with_label(&format!("validator_{}", &pk)),
                 engine::Config {
                     signer: sk.clone(),
@@ -386,6 +398,7 @@ mod test {
                     partition_prefix: format!("validator_{}", &pk),
                     freezer_table_initial_size: 1024, // 1mb
                     peer_config: self.peer_config.clone(),
+                    strategy: Sequential,
                 },
             )
             .await;
@@ -415,8 +428,10 @@ mod test {
                 self.start_one::<EdScheme, RoundRobin>(ctx, oracle, updates, pk)
                     .await;
             } else {
-                self.start_one::<ThresholdScheme<MinSig>, Random>(ctx, oracle, updates, pk)
-                    .await;
+                self.start_one::<ThresholdScheme<MinSig, Sequential>, Random>(
+                    ctx, oracle, updates, pk,
+                )
+                .await;
             }
         }
 
@@ -710,7 +725,7 @@ mod test {
                         if team.output.is_none() {
                             team.start_one::<EdScheme, RoundRobin>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         } else {
-                            team.start_one::<ThresholdScheme<MinSig>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                            team.start_one::<ThresholdScheme<MinSig, Sequential>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         }
                     },
                     _ = crash_receiver.next() => {

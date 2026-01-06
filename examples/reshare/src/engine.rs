@@ -22,6 +22,7 @@ use commonware_cryptography::{
     Hasher, Signer,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
@@ -48,12 +49,13 @@ const BUFFER_POOL_PAGE_SIZE: NonZero<usize> = NZUsize!(4_096); // 4KB
 const BUFFER_POOL_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 
-pub struct Config<C, P, B, V>
+pub struct Config<C, P, B, V, St>
 where
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
+    St: Strategy,
 {
     pub signer: C,
     pub manager: P,
@@ -64,9 +66,10 @@ where
     pub peer_config: PeerConfig<C::PublicKey>,
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
+    pub strategy: St,
 }
 
-pub struct Engine<E, C, P, B, H, V, S, L>
+pub struct Engine<E, C, P, B, H, V, S, L, St>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
@@ -76,10 +79,12 @@ where
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
-    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    St: Strategy,
+    Provider<S, C, St>:
+        EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
 {
     context: ContextCell<E>,
-    config: Config<C, P, B, V>,
+    config: Config<C, P, B, V, St>,
     dkg: dkg::Actor<E, P, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
@@ -88,7 +93,7 @@ where
     marshal: marshal::Actor<
         E,
         Block<H, C, V>,
-        Provider<S, C>,
+        Provider<S, C, St>,
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
         FixedEpocher,
@@ -103,11 +108,12 @@ where
         Marshaled<E, S, Application<E, S, H, C, V>, Block<H, C, V>, FixedEpocher>,
         S,
         L,
+        St,
     >,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
 }
 
-impl<E, C, P, B, H, V, S, L> Engine<E, C, P, B, H, V, S, L>
+impl<E, C, P, B, H, V, S, L, St> Engine<E, C, P, B, H, V, S, L, St>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
@@ -117,9 +123,11 @@ where
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
-    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
+    St: Strategy,
+    Provider<S, C, St>:
+        EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
 {
-    pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
+    pub async fn new(context: E, config: Config<C, P, B, V, St>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let num_participants = NZU32!(config.peer_config.max_participants_per_round());
@@ -221,12 +229,17 @@ where
         // Create the certificate verifier from the initial output (if available).
         // This allows epoch-independent certificate verification after the DKG is complete.
         let certificate_verifier = config.output.as_ref().and_then(|output| {
-            <Provider<S, C> as EpochProvider>::certificate_verifier(&consensus_namespace, output)
+            <Provider<S, C, St> as EpochProvider>::certificate_verifier(
+                &consensus_namespace,
+                output,
+                config.strategy.clone(),
+            )
         });
         let provider = Provider::new(
             consensus_namespace.clone(),
             config.signer.clone(),
             certificate_verifier,
+            config.strategy.clone(),
         );
 
         let (marshal, marshal_mailbox, _processed_height) = marshal::Actor::init(
