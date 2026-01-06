@@ -201,8 +201,7 @@ mod tests {
     };
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{test_rng, union_unique, NZUsize};
+    use commonware_utils::{test_rng, union_unique};
 
     fn blst_aggregate_verify_same_message<'a, V, I>(
         public: I,
