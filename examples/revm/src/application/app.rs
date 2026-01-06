@@ -100,7 +100,7 @@ where
 
         let digest = child.commitment();
         self.state
-            .insert_snapshot(digest, db, child.state_root)
+            .insert_snapshot(digest, db, child.state_root, outcome.qmdb_changes)
             .await;
         Some(child)
     }
@@ -145,7 +145,7 @@ where
 
         let digest = block.commitment();
         self.state
-            .insert_snapshot(digest, db, block.state_root)
+            .insert_snapshot(digest, db, block.state_root, outcome.qmdb_changes)
             .await;
         true
     }

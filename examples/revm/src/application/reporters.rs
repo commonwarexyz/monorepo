@@ -120,9 +120,18 @@ impl Reporter for FinalizedReporter {
                     .expect("execute finalized block");
                     assert_eq!(outcome.state_root, block.state_root, "state root mismatch");
                     self.state
-                        .insert_snapshot(digest, db, outcome.state_root)
+                        .insert_snapshot(
+                            digest,
+                            db,
+                            outcome.state_root,
+                            outcome.qmdb_changes,
+                        )
                         .await;
                 }
+                self.state
+                    .persist_snapshot(digest)
+                    .await
+                    .expect("persist finalized block");
                 self.state.prune_mempool(&block.txs).await;
                 let _ = self.finalized.unbounded_send((self.node, digest));
                 // Marshal waits for the application to acknowledge processing before advancing the

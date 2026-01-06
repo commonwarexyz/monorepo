@@ -10,16 +10,13 @@
 //! The deterministic simulation queries this state through `crate::application::NodeHandle`.
 
 use crate::{
+    qmdb::{QmdbChanges, QmdbConfig, QmdbState, RevmDb},
     types::{Block, StateRoot, Tx, TxId},
     ConsensusDigest,
 };
-use alloy_evm::revm::{
-    database::InMemoryDB,
-    primitives::{Address, B256, U256},
-    state::AccountInfo,
-    Database as _,
-};
+use alloy_evm::revm::{primitives::{Address, B256, U256}, Database as _};
 use commonware_cryptography::Committable as _;
+use commonware_runtime::{buffer::PoolRef, tokio};
 use futures::lock::Mutex;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -36,16 +33,24 @@ struct State {
     mempool: BTreeMap<TxId, Tx>,
     snapshots: BTreeMap<ConsensusDigest, ExecutionSnapshot>,
     seeds: BTreeMap<ConsensusDigest, B256>,
+    qmdb: QmdbState,
+    persisted: BTreeSet<ConsensusDigest>,
 }
 
 #[derive(Clone)]
 pub(crate) struct ExecutionSnapshot {
-    pub(crate) db: InMemoryDB,
+    pub(crate) db: RevmDb,
     pub(crate) state_root: StateRoot,
+    pub(crate) qmdb_changes: QmdbChanges,
 }
 
 impl Shared {
-    pub(crate) fn new(genesis_alloc: Vec<(Address, U256)>) -> Self {
+    pub(crate) async fn init(
+        context: tokio::Context,
+        buffer_pool: PoolRef,
+        partition_prefix: String,
+        genesis_alloc: Vec<(Address, U256)>,
+    ) -> anyhow::Result<Self> {
         let genesis_block = Block {
             parent: crate::BlockId(B256::ZERO),
             height: 0,
@@ -55,17 +60,13 @@ impl Shared {
         };
         let genesis_digest = genesis_block.commitment();
 
-        let mut db = InMemoryDB::default();
-        for (address, balance) in genesis_alloc {
-            db.insert_account_info(
-                address,
-                AccountInfo {
-                    balance,
-                    nonce: 0,
-                    ..Default::default()
-                },
-            );
-        }
+        let qmdb = QmdbState::init(
+            context.with_label("qmdb"),
+            QmdbConfig::new(partition_prefix, buffer_pool),
+            genesis_alloc,
+        )
+        .await?;
+        let db = RevmDb::new(qmdb.database()?);
 
         let mut snapshots = BTreeMap::new();
         snapshots.insert(
@@ -73,20 +74,23 @@ impl Shared {
             ExecutionSnapshot {
                 db,
                 state_root: genesis_block.state_root,
+                qmdb_changes: QmdbChanges::default(),
             },
         );
 
         let mut seeds = BTreeMap::new();
         seeds.insert(genesis_digest, B256::ZERO);
 
-        Self {
+        Ok(Self {
             inner: Arc::new(Mutex::new(State {
                 mempool: BTreeMap::new(),
                 snapshots,
                 seeds,
+                qmdb,
+                persisted: BTreeSet::new(),
             })),
             genesis_block,
-        }
+        })
     }
 
     pub(crate) fn genesis_block(&self) -> Block {
@@ -148,8 +152,9 @@ impl Shared {
     pub(crate) async fn insert_snapshot(
         &self,
         digest: ConsensusDigest,
-        db: InMemoryDB,
+        db: RevmDb,
         root: StateRoot,
+        qmdb_changes: QmdbChanges,
     ) {
         let mut inner = self.inner.lock().await;
         inner.snapshots.insert(
@@ -157,8 +162,35 @@ impl Shared {
             ExecutionSnapshot {
                 db,
                 state_root: root,
+                qmdb_changes,
             },
         );
+    }
+
+    pub(crate) async fn persist_snapshot(&self, digest: ConsensusDigest) -> anyhow::Result<()> {
+        let (qmdb, changes, already_persisted) = {
+            let inner = self.inner.lock().await;
+            let already = inner.persisted.contains(&digest);
+            let snapshot = inner
+                .snapshots
+                .get(&digest)
+                .ok_or_else(|| anyhow::anyhow!("missing snapshot for digest"))?;
+            (
+                inner.qmdb.clone(),
+                snapshot.qmdb_changes.clone(),
+                already,
+            )
+        };
+
+        if already_persisted {
+            return Ok(());
+        }
+
+        qmdb.apply_changes(&changes).await?;
+
+        let mut inner = self.inner.lock().await;
+        inner.persisted.insert(digest);
+        Ok(())
     }
 
     pub(crate) async fn prune_mempool(&self, txs: &[Tx]) {
