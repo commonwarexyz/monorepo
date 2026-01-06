@@ -2693,7 +2693,7 @@ mod tests {
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
-                certify_latency: (100_000.0, 0.0), // 100 seconds - very slow
+                certify_latency: (2_000.0, 0.0), // 2 seconds
                 should_certify: mocks::application::Certifier::Always,
             };
             let (actor, application) = mocks::application::Application::new(
@@ -2806,12 +2806,13 @@ mod tests {
                 }
             }
 
-            // Check that no Certified message was sent within a timeout
+            // Wait longer than certify_latency (2s) to verify certification was cancelled.
+            // If certification wasn't cancelled, it would complete and send a Certified message.
             let certified_received = select! {
                 msg = resolver_receiver.next() => {
                     matches!(msg, Some(MailboxMessage::Certified { .. }))
                 },
-                _ = context.sleep(Duration::from_millis(500)) => {
+                _ = context.sleep(Duration::from_secs(4)) => {
                     false
                 },
             };
