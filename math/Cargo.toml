@@ -22,19 +22,19 @@ test_strategies = [ "dep:proptest", "std" ]
 std = [
 	"bytes/std",
 	"commonware-codec/std",
+	"commonware-parallel/std",
 	"commonware-utils/std",
 	"rand_core/std",
-	"rayon",
 ]
 
 [dependencies]
 arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
 commonware-codec.workspace = true
+commonware-parallel.workspace = true
 commonware-utils.workspace = true
 proptest = { workspace = true, optional = true }
 rand_core.workspace = true
-rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
 commonware-conformance.workspace = true

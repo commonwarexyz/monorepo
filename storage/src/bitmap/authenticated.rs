@@ -24,7 +24,8 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_parallel::ThreadPool;
+use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::prefixed_u64::U64};
 use std::collections::HashSet;
 use tracing::{debug, error, warn};
