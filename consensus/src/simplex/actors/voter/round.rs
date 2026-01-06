@@ -574,6 +574,7 @@ mod tests {
         types::{Epoch, View},
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
+    use commonware_utils::futures::AbortablePool;
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
@@ -870,7 +871,7 @@ mod tests {
         assert!(matches!(round.try_certify(), CertifyResult::Ready(_)));
 
         // Set a certify handle then mark as certified
-        let mut pool = commonware_utils::futures::AbortablePool::<()>::default();
+        let mut pool = AbortablePool::<()>::default();
         let handle = pool.push(futures::future::pending());
         round.set_certify_handle(handle);
         round.certified(true);
@@ -911,7 +912,7 @@ mod tests {
         assert!(matches!(round.try_certify(), CertifyResult::Ready(_)));
 
         // Set a certify handle (simulating in-flight certification)
-        let mut pool = commonware_utils::futures::AbortablePool::<()>::default();
+        let mut pool = AbortablePool::<()>::default();
         let handle = pool.push(futures::future::pending());
         round.set_certify_handle(handle);
 
@@ -948,7 +949,7 @@ mod tests {
         assert!(added);
 
         // Set a certify handle
-        let mut pool = commonware_utils::futures::AbortablePool::<()>::default();
+        let mut pool = AbortablePool::<()>::default();
         let handle = pool.push(futures::future::pending());
         round.set_certify_handle(handle);
 
@@ -1022,7 +1023,7 @@ mod tests {
         assert!(added);
 
         // Set a certify handle (simulating in-flight certification)
-        let mut pool = commonware_utils::futures::AbortablePool::<()>::default();
+        let mut pool = AbortablePool::<()>::default();
         let handle = pool.push(futures::future::pending());
         round.set_certify_handle(handle);
 

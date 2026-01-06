@@ -622,6 +622,7 @@ mod tests {
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_runtime::{deterministic, Runner};
+    use commonware_utils::futures::AbortablePool;
     use std::time::Duration;
 
     fn test_genesis() -> Sha256Digest {
@@ -869,7 +870,7 @@ mod tests {
             assert!(state.parent_payload(&proposal).is_none());
 
             // Set certify handle then certify the parent
-            let mut pool = commonware_utils::futures::AbortablePool::<()>::default();
+            let mut pool = AbortablePool::<()>::default();
             let handle = pool.push(futures::future::pending());
             state.set_certify_handle(parent_view, handle);
             state.certified(parent_view, true);
@@ -1250,7 +1251,7 @@ mod tests {
             assert_eq!(candidates.len(), 6);
 
             // Set certify handles for views 3, 4, 5, 7 (NOT 6 or 8)
-            let mut pool = commonware_utils::futures::AbortablePool::<()>::default();
+            let mut pool = AbortablePool::<()>::default();
             for i in [3u64, 4, 5, 7] {
                 let handle = pool.push(futures::future::pending());
                 state.set_certify_handle(View::new(i), handle);
@@ -1402,7 +1403,7 @@ mod tests {
             assert_eq!(candidates.len(), 1);
 
             // Set certify handle
-            let mut pool = commonware_utils::futures::AbortablePool::<()>::default();
+            let mut pool = AbortablePool::<()>::default();
             let handle = pool.push(futures::future::pending());
             state.set_certify_handle(view3, handle);
 
