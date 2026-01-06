@@ -2,9 +2,8 @@ use super::{Config, Translator};
 use crate::{
     archive::{Error, Identifier},
     index::{unordered::Index, Unordered},
-    journal::segmented::{
-        fixed::{Config as FixedJournalConfig, Journal as FixedJournal},
-        glob::{Config as GlobConfig, Glob},
+    journal::segmented::oversized::{
+        Config as OversizedConfig, Oversized, OversizedEntry as OversizedEntryTrait,
     },
     rmap::RMap,
 };
@@ -12,7 +11,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Storage};
 use commonware_utils::Array;
-use futures::{future::join, pin_mut, StreamExt};
+use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
@@ -76,6 +75,18 @@ impl<K: Array> FixedSize for IndexEntry<K> {
     const SIZE: usize = u64::SIZE + K::SIZE + u32::SIZE + u32::SIZE;
 }
 
+impl<K: Array> OversizedEntryTrait for IndexEntry<K> {
+    fn value_location(&self) -> (u32, u32) {
+        (self.value_offset, self.value_size)
+    }
+
+    fn with_location(mut self, offset: u32, size: u32) -> Self {
+        self.value_offset = offset;
+        self.value_size = size;
+        self
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl<K: Array> arbitrary::Arbitrary<'_> for IndexEntry<K>
 where
@@ -93,22 +104,20 @@ where
 
 /// Implementation of `Archive` storage.
 ///
-/// Uses two storage backends:
-/// - **index_journal**: Fixed-size entries containing (index, key, value_offset, value_size)
+/// Uses [`Oversized`] to combine:
+/// - **index journal**: Fixed-size entries containing (index, key, value_offset, value_size)
 /// - **glob**: Raw blob storage for values (no size prefix, CRC32 checksums)
 ///
 /// This separation provides:
 /// - Fast startup replay (only reads index journal, no values)
 /// - Efficient key lookups (key comparison without reading values)
 /// - Direct value reads bypass buffer pool (avoids cache pollution)
+/// - Automatic crash recovery (validates index entries against glob sizes)
 pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     items_per_section: u64,
 
-    /// Fixed-size journal for index entries (fast replay, efficient key lookups).
-    index_journal: FixedJournal<E, IndexEntry<K>>,
-
-    /// Blob storage for values (direct reads bypass buffer pool).
-    glob: Glob<E, V>,
+    /// Combined index + value storage with crash recovery.
+    oversized: Oversized<E, IndexEntry<K>, V>,
 
     pending: BTreeSet<u64>,
 
@@ -143,26 +152,20 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     ///
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying only the index journal (no values are read).
+    /// Crash recovery is handled automatically by `Oversized`.
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
-        // Initialize index journal (segmented/fixed)
-        let index_journal_cfg = FixedJournalConfig {
-            partition: cfg.index_partition,
+        // Initialize oversized journal (handles crash recovery)
+        let oversized_cfg = OversizedConfig {
+            index_partition: cfg.index_partition,
+            value_partition: cfg.value_partition,
+            index_buffer_pool: cfg.index_buffer_pool,
             write_buffer: cfg.write_buffer,
-            buffer_pool: cfg.index_buffer_pool,
-        };
-        let index_journal: FixedJournal<E, IndexEntry<K>> =
-            FixedJournal::init(context.with_label("index_journal"), index_journal_cfg).await?;
-
-        // Initialize value blob storage
-        let glob_cfg = GlobConfig {
-            partition: cfg.value_partition,
+            replay_buffer: cfg.replay_buffer,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
-            write_buffer: cfg.write_buffer,
         };
-        let glob = Glob::init(context.with_label("glob"), glob_cfg)
-            .await
-            .map_err(Error::Journal)?;
+        let oversized: Oversized<E, IndexEntry<K>, V> =
+            Oversized::init(context.with_label("oversized"), oversized_cfg).await?;
 
         // Initialize keys and replay index journal (no values read!)
         let mut indices = BTreeMap::new();
@@ -170,7 +173,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         let mut intervals = RMap::new();
         {
             debug!("initializing archive from index journal");
-            let stream = index_journal.replay(0, cfg.replay_buffer).await?;
+            let stream = oversized.replay(0, cfg.replay_buffer).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 let (_section, position, entry) = result?;
@@ -220,8 +223,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         // Return populated archive
         Ok(Self {
             items_per_section: cfg.items_per_section.get(),
-            index_journal,
-            glob,
+            oversized,
             pending: BTreeSet::new(),
             oldest_allowed: None,
             indices,
@@ -248,11 +250,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Fetch value directly from blob storage (bypasses buffer pool)
         let section = self.section(index);
-        let value = self
-            .glob
-            .get(section, value_offset, value_size)
-            .await
-            .map_err(Error::Journal)?;
+        let value = self.oversized.get_value(section, value_offset, value_size).await?;
         Ok(Some(value))
     }
 
@@ -275,16 +273,12 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
             // Fetch index entry from index journal to verify key
             let section = self.section(*index);
-            let entry = self.index_journal.get(section, position).await?;
+            let entry = self.oversized.get(section, position).await?;
 
             // Get key from entry
             if entry.key.as_ref() == key.as_ref() {
                 // Fetch value directly from blob storage (bypasses buffer pool)
-                let value = self
-                    .glob
-                    .get(section, value_offset, value_size)
-                    .await
-                    .map_err(Error::Journal)?;
+                let value = self.oversized.get_value(section, value_offset, value_size).await?;
                 return Ok(Some(value));
             }
             self.unnecessary_reads.inc();
@@ -317,11 +311,8 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         }
         debug!(min, "pruning archive");
 
-        // Prune index journal and value blob
-        let (index_result, value_result) =
-            join(self.index_journal.prune(min), self.glob.prune(min)).await;
-        index_result.map_err(Error::Journal)?;
-        value_result.map_err(Error::Journal)?;
+        // Prune oversized journal (handles both index and values)
+        self.oversized.prune(min).await?;
 
         // Remove pending writes (no need to call `sync` as we are pruning)
         loop {
@@ -372,17 +363,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
             return Ok(());
         }
 
-        // Write value to blob storage (returns offset and size)
+        // Write value and index entry atomically (glob first, then index)
         let section = self.section(index);
-        let (value_offset, value_size) = self
-            .glob
-            .append(section, &data)
-            .await
-            .map_err(Error::Journal)?;
-
-        // Write index entry to fixed journal
-        let entry = IndexEntry::new(index, key.clone(), value_offset, value_size);
-        let position = self.index_journal.append(section, entry).await?;
+        let entry = IndexEntry::new(index, key.clone(), 0, 0);
+        let (position, value_offset, value_size) = self.oversized.append(section, entry, &data).await?;
 
         // Store index location
         self.indices
@@ -425,20 +409,9 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
             self.syncs.inc();
         }
 
-        // Sync index journal and value blob concurrently
-        let index_syncs: Vec<_> = pending
-            .iter()
-            .map(|s| self.index_journal.sync(*s))
-            .collect();
-        let value_syncs: Vec<_> = pending.iter().map(|s| self.glob.sync(*s)).collect();
-
-        let (index_results, value_results) = join(
-            futures::future::try_join_all(index_syncs),
-            futures::future::try_join_all(value_syncs),
-        )
-        .await;
-        index_results?;
-        value_results.map_err(Error::Journal)?;
+        // Sync oversized journal (handles both index and values)
+        let syncs: Vec<_> = pending.iter().map(|s| self.oversized.sync(*s)).collect();
+        futures::future::try_join_all(syncs).await?;
 
         self.pending.clear();
         Ok(())
@@ -465,11 +438,8 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        // Destroy index journal and value blob
-        let (index_result, value_result) =
-            join(self.index_journal.destroy(), self.glob.destroy()).await;
-        index_result.map_err(Error::Journal)?;
-        value_result.map_err(Error::Journal)?;
+        // Destroy oversized journal (handles both index and values)
+        self.oversized.destroy().await?;
         Ok(())
     }
 }

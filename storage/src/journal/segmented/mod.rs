@@ -7,4 +7,5 @@ mod manager;
 
 pub mod fixed;
 pub mod glob;
+pub mod oversized;
 pub mod variable;

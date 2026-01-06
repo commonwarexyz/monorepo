@@ -1,8 +1,7 @@
 use super::{Config, Error, Identifier};
 use crate::{
-    journal::segmented::{
-        fixed::{Config as FixedJournalConfig, Journal as FixedJournal},
-        glob::{Config as GlobConfig, Glob},
+    journal::segmented::oversized::{
+        Config as OversizedConfig, Oversized, OversizedEntry as OversizedEntryTrait,
     },
     kv, Persistable,
 };
@@ -10,7 +9,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
 use commonware_utils::Array;
-use futures::future::{join, try_join, try_join_all};
+use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
 use std::{
     cmp::Ordering, collections::BTreeSet, marker::PhantomData, num::NonZeroUsize, ops::Deref,
@@ -352,6 +351,18 @@ impl<K: Array> FixedSize for KeyEntry<K> {
     const SIZE: usize = K::SIZE + u64::SIZE + u32::SIZE + u32::SIZE + u32::SIZE;
 }
 
+impl<K: Array> OversizedEntryTrait for KeyEntry<K> {
+    fn value_location(&self) -> (u32, u32) {
+        (self.value_offset, self.value_size)
+    }
+
+    fn with_location(mut self, offset: u32, size: u32) -> Self {
+        self.value_offset = offset;
+        self.value_size = size;
+        self
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl<K: Array> arbitrary::Arbitrary<'_> for KeyEntry<K>
 where
@@ -383,11 +394,8 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Table blob that maps slots to key index chain heads
     table: E::Blob,
 
-    // Fixed journal for key entries (efficient collision chain traversal)
-    key_index: FixedJournal<E, KeyEntry<K>>,
-
-    // Blob storage for values (direct reads, no buffer pool)
-    glob: Glob<E, V>,
+    // Combined key index + value storage with crash recovery
+    oversized: Oversized<E, KeyEntry<K>, V>,
 
     // Target size for value blob sections
     blob_target_size: u64,
@@ -625,25 +633,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             "table_initial_size must be a power of 2"
         );
 
-        // Initialize key index journal (segmented/fixed)
-        let key_index_config = FixedJournalConfig {
-            partition: config.key_index_partition.clone(),
+        // Initialize oversized journal (handles crash recovery)
+        let oversized_cfg = OversizedConfig {
+            index_partition: config.key_index_partition.clone(),
+            value_partition: config.value_journal_partition.clone(),
+            index_buffer_pool: config.key_index_buffer_pool.clone(),
             write_buffer: config.key_index_write_buffer,
-            buffer_pool: config.key_index_buffer_pool.clone(),
-        };
-        let mut key_index =
-            FixedJournal::init(context.with_label("key_index"), key_index_config).await?;
-
-        // Initialize value blob storage
-        let glob_config = GlobConfig {
-            partition: config.value_journal_partition.clone(),
+            replay_buffer: config.key_index_replay_buffer,
             compression: config.value_journal_compression,
             codec_config: config.codec_config,
-            write_buffer: config.value_journal_write_buffer,
         };
-        let mut glob = Glob::init(context.with_label("glob"), glob_config)
-            .await
-            .map_err(Error::Journal)?;
+        let mut oversized: Oversized<E, KeyEntry<K>, V> =
+            Oversized::init(context.with_label("oversized"), oversized_cfg).await?;
 
         // Open table blob
         let (table, table_len) = context
@@ -677,23 +678,17 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                     "table_size must be a power of 2"
                 );
 
-                // Rewind both journals to the committed section and offset
-                let (key_rewind, value_rewind) = join(
-                    key_index.rewind(checkpoint.section, checkpoint.key_index_size),
-                    glob.rewind(checkpoint.section, checkpoint.value_journal_size),
-                )
-                .await;
-                key_rewind?;
-                value_rewind.map_err(Error::Journal)?;
+                // Rewind oversized to the committed section and offsets
+                oversized
+                    .rewind(
+                        checkpoint.section,
+                        checkpoint.key_index_size,
+                        checkpoint.value_journal_size,
+                    )
+                    .await?;
 
-                // Sync both journals
-                let (key_sync, value_sync) = join(
-                    key_index.sync(checkpoint.section),
-                    glob.sync(checkpoint.section),
-                )
-                .await;
-                key_sync?;
-                value_sync.map_err(Error::Journal)?;
+                // Sync oversized
+                oversized.sync(checkpoint.section).await?;
 
                 // Resize table if needed
                 let expected_table_len = Self::table_offset(checkpoint.table_size);
@@ -743,12 +738,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                     table.sync().await?;
                 }
 
+                // Get sizes from oversized (crash recovery already ran during init)
+                let (key_index_size, value_journal_size) = oversized.sizes(max_section).await?;
+
                 (
                     Checkpoint {
                         epoch: max_epoch,
                         section: max_section,
-                        key_index_size: key_index.size(max_section).await?,
-                        value_journal_size: glob.size(max_section).await.map_err(Error::Journal)?,
+                        key_index_size,
+                        value_journal_size,
                         table_size,
                     },
                     resizable,
@@ -788,8 +786,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             table_resize_frequency: config.table_resize_frequency,
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
-            key_index,
-            glob,
+            oversized,
             blob_target_size: config.value_journal_target_size,
             current_section: checkpoint.section,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
@@ -829,16 +826,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// Determine which blob section to write to based on current blob size.
     async fn update_section(&mut self) -> Result<(), Error> {
         // Get the current value blob section size
-        let size = self
-            .glob
-            .size(self.current_section)
-            .await
-            .map_err(Error::Journal)?;
+        let (_, value_size) = self.oversized.sizes(self.current_section).await?;
 
         // If the current section has reached the target size, create a new section
-        if size >= self.blob_target_size {
+        if value_size >= self.blob_target_size {
             self.current_section += 1;
-            debug!(size, section = self.current_section, "updated section");
+            debug!(size = value_size, section = self.current_section, "updated section");
         }
 
         Ok(())
@@ -857,25 +850,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
         let head = Self::read_latest_entry(&entry1, &entry2);
 
-        // Write value to blob storage (returns offset and size)
-        let (value_offset, value_size) = self
-            .glob
-            .append(self.current_section, &value)
-            .await
-            .map_err(Error::Journal)?;
-
-        // Create key entry with pointer to previous head
+        // Create key entry with pointer to previous head (value location set by oversized.append)
         let key_entry = KeyEntry::new(
             key,
             head.map(|(section, position, _)| (section, position)),
-            value_offset,
-            value_size,
+            0,
+            0,
         );
 
-        // Append key entry to fixed journal
-        let position = self
-            .key_index
-            .append(self.current_section, key_entry)
+        // Write value and key entry atomically (glob first, then index)
+        let (position, value_offset, value_size) = self
+            .oversized
+            .append(self.current_section, key_entry, &value)
             .await?;
 
         // Update the number of items added to the entry.
@@ -923,10 +909,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     async fn get_cursor(&self, cursor: Cursor) -> Result<V, Error> {
         // Read value directly from blob storage
         let value = self
-            .glob
-            .get(cursor.section(), cursor.offset(), cursor.size())
-            .await
-            .map_err(Error::Journal)?;
+            .oversized
+            .get_value(cursor.section(), cursor.offset(), cursor.size())
+            .await?;
 
         Ok(value)
     }
@@ -945,16 +930,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Follow the linked list chain to find the first matching key
         loop {
             // Get the key entry from the fixed key index (efficient, good cache locality)
-            let key_entry = self.key_index.get(section, position).await?;
+            let key_entry = self.oversized.get(section, position).await?;
 
             // Check if this key matches
             if key_entry.key.as_ref() == key.as_ref() {
                 // Read value from blob storage (direct, single read using known size)
                 let value = self
-                    .glob
-                    .get(section, key_entry.value_offset, key_entry.value_size)
-                    .await
-                    .map_err(Error::Journal)?;
+                    .oversized
+                    .get_value(section, key_entry.value_offset, key_entry.value_size)
+                    .await?;
                 return Ok(Some(value));
             }
 
@@ -1089,22 +1073,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// Each sync will process up to `table_resize_chunk_size` entries until the resize
     /// is complete.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
-        // Sync all modified sections concurrently for both key_index and glob
-        let key_syncs: Vec<_> = self
+        // Sync all modified sections for oversized journal
+        let syncs: Vec<_> = self
             .modified_sections
             .iter()
-            .map(|section| self.key_index.sync(*section))
+            .map(|section| self.oversized.sync(*section))
             .collect();
-        let value_syncs: Vec<_> = self
-            .modified_sections
-            .iter()
-            .map(|section| self.glob.sync(*section))
-            .collect();
-
-        let (key_results, value_results) =
-            join(try_join_all(key_syncs), try_join_all(value_syncs)).await;
-        key_results?;
-        value_results.map_err(Error::Journal)?;
+        try_join_all(syncs).await?;
         self.modified_sections.clear();
 
         // Start a resize (if needed)
@@ -1122,14 +1097,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let stored_epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
 
-        // Get sizes concurrently
-        let (key_index_size, value_journal_size) = join(
-            self.key_index.size(self.current_section),
-            self.glob.size(self.current_section),
-        )
-        .await;
-        let key_index_size = key_index_size?;
-        let value_journal_size = value_journal_size.map_err(Error::Journal)?;
+        // Get sizes from oversized
+        let (key_index_size, value_journal_size) =
+            self.oversized.sizes(self.current_section).await?;
 
         Ok(Checkpoint {
             epoch: stored_epoch,
@@ -1155,10 +1125,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Close and remove any underlying blobs created by the [Freezer].
     pub async fn destroy(self) -> Result<(), Error> {
-        // Destroy key index and value blob
-        let (key_result, value_result) = join(self.key_index.destroy(), self.glob.destroy()).await;
-        key_result?;
-        value_result.map_err(Error::Journal)?;
+        // Destroy oversized journal
+        self.oversized.destroy().await?;
 
         // Destroy the table
         drop(self.table);

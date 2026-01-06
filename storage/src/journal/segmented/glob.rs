@@ -148,7 +148,8 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
 
         let data_len = buf.len() - 4;
         let compressed_data = &buf[..data_len];
-        let stored_checksum = u32::from_be_bytes(buf[data_len..].try_into().unwrap());
+        let stored_checksum =
+            u32::from_be_bytes(buf[data_len..].try_into().expect("checksum is 4 bytes"));
 
         // Verify checksum
         let checksum = crc32fast::hash(compressed_data);
@@ -365,6 +366,44 @@ mod tests {
             // Get should fail with checksum mismatch
             let result = glob.get(1, offset, size).await;
             assert!(matches!(result, Err(Error::ChecksumMismatch(_, _))));
+
+            glob.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_glob_rewind() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut glob: Glob<_, i32> = Glob::init(context.clone(), test_cfg())
+                .await
+                .expect("Failed to init glob");
+
+            // Append multiple values and track sizes
+            let values: Vec<i32> = vec![1, 2, 3, 4, 5];
+            let mut locations = Vec::new();
+
+            for value in &values {
+                let (offset, size) = glob.append(1, value).await.expect("Failed to append");
+                locations.push((offset, size));
+            }
+            glob.sync(1).await.expect("Failed to sync");
+
+            // Rewind to after the third value
+            let (third_offset, third_size) = locations[2];
+            let rewind_size = (third_offset + third_size) as u64;
+            glob.rewind(1, rewind_size).await.expect("Failed to rewind");
+
+            // First three values should still be readable
+            for (i, (offset, size)) in locations.iter().take(3).enumerate() {
+                let retrieved = glob.get(1, *offset, *size).await.expect("Failed to get");
+                assert_eq!(retrieved, values[i]);
+            }
+
+            // Fourth and fifth values should fail (reading past end of blob)
+            let (fourth_offset, fourth_size) = locations[3];
+            let result = glob.get(1, fourth_offset, fourth_size).await;
+            assert!(result.is_err());
 
             glob.destroy().await.expect("Failed to destroy");
         });

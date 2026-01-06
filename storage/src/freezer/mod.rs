@@ -158,6 +158,7 @@
 //!         key_index_partition: "freezer_key_index".into(),
 //!         key_index_write_buffer: NZUsize!(1024 * 1024), // 1MB
 //!         key_index_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!         key_index_replay_buffer: NZUsize!(1024 * 1024), // 1MB
 //!         value_journal_partition: "freezer_value_journal".into(),
 //!         value_journal_compression: Some(3),
 //!         value_journal_write_buffer: NZUsize!(1024 * 1024), // 1MB
@@ -223,6 +224,9 @@ pub struct Config<C> {
     /// The buffer pool for the key index journal.
     pub key_index_buffer_pool: PoolRef,
 
+    /// The size of the replay buffer for the key index journal.
+    pub key_index_replay_buffer: NonZeroUsize,
+
     /// The [commonware_runtime::Storage] partition for the value journal.
     pub value_journal_partition: String,
 
@@ -270,6 +274,7 @@ mod tests {
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
     const DEFAULT_TABLE_RESIZE_CHUNK_SIZE: u32 = 128; // force multiple chunks
     const DEFAULT_TABLE_REPLAY_BUFFER: usize = 64 * 1024; // 64KB
+    const DEFAULT_KEY_INDEX_REPLAY_BUFFER: usize = 64 * 1024; // 64KB
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
@@ -290,6 +295,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: compression,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -360,6 +366,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: None,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -413,6 +420,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: None,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -476,6 +484,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: None,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -548,6 +557,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: None,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -649,6 +659,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: None,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -710,6 +721,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: None,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -770,6 +782,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: None,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -836,6 +849,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: None,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -913,6 +927,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: None,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -984,6 +999,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: None,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -1054,6 +1070,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: None,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -1118,6 +1135,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: None,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -1274,6 +1292,7 @@ mod tests {
                 key_index_partition: "test_key_index".into(),
                 key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_index_replay_buffer: NZUsize!(DEFAULT_KEY_INDEX_REPLAY_BUFFER),
                 value_journal_partition: "test_value_journal".into(),
                 value_journal_compression: None,
                 value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),

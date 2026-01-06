@@ -146,7 +146,8 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 
     /// Verify the integrity of the item + checksum in `buf`.
     fn verify_integrity(buf: &[u8]) -> Result<A, Error> {
-        let stored_checksum = u32::from_be_bytes(buf[A::SIZE..].try_into().unwrap());
+        let stored_checksum =
+            u32::from_be_bytes(buf[A::SIZE..].try_into().expect("checksum is 4 bytes"));
         let checksum = crc32fast::hash(&buf[..A::SIZE]);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
@@ -271,6 +272,13 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     /// after `section` are removed.
     pub async fn rewind(&mut self, section: u64, offset: u64) -> Result<(), Error> {
         self.manager.rewind(section, offset).await
+    }
+
+    /// Rewind only the given section to a specific byte offset.
+    ///
+    /// Unlike `rewind`, this does not affect other sections.
+    pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.manager.rewind_section(section, size).await
     }
 
     /// Remove all underlying blobs.
@@ -487,6 +495,40 @@ mod tests {
                 count
             };
             assert_eq!(count, 4);
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_persistence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate journal
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            for i in 0u64..5 {
+                journal
+                    .append(1, test_digest(i))
+                    .await
+                    .expect("failed to append");
+            }
+            journal.sync_all().await.expect("failed to sync");
+            drop(journal);
+
+            // Reopen and verify data persisted
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg)
+                .await
+                .expect("failed to re-init");
+
+            for i in 0u64..5 {
+                let item = journal.get(1, i as u32).await.expect("failed to get");
+                assert_eq!(item, test_digest(i));
+            }
 
             journal.destroy().await.expect("failed to destroy");
         });
