@@ -343,10 +343,8 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
     use commonware_parallel::{Parallel, Sequential};
-    use commonware_utils::{quorum, test_rng, union_unique, NZU32};
+    use commonware_utils::{quorum, test_rng, union_unique, NZUsize, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
-    use rayon::ThreadPoolBuilder;
-    use std::sync::Arc;
 
     fn blst_verify_proof_of_possession<V: Variant>(
         public: &V::Public,
@@ -481,7 +479,7 @@ mod tests {
         )
         .expect("Verification with namespaced messages should succeed");
 
-        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(4).build().unwrap());
+        let pool = commonware_parallel::create_pool(NZUsize!(4)).unwrap();
         let parallel = Parallel::new(pool);
         batch_verify_same_signer::<_, V, _, _>(
             &mut rng,
@@ -609,7 +607,7 @@ mod tests {
         ops::verify_message::<V>(sharing.public(), b"test", b"payload1", &sig_1).unwrap();
         ops::verify_message::<V>(sharing.public(), b"test", b"payload2", &sig_2).unwrap();
 
-        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(4).build().unwrap());
+        let pool = commonware_parallel::create_pool(NZUsize!(4)).unwrap();
         let parallel = Parallel::new(pool);
         let (sig_1_par, sig_2_par) =
             recover_pair::<V, _, _>(&sharing, &partials_1, &partials_2, &parallel).unwrap();

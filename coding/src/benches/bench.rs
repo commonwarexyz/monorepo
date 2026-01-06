@@ -1,10 +1,9 @@
 use commonware_coding::{Config, Scheme};
 use commonware_parallel::{Parallel, Sequential};
+use commonware_utils::NZUsize;
 use criterion::{criterion_main, BatchSize, Criterion};
 use rand::{RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
-use rayon::ThreadPoolBuilder;
-use std::sync::Arc;
 
 mod no_coding;
 mod reed_solomon;
@@ -21,7 +20,7 @@ pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                     minimum_shards: min as u16,
                     extra_shards: (chunks - min) as u16,
                 };
-                let pool = Arc::new(ThreadPoolBuilder::new().num_threads(conc).build().unwrap());
+                let pool = commonware_parallel::create_pool(NZUsize!(conc)).unwrap();
                 c.bench_function(
                     &format!("{name}/msg_len={data_length} chunks={chunks} conc={conc}"),
                     |b| {
@@ -63,7 +62,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                     minimum_shards: min as u16,
                     extra_shards: (chunks - min) as u16,
                 };
-                let pool = Arc::new(ThreadPoolBuilder::new().num_threads(conc).build().unwrap());
+                let pool = commonware_parallel::create_pool(NZUsize!(conc)).unwrap();
                 c.bench_function(
                     &format!("{name}/msg_len={data_length} chunks={chunks} conc={conc}"),
                     |b| {

@@ -162,9 +162,7 @@ mod tests {
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::{Parallel, Sequential};
-    use commonware_utils::test_rng;
-    use rayon::ThreadPoolBuilder;
-    use std::sync::Arc;
+    use commonware_utils::{test_rng, NZUsize};
 
     fn verify_same_signer_correct<V: Variant>() {
         let mut rng = test_rng();
@@ -183,7 +181,7 @@ mod tests {
         verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &Sequential)
             .expect("valid signatures should be accepted");
 
-        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(4).build().unwrap());
+        let pool = commonware_parallel::create_pool(NZUsize!(4)).unwrap();
         let parallel = Parallel::new(pool);
         verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &parallel)
             .expect("valid signatures should be accepted with parallel strategy");

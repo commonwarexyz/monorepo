@@ -11,8 +11,7 @@ use commonware_cryptography::bls12381::primitives::{
 use commonware_parallel::{Parallel, Sequential};
 use libfuzzer_sys::fuzz_target;
 use rand::thread_rng;
-use rayon::ThreadPoolBuilder;
-use std::sync::Arc;
+use std::num::NonZeroUsize;
 
 mod common;
 use common::{
@@ -393,12 +392,9 @@ fn fuzz(op: FuzzOperation) {
                     .map(|group| group.iter().collect())
                     .collect();
                 if concurrency > 1 {
-                    let pool = Arc::new(
-                        ThreadPoolBuilder::new()
-                            .num_threads(concurrency)
-                            .build()
-                            .unwrap(),
-                    );
+                    let pool =
+                        commonware_parallel::create_pool(NonZeroUsize::new(concurrency).unwrap())
+                            .unwrap();
                     let _ = threshold::recover_multiple::<MinPk, _, _>(
                         &sharing,
                         groups_refs,
@@ -425,12 +421,9 @@ fn fuzz(op: FuzzOperation) {
                     .map(|group| group.iter().collect())
                     .collect();
                 if concurrency > 1 {
-                    let pool = Arc::new(
-                        ThreadPoolBuilder::new()
-                            .num_threads(concurrency)
-                            .build()
-                            .unwrap(),
-                    );
+                    let pool =
+                        commonware_parallel::create_pool(NonZeroUsize::new(concurrency).unwrap())
+                            .unwrap();
                     let _ = threshold::recover_multiple::<MinSig, _, _>(
                         &sharing,
                         groups_refs,

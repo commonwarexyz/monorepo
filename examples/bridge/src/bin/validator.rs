@@ -218,8 +218,7 @@ fn main() {
         );
 
         // Initialize application
-        let n_threads = std::thread::available_parallelism().unwrap().get();
-        let thread_pool = create_pool(context.clone(), n_threads).unwrap();
+        let thread_pool = create_pool(context.clone(), NZUsize!(2)).unwrap();
         let strategy = Parallel::new(thread_pool);
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let this_network = Scheme::signer(

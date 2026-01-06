@@ -21,6 +21,7 @@ cfg-if.workspace = true
 commonware-codec = { workspace = true, default-features = false }
 commonware-cryptography = { workspace = true, default-features = false }
 commonware-macros.workspace = true
+commonware-parallel = { workspace = true, optional = true, features = ["std"] }
 commonware-runtime = { workspace = true, optional = true }
 commonware-utils = { workspace = true, default-features = false }
 crc32fast = { workspace = true, optional = true }
@@ -48,6 +49,8 @@ std = [
 	"bytes/std",
 	"commonware-codec/std",
 	"commonware-cryptography/std",
+	"commonware-parallel",
+	"commonware-parallel?/std",
 	"commonware-runtime",
 	"commonware-utils/std",
 	"crc32fast/std",

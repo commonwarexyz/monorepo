@@ -1,7 +1,8 @@
 //! Benchmarks of QMDB variants on variable-sized values.
 
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
+use commonware_parallel::ThreadPool;
+use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context};
 use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
     qmdb::{
@@ -46,7 +47,7 @@ const PARTITION_SUFFIX: &str = "any_variable_bench_partition";
 
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
 /// configured to provide 8 cores.
-const THREADS: usize = 8;
+const THREADS: NonZeroUsize = NZUsize!(8);
 
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroUsize = NZUsize!(16384);

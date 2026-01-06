@@ -8,12 +8,11 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::{Parallel, Sequential};
-use commonware_utils::{ordered::Set, quorum, TryCollect};
+use commonware_utils::{ordered::Set, quorum, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
-use rayon::ThreadPoolBuilder;
-use std::{collections::BTreeMap, hint::black_box, sync::Arc};
+use std::{collections::BTreeMap, hint::black_box};
 
 type V = MinSig;
 
@@ -131,12 +130,7 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
         let t = quorum(n);
         let bench = Bench::new(&mut rng, reshare, n);
         for &concurrency in CONCURRENCY {
-            let pool = Arc::new(
-                ThreadPoolBuilder::new()
-                    .num_threads(concurrency)
-                    .build()
-                    .unwrap(),
-            );
+            let pool = commonware_parallel::create_pool(NZUsize!(concurrency)).unwrap();
             c.bench_function(
                 &format!(
                     "{}{}/n={} t={} conc={}",

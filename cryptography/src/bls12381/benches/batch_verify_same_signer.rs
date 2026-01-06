@@ -2,8 +2,7 @@ use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use commonware_parallel::{Parallel, Sequential};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
-use rayon::ThreadPoolBuilder;
-use std::sync::Arc;
+use std::num::NonZeroUsize;
 
 fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
     let namespace = b"namespace";
@@ -15,12 +14,8 @@ fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
             msgs.push(msg);
         }
         for concurrency in [1, 8] {
-            let pool = Arc::new(
-                ThreadPoolBuilder::new()
-                    .num_threads(concurrency)
-                    .build()
-                    .unwrap(),
-            );
+            let pool =
+                commonware_parallel::create_pool(NonZeroUsize::new(concurrency).unwrap()).unwrap();
             c.bench_function(
                 &format!("{}/conc={} msgs={}", module_path!(), concurrency, n),
                 |b| {

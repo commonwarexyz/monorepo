@@ -1,10 +1,10 @@
 use commonware_cryptography::Sha256;
+use commonware_parallel::ThreadPool;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::PoolRef,
     create_pool,
     tokio::{Config, Context},
-    ThreadPool,
 };
 use commonware_storage::qmdb::{
     keyless::{Config as KConfig, Keyless},
@@ -31,7 +31,7 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
 /// configured to provide 8 cores.
-const THREADS: usize = 8;
+const THREADS: NonZeroUsize = NZUsize!(8);
 
 fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, ())> {
     KConfig::<(commonware_codec::RangeCfg<usize>, ())> {

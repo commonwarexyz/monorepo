@@ -5,9 +5,10 @@ use commonware_runtime::{
     tokio::Config,
 };
 use commonware_storage::mmr::{mem::CleanMmr, Location, StandardHasher};
+use commonware_utils::NZUsize;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::{collections::HashMap, time::Instant};
+use std::{collections::HashMap, num::NonZeroUsize, time::Instant};
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 enum Strategy {
@@ -19,7 +20,7 @@ enum Strategy {
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
 /// configured to provide 8 cores. More threads may be faster on machines with more cores, but
 /// returns start diminishing.
-const THREADS: usize = 8;
+const THREADS: NonZeroUsize = NZUsize!(8);
 
 #[cfg(not(full_bench))]
 const N_LEAVES: [usize; 1] = [100_000];

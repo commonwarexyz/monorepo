@@ -25,7 +25,7 @@ use commonware_cryptography::{
 use commonware_parallel::Parallel;
 use commonware_runtime::{create_pool, tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{from_hex, ordered::Set, union, TryCollect};
+use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -137,8 +137,7 @@ fn main() {
     // Create context
     let executor = tokio::Runner::default();
     executor.start(|context| async move {
-        let n_threads = std::thread::available_parallelism().unwrap().get();
-        let thread_pool = create_pool(context.clone(), n_threads).unwrap();
+        let thread_pool = create_pool(context.clone(), NZUsize!(2)).unwrap();
         let strategy = Parallel::new(thread_pool);
 
         for network in networks {

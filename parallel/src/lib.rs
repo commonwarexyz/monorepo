@@ -61,9 +61,10 @@ cfg_if! {
     if #[cfg(feature = "std")] {
         use rayon::{
             iter::{IntoParallelIterator, ParallelIterator},
-            ThreadPool,
+            ThreadPool as RThreadPool, ThreadPoolBuilder,
+            ThreadPoolBuildError
         };
-        use std::sync::Arc;
+        use std::{num::NonZeroUsize, sync::Arc};
     } else {
         extern crate alloc;
         use alloc::vec::Vec;
@@ -372,19 +373,13 @@ cfg_if! {
         /// ```
         #[derive(Debug, Clone)]
         pub struct Parallel {
-            thread_pool: Arc<ThreadPool>,
+            thread_pool: ThreadPool,
         }
 
         impl Parallel {
             /// Creates a new [`Parallel`] strategy with the given [`ThreadPool`].
-            pub const fn new(thread_pool: Arc<ThreadPool>) -> Self {
+            pub const fn new(thread_pool: ThreadPool) -> Self {
                 Self { thread_pool }
-            }
-        }
-
-        impl From<Arc<ThreadPool>> for Parallel {
-            fn from(thread_pool: Arc<ThreadPool>) -> Self {
-                Self::new(thread_pool)
             }
         }
 
@@ -430,19 +425,35 @@ cfg_if! {
                 })
             }
         }
+
+        /// A clone-able wrapper around a [rayon]-compatible thread pool.
+        pub type ThreadPool = Arc<RThreadPool>;
+
+        /// Creates a [`ThreadPool`] with the given number of threads.
+        pub fn create_pool(num_threads: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+            create_pool_with(num_threads, ThreadPoolBuilder::build)
+        }
+
+        /// Creates a [`ThreadPool`] with custom configuration.
+        pub fn create_pool_with(
+            num_threads: NonZeroUsize,
+            build: impl FnOnce(ThreadPoolBuilder) -> Result<RThreadPool, ThreadPoolBuildError>,
+        ) -> Result<ThreadPool, ThreadPoolBuildError> {
+            let builder = ThreadPoolBuilder::new().num_threads(num_threads.get());
+            build(builder).map(Arc::new)
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{Parallel, Sequential, Strategy};
+    use crate::{create_pool, Parallel, Sequential, Strategy};
+    use core::num::NonZeroUsize;
     use proptest::prelude::*;
-    use rayon::ThreadPoolBuilder;
-    use std::sync::Arc;
 
     fn parallel_strategy() -> Parallel {
-        let thread_pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
-        Parallel::new(Arc::new(thread_pool))
+        let thread_pool = create_pool(NonZeroUsize::new(4).unwrap()).unwrap();
+        Parallel::new(thread_pool)
     }
 
     proptest! {

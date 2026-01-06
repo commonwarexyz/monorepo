@@ -19,6 +19,7 @@ bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec.workspace = true
 commonware-macros.workspace = true
+commonware-parallel = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
 futures.workspace = true
 governor.workspace = true

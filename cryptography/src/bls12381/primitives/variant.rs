@@ -415,9 +415,7 @@ mod tests {
     use crate::bls12381::primitives::{group::Scalar, ops};
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::{Parallel, Sequential};
-    use commonware_utils::test_rng;
-    use rayon::ThreadPoolBuilder;
-    use std::sync::Arc;
+    use commonware_utils::{test_rng, NZUsize};
 
     fn batch_verify_correct<V: Variant>() {
         let mut rng = test_rng();
@@ -446,7 +444,7 @@ mod tests {
         )
         .expect("valid batch should pass");
 
-        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(4).build().unwrap());
+        let pool = commonware_parallel::create_pool(NZUsize!(2)).unwrap();
         let parallel = Parallel::new(pool);
         V::batch_verify(
             &mut rng,

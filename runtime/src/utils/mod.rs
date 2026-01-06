@@ -3,13 +3,15 @@
 #[cfg(test)]
 use crate::Runner;
 use crate::{Metrics, Spawner};
+use commonware_parallel::ThreadPool;
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::task::ArcWake;
-use rayon::{ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
+use rayon::ThreadPoolBuildError;
 use std::{
     any::Any,
     future::Future,
+    num::NonZeroUsize,
     pin::Pin,
     sync::{Arc, Condvar, Mutex},
     task::{Context, Poll},
@@ -76,9 +78,6 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
     )
 }
 
-/// A clone-able wrapper around a [rayon]-compatible thread pool.
-pub type ThreadPool = Arc<RThreadPool>;
-
 /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
 ///
 /// # Arguments
@@ -89,25 +88,25 @@ pub type ThreadPool = Arc<RThreadPool>;
 /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot be built.
 pub fn create_pool<S: Spawner + Metrics>(
     context: S,
-    concurrency: usize,
+    concurrency: NonZeroUsize,
 ) -> Result<ThreadPool, ThreadPoolBuildError> {
-    let mut builder = ThreadPoolBuilder::new()
-        .num_threads(concurrency)
-        .spawn_handler(move |thread| {
-            // Tasks spawned in a thread pool are expected to run longer than any single
-            // task and thus should be provisioned as a dedicated thread.
-            context
-                .with_label("rayon_thread")
-                .dedicated()
-                .spawn(move |_| async move { thread.run() });
-            Ok(())
-        });
+    commonware_parallel::create_pool_with(concurrency, |mut builder| {
+        if rayon::current_thread_index().is_none() {
+            builder = builder.use_current_thread()
+        }
 
-    if rayon::current_thread_index().is_none() {
-        builder = builder.use_current_thread();
-    }
-
-    builder.build().map(Arc::new)
+        builder
+            .spawn_handler(move |thread| {
+                // Tasks spawned in a thread pool are expected to run longer than any single
+                // task and thus should be provisioned as a dedicated thread.
+                context
+                    .with_label("rayon_thread")
+                    .dedicated()
+                    .spawn(move |_| async move { thread.run() });
+                Ok(())
+            })
+            .build()
+    })
 }
 
 /// Async reader–writer lock.
@@ -280,6 +279,7 @@ mod tests {
     use super::*;
     use crate::{deterministic, tokio, Metrics};
     use commonware_macros::test_traced;
+    use commonware_utils::NZUsize;
     use futures::task::waker;
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -289,7 +289,7 @@ mod tests {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
-            let pool = create_pool(context.with_label("pool"), 4).unwrap();
+            let pool = create_pool(context.with_label("pool"), NZUsize!(4)).unwrap();
 
             // Create a vector of numbers
             let v: Vec<_> = (0..10000).collect();
@@ -306,7 +306,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
-            let pool = create_pool(context.with_label("pool"), 4).unwrap();
+            let pool = create_pool(context.with_label("pool"), NZUsize!(4)).unwrap();
 
             // Create a vector of numbers
             let v: Vec<_> = (0..10000).collect();

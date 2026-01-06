@@ -16,7 +16,7 @@ use commonware_cryptography::{
 use commonware_p2p::authenticated::discovery;
 use commonware_parallel::Parallel;
 use commonware_runtime::{create_pool, tokio, Metrics, Quota};
-use commonware_utils::{union, union_unique, NZU32};
+use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -121,8 +121,7 @@ pub async fn run<S, L>(
     };
     let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
-    let n_threads = std::thread::available_parallelism().unwrap().get();
-    let thread_pool = create_pool(context.clone(), n_threads).unwrap();
+    let thread_pool = create_pool(context.clone(), NZUsize!(2)).unwrap();
     let strategy = Parallel::new(thread_pool);
     let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
         context.with_label("engine"),

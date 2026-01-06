@@ -1,22 +1,16 @@
 use commonware_cryptography::bls12381::primitives::group::{Scalar, G1};
 use commonware_math::{algebra::Random, poly::Poly};
 use commonware_parallel::{Parallel, Sequential};
-use commonware_utils::quorum;
+use commonware_utils::{quorum, NZUsize};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
-use rayon::ThreadPoolBuilder;
-use std::{hint::black_box, sync::Arc};
+use std::hint::black_box;
 
 fn benchmark_evaluate_point(c: &mut Criterion) {
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         let t = quorum(n);
         for concurrency in [1, 8] {
-            let pool = Arc::new(
-                ThreadPoolBuilder::new()
-                    .num_threads(concurrency)
-                    .build()
-                    .unwrap(),
-            );
+            let pool = commonware_parallel::create_pool(NZUsize!(concurrency)).unwrap();
             c.bench_function(
                 &format!("{}/n={} t={} conc={}", module_path!(), n, t, concurrency),
                 |b| {
