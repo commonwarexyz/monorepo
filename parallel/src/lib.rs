@@ -1,4 +1,4 @@
-//! Abstract data parallelism over iterators and collections.
+//! Parallelize fold operations with pluggable execution strategies..
 //!
 //! This crate provides the [`Parallel`] trait, which abstracts over sequential and parallel
 //! execution of fold operations. This allows algorithms to be written once and executed either
