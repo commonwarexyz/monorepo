@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         actors::voter,
         interesting,
-        metrics::Inbound,
+        metrics::{Inbound, Peer},
         scheme::Scheme,
         types::{Activity, Certificate, Vote},
     },
@@ -15,12 +15,17 @@ use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::histogram::{self, Buckets},
+    telemetry::metrics::{
+        histogram::{self, Buckets},
+        status::GaugeExt,
+    },
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::ordered::{Quorum, Set};
 use futures::{channel::mpsc, StreamExt};
-use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
+use prometheus_client::metrics::{
+    counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
+};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace, warn};
@@ -49,6 +54,7 @@ pub struct Actor<
     added: Counter,
     verified: Counter,
     inbound_messages: Family<Inbound, Counter>,
+    latest_vote: Family<Peer, Gauge>,
     batch_size: Histogram,
     verify_latency: histogram::Timed<E>,
     recover_latency: histogram::Timed<E>,
@@ -79,6 +85,16 @@ impl<
             "number of inbound messages",
             inbound_messages.clone(),
         );
+        let latest_vote = Family::<Peer, Gauge>::default();
+        context.register(
+            "latest_vote",
+            "view of latest vote received per peer",
+            latest_vote.clone(),
+        );
+        let participants = cfg.scheme.participants().clone();
+        for participant in participants.iter() {
+            latest_vote.get_or_create(&Peer::new(participant)).set(0);
+        }
         context.register(
             "batch_size",
             "number of messages in a signature verification batch",
@@ -99,7 +115,6 @@ impl<
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-        let participants = cfg.scheme.participants().clone();
         (
             Self {
                 context: ContextCell::new(context),
@@ -119,6 +134,7 @@ impl<
                 added,
                 verified,
                 inbound_messages,
+                latest_vote,
                 batch_size,
                 verify_latency: histogram::Timed::new(verify_latency, clock.clone()),
                 recover_latency: histogram::Timed::new(recover_latency, clock),
@@ -383,6 +399,12 @@ impl<
                         self.blocker.block(sender).await;
                         continue;
                     }
+
+                    // Update per-peer latest vote metric (only if higher than current)
+                    let _ = self
+                        .latest_vote
+                        .get_or_create(&Peer::new(&sender))
+                        .set_max(message.view().get());
 
                     // If the view isn't interesting, we can skip
                     let view = message.view();
