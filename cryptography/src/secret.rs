@@ -48,8 +48,7 @@ pub struct Secret<T>(ManuallyDrop<T>);
 impl<T> Secret<T> {
     /// Creates a new `Secret` wrapping the given value.
     #[inline]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn new(value: T) -> Self {
+    pub const fn new(value: T) -> Self {
         Self(ManuallyDrop::new(value))
     }
 

@@ -688,7 +688,7 @@ pub struct DealerPrivMsg {
 
 impl DealerPrivMsg {
     /// Creates a new `DealerPrivMsg` with the given share.
-    pub fn new(share: Scalar) -> Self {
+    pub const fn new(share: Scalar) -> Self {
         Self {
             share: Secret::new(share),
         }
