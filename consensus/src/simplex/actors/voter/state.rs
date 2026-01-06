@@ -1,4 +1,4 @@
-use super::round::{CertifyResult, Round};
+use super::round::Round;
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
@@ -471,11 +471,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 if view <= self.last_finalized {
                     return None;
                 }
-                let round = self.views.get_mut(&view)?;
-                match round.try_certify() {
-                    CertifyResult::Ready(proposal) => Some(proposal),
-                    CertifyResult::Skip => None,
-                }
+                self.views.get_mut(&view)?.try_certify()
             })
             .collect()
     }

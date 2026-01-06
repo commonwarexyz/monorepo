@@ -30,14 +30,6 @@ enum CertifyState {
     Aborted,
 }
 
-/// Result of attempting to certify a round's proposal.
-pub enum CertifyResult<D: Digest> {
-    /// Ready for certification with the proposal.
-    Ready(Proposal<D>),
-    /// Cannot certify (no notarization, already certified/aborted, or equivocation).
-    Skip,
-}
-
 /// Per-[Rnd] state machine.
 pub struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
@@ -137,14 +129,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Attempt to certify this round's proposal.
-    pub fn try_certify(&mut self) -> CertifyResult<D> {
-        let Some(notarization) = self.notarization.as_ref() else {
-            return CertifyResult::Skip;
-        };
+    pub fn try_certify(&mut self) -> Option<Proposal<D>> {
+        let notarization = self.notarization.as_ref()?;
         match self.certify {
             CertifyState::Ready => {}
             CertifyState::Outstanding(_) | CertifyState::Certified(_) | CertifyState::Aborted => {
-                return CertifyResult::Skip;
+                return None;
             }
         }
 
@@ -154,12 +144,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         let proposal = self
             .proposal
             .proposal()
+            .cloned()
             .expect("proposal must be set if notarization is set");
         assert_eq!(
-            proposal, &notarization.proposal,
+            &proposal, &notarization.proposal,
             "slot proposal must match notarization proposal"
         );
-        CertifyResult::Ready(proposal.clone())
+        Some(proposal)
     }
 
     /// Sets the handle for the certification request.
@@ -169,13 +160,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Aborts the in-flight certification request.
     pub fn abort_certify(&mut self) {
-        match &self.certify {
-            CertifyState::Certified(_) | CertifyState::Aborted => {}
-            CertifyState::Ready => self.certify = CertifyState::Aborted,
-            CertifyState::Outstanding(_) => {
-                drop(replace(&mut self.certify, CertifyState::Aborted));
-            }
+        if matches!(self.certify, CertifyState::Certified(_)) {
+            return;
         }
+        self.certify = CertifyState::Aborted;
     }
 
     /// Returns the elected leader (if any) for this round.
@@ -836,7 +824,7 @@ mod tests {
         assert!(round.verified());
 
         // No notarization yet - should skip
-        assert!(matches!(round.try_certify(), CertifyResult::Skip));
+        assert!(round.try_certify().is_none());
     }
 
     #[test]
@@ -868,7 +856,7 @@ mod tests {
         assert!(added);
 
         // First try_certify should succeed
-        assert!(matches!(round.try_certify(), CertifyResult::Ready(_)));
+        assert!(round.try_certify().is_some());
 
         // Set a certify handle then mark as certified
         let mut pool = AbortablePool::<()>::default();
@@ -877,7 +865,7 @@ mod tests {
         round.certified(true);
 
         // Second try_certify should skip - already certified
-        assert!(matches!(round.try_certify(), CertifyResult::Skip));
+        assert!(round.try_certify().is_none());
     }
 
     #[test]
@@ -909,7 +897,7 @@ mod tests {
         assert!(added);
 
         // First try_certify should succeed
-        assert!(matches!(round.try_certify(), CertifyResult::Ready(_)));
+        assert!(round.try_certify().is_some());
 
         // Set a certify handle (simulating in-flight certification)
         let mut pool = AbortablePool::<()>::default();
@@ -917,7 +905,7 @@ mod tests {
         round.set_certify_handle(handle);
 
         // Second try_certify should skip - handle exists
-        assert!(matches!(round.try_certify(), CertifyResult::Skip));
+        assert!(round.try_certify().is_none());
     }
 
     #[test]
@@ -954,13 +942,13 @@ mod tests {
         round.set_certify_handle(handle);
 
         // try_certify blocked by handle
-        assert!(matches!(round.try_certify(), CertifyResult::Skip));
+        assert!(round.try_certify().is_none());
 
         // Abort transitions to Aborted state
         round.abort_certify();
 
         // try_certify still blocked after abort (no re-certification allowed)
-        assert!(matches!(round.try_certify(), CertifyResult::Skip));
+        assert!(round.try_certify().is_none());
     }
 
     #[test]
@@ -992,7 +980,7 @@ mod tests {
 
         // Has notarization and proposal came from certificate
         // try_certify returns the proposal from the certificate
-        assert!(matches!(round.try_certify(), CertifyResult::Ready(_)));
+        assert!(round.try_certify().is_some());
     }
 
     #[test]
