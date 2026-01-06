@@ -16,7 +16,7 @@ use commonware_cryptography::{
     ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
-use commonware_parallel::ParallelRayon;
+use commonware_parallel::Rayon;
 use commonware_runtime::{
     buffer::PoolRef, tokio, Metrics, Network, Quota, RayonPoolSpawner, Runner,
 };
@@ -221,7 +221,7 @@ fn main() {
 
         // Initialize application
         let thread_pool = context.clone().create_pool(NZUsize!(2)).unwrap();
-        let strategy = ParallelRayon::new(thread_pool);
+        let strategy = Rayon::new(thread_pool);
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let this_network = Scheme::signer(
             &consensus_namespace,

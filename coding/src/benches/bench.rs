@@ -1,5 +1,5 @@
 use commonware_coding::{Config, Scheme};
-use commonware_parallel::{ParallelNone, ParallelRayon};
+use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::NZUsize;
 use criterion::{criterion_main, BatchSize, Criterion};
 use rand::{RngCore, SeedableRng as _};
@@ -33,14 +33,10 @@ pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                             },
                             |data| {
                                 if conc > 1 {
-                                    S::encode(
-                                        &config,
-                                        data.as_slice(),
-                                        &ParallelRayon::new(pool.clone()),
-                                    )
-                                    .unwrap()
+                                    S::encode(&config, data.as_slice(), &Rayon::new(pool.clone()))
+                                        .unwrap()
                                 } else {
-                                    S::encode(&config, data.as_slice(), &ParallelNone).unwrap()
+                                    S::encode(&config, data.as_slice(), &Sequential).unwrap()
                                 }
                             },
                             BatchSize::SmallInput,
@@ -75,14 +71,10 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
 
                                 // Encode data
                                 let (commitment, mut shards) = if conc > 1 {
-                                    S::encode(
-                                        &config,
-                                        data.as_slice(),
-                                        &ParallelRayon::new(pool.clone()),
-                                    )
-                                    .unwrap()
+                                    S::encode(&config, data.as_slice(), &Rayon::new(pool.clone()))
+                                        .unwrap()
                                 } else {
-                                    S::encode(&config, data.as_slice(), &ParallelNone).unwrap()
+                                    S::encode(&config, data.as_slice(), &Sequential).unwrap()
                                 };
 
                                 let my_shard = shards.pop().unwrap();
@@ -128,7 +120,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                         &commitment,
                                         checking_data,
                                         &checked_shards,
-                                        &ParallelRayon::new(pool.clone()),
+                                        &Rayon::new(pool.clone()),
                                     )
                                     .unwrap()
                                 } else {
@@ -137,7 +129,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                         &commitment,
                                         checking_data,
                                         &checked_shards,
-                                        &ParallelNone,
+                                        &Sequential,
                                     )
                                     .unwrap()
                                 }

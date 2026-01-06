@@ -1,5 +1,5 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
-use commonware_parallel::{ParallelNone, ParallelRayon};
+use commonware_parallel::{Rayon, Sequential};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::num::NonZeroUsize;
@@ -37,7 +37,7 @@ fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
                                     &mut thread_rng(),
                                     &public,
                                     &entries,
-                                    &ParallelRayon::new(pool.clone()),
+                                    &Rayon::new(pool.clone()),
                                 )
                                 .unwrap();
                             } else {
@@ -45,7 +45,7 @@ fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
                                     &mut thread_rng(),
                                     &public,
                                     &entries,
-                                    &ParallelNone,
+                                    &Sequential,
                                 )
                                 .unwrap();
                             }

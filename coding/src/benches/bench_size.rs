@@ -1,11 +1,11 @@
 use commonware_codec::EncodeSize as _;
 use commonware_coding::{Config, NoCoding, ReedSolomon, Scheme, Zoda};
 use commonware_cryptography::Sha256;
-use commonware_parallel::ParallelNone;
+use commonware_parallel::Sequential;
 use rand::{RngCore as _, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 
-const STRATEGY: ParallelNone = ParallelNone;
+const STRATEGY: Sequential = Sequential;
 
 fn benchmark_size<S: Scheme>(name: &str) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);

@@ -8,7 +8,7 @@ use commonware_cryptography::bls12381::primitives::{
     sharing::Sharing,
     variant::{MinPk, MinSig, PartialSignature},
 };
-use commonware_parallel::{ParallelNone, ParallelRayon};
+use commonware_parallel::{Rayon, Sequential};
 use libfuzzer_sys::fuzz_target;
 use rand::thread_rng;
 use std::num::NonZeroUsize;
@@ -290,7 +290,7 @@ fn fuzz(op: FuzzOperation) {
                     &public,
                     index,
                     &entries_refs,
-                    &ParallelNone,
+                    &Sequential,
                 );
             }
         }
@@ -320,7 +320,7 @@ fn fuzz(op: FuzzOperation) {
                     &public,
                     index,
                     &entries_refs,
-                    &ParallelNone,
+                    &Sequential,
                 );
             }
         }
@@ -397,7 +397,7 @@ fn fuzz(op: FuzzOperation) {
                 let _ = threshold::recover_multiple::<MinPk, _, _>(
                     &sharing,
                     groups_refs,
-                    &ParallelRayon::new(pool),
+                    &Rayon::new(pool),
                 );
             }
         }
@@ -418,7 +418,7 @@ fn fuzz(op: FuzzOperation) {
                 let _ = threshold::recover_multiple::<MinSig, _, _>(
                     &sharing,
                     groups_refs,
-                    &ParallelRayon::new(pool),
+                    &Rayon::new(pool),
                 );
             }
         }
@@ -432,7 +432,7 @@ fn fuzz(op: FuzzOperation) {
                 &sharing,
                 &partials_1,
                 &partials_2,
-                &ParallelNone,
+                &Sequential,
             );
         }
 
@@ -445,7 +445,7 @@ fn fuzz(op: FuzzOperation) {
                 &sharing,
                 &partials_1,
                 &partials_2,
-                &ParallelNone,
+                &Sequential,
             );
         }
 

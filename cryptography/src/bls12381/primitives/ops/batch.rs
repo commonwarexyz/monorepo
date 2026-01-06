@@ -161,7 +161,7 @@ mod tests {
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
     use commonware_math::algebra::{CryptoGroup, Random};
-    use commonware_parallel::{ParallelNone, ParallelRayon};
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::{test_rng, NZUsize};
 
     fn verify_same_signer_correct<V: Variant>() {
@@ -178,11 +178,11 @@ mod tests {
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(&private, ns, msg)))
             .collect();
 
-        verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &ParallelNone)
+        verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &Sequential)
             .expect("valid signatures should be accepted");
 
         let pool = commonware_parallel::create_pool(NZUsize!(4)).unwrap();
-        let parallel = ParallelRayon::new(pool);
+        let parallel = Rayon::new(pool);
         verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &parallel)
             .expect("valid signatures should be accepted with parallel strategy");
     }
@@ -210,7 +210,7 @@ mod tests {
         let random_scalar = Scalar::random(&mut rng);
         entries[1].2 += &(V::Signature::generator() * &random_scalar);
 
-        let result = verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &ParallelNone);
+        let result = verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &Sequential);
         assert!(result.is_err(), "corrupted signature should be rejected");
     }
 
@@ -267,7 +267,7 @@ mod tests {
             (namespace, msg2, forged_sig2),
         ];
         let result =
-            verify_same_signer::<_, V, _, _>(&mut rng, &public, &forged_entries, &ParallelNone);
+            verify_same_signer::<_, V, _, _>(&mut rng, &public, &forged_entries, &Sequential);
         assert!(
             result.is_err(),
             "batch verification should reject forged signatures"
@@ -276,7 +276,7 @@ mod tests {
         // Batch verification accepts valid signatures
         let valid_entries: Vec<(&[u8], &[u8], _)> =
             vec![(namespace, msg1, sig1), (namespace, msg2, sig2)];
-        verify_same_signer::<_, V, _, _>(&mut rng, &public, &valid_entries, &ParallelNone)
+        verify_same_signer::<_, V, _, _>(&mut rng, &public, &valid_entries, &Sequential)
             .expect("batch verification should accept valid signatures");
     }
 

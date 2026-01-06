@@ -29,7 +29,7 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Subject as CertificateSubject, Verification},
     Digest, PublicKey,
 };
-use commonware_parallel::{Parallel, ParallelNone};
+use commonware_parallel::{Parallel, Sequential};
 use commonware_utils::ordered::Set;
 use rand_core::CryptoRngCore;
 use std::{
@@ -75,7 +75,7 @@ enum Role<P: PublicKey, V: Variant> {
 /// The scheme is generic over a [`Parallel`] strategy which determines whether cryptographic
 /// operations such as signature recovery and batch verification run sequentially or in parallel.
 #[derive(Clone, Debug)]
-pub struct Scheme<P: PublicKey, V: Variant, S: Parallel = ParallelNone> {
+pub struct Scheme<P: PublicKey, V: Variant, S: Parallel = Sequential> {
     role: Role<P, V>,
     strategy: S,
 }
@@ -285,10 +285,10 @@ where
         namespace,
         n,
         |namespace, participants, polynomial, share| {
-            Scheme::signer(namespace, participants, polynomial, share, ParallelNone)
+            Scheme::signer(namespace, participants, polynomial, share, Sequential)
         },
         |namespace, participants, polynomial| {
-            Scheme::verifier(namespace, participants, polynomial, ParallelNone)
+            Scheme::verifier(namespace, participants, polynomial, Sequential)
         },
     )
 }
@@ -804,7 +804,7 @@ mod tests {
             participants.keys().clone(),
             polynomial,
             shares[0].clone(),
-            ParallelNone,
+            Sequential,
         );
     }
 
@@ -828,7 +828,7 @@ mod tests {
             participants.keys().clone(),
             polynomial,
             shares[0].clone(),
-            ParallelNone,
+            Sequential,
         );
     }
 
@@ -852,7 +852,7 @@ mod tests {
             NAMESPACE,
             participants.keys().clone(),
             polynomial,
-            ParallelNone,
+            Sequential,
         );
     }
 
@@ -1307,7 +1307,7 @@ mod tests {
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         let certificate_verifier =
-            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity(), ParallelNone);
+            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity(), Sequential);
         assert!(
             certificate_verifier
                 .sign(Subject::Finalize {
@@ -1334,7 +1334,7 @@ mod tests {
     fn certificate_verifier_panics_on_vote<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 37);
         let certificate_verifier =
-            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity(), ParallelNone);
+            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity(), Sequential);
         let proposal = sample_proposal(Epoch::new(0), View::new(15), 8);
         let vote = schemes[1]
             .sign(Subject::Finalize {

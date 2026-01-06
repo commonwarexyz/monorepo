@@ -779,9 +779,9 @@ mod tests {
     use super::*;
     use crate::{CodecConfig, Config};
     use commonware_cryptography::Sha256;
-    use commonware_parallel::ParallelNone;
+    use commonware_parallel::Sequential;
 
-    const STRATEGY: ParallelNone = ParallelNone;
+    const STRATEGY: Sequential = Sequential;
 
     #[test]
     fn topology_reckon_handles_small_extra_shards() {

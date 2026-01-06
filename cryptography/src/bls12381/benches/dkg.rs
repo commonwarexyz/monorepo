@@ -7,7 +7,7 @@ use commonware_cryptography::{
     Signer as _,
 };
 use commonware_math::algebra::Random;
-use commonware_parallel::{ParallelNone, ParallelRayon};
+use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{ordered::Set, quorum, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
@@ -146,12 +146,10 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
                         |(player, logs)| {
                             if concurrency > 1 {
                                 black_box(
-                                    player
-                                        .finalize(logs, &ParallelRayon::new(pool.clone()))
-                                        .unwrap(),
+                                    player.finalize(logs, &Rayon::new(pool.clone())).unwrap(),
                                 );
                             } else {
-                                black_box(player.finalize(logs, &ParallelNone).unwrap());
+                                black_box(player.finalize(logs, &Sequential).unwrap());
                             }
                         },
                         BatchSize::SmallInput,

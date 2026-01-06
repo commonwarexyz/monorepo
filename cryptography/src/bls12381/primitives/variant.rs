@@ -414,7 +414,7 @@ mod tests {
     use super::*;
     use crate::bls12381::primitives::{group::Scalar, ops};
     use commonware_math::algebra::{CryptoGroup, Random};
-    use commonware_parallel::{ParallelNone, ParallelRayon};
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::{test_rng, NZUsize};
 
     fn batch_verify_correct<V: Variant>() {
@@ -440,12 +440,12 @@ mod tests {
             &[public1, public2, public3],
             &[hm1, hm2, hm3],
             &[sig1, sig2, sig3],
-            &ParallelNone,
+            &Sequential,
         )
         .expect("valid batch should pass");
 
         let pool = commonware_parallel::create_pool(NZUsize!(2)).unwrap();
-        let parallel = ParallelRayon::new(pool);
+        let parallel = Rayon::new(pool);
         V::batch_verify(
             &mut rng,
             &[public1, public2, public3],
@@ -504,7 +504,7 @@ mod tests {
             &[public1, public2],
             &[hm1, hm2],
             &[forged_sig1, forged_sig2],
-            &ParallelNone,
+            &Sequential,
         );
         assert!(
             result.is_err(),
@@ -517,7 +517,7 @@ mod tests {
             &[public1, public2],
             &[hm1, hm2],
             &[sig1, sig2],
-            &ParallelNone,
+            &Sequential,
         )
         .expect("valid signatures should pass batch_verify");
     }

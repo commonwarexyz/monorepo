@@ -84,9 +84,9 @@ pub struct CodecConfig {
 /// ```
 /// use commonware_coding::{Config, ReedSolomon, Scheme as _};
 /// use commonware_cryptography::Sha256;
-/// use commonware_parallel::ParallelNone;
+/// use commonware_parallel::Sequential;
 ///
-/// const STRATEGY: ParallelNone = ParallelNone;
+/// const STRATEGY: Sequential = Sequential;
 ///
 /// type RS = ReedSolomon<Sha256>;
 ///
@@ -216,7 +216,7 @@ mod test {
     use crate::reed_solomon::ReedSolomon;
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
-    use commonware_parallel::ParallelNone;
+    use commonware_parallel::Sequential;
     use std::cmp::Reverse;
 
     const MAX_DATA_BYTES: usize = 1 << 31;
@@ -251,7 +251,7 @@ mod test {
         let read_cfg = CodecConfig {
             maximum_shard_size: MAX_DATA_BYTES,
         };
-        let (commitment, shards) = S::encode(&config, data, &ParallelNone).unwrap();
+        let (commitment, shards) = S::encode(&config, data, &Sequential).unwrap();
         // Pick out the packets we want, in reverse order.
         let ((_, _, checking_data, my_checked_shard, _), other_packets) = {
             let mut out = shards
@@ -285,7 +285,7 @@ mod test {
             &commitment,
             checking_data,
             &checked_shards,
-            &ParallelNone,
+            &Sequential,
         )
         .unwrap();
         assert_eq!(&decoded, data, "{name} failed");

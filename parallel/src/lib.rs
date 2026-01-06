@@ -19,14 +19,14 @@
 //!
 //! Two implementations are provided:
 //!
-//! - [`ParallelNone`]: Executes operations sequentially on the current thread (works in `no_std`)
-//! - [`ParallelRayon`]: Executes operations in parallel using a [`rayon`] thread pool (requires `std`)
+//! - [`Sequential`]: Executes operations sequentially on the current thread (works in `no_std`)
+//! - [`Rayon`]: Executes operations in parallel using a [`rayon`] thread pool (requires `std`)
 //!
 //! # Features
 //!
-//! - `std` (default): Enables the [`ParallelRayon`] strategy backed by rayon
+//! - `std` (default): Enables the [`Rayon`] strategy backed by rayon
 //!
-//! When the `std` feature is disabled, only [`ParallelNone`] is available, making this crate
+//! When the `std` feature is disabled, only [`Sequential`] is available, making this crate
 //! suitable for `no_std` environments.
 //!
 //! # Example
@@ -35,7 +35,7 @@
 //! and parallel execution:
 //!
 //! ```
-//! use commonware_parallel::{Parallel, ParallelNone};
+//! use commonware_parallel::{Parallel, Sequential};
 //!
 //! fn sum_of_squares(strategy: &impl Parallel, data: &[i64]) -> i64 {
 //!     strategy.fold(
@@ -46,7 +46,7 @@
 //!     )
 //! }
 //!
-//! let strategy = ParallelNone;
+//! let strategy = Sequential;
 //! let data = vec![1, 2, 3, 4, 5];
 //! let result = sum_of_squares(&strategy, &data);
 //! assert_eq!(result, 55); // 1 + 4 + 9 + 16 + 25
@@ -95,9 +95,9 @@ pub trait Parallel: Clone + Send + Sync + fmt::Debug + 'static {
     /// # Examples
     ///
     /// ```
-    /// use commonware_parallel::{Parallel, ParallelNone};
+    /// use commonware_parallel::{Parallel, Sequential};
     ///
-    /// let strategy = ParallelNone;
+    /// let strategy = Sequential;
     /// let data = vec![1u32, 2, 3, 4, 5];
     ///
     /// // Use a scratch buffer to avoid allocations in the inner loop
@@ -151,9 +151,9 @@ pub trait Parallel: Clone + Send + Sync + fmt::Debug + 'static {
     /// ## Sum of Elements
     ///
     /// ```
-    /// use commonware_parallel::{Parallel, ParallelNone};
+    /// use commonware_parallel::{Parallel, Sequential};
     ///
-    /// let strategy = ParallelNone;
+    /// let strategy = Sequential;
     /// let numbers = vec![1, 2, 3, 4, 5];
     ///
     /// let sum = strategy.fold(
@@ -185,8 +185,8 @@ pub trait Parallel: Clone + Send + Sync + fmt::Debug + 'static {
     /// Maps each element and collects results into a `Vec`.
     ///
     /// This is a convenience method that applies `map_op` to each element and
-    /// collects the results. For [`ParallelNone`], elements are processed in order.
-    /// For [`ParallelRayon`], elements may be processed out of order but the final
+    /// collects the results. For [`Sequential`], elements are processed in order.
+    /// For [`Rayon`], elements may be processed out of order but the final
     /// vector preserves the original ordering.
     ///
     /// # Arguments
@@ -197,9 +197,9 @@ pub trait Parallel: Clone + Send + Sync + fmt::Debug + 'static {
     /// # Examples
     ///
     /// ```
-    /// use commonware_parallel::{Parallel, ParallelNone};
+    /// use commonware_parallel::{Parallel, Sequential};
     ///
-    /// let strategy = ParallelNone;
+    /// let strategy = Sequential;
     /// let data = vec![1, 2, 3, 4, 5];
     ///
     /// let squared: Vec<i32> = strategy.map_collect_vec(&data, |&x| x * x);
@@ -240,9 +240,9 @@ pub trait Parallel: Clone + Send + Sync + fmt::Debug + 'static {
     /// # Examples
     ///
     /// ```
-    /// use commonware_parallel::{Parallel, ParallelNone};
+    /// use commonware_parallel::{Parallel, Sequential};
     ///
-    /// let strategy = ParallelNone;
+    /// let strategy = Sequential;
     /// let data = vec![1, 2, 3, 4, 5];
     ///
     /// // Use a counter that tracks position within each partition
@@ -295,18 +295,18 @@ pub trait Parallel: Clone + Send + Sync + fmt::Debug + 'static {
 /// # Examples
 ///
 /// ```
-/// use commonware_parallel::{Parallel, ParallelNone};
+/// use commonware_parallel::{Parallel, Sequential};
 ///
-/// let strategy = ParallelNone;
+/// let strategy = Sequential;
 /// let data = vec![1, 2, 3, 4, 5];
 ///
 /// let sum = strategy.fold(&data, || 0, |a, &b| a + b, |a, b| a + b);
 /// assert_eq!(sum, 15);
 /// ```
 #[derive(Default, Debug, Clone)]
-pub struct ParallelNone;
+pub struct Sequential;
 
-impl Parallel for ParallelNone {
+impl Parallel for Sequential {
     fn fold_init<I, INIT, T, R, ID, F, RD>(
         &self,
         iter: I,
@@ -339,19 +339,19 @@ cfg_if! {
         ///
         /// # Thread Pool Ownership
         ///
-        /// `ParallelRayon` holds an [`Arc<ThreadPool>`], so it can be cheaply cloned and shared
-        /// across threads. Multiple [`ParallelRayon`] instances can share the same underlying
+        /// `Rayon` holds an [`Arc<ThreadPool>`], so it can be cheaply cloned and shared
+        /// across threads. Multiple [`Rayon`] instances can share the same underlying
         /// thread pool.
         ///
         /// # When to Use
         ///
-        /// Use `ParallelRayon` when:
+        /// Use `Rayon` when:
         ///
         /// - Processing large collections where parallelism overhead is justified
         /// - The fold/reduce operations are CPU-bound
         /// - You want to utilize multiple cores
         ///
-        /// Consider [`ParallelNone`] instead when:
+        /// Consider [`Sequential`] instead when:
         ///
         /// - The collection is small
         /// - Operations are I/O-bound rather than CPU-bound
@@ -360,30 +360,30 @@ cfg_if! {
         /// # Examples
         ///
         /// ```
-        /// use commonware_parallel::{Parallel, ParallelRayon};
+        /// use commonware_parallel::{Parallel, Rayon};
         /// use rayon::ThreadPoolBuilder;
         /// use std::sync::Arc;
         ///
         /// let pool = Arc::new(ThreadPoolBuilder::new().num_threads(2).build().unwrap());
-        /// let strategy = ParallelRayon::new(pool);
+        /// let strategy = Rayon::new(pool);
         ///
         /// let data: Vec<i64> = (0..1000).collect();
         /// let sum = strategy.fold(&data, || 0i64, |acc, &n| acc + n, |a, b| a + b);
         /// assert_eq!(sum, 499500);
         /// ```
         #[derive(Debug, Clone)]
-        pub struct ParallelRayon {
+        pub struct Rayon {
             thread_pool: ThreadPool,
         }
 
-        impl ParallelRayon {
-            /// Creates a new [`ParallelRayon`] strategy with the given [`ThreadPool`].
+        impl Rayon {
+            /// Creates a new [`Rayon`] strategy with the given [`ThreadPool`].
             pub const fn new(thread_pool: ThreadPool) -> Self {
                 Self { thread_pool }
             }
         }
 
-        impl Parallel for ParallelRayon {
+        impl Parallel for Rayon {
             fn fold_init<I, INIT, T, R, ID, F, RD>(
                 &self,
                 iter: I,
@@ -447,19 +447,19 @@ cfg_if! {
 
 #[cfg(test)]
 mod test {
-    use crate::{create_pool, Parallel, ParallelNone, ParallelRayon};
+    use crate::{create_pool, Parallel, Rayon, Sequential};
     use core::num::NonZeroUsize;
     use proptest::prelude::*;
 
-    fn parallel_strategy() -> ParallelRayon {
+    fn parallel_strategy() -> Rayon {
         let thread_pool = create_pool(NonZeroUsize::new(4).unwrap()).unwrap();
-        ParallelRayon::new(thread_pool)
+        Rayon::new(thread_pool)
     }
 
     proptest! {
         #[test]
         fn parallel_fold_init_matches_sequential(data in prop::collection::vec(any::<i32>(), 0..500)) {
-            let sequential = ParallelNone;
+            let sequential = Sequential;
             let parallel = parallel_strategy();
 
             let seq_result: Vec<i32> = sequential.fold_init(
@@ -483,7 +483,7 @@ mod test {
 
         #[test]
         fn fold_equals_fold_init(data in prop::collection::vec(any::<i32>(), 0..500)) {
-            let s = ParallelNone;
+            let s = Sequential;
 
             let via_fold: Vec<i32> = s.fold(
                 &data,
@@ -505,7 +505,7 @@ mod test {
 
         #[test]
         fn map_collect_vec_equals_fold(data in prop::collection::vec(any::<i32>(), 0..500)) {
-            let s = ParallelNone;
+            let s = Sequential;
             let map_op = |&x: &i32| x.wrapping_mul(3);
 
             let via_map: Vec<i32> = s.map_collect_vec(&data, map_op);
@@ -522,7 +522,7 @@ mod test {
 
         #[test]
         fn map_init_collect_vec_equals_fold_init(data in prop::collection::vec(any::<i32>(), 0..500)) {
-            let s = ParallelNone;
+            let s = Sequential;
 
             let via_map: Vec<i32> = s.map_init_collect_vec(
                 &data,
