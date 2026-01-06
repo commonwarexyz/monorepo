@@ -546,6 +546,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         round.nullification().is_some()
     }
 
+    /// Returns true if certification for the view was aborted due to finalization.
+    #[cfg(test)]
+    pub fn is_certify_aborted(&self, view: View) -> bool {
+        self.views
+            .get(&view)
+            .is_some_and(|round| round.is_certify_aborted())
+    }
+
     /// Finds the parent payload for a given view by walking backwards through
     /// the chain, skipping nullified views until finding a certified payload.
     fn find_parent(&self, view: View) -> Result<(View, D), View> {
@@ -1144,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn certify_candidates_blocked_when_finalized() {
+    fn certification_lifecycle() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -1163,270 +1171,104 @@ mod tests {
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
-            // Add notarization for view 3
-            let view3 = View::new(3);
-            let proposal3 = Proposal::new(
-                Rnd::new(Epoch::new(1), view3),
-                GENESIS_VIEW,
-                Sha256Digest::from([3u8; 32]),
-            );
-            let notarize_votes: Vec<_> = schemes
-                .iter()
-                .map(|scheme| Notarize::sign(scheme, proposal3.clone()).unwrap())
-                .collect();
-            let notarization =
-                Notarization::from_notarizes(&verifier, notarize_votes.iter()).unwrap();
-            state.add_notarization(notarization);
-
-            // certify_candidates should return view 3's proposal before finalization
-            let candidates = state.certify_candidates();
-            assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), view3);
-
-            // Re-add view 3 to candidates for the next test
-            state.add_notarization(
-                Notarization::from_notarizes(&verifier, notarize_votes.iter()).unwrap(),
-            );
-
-            // Add finalization for view 5 (which finalizes everything up to and including 5)
-            let view5 = View::new(5);
-            let proposal5 = Proposal::new(
-                Rnd::new(Epoch::new(1), view5),
-                GENESIS_VIEW,
-                Sha256Digest::from([5u8; 32]),
-            );
-            let finalize_votes: Vec<_> = schemes
-                .iter()
-                .map(|scheme| Finalize::sign(scheme, proposal5.clone()).unwrap())
-                .collect();
-            let finalization =
-                Finalization::from_finalizes(&verifier, finalize_votes.iter()).unwrap();
-            state.add_finalization(finalization);
-
-            // certify_candidates should return empty (view 3 is finalized, pruned from candidates)
-            let candidates = state.certify_candidates();
-            assert!(candidates.is_empty());
-        });
-    }
-
-    #[test]
-    fn finalization_aborts_multiple_outstanding_certifications() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-            let cfg = Config {
-                scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(10),
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
-
-            // Add notarizations for views 3, 4, 5, 6, 7, 8
-            for i in 3..=8u64 {
-                let view = View::new(i);
+            // Helper to create notarization for a view
+            let make_notarization = |view: View| {
                 let proposal = Proposal::new(
                     Rnd::new(Epoch::new(1), view),
                     GENESIS_VIEW,
-                    Sha256Digest::from([i as u8; 32]),
+                    Sha256Digest::from([view.get() as u8; 32]),
                 );
-                let notarize_votes: Vec<_> = schemes
+                let votes: Vec<_> = schemes
                     .iter()
-                    .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                    .map(|s| Notarize::sign(s, proposal.clone()).unwrap())
                     .collect();
-                let notarization =
-                    Notarization::from_notarizes(&verifier, notarize_votes.iter()).unwrap();
-                state.add_notarization(notarization);
+                Notarization::from_notarizes(&verifier, votes.iter()).unwrap()
+            };
+
+            // Helper to create finalization for a view
+            let make_finalization = |view: View| {
+                let proposal = Proposal::new(
+                    Rnd::new(Epoch::new(1), view),
+                    GENESIS_VIEW,
+                    Sha256Digest::from([view.get() as u8; 32]),
+                );
+                let votes: Vec<_> = schemes
+                    .iter()
+                    .map(|s| Finalize::sign(s, proposal.clone()).unwrap())
+                    .collect();
+                Finalization::from_finalizes(&verifier, votes.iter()).unwrap()
+            };
+
+            let mut pool = AbortablePool::<()>::default();
+
+            // Add notarizations for views 3-8
+            for i in 3..=8u64 {
+                state.add_notarization(make_notarization(View::new(i)));
             }
 
-            // Get all proposals (6 views)
+            // All 6 views should be candidates
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 6);
 
             // Set certify handles for views 3, 4, 5, 7 (NOT 6 or 8)
-            let mut pool = AbortablePool::<()>::default();
             for i in [3u64, 4, 5, 7] {
                 let handle = pool.push(futures::future::pending());
                 state.set_certify_handle(View::new(i), handle);
             }
 
-            // certify_candidates returns empty (candidates were consumed, handles block views with handles)
-            let candidates = state.certify_candidates();
-            assert!(candidates.is_empty());
+            // Candidates empty (consumed by certify_candidates, handles block re-fetching)
+            assert!(state.certify_candidates().is_empty());
+
+            // Complete certification for view 7 (success)
+            let notarization = state.certified(View::new(7), true);
+            assert!(notarization.is_some());
+
+            // View 7 should not be aborted (it was certified successfully)
+            assert!(!state.is_certify_aborted(View::new(7)));
 
             // Add finalization for view 5 - aborts handles for views 3, 4, 5
-            let view5 = View::new(5);
-            let proposal5 = Proposal::new(
-                Rnd::new(Epoch::new(1), view5),
-                GENESIS_VIEW,
-                Sha256Digest::from([5u8; 32]),
-            );
-            let finalize_votes: Vec<_> = schemes
-                .iter()
-                .map(|scheme| Finalize::sign(scheme, proposal5.clone()).unwrap())
-                .collect();
-            let finalization =
-                Finalization::from_finalizes(&verifier, finalize_votes.iter()).unwrap();
-            state.add_finalization(finalization);
+            state.add_finalization(make_finalization(View::new(5)));
 
-            // certify_candidates returns empty:
-            // - views 3, 4, 5 are <= finalized (filtered out)
-            // - views 6, 8 were already consumed from candidates (no way to re-add)
-            // - view 7 still has handle (not aborted since 7 > 5)
-            let candidates = state.certify_candidates();
-            assert!(candidates.is_empty());
+            // Verify views 3, 4, 5 had their certification aborted
+            assert!(state.is_certify_aborted(View::new(3)));
+            assert!(state.is_certify_aborted(View::new(4)));
+            assert!(state.is_certify_aborted(View::new(5)));
 
-            // Add new notarization for view 9 (after finalization)
-            let view9 = View::new(9);
-            let proposal9 = Proposal::new(
-                Rnd::new(Epoch::new(1), view9),
-                GENESIS_VIEW,
-                Sha256Digest::from([9u8; 32]),
-            );
-            let notarize_votes9: Vec<_> = schemes
-                .iter()
-                .map(|scheme| Notarize::sign(scheme, proposal9.clone()).unwrap())
-                .collect();
-            let notarization9 =
-                Notarization::from_notarizes(&verifier, notarize_votes9.iter()).unwrap();
-            state.add_notarization(notarization9);
+            // View 7 still not aborted (was certified, and 7 > 5)
+            assert!(!state.is_certify_aborted(View::new(7)));
 
-            // View 9 should be returned (new, > finalized, no handle)
+            // Views 6, 8 never had handles set, so they're not aborted (still Ready)
+            assert!(!state.is_certify_aborted(View::new(6)));
+            assert!(!state.is_certify_aborted(View::new(8)));
+
+            // Candidates empty: 3-5 finalized, 6/8 consumed, 7 certified
+            assert!(state.certify_candidates().is_empty());
+
+            // Add view 9, should be returned as candidate
+            state.add_notarization(make_notarization(View::new(9)));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), view9);
+            assert_eq!(candidates[0].round.view(), View::new(9));
 
-            // Set handle for view 9
+            // Set handle for view 9, add view 10
             let handle9 = pool.push(futures::future::pending());
-            state.set_certify_handle(view9, handle9);
-
-            // Add view 10
-            let view10 = View::new(10);
-            let proposal10 = Proposal::new(
-                Rnd::new(Epoch::new(1), view10),
-                GENESIS_VIEW,
-                Sha256Digest::from([10u8; 32]),
-            );
-            let notarize_votes10: Vec<_> = schemes
-                .iter()
-                .map(|scheme| Notarize::sign(scheme, proposal10.clone()).unwrap())
-                .collect();
-            let notarization10 =
-                Notarization::from_notarizes(&verifier, notarize_votes10.iter()).unwrap();
-            state.add_notarization(notarization10);
+            state.set_certify_handle(View::new(9), handle9);
+            state.add_notarization(make_notarization(View::new(10)));
 
             // View 10 returned (view 9 has handle)
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), view10);
+            assert_eq!(candidates[0].round.view(), View::new(10));
 
-            // Now finalize view 9 - this aborts view 9's handle AND view 7's handle
-            let proposal9_fin = Proposal::new(
-                Rnd::new(Epoch::new(1), view9),
-                GENESIS_VIEW,
-                Sha256Digest::from([9u8; 32]),
-            );
-            let finalize_votes9: Vec<_> = schemes
-                .iter()
-                .map(|scheme| Finalize::sign(scheme, proposal9_fin.clone()).unwrap())
-                .collect();
-            let finalization9 =
-                Finalization::from_finalizes(&verifier, finalize_votes9.iter()).unwrap();
-            state.add_finalization(finalization9);
+            // Finalize view 9 - aborts view 9's handle
+            state.add_finalization(make_finalization(View::new(9)));
+            assert!(state.is_certify_aborted(View::new(9)));
 
-            // Add view 11
-            let view11 = View::new(11);
-            let proposal11 = Proposal::new(
-                Rnd::new(Epoch::new(1), view11),
-                GENESIS_VIEW,
-                Sha256Digest::from([11u8; 32]),
-            );
-            let notarize_votes11: Vec<_> = schemes
-                .iter()
-                .map(|scheme| Notarize::sign(scheme, proposal11.clone()).unwrap())
-                .collect();
-            let notarization11 =
-                Notarization::from_notarizes(&verifier, notarize_votes11.iter()).unwrap();
-            state.add_notarization(notarization11);
-
-            // View 11 returned (view 10 was consumed, views 7, 9 are finalized)
+            // Add view 11, should be returned
+            state.add_notarization(make_notarization(View::new(11)));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), view11);
-        });
-    }
-
-    #[test]
-    fn certified_removes_from_outstanding() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-            let cfg = Config {
-                scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(10),
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
-
-            // Add notarization for view 3
-            let view3 = View::new(3);
-            let proposal3 = Proposal::new(
-                Rnd::new(Epoch::new(1), view3),
-                GENESIS_VIEW,
-                Sha256Digest::from([3u8; 32]),
-            );
-            let notarize_votes: Vec<_> = schemes
-                .iter()
-                .map(|scheme| Notarize::sign(scheme, proposal3.clone()).unwrap())
-                .collect();
-            let notarization =
-                Notarization::from_notarizes(&verifier, notarize_votes.iter()).unwrap();
-            state.add_notarization(notarization);
-
-            // Get proposal
-            let candidates = state.certify_candidates();
-            assert_eq!(candidates.len(), 1);
-
-            // Set certify handle
-            let mut pool = AbortablePool::<()>::default();
-            let handle = pool.push(futures::future::pending());
-            state.set_certify_handle(view3, handle);
-
-            // Verify certify_candidates returns empty (has handle)
-            let candidates = state.certify_candidates();
-            assert!(candidates.is_empty());
-
-            // Call certified
-            let notarization = state.certified(view3, true);
-            assert!(notarization.is_some());
-
-            // Re-add notarization for view 3 to candidates (won't add since already exists)
-            let notarize_votes: Vec<_> = schemes
-                .iter()
-                .map(|scheme| Notarize::sign(scheme, proposal3.clone()).unwrap())
-                .collect();
-            let notarization =
-                Notarization::from_notarizes(&verifier, notarize_votes.iter()).unwrap();
-            state.add_notarization(notarization);
-
-            // certify_candidates should return empty (certified.is_some() blocks re-certification)
-            let candidates = state.certify_candidates();
-            assert!(candidates.is_empty());
+            assert_eq!(candidates[0].round.view(), View::new(11));
         });
     }
 

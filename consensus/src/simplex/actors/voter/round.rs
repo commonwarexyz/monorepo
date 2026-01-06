@@ -223,6 +223,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         matches!(self.certify, CertifyState::Certified(true))
     }
 
+    /// Returns true if certification was aborted due to finalization.
+    #[cfg(test)]
+    pub const fn is_certify_aborted(&self) -> bool {
+        matches!(self.certify, CertifyState::Aborted)
+    }
+
     /// Returns how much time elapsed since the round started, if the clock monotonicity holds.
     pub fn elapsed_since_start(&self, now: SystemTime) -> Duration {
         now.duration_since(self.start).unwrap_or_default()
