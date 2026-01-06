@@ -2,7 +2,7 @@
 
 use super::{Db, Operation};
 use crate::{
-    index::unordered::Index,
+    index::ordered::Index,
     journal::{authenticated, contiguous::variable},
     mmr::{mem::Clean, Location, Position, StandardHasher},
     qmdb::{self, any::VariableValue, Durable, Merkleized},
@@ -123,135 +123,43 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        qmdb::{
-            any::{sync::tests::SyncTestHarness, unordered::Update},
-            NonDurable, Unmerkleized,
-        },
-        translator::TwoCap,
-    };
-    use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_macros::test_traced;
-    use commonware_math::algebra::Random;
-    use commonware_runtime::{
-        buffer::PoolRef,
-        deterministic::{self, Context},
-    };
-    use commonware_utils::{NZUsize, NZU64};
-    use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use crate::qmdb::any::{ordered::variable::test, sync::tests as sync_tests};
+    use commonware_cryptography::sha256::Digest;
+    use commonware_runtime::deterministic::Context;
     use rstest::rstest;
     use std::num::NonZeroU64;
-
-    const PAGE_SIZE: usize = 99;
-    const PAGE_CACHE_SIZE: usize = 3;
-
-    type VarConfig = qmdb::any::VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
-
-    fn test_config(suffix: &str) -> VarConfig {
-        qmdb::any::VariableConfig {
-            mmr_journal_partition: format!("mmr_journal_{suffix}"),
-            mmr_metadata_partition: format!("mmr_metadata_{suffix}"),
-            mmr_items_per_blob: NZU64!(13),
-            mmr_write_buffer: NZUsize!(64),
-            log_partition: format!("log_{suffix}"),
-            log_items_per_blob: NZU64!(11),
-            log_write_buffer: NZUsize!(64),
-            log_compression: None,
-            log_codec_config: ((0..=10000).into(), ()),
-            translator: TwoCap,
-            thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-        }
-    }
-
-    /// Type alias for tests
-    type AnyTest =
-        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
-
-    fn test_value(i: u64) -> Vec<u8> {
-        let len = ((i % 13) + 7) as usize;
-        vec![(i % 255) as u8; len]
-    }
-
-    /// Create a test database with unique partition names
-    async fn create_test_db(mut context: Context) -> AnyTest {
-        let seed = context.next_u64();
-        let config = test_config(&format!("{seed}"));
-        AnyTest::init(context, config).await.unwrap()
-    }
-
-    /// Create n random operations. Some portion of the updates are deletes.
-    fn create_test_ops(n: usize) -> Vec<Operation<Digest, Vec<u8>>> {
-        let mut rng = StdRng::seed_from_u64(1337);
-        let mut prev_key = Digest::random(&mut rng);
-        let mut ops = Vec::new();
-        for i in 0..n {
-            let key = Digest::random(&mut rng);
-            if i % 10 == 0 && i > 0 {
-                ops.push(Operation::Delete(prev_key));
-            } else {
-                let value = test_value(i as u64);
-                ops.push(Operation::Update(Update(key, value)));
-                prev_key = key;
-            }
-        }
-        ops
-    }
-
-    type DirtyAnyTest =
-        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
-
-    /// Applies the given operations to the database.
-    async fn apply_ops_inner(
-        mut db: DirtyAnyTest,
-        ops: Vec<Operation<Digest, Vec<u8>>>,
-    ) -> DirtyAnyTest {
-        for op in ops {
-            match op {
-                Operation::Update(Update(key, value)) => {
-                    db.update(key, value).await.unwrap();
-                }
-                Operation::Delete(key) => {
-                    db.delete(key).await.unwrap();
-                }
-                Operation::CommitFloor(metadata, _) => {
-                    db = db.commit(metadata).await.unwrap().0.into_mutable();
-                }
-            }
-        }
-        db
-    }
+    use sync_tests::SyncTestHarness;
 
     /// Harness for sync tests.
     struct VariableHarness;
 
     impl SyncTestHarness for VariableHarness {
-        type Db = AnyTest;
+        type Db = test::AnyTest;
 
-        fn config(suffix: &str) -> VarConfig {
-            test_config(suffix)
+        fn config(suffix: &str) -> test::VarConfig {
+            test::create_test_config(suffix.parse().unwrap_or(0))
         }
 
-        fn clone_config(config: &VarConfig) -> VarConfig {
+        fn clone_config(config: &test::VarConfig) -> test::VarConfig {
             config.clone()
         }
 
         fn create_ops(n: usize) -> Vec<Operation<Digest, Vec<u8>>> {
-            create_test_ops(n)
+            test::create_test_ops(n)
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            create_test_db(ctx).await
+            test::create_test_db(ctx).await
         }
 
-        async fn init_db_with_config(ctx: Context, config: VarConfig) -> Self::Db {
-            AnyTest::init(ctx, config).await.unwrap()
+        async fn init_db_with_config(ctx: Context, config: test::VarConfig) -> Self::Db {
+            test::AnyTest::init(ctx, config).await.unwrap()
         }
 
         async fn apply_ops(db: Self::Db, ops: Vec<Operation<Digest, Vec<u8>>>) -> Self::Db {
-            apply_ops_inner(db.into_mutable(), ops)
-                .await
-                .commit(None)
+            let mut db = db.into_mutable();
+            test::apply_ops(&mut db, ops).await;
+            db.commit(None::<Vec<u8>>)
                 .await
                 .unwrap()
                 .0
@@ -261,12 +169,12 @@ mod tests {
 
     #[test]
     fn test_sync_invalid_bounds() {
-        crate::qmdb::any::sync::tests::test_sync_invalid_bounds::<VariableHarness>();
+        sync_tests::test_sync_invalid_bounds::<VariableHarness>();
     }
 
     #[test]
     fn test_sync_resolver_fails() {
-        crate::qmdb::any::sync::tests::test_sync_resolver_fails::<VariableHarness>();
+        sync_tests::test_sync_resolver_fails::<VariableHarness>();
     }
 
     #[rstest]
@@ -279,7 +187,7 @@ mod tests {
     #[case::db_size_eq_batch_size(1000, 1000)]
     #[case::batch_size_gt_db_size(1000, 1001)]
     fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: u64) {
-        crate::qmdb::any::sync::tests::test_sync::<VariableHarness>(
+        sync_tests::test_sync::<VariableHarness>(
             target_db_ops,
             NonZeroU64::new(fetch_batch_size).unwrap(),
         );
@@ -287,46 +195,42 @@ mod tests {
 
     #[test]
     fn test_sync_subset_of_target_database() {
-        crate::qmdb::any::sync::tests::test_sync_subset_of_target_database::<VariableHarness>(1000);
+        sync_tests::test_sync_subset_of_target_database::<VariableHarness>(1000);
     }
 
     #[test]
     fn test_sync_use_existing_db_partial_match() {
-        crate::qmdb::any::sync::tests::test_sync_use_existing_db_partial_match::<VariableHarness>(
-            1000,
-        );
+        sync_tests::test_sync_use_existing_db_partial_match::<VariableHarness>(1000);
     }
 
     #[test]
     fn test_sync_use_existing_db_exact_match() {
-        crate::qmdb::any::sync::tests::test_sync_use_existing_db_exact_match::<VariableHarness>(
-            1000,
-        );
+        sync_tests::test_sync_use_existing_db_exact_match::<VariableHarness>(1000);
     }
 
-    #[test_traced("WARN")]
+    #[test]
     fn test_target_update_lower_bound_decrease() {
-        crate::qmdb::any::sync::tests::test_target_update_lower_bound_decrease::<VariableHarness>();
+        sync_tests::test_target_update_lower_bound_decrease::<VariableHarness>();
     }
 
-    #[test_traced("WARN")]
+    #[test]
     fn test_target_update_upper_bound_decrease() {
-        crate::qmdb::any::sync::tests::test_target_update_upper_bound_decrease::<VariableHarness>();
+        sync_tests::test_target_update_upper_bound_decrease::<VariableHarness>();
     }
 
-    #[test_traced("WARN")]
+    #[test]
     fn test_target_update_bounds_increase() {
-        crate::qmdb::any::sync::tests::test_target_update_bounds_increase::<VariableHarness>();
+        sync_tests::test_target_update_bounds_increase::<VariableHarness>();
     }
 
-    #[test_traced("WARN")]
+    #[test]
     fn test_target_update_invalid_bounds() {
-        crate::qmdb::any::sync::tests::test_target_update_invalid_bounds::<VariableHarness>();
+        sync_tests::test_target_update_invalid_bounds::<VariableHarness>();
     }
 
-    #[test_traced("WARN")]
+    #[test]
     fn test_target_update_on_done_client() {
-        crate::qmdb::any::sync::tests::test_target_update_on_done_client::<VariableHarness>();
+        sync_tests::test_target_update_on_done_client::<VariableHarness>();
     }
 
     #[rstest]
@@ -343,38 +247,31 @@ mod tests {
     #[case(100, 100)]
     #[case(100, 1000)]
     fn test_target_update_during_sync(#[case] initial_ops: usize, #[case] additional_ops: usize) {
-        crate::qmdb::any::sync::tests::test_target_update_during_sync::<VariableHarness>(
-            initial_ops,
-            additional_ops,
-        );
+        sync_tests::test_target_update_during_sync::<VariableHarness>(initial_ops, additional_ops);
     }
 
-    #[test_traced("WARN")]
+    #[test]
     fn test_sync_database_persistence() {
-        crate::qmdb::any::sync::tests::test_sync_database_persistence::<VariableHarness>();
+        sync_tests::test_sync_database_persistence::<VariableHarness>();
     }
 
     #[test]
     fn test_from_sync_result_empty_to_nonempty() {
-        crate::qmdb::any::sync::tests::test_from_sync_result_empty_to_nonempty::<VariableHarness>();
+        sync_tests::test_from_sync_result_empty_to_nonempty::<VariableHarness>();
     }
 
-    #[test_traced("WARN")]
+    #[test]
     fn test_from_sync_result_empty_to_empty() {
-        crate::qmdb::any::sync::tests::test_from_sync_result_empty_to_empty::<VariableHarness>();
+        sync_tests::test_from_sync_result_empty_to_empty::<VariableHarness>();
     }
 
     #[test]
     fn test_from_sync_result_nonempty_to_nonempty_partial_match() {
-        crate::qmdb::any::sync::tests::test_from_sync_result_nonempty_to_nonempty_partial_match::<
-            VariableHarness,
-        >();
+        sync_tests::test_from_sync_result_nonempty_to_nonempty_partial_match::<VariableHarness>();
     }
 
     #[test]
     fn test_from_sync_result_nonempty_to_nonempty_exact_match() {
-        crate::qmdb::any::sync::tests::test_from_sync_result_nonempty_to_nonempty_exact_match::<
-            VariableHarness,
-        >();
+        sync_tests::test_from_sync_result_nonempty_to_nonempty_exact_match::<VariableHarness>();
     }
 }

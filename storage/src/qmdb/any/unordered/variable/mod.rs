@@ -403,7 +403,7 @@ pub(super) mod test {
         use super::*;
         use crate::{
             mmr::{iterator::nodes_to_pin, journaled::Mmr, mem::Clean, Position},
-            qmdb::any::unordered::sync_tests::FromSyncTestable,
+            qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
 

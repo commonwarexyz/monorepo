@@ -22,6 +22,8 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
 
+pub mod sync;
+
 pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;
 pub type Operation<K, V> = ordered::Operation<K, FixedEncoding<V>>;
 
@@ -68,7 +70,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
@@ -111,19 +113,19 @@ mod test {
     }
 
     /// Type aliases for concrete [Db] types used in these unit tests.
-    type CleanAnyTest =
+    pub(crate) type AnyTest =
         Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
     type MutableAnyTest =
         Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
     /// Return an `Any` database initialized with a fixed config.
-    async fn open_db(context: deterministic::Context) -> CleanAnyTest {
-        CleanAnyTest::init(context, any_db_config("partition"))
+    async fn open_db(context: deterministic::Context) -> AnyTest {
+        AnyTest::init(context, any_db_config("partition"))
             .await
             .unwrap()
     }
 
-    fn create_test_config(seed: u64) -> Config<TwoCap> {
+    pub(crate) fn create_test_config(seed: u64) -> Config<TwoCap> {
         create_generic_test_config::<TwoCap>(seed, TwoCap)
     }
 
@@ -143,15 +145,15 @@ mod test {
     }
 
     /// Create a test database with unique partition names
-    async fn create_test_db(mut context: Context) -> CleanAnyTest {
+    pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let config = create_test_config(seed);
-        CleanAnyTest::init(context, config).await.unwrap()
+        AnyTest::init(context, config).await.unwrap()
     }
 
     /// Create n random operations. Some portion of the updates are deletes.
     /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
-    fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
+    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
         let mut rng = StdRng::seed_from_u64(1337);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -174,7 +176,7 @@ mod test {
     }
 
     /// Applies the given operations to the database.
-    async fn apply_ops(db: &mut MutableAnyTest, ops: Vec<Operation<Digest, Digest>>) {
+    pub(crate) async fn apply_ops(db: &mut MutableAnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
                 Operation::Update(data) => {
@@ -1004,5 +1006,38 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_any_ordered_fixed_batch() {
         batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
+    }
+
+    // FromSyncTestable implementation for from_sync_result tests
+    mod from_sync_testable {
+        use super::*;
+        use crate::{
+            mmr::{iterator::nodes_to_pin, journaled::Mmr, mem::Clean},
+            qmdb::any::sync::tests::FromSyncTestable,
+        };
+        use futures::future::join_all;
+
+        type TestMmr = Mmr<deterministic::Context, Digest, Clean<Digest>>;
+
+        impl FromSyncTestable for AnyTest {
+            type Mmr = TestMmr;
+
+            fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
+                (self.log.mmr, self.log.journal)
+            }
+
+            async fn pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
+                join_all(nodes_to_pin(pos).map(|p| self.log.mmr.get_node(p)))
+                    .await
+                    .into_iter()
+                    .map(|n| n.unwrap().unwrap())
+                    .collect()
+            }
+
+            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
+                let map = self.log.mmr.get_pinned_nodes();
+                nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
+            }
+        }
     }
 }

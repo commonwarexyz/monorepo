@@ -24,7 +24,7 @@ use crate::{
         Error::{self, *},
         Proof,
     },
-    qmdb::any::unordered::fixed::sync::init_journal,
+    qmdb::any::sync::fixed::init_journal,
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
