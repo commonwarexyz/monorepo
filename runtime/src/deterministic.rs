@@ -1072,8 +1072,6 @@ impl crate::RayonPoolSpawner for Context {
 
         builder
             .spawn_handler(move |thread| {
-                // Tasks spawned in a thread pool are expected to run longer than any single
-                // task and thus should be provisioned as a dedicated thread.
                 self.with_label("rayon_thread")
                     .dedicated()
                     .spawn(move |_| async move { thread.run() });
