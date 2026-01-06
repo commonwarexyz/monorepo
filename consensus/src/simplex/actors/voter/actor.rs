@@ -322,13 +322,6 @@ impl<
         Some(Request(context, receiver))
     }
 
-    /// Attempt to certify a proposal for the given view.
-    async fn try_certify(&mut self, view: View) -> Option<Request<Rnd, bool>> {
-        let proposal = self.state.try_certify(view)?;
-        let receiver = self.automaton.certify(proposal.payload).await;
-        Some(Request(proposal.round, receiver))
-    }
-
     /// Handle a timeout.
     async fn handle_timeout<Sp: Sender, Sr: Sender>(
         &mut self,
@@ -825,13 +818,13 @@ impl<
             }
 
             // Attempt to certify any views that we have notarizations for.
-            for v in self.state.certify_candidates() {
-                if let Some(Request(ctx, receiver)) = self.try_certify(v).await {
-                    debug!(%v, "attempting certification");
-                    let view = ctx.view();
-                    let handle = certify_pool.push(async move { (ctx, receiver.await) });
-                    self.state.set_certify_handle(view, handle);
-                }
+            for proposal in self.state.certify_candidates() {
+                let ctx = proposal.round;
+                debug!(view = %ctx.view(), "attempting certification");
+                let receiver = self.automaton.certify(proposal.payload).await;
+                let view = ctx.view();
+                let handle = certify_pool.push(async move { (ctx, receiver.await) });
+                self.state.set_certify_handle(view, handle);
             }
 
             // Prepare waiters

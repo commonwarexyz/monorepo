@@ -460,26 +460,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .unwrap_or(false)
     }
 
-    /// Attempt to certify a view's proposal.
-    ///
-    /// Returns `Some(proposal)` if ready for certification, `None` otherwise.
-    /// If certification is pending (has notarization but no proposal yet),
-    /// the view is automatically re-added to candidates for later retry.
-    pub fn try_certify(&mut self, view: View) -> Option<Proposal<D>> {
-        if !self.is_certify_candidate(view) {
-            return None;
-        }
-        let round = self.views.get_mut(&view)?;
-        let (proposal, pending) = round.try_certify();
-        if let Some(proposal) = proposal {
-            return Some(proposal);
-        }
-        if pending {
-            self.certification_candidates.insert(view);
-        }
-        None
-    }
-
     /// Store the abort handle for an in-flight certification request.
     pub fn set_certify_handle(&mut self, view: View, handle: Aborter) {
         let Some(round) = self.views.get_mut(&view) else {
@@ -489,9 +469,28 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.outstanding_certifications.insert(view);
     }
 
-    /// Takes all certification candidates, returning an iterator and clearing the set.
-    pub fn certify_candidates(&mut self) -> impl Iterator<Item = View> {
-        take(&mut self.certification_candidates).into_iter()
+    /// Takes all certification candidates and returns proposals ready for certification.
+    ///
+    /// Views that are pending (have notarization but no proposal yet) are re-added
+    /// to candidates for later retry.
+    pub fn certify_candidates(&mut self) -> Vec<Proposal<D>> {
+        let candidates = take(&mut self.certification_candidates);
+        let mut ready = Vec::new();
+        for view in candidates {
+            if !self.is_certify_candidate(view) {
+                continue;
+            }
+            let Some(round) = self.views.get_mut(&view) else {
+                continue;
+            };
+            let (proposal, pending) = round.try_certify();
+            if let Some(proposal) = proposal {
+                ready.push(proposal);
+            } else if pending {
+                self.certification_candidates.insert(view);
+            }
+        }
+        ready
     }
 
     /// Marks proposal certification as complete and returns the notarization.
@@ -1154,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn try_certify_blocked_when_finalized() {
+    fn certify_candidates_blocked_when_finalized() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -1188,8 +1187,15 @@ mod tests {
                 Notarization::from_notarizes(&verifier, notarize_votes.iter()).unwrap();
             state.add_notarization(notarization);
 
-            // try_certify should succeed before finalization
-            assert!(state.try_certify(view3).is_some());
+            // certify_candidates should return view 3's proposal before finalization
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].round.view(), view3);
+
+            // Re-add view 3 to candidates for the next test
+            state.add_notarization(
+                Notarization::from_notarizes(&verifier, notarize_votes.iter()).unwrap(),
+            );
 
             // Add finalization for view 5 (which finalizes everything up to and including 5)
             let view5 = View::new(5);
@@ -1206,11 +1212,9 @@ mod tests {
                 Finalization::from_finalizes(&verifier, finalize_votes.iter()).unwrap();
             state.add_finalization(finalization);
 
-            // try_certify for view 3 should now return None (view 3 <= last_finalized 5)
-            assert!(state.try_certify(view3).is_none());
-
-            // try_certify for view 5 should also return None (view 5 <= last_finalized 5)
-            assert!(state.try_certify(view5).is_none());
+            // certify_candidates should return empty (view 3 is finalized, pruned from candidates)
+            let candidates = state.certify_candidates();
+            assert!(candidates.is_empty());
         });
     }
 
