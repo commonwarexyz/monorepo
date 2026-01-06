@@ -140,7 +140,7 @@ mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
     use commonware_math::algebra::Random;
-    use rand::rngs::OsRng;
+    use commonware_utils::test_rng;
 
     #[test]
     fn test_debug_redacted() {
@@ -206,9 +206,10 @@ mod tests {
 
     #[test]
     fn test_scalar_equality() {
-        let scalar1 = Scalar::random(&mut OsRng);
+        let mut rng = test_rng();
+        let scalar1 = Scalar::random(&mut rng);
         let scalar2 = scalar1.clone();
-        let scalar3 = Scalar::random(&mut OsRng);
+        let scalar3 = Scalar::random(&mut rng);
 
         let s1 = Secret::new(scalar1);
         let s2 = Secret::new(scalar2);
