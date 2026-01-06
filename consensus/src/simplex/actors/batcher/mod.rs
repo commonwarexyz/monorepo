@@ -206,7 +206,7 @@ mod tests {
             injector_sender
                 .send(
                     Recipients::One(me.clone()),
-                    Certificate::Notarization(notarization.clone()).encode().into(),
+                    Certificate::Notarization(notarization.clone()).encode(),
                     true,
                 )
                 .await
@@ -224,8 +224,7 @@ mod tests {
                 .send(
                     Recipients::One(me.clone()),
                     Certificate::<S, Sha256Digest>::Nullification(nullification.clone())
-                        .encode()
-                        .into(),
+                        .encode(),
                     true,
                 )
                 .await
@@ -242,7 +241,7 @@ mod tests {
             injector_sender
                 .send(
                     Recipients::One(me.clone()),
-                    Certificate::Finalization(finalization.clone()).encode().into(),
+                    Certificate::Finalization(finalization.clone()).encode(),
                     true,
                 )
                 .await
@@ -372,7 +371,7 @@ mod tests {
                     sender
                         .send(
                             Recipients::One(me.clone()),
-                            Vote::Notarize(vote).encode().into(),
+                            Vote::Notarize(vote).encode(),
                             true,
                         )
                         .await
@@ -527,7 +526,7 @@ mod tests {
                     sender
                         .send(
                             Recipients::One(me.clone()),
-                            Vote::Notarize(vote).encode().into(),
+                            Vote::Notarize(vote).encode(),
                             true,
                         )
                         .await
@@ -550,7 +549,7 @@ mod tests {
             injector_sender
                 .send(
                     Recipients::One(me.clone()),
-                    Certificate::Notarization(notarization.clone()).encode().into(),
+                    Certificate::Notarization(notarization.clone()).encode(),
                     true,
                 )
                 .await
@@ -572,7 +571,7 @@ mod tests {
                 sender
                     .send(
                         Recipients::One(me.clone()),
-                        Vote::Notarize(last_vote).encode().into(),
+                        Vote::Notarize(last_vote).encode(),
                         true,
                     )
                     .await
@@ -706,7 +705,7 @@ mod tests {
                 sender
                     .send(
                         Recipients::One(me.clone()),
-                        Vote::Notarize(leader_vote).encode().into(),
+                        Vote::Notarize(leader_vote).encode(),
                         true,
                     )
                     .await
@@ -731,7 +730,7 @@ mod tests {
                     sender
                         .send(
                             Recipients::One(me.clone()),
-                            Vote::Notarize(vote).encode().into(),
+                            Vote::Notarize(vote).encode(),
                             true,
                         )
                         .await
@@ -770,7 +769,7 @@ mod tests {
                 sender
                     .send(
                         Recipients::One(me.clone()),
-                        Vote::Notarize(vote6).encode().into(),
+                        Vote::Notarize(vote6).encode(),
                         true,
                     )
                     .await
@@ -902,7 +901,7 @@ mod tests {
             leader_sender
                 .send(
                     Recipients::One(me.clone()),
-                    Vote::Notarize(leader_vote).encode().into(),
+                    Vote::Notarize(leader_vote).encode(),
                     true,
                 )
                 .await
@@ -1019,7 +1018,7 @@ mod tests {
             leader_sender
                 .send(
                     Recipients::One(me.clone()),
-                    Vote::Notarize(leader_vote).encode().into(),
+                    Vote::Notarize(leader_vote).encode(),
                     true,
                 )
                 .await
@@ -1162,7 +1161,7 @@ mod tests {
             leader_sender
                 .send(
                     Recipients::One(me.clone()),
-                    Vote::Notarize(leader_vote).encode().into(),
+                    Vote::Notarize(leader_vote).encode(),
                     true,
                 )
                 .await
@@ -1318,7 +1317,7 @@ mod tests {
                     sender
                         .send(
                             Recipients::One(me.clone()),
-                            Vote::Notarize(vote).encode().into(),
+                            Vote::Notarize(vote).encode(),
                             true,
                         )
                         .await
@@ -1364,7 +1363,7 @@ mod tests {
                     sender
                         .send(
                             Recipients::One(me.clone()),
-                            Vote::Notarize(vote).encode().into(),
+                            Vote::Notarize(vote).encode(),
                             true,
                         )
                         .await

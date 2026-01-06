@@ -346,7 +346,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
                 let new_value = self.map.get(key).expect("key must exist");
                 if info.length == new_value.encode_size() {
                     // Overwrite existing value
-                    let encoded = new_value.encode();
+                    let encoded = new_value.encode_mut();
                     target.data[info.start..info.start + info.length].copy_from_slice(&encoded);
                     writes.push(target.blob.write_at(encoded, info.start as u64));
                 } else {

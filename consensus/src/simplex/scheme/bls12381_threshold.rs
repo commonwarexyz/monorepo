@@ -426,10 +426,8 @@ impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P,
 /// The seed message is the round encoded as bytes, used for per-view randomness.
 fn seed_message_from_subject<D: Digest>(subject: &Subject<'_, D>) -> bytes::Bytes {
     match subject {
-        Subject::Notarize { proposal } | Subject::Finalize { proposal } => {
-            proposal.round.encode().freeze()
-        }
-        Subject::Nullify { round } => round.encode().freeze(),
+        Subject::Notarize { proposal } | Subject::Finalize { proposal } => proposal.round.encode(),
+        Subject::Nullify { round } => round.encode(),
     }
 }
 
@@ -1109,8 +1107,7 @@ mod tests {
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         let encoded = certificate.encode();
-        let decoded =
-            Signature::<V>::decode_cfg(encoded.freeze(), &()).expect("decode certificate");
+        let decoded = Signature::<V>::decode_cfg(encoded, &()).expect("decode certificate");
         assert_eq!(decoded, certificate);
     }
 
@@ -1375,7 +1372,7 @@ mod tests {
 
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
-        let mut encoded = certificate.encode().freeze();
+        let mut encoded = certificate.encode();
         let truncated = encoded.split_to(encoded.len() - 1);
         assert!(Signature::<V>::decode_cfg(truncated, &()).is_err());
     }

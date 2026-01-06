@@ -1045,7 +1045,7 @@ mod tests {
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.proof(1).unwrap();
-        let mut serialized = proof.encode();
+        let mut serialized = proof.encode_mut();
 
         // Append an extra byte.
         serialized.extend_from_slice(&[0u8]);
