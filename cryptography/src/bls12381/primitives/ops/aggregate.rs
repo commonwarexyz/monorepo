@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Additive;
+use commonware_parallel::Strategy;
 
 /// An aggregated public key from multiple individual public keys.
 ///
@@ -122,6 +123,63 @@ where
     }
 }
 
+/// A combined message hash from multiple individual messages.
+///
+/// This type is returned by [`combine_messages`] and ensures that
+/// combined message hashes are not confused with individual message hashes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Message<V: Variant>(V::Signature);
+
+impl<V: Variant> Message<V> {
+    /// Creates a zero combined message.
+    pub fn zero() -> Self {
+        Self(V::Signature::zero())
+    }
+
+    /// Returns the inner message hash value.
+    pub(crate) const fn inner(&self) -> &V::Signature {
+        &self.0
+    }
+
+    /// Adds another hashed message to this one.
+    pub(crate) fn add(&mut self, other: &V::Signature) {
+        self.0 += other;
+    }
+
+    /// Combines another [Message] into this one.
+    pub(crate) fn combine(&mut self, other: &Self) {
+        self.0 += &other.0;
+    }
+}
+
+impl<V: Variant> Write for Message<V> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.0.write(writer);
+    }
+}
+
+impl<V: Variant> Read for Message<V> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self(V::Signature::read(reader)?))
+    }
+}
+
+impl<V: Variant> FixedSize for Message<V> {
+    const SIZE: usize = V::Signature::SIZE;
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for Message<V>
+where
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self(V::Signature::arbitrary(u)?))
+    }
+}
+
 /// Combines multiple public keys into an aggregate public key.
 ///
 /// # Warning
@@ -163,6 +221,32 @@ where
     s
 }
 
+/// Combines multiple messages into a single message hash.
+///
+/// # Warning
+///
+/// It is not safe to provide duplicate messages.
+pub fn combine_messages<'a, V, I>(messages: I, strategy: &impl Strategy) -> Message<V>
+where
+    V: Variant,
+    I: IntoIterator<Item = &'a (&'a [u8], &'a [u8])> + Send,
+    I::IntoIter: Send,
+{
+    strategy.fold(
+        messages,
+        Message::zero,
+        |mut sum, (namespace, msg)| {
+            let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, msg);
+            sum.add(&hm);
+            sum
+        },
+        |mut a, b| {
+            a.combine(&b);
+            a
+        },
+    )
+}
+
 /// Verifies the aggregate signature over a single message from multiple public keys.
 ///
 /// # Precomputed Aggregate Public Key
@@ -188,6 +272,25 @@ pub fn verify_same_message<V: Variant>(
     V::verify(public.inner(), &hm, signature.inner())
 }
 
+/// Verifies the aggregate signature over multiple messages from a single public key.
+///
+/// # Precomputed Combined Message
+///
+/// Instead of requiring all messages that participated in the aggregate signature (and generating
+/// the combined message on-demand), this function accepts a precomputed combined message to allow
+/// the caller to cache previous constructions and/or perform parallel combination.
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on `public` and `signature`.
+pub fn verify_same_signer<V: Variant>(
+    public: &V::Public,
+    message: &Message<V>,
+    signature: &Signature<V>,
+) -> Result<(), Error> {
+    V::verify(public, message.inner(), signature.inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -201,7 +304,8 @@ mod tests {
     };
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
-    use commonware_utils::{test_rng, union_unique};
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::{test_rng, union_unique, NZUsize};
 
     fn blst_aggregate_verify_same_message<'a, V, I>(
         public: I,
@@ -327,6 +431,81 @@ mod tests {
         aggregate_verify_same_message_wrong_public_key_count::<MinSig>();
     }
 
+    fn blst_aggregate_verify_same_signer<'a, V, I>(
+        public: &V::Public,
+        msgs: I,
+        signature: &Signature<V>,
+    ) -> Result<(), BLST_ERROR>
+    where
+        V: Variant,
+        I: IntoIterator<Item = &'a [u8]>,
+    {
+        match V::MESSAGE {
+            G1_MESSAGE => {
+                let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
+                let msgs = msgs.into_iter().collect::<Vec<_>>();
+                let pks = vec![&public; msgs.len()];
+                let signature =
+                    blst::min_sig::Signature::from_bytes(&signature.inner().encode()).unwrap();
+                match signature.aggregate_verify(true, &msgs, V::MESSAGE, &pks, true) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            G2_MESSAGE => {
+                let public = blst::min_pk::PublicKey::from_bytes(&public.encode()).unwrap();
+                let msgs = msgs.into_iter().collect::<Vec<_>>();
+                let pks = vec![&public; msgs.len()];
+                let signature =
+                    blst::min_pk::Signature::from_bytes(&signature.inner().encode()).unwrap();
+                match signature.aggregate_verify(true, &msgs, V::MESSAGE, &pks, true) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            _ => panic!("Unsupported Variant"),
+        }
+    }
+
+    fn aggregate_verify_same_signer_correct<V: Variant>() {
+        let (private, public) = keypair::<_, V>(&mut test_rng());
+        let namespace = b"test";
+        let messages: Vec<(&[u8], &[u8])> = vec![
+            (namespace, b"Message 1"),
+            (namespace, b"Message 2"),
+            (namespace, b"Message 3"),
+        ];
+        let signatures: Vec<_> = messages
+            .iter()
+            .map(|(namespace, msg)| sign_message::<V>(&private, namespace, msg))
+            .collect();
+
+        let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
+
+        let combined_msg = aggregate::combine_messages::<V, _>(&messages, &Sequential);
+        aggregate::verify_same_signer::<V>(&public, &combined_msg, &aggregate_sig)
+            .expect("Aggregated signature should be valid");
+
+        let parallel = Rayon::new(NZUsize!(4)).unwrap();
+        let combined_msg_parallel = aggregate::combine_messages::<V, _>(&messages, &parallel);
+        aggregate::verify_same_signer::<V>(&public, &combined_msg_parallel, &aggregate_sig)
+            .expect("Aggregated signature should be valid with parallelism");
+
+        let payload_msgs: Vec<_> = messages
+            .iter()
+            .map(|(ns, msg)| union_unique(ns, msg))
+            .collect();
+        let payload_refs: Vec<&[u8]> = payload_msgs.iter().map(|p| p.as_ref()).collect();
+        blst_aggregate_verify_same_signer::<V, _>(&public, payload_refs, &aggregate_sig)
+            .expect("blst should also accept aggregated signature");
+    }
+
+    #[test]
+    fn test_aggregate_verify_same_signer_correct() {
+        aggregate_verify_same_signer_correct::<MinPk>();
+        aggregate_verify_same_signer_correct::<MinSig>();
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
@@ -334,6 +513,7 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<PublicKey<MinSig>>,
+            CodecConformance<Message<MinSig>>,
             CodecConformance<Signature<MinSig>>,
         }
     }

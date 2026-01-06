@@ -1208,7 +1208,6 @@ dependencies = [
  "libfuzzer-sys",
  "p256",
  "rand 0.8.5",
- "rayon",
  "sha2 0.10.9",
  "zeroize",
 ]
