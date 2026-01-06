@@ -6,6 +6,7 @@
 mod application;
 mod commitment;
 mod execution;
+mod qmdb;
 mod sim;
 mod types;
 
