@@ -11,7 +11,7 @@
 //! # Format
 //!
 //! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [commonware_runtime::Blob])
-//! that maps keys to locations and a [crate::archive::blob::Blob] that stores key-value data.
+//! that maps keys to locations and a [crate::journal::segmented::glob::Glob] that stores key-value data.
 //!
 //! ```text
 //! +-----------------------------------------------------------------+
@@ -134,6 +134,15 @@
 //! To prevent a "stall" during a single resize, the table is resized incrementally across multiple sync calls.
 //! Each sync will process up to `table_resize_chunk_size` entries until the resize is complete. If there is
 //! an ongoing resize when closing the [Freezer], the resize will be completed before closing.
+//!
+//! # Caching Strategy
+//!
+//! The [Freezer] uses different caching strategies for keys and values:
+//!
+//! - **Key Index**: Uses a buffer pool for caching. Keys are small and frequently accessed during
+//!   collision chain traversal, making caching beneficial.
+//! - **Value Journal**: No buffer pool caching. Values are typically large and accessed once,
+//!   so caching would pollute the cache without benefit.
 //!
 //! # Example
 //!

@@ -1,30 +1,92 @@
 //! Common blob management for segmented journals.
 //!
-//! This module provides `BlobManager`, a reusable component that handles
+//! This module provides `Manager`, a reusable component that handles
 //! section-based blob storage, pruning, syncing, and metrics.
 
 use crate::journal::Error;
 use commonware_runtime::{
-    buffer::{Append, PoolRef},
+    buffer::{Append, PoolRef, Write},
     telemetry::metrics::status::GaugeExt,
     Blob, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::{collections::BTreeMap, num::NonZeroUsize};
+use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 use tracing::debug;
+
+/// A buffer that wraps a blob and provides size information.
+///
+/// Both [`Append`] and [`Write`] implement this trait.
+pub trait SectionBuffer: Blob + Clone + Send + Sync {
+    /// Returns the current logical size of the buffer including any buffered data.
+    fn size(&self) -> impl Future<Output = u64> + Send;
+}
+
+impl<B: Blob> SectionBuffer for Append<B> {
+    async fn size(&self) -> u64 {
+        Self::size(self).await
+    }
+}
+
+impl<B: Blob> SectionBuffer for Write<B> {
+    async fn size(&self) -> u64 {
+        Self::size(self).await
+    }
+}
+
+/// Factory for creating section buffers from raw blobs.
+pub trait BufferFactory<B: Blob>: Clone + Send + Sync {
+    /// The buffer type produced by this factory.
+    type Buffer: SectionBuffer;
+
+    /// Create a new buffer wrapping the given blob with the specified size.
+    fn create(
+        &self,
+        blob: B,
+        size: u64,
+    ) -> impl Future<Output = Result<Self::Buffer, RError>> + Send;
+}
+
+/// Factory for creating [`Append`] buffers with pool caching.
+#[derive(Clone)]
+pub struct AppendFactory {
+    /// The size of the write buffer.
+    pub write_buffer: NonZeroUsize,
+    /// The buffer pool for read caching.
+    pub pool_ref: PoolRef,
+}
+
+impl<B: Blob> BufferFactory<B> for AppendFactory {
+    type Buffer = Append<B>;
+
+    async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
+        Append::new(blob, size, self.write_buffer, self.pool_ref.clone()).await
+    }
+}
+
+/// Factory for creating [`Write`] buffers without caching.
+#[derive(Clone)]
+pub struct WriteFactory {
+    /// The capacity of the write buffer.
+    pub capacity: NonZeroUsize,
+}
+
+impl<B: Blob> BufferFactory<B> for WriteFactory {
+    type Buffer = Write<B>;
+
+    async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
+        Ok(Write::new(blob, size, self.capacity))
+    }
+}
 
 /// Configuration for blob management.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<F> {
     /// The partition to use for storing blobs.
     pub partition: String,
 
-    /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef,
-
-    /// The size of the write buffer to use for each blob.
-    pub write_buffer: NonZeroUsize,
+    /// The factory for creating section buffers.
+    pub factory: F,
 }
 
 /// Manages a collection of section-based blobs.
@@ -32,12 +94,13 @@ pub struct Config {
 /// Each section is stored in a separate blob, named by its section number
 /// (big-endian u64). This component handles initialization, pruning, syncing,
 /// and metrics.
-pub struct BlobManager<E: Storage + Metrics> {
+pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     pub(crate) context: E,
-    pub(crate) cfg: Config,
+    pub(crate) partition: String,
+    pub(crate) factory: F,
 
     /// One blob per section.
-    pub(crate) blobs: BTreeMap<u64, Append<E::Blob>>,
+    pub(crate) blobs: BTreeMap<u64, F::Buffer>,
 
     /// A section number before which all sections have been pruned during
     /// the current execution. Not persisted across restarts.
@@ -48,11 +111,11 @@ pub struct BlobManager<E: Storage + Metrics> {
     pub(crate) pruned: Counter,
 }
 
-impl<E: Storage + Metrics> BlobManager<E> {
-    /// Initialize a new `BlobManager`.
+impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
+    /// Initialize a new `Manager`.
     ///
     /// Scans the partition for existing blobs and opens them.
-    pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<F>) -> Result<Self, Error> {
         let mut blobs = BTreeMap::new();
         let stored_blobs = match context.scan(&cfg.partition).await {
             Ok(blobs) => blobs,
@@ -68,8 +131,8 @@ impl<E: Storage + Metrics> BlobManager<E> {
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
             debug!(section, blob = hex_name, size, "loaded section");
-            let blob = Append::new(blob, size, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
-            blobs.insert(section, blob);
+            let buffer = cfg.factory.create(blob, size).await?;
+            blobs.insert(section, buffer);
         }
 
         let tracked = Gauge::default();
@@ -82,7 +145,8 @@ impl<E: Storage + Metrics> BlobManager<E> {
 
         Ok(Self {
             context,
-            cfg,
+            partition: cfg.partition,
+            factory: cfg.factory,
             blobs,
             oldest_retained_section: 0,
             tracked,
@@ -101,27 +165,21 @@ impl<E: Storage + Metrics> BlobManager<E> {
     }
 
     /// Get a reference to a blob for a section, if it exists.
-    pub fn get(&self, section: u64) -> Result<Option<&Append<E::Blob>>, Error> {
+    pub fn get(&self, section: u64) -> Result<Option<&F::Buffer>, Error> {
         self.prune_guard(section)?;
         Ok(self.blobs.get(&section))
     }
 
     /// Get a mutable reference to a blob, creating it if it doesn't exist.
-    pub async fn get_or_create(&mut self, section: u64) -> Result<&mut Append<E::Blob>, Error> {
+    pub async fn get_or_create(&mut self, section: u64) -> Result<&mut F::Buffer, Error> {
         self.prune_guard(section)?;
 
         if !self.blobs.contains_key(&section) {
             let name = section.to_be_bytes();
-            let (blob, size) = self.context.open(&self.cfg.partition, &name).await?;
-            let blob = Append::new(
-                blob,
-                size,
-                self.cfg.write_buffer,
-                self.cfg.buffer_pool.clone(),
-            )
-            .await?;
+            let (blob, size) = self.context.open(&self.partition, &name).await?;
+            let buffer = self.factory.create(blob, size).await?;
             self.tracked.inc();
-            self.blobs.insert(section, blob);
+            self.blobs.insert(section, buffer);
         }
 
         Ok(self.blobs.get_mut(&section).unwrap())
@@ -159,7 +217,7 @@ impl<E: Storage + Metrics> BlobManager<E> {
             drop(blob);
 
             self.context
-                .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
+                .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
             pruned = true;
 
@@ -196,10 +254,7 @@ impl<E: Storage + Metrics> BlobManager<E> {
     }
 
     /// Returns an iterator over all sections starting from `start_section`.
-    pub fn sections_from(
-        &self,
-        start_section: u64,
-    ) -> impl Iterator<Item = (&u64, &Append<E::Blob>)> {
+    pub fn sections_from(&self, start_section: u64) -> impl Iterator<Item = (&u64, &F::Buffer)> {
         self.blobs.range(start_section..)
     }
 
@@ -210,10 +265,10 @@ impl<E: Storage + Metrics> BlobManager<E> {
             drop(blob);
             debug!(section, size, "destroyed blob");
             self.context
-                .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
+                .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
         }
-        match self.context.remove(&self.cfg.partition, None).await {
+        match self.context.remove(&self.partition, None).await {
             Ok(()) => {}
             Err(RError::PartitionMissing(_)) => {}
             Err(err) => return Err(Error::Runtime(err)),
@@ -233,7 +288,7 @@ impl<E: Storage + Metrics> BlobManager<E> {
             let blob = self.blobs.remove(&s).unwrap();
             drop(blob);
             self.context
-                .remove(&self.cfg.partition, Some(&s.to_be_bytes()))
+                .remove(&self.partition, Some(&s.to_be_bytes()))
                 .await?;
             self.tracked.dec();
             debug!(section = s, "removed blob during rewind");
@@ -284,7 +339,7 @@ impl<E: Storage + Metrics> BlobManager<E> {
     ///
     /// This is primarily intended for conformance testing where raw access
     /// to blob data is needed.
-    pub const fn blobs(&self) -> &BTreeMap<u64, Append<E::Blob>> {
+    pub const fn blobs(&self) -> &BTreeMap<u64, F::Buffer> {
         &self.blobs
     }
 }

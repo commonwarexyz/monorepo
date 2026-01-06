@@ -94,7 +94,7 @@
 //! });
 //! ```
 
-use super::blob_manager::{BlobManager, Config as BlobManagerConfig};
+use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt, Write as CodecWrite};
@@ -127,16 +127,6 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
-impl<C: Clone> Config<C> {
-    fn to_blob_manager_config(&self) -> BlobManagerConfig {
-        BlobManagerConfig {
-            partition: self.partition.clone(),
-            buffer_pool: self.buffer_pool.clone(),
-            write_buffer: self.write_buffer,
-        }
-    }
-}
-
 pub(crate) const ITEM_ALIGNMENT: u64 = 16;
 
 /// Minimum size of any item: 1 byte varint (size=0) + 0 bytes data + 4 bytes checksum.
@@ -159,7 +149,7 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
 
 /// Implementation of `Journal` storage.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
-    manager: BlobManager<E>,
+    manager: Manager<E, AppendFactory>,
 
     /// Compression level (if enabled).
     compression: Option<u8>,
@@ -177,8 +167,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// initialization. The `replay` method can be used
     /// to iterate over all items in the `Journal`.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        let blob_cfg = cfg.to_blob_manager_config();
-        let manager = BlobManager::init(context, blob_cfg).await?;
+        let manager_cfg = ManagerConfig {
+            partition: cfg.partition,
+            factory: AppendFactory {
+                write_buffer: cfg.write_buffer,
+                pool_ref: cfg.buffer_pool,
+            },
+        };
+        let manager = Manager::init(context, manager_cfg).await?;
 
         Ok(Self {
             manager,

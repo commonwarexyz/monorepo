@@ -1,7 +1,7 @@
 //! A prunable key-value store for ordered data.
 //!
 //! Data is stored across two backends: an **index journal** ([crate::journal::segmented::fixed])
-//! for fixed-size index entries and a **value blob** ([crate::archive::blob::Blob])
+//! for fixed-size index entries and a **value glob** ([crate::journal::segmented::glob::Glob])
 //! for values. The location of written data is stored in-memory by both index and key (via
 //! [crate::index::unordered::Index]) to enable **single-read lookups** for both query patterns over
 //! archived data.
@@ -63,8 +63,8 @@
 //! item in the linked list instead of a pointer to the first item._
 //!
 //! `index` is the key to the map used to serve lookups by `index` that stores the location of data
-//! in a given `Blob` (selected by `section = index & section_mask` to minimize the number of open
-//! [crate::archive::blob::Blob]s):
+//! in a given `Glob` (selected by `section = index & section_mask` to minimize the number of open
+//! [crate::journal::segmented::glob::Glob]s):
 //!
 //! ```rust
 //! struct Location {

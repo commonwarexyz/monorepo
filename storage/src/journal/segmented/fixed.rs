@@ -33,12 +33,14 @@
 //! All data must be assigned to a `section`. This allows pruning entire sections
 //! (and their corresponding blobs) independently.
 
-use super::blob_manager::BlobManager;
-pub use super::blob_manager::Config;
+use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use bytes::BufMut;
 use commonware_codec::{CodecFixed, DecodeExt as _, FixedSize};
-use commonware_runtime::{buffer::Read, Blob, Error as RError, Metrics, Storage};
+use commonware_runtime::{
+    buffer::{PoolRef, Read},
+    Blob, Error as RError, Metrics, Storage,
+};
 use futures::{
     stream::{self, Stream},
     StreamExt,
@@ -46,12 +48,25 @@ use futures::{
 use std::{marker::PhantomData, num::NonZeroUsize};
 use tracing::{trace, warn};
 
+/// Configuration for the fixed segmented journal.
+#[derive(Clone)]
+pub struct Config {
+    /// The partition to use for storing blobs.
+    pub partition: String,
+
+    /// The buffer pool to use for caching data.
+    pub buffer_pool: PoolRef,
+
+    /// The size of the write buffer to use for each blob.
+    pub write_buffer: NonZeroUsize,
+}
+
 /// A segmented journal with fixed-size entries.
 ///
 /// Each section is stored in a separate blob. Within each blob, items are
 /// fixed-size with a CRC32 checksum appended.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
-    manager: BlobManager<E>,
+    manager: Manager<E, AppendFactory>,
     _array: PhantomData<A>,
 }
 
@@ -69,7 +84,14 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     ///
     /// Corrupted trailing data in blobs is automatically truncated during replay.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
-        let manager = BlobManager::init(context, cfg).await?;
+        let manager_cfg = ManagerConfig {
+            partition: cfg.partition,
+            factory: AppendFactory {
+                write_buffer: cfg.write_buffer,
+                pool_ref: cfg.buffer_pool,
+            },
+        };
+        let manager = Manager::init(context, manager_cfg).await?;
         Ok(Self {
             manager,
             _array: PhantomData,

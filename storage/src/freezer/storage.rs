@@ -1,7 +1,9 @@
 use super::{Config, Error, Identifier};
 use crate::{
-    archive::blob::Blob as ValueBlob,
-    journal::segmented::fixed::{Config as FixedJournalConfig, Journal as FixedJournal},
+    journal::segmented::{
+        fixed::{Config as FixedJournalConfig, Journal as FixedJournal},
+        glob::{Config as GlobConfig, Glob},
+    },
     kv, Persistable,
 };
 use bytes::{Buf, BufMut};
@@ -385,7 +387,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     key_index: FixedJournal<E, KeyEntry<K>>,
 
     // Blob storage for values (direct reads, no buffer pool)
-    value_blob: ValueBlob<E, V>,
+    glob: Glob<E, V>,
 
     // Target size for value blob sections
     blob_target_size: u64,
@@ -633,15 +635,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             FixedJournal::init(context.with_label("key_index"), key_index_config).await?;
 
         // Initialize value blob storage
-        let mut value_blob = ValueBlob::init(
-            context.with_label("value_blob"),
-            config.value_journal_partition.clone(),
-            config.value_journal_compression,
-            config.value_journal_write_buffer,
-            config.codec_config,
-        )
-        .await
-        .map_err(Error::Journal)?;
+        let glob_config = GlobConfig {
+            partition: config.value_journal_partition.clone(),
+            compression: config.value_journal_compression,
+            codec_config: config.codec_config,
+            write_buffer: config.value_journal_write_buffer,
+        };
+        let mut glob = Glob::init(context.with_label("glob"), glob_config)
+            .await
+            .map_err(Error::Journal)?;
 
         // Open table blob
         let (table, table_len) = context
@@ -678,7 +680,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 // Rewind both journals to the committed section and offset
                 let (key_rewind, value_rewind) = join(
                     key_index.rewind(checkpoint.section, checkpoint.key_index_size),
-                    value_blob.rewind(checkpoint.section, checkpoint.value_journal_size),
+                    glob.rewind(checkpoint.section, checkpoint.value_journal_size),
                 )
                 .await;
                 key_rewind?;
@@ -687,7 +689,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 // Sync both journals
                 let (key_sync, value_sync) = join(
                     key_index.sync(checkpoint.section),
-                    value_blob.sync(checkpoint.section),
+                    glob.sync(checkpoint.section),
                 )
                 .await;
                 key_sync?;
@@ -746,10 +748,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                         epoch: max_epoch,
                         section: max_section,
                         key_index_size: key_index.size(max_section).await?,
-                        value_journal_size: value_blob
-                            .size(max_section)
-                            .await
-                            .map_err(Error::Journal)?,
+                        value_journal_size: glob.size(max_section).await.map_err(Error::Journal)?,
                         table_size,
                     },
                     resizable,
@@ -790,7 +789,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
             key_index,
-            value_blob,
+            glob,
             blob_target_size: config.value_journal_target_size,
             current_section: checkpoint.section,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
@@ -831,7 +830,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     async fn update_section(&mut self) -> Result<(), Error> {
         // Get the current value blob section size
         let size = self
-            .value_blob
+            .glob
             .size(self.current_section)
             .await
             .map_err(Error::Journal)?;
@@ -860,7 +859,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Write value to blob storage (returns offset and size)
         let (value_offset, value_size) = self
-            .value_blob
+            .glob
             .append(self.current_section, &value)
             .await
             .map_err(Error::Journal)?;
@@ -924,7 +923,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     async fn get_cursor(&self, cursor: Cursor) -> Result<V, Error> {
         // Read value directly from blob storage
         let value = self
-            .value_blob
+            .glob
             .get(cursor.section(), cursor.offset(), cursor.size())
             .await
             .map_err(Error::Journal)?;
@@ -952,7 +951,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             if key_entry.key.as_ref() == key.as_ref() {
                 // Read value from blob storage (direct, single read using known size)
                 let value = self
-                    .value_blob
+                    .glob
                     .get(section, key_entry.value_offset, key_entry.value_size)
                     .await
                     .map_err(Error::Journal)?;
@@ -1090,21 +1089,22 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// Each sync will process up to `table_resize_chunk_size` entries until the resize
     /// is complete.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
-        // Sync all modified sections
-        let mut key_updates = Vec::with_capacity(self.modified_sections.len());
-        for section in &self.modified_sections {
-            key_updates.push(self.key_index.sync(*section));
-        }
-        let key_results = try_join_all(key_updates).await;
-        key_results?;
+        // Sync all modified sections concurrently for both key_index and glob
+        let key_syncs: Vec<_> = self
+            .modified_sections
+            .iter()
+            .map(|section| self.key_index.sync(*section))
+            .collect();
+        let value_syncs: Vec<_> = self
+            .modified_sections
+            .iter()
+            .map(|section| self.glob.sync(*section))
+            .collect();
 
-        // Sync value blob sections sequentially (blob.sync needs &mut self)
-        for section in &self.modified_sections {
-            self.value_blob
-                .sync(*section)
-                .await
-                .map_err(Error::Journal)?;
-        }
+        let (key_results, value_results) =
+            join(try_join_all(key_syncs), try_join_all(value_syncs)).await;
+        key_results?;
+        value_results.map_err(Error::Journal)?;
         self.modified_sections.clear();
 
         // Start a resize (if needed)
@@ -1122,15 +1122,20 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let stored_epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
 
+        // Get sizes concurrently
+        let (key_index_size, value_journal_size) = join(
+            self.key_index.size(self.current_section),
+            self.glob.size(self.current_section),
+        )
+        .await;
+        let key_index_size = key_index_size?;
+        let value_journal_size = value_journal_size.map_err(Error::Journal)?;
+
         Ok(Checkpoint {
             epoch: stored_epoch,
             section: self.current_section,
-            key_index_size: self.key_index.size(self.current_section).await?,
-            value_journal_size: self
-                .value_blob
-                .size(self.current_section)
-                .await
-                .map_err(Error::Journal)?,
+            key_index_size,
+            value_journal_size,
             table_size: self.table_size,
         })
     }
@@ -1151,8 +1156,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// Close and remove any underlying blobs created by the [Freezer].
     pub async fn destroy(self) -> Result<(), Error> {
         // Destroy key index and value blob
-        let (key_result, value_result) =
-            join(self.key_index.destroy(), self.value_blob.destroy()).await;
+        let (key_result, value_result) = join(self.key_index.destroy(), self.glob.destroy()).await;
         key_result?;
         value_result.map_err(Error::Journal)?;
 

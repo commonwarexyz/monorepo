@@ -8,7 +8,6 @@ use commonware_utils::Array;
 use std::future::Future;
 use thiserror::Error;
 
-pub mod blob;
 pub mod immutable;
 pub mod prunable;
 

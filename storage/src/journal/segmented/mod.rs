@@ -3,9 +3,8 @@
 //! This module provides journal implementations that organize data into sections,
 //! where each section is stored in a separate blob.
 
-mod blob_manager;
+mod manager;
 
 pub mod fixed;
+pub mod glob;
 pub mod variable;
-
-pub use blob_manager::{BlobManager, Config as BlobManagerConfig};

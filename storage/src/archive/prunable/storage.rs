@@ -1,8 +1,11 @@
 use super::{Config, Translator};
 use crate::{
-    archive::{blob::Blob as ValueBlob, Error, Identifier},
+    archive::{Error, Identifier},
     index::{unordered::Index, Unordered},
-    journal::segmented::fixed::{Config as FixedJournalConfig, Journal as FixedJournal},
+    journal::segmented::{
+        fixed::{Config as FixedJournalConfig, Journal as FixedJournal},
+        glob::{Config as GlobConfig, Glob},
+    },
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};
@@ -92,7 +95,7 @@ where
 ///
 /// Uses two storage backends:
 /// - **index_journal**: Fixed-size entries containing (index, key, value_offset, value_size)
-/// - **value_blob**: Raw blob storage for values (no size prefix, CRC32 checksums)
+/// - **glob**: Raw blob storage for values (no size prefix, CRC32 checksums)
 ///
 /// This separation provides:
 /// - Fast startup replay (only reads index journal, no values)
@@ -105,7 +108,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     index_journal: FixedJournal<E, IndexEntry<K>>,
 
     /// Blob storage for values (direct reads bypass buffer pool).
-    value_blob: ValueBlob<E, V>,
+    glob: Glob<E, V>,
 
     pending: BTreeSet<u64>,
 
@@ -151,15 +154,15 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             FixedJournal::init(context.with_label("index_journal"), index_journal_cfg).await?;
 
         // Initialize value blob storage
-        let value_blob = ValueBlob::init(
-            context.with_label("value_blob"),
-            cfg.value_partition,
-            cfg.compression,
-            cfg.write_buffer,
-            cfg.codec_config,
-        )
-        .await
-        .map_err(Error::Journal)?;
+        let glob_cfg = GlobConfig {
+            partition: cfg.value_partition,
+            compression: cfg.compression,
+            codec_config: cfg.codec_config,
+            write_buffer: cfg.write_buffer,
+        };
+        let glob = Glob::init(context.with_label("glob"), glob_cfg)
+            .await
+            .map_err(Error::Journal)?;
 
         // Initialize keys and replay index journal (no values read!)
         let mut indices = BTreeMap::new();
@@ -170,7 +173,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             let stream = index_journal.replay(0, cfg.replay_buffer).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
-                let (section, position, entry) = result?;
+                let (_section, position, entry) = result?;
 
                 // Store index location (position in index journal, value_offset, value_size)
                 indices.insert(
@@ -183,16 +186,6 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
                 // Store index in intervals
                 intervals.insert(entry.index);
-
-                // Verify section matches expected section
-                let expected_section =
-                    (entry.index / cfg.items_per_section.get()) * cfg.items_per_section.get();
-                if section != expected_section {
-                    debug!(
-                        index = entry.index,
-                        section, expected_section, "section mismatch during replay"
-                    );
-                }
             }
             debug!("archive initialized");
         }
@@ -228,7 +221,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         Ok(Self {
             items_per_section: cfg.items_per_section.get(),
             index_journal,
-            value_blob,
+            glob,
             pending: BTreeSet::new(),
             oldest_allowed: None,
             indices,
@@ -256,7 +249,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         // Fetch value directly from blob storage (bypasses buffer pool)
         let section = self.section(index);
         let value = self
-            .value_blob
+            .glob
             .get(section, value_offset, value_size)
             .await
             .map_err(Error::Journal)?;
@@ -288,7 +281,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             if entry.key.as_ref() == key.as_ref() {
                 // Fetch value directly from blob storage (bypasses buffer pool)
                 let value = self
-                    .value_blob
+                    .glob
                     .get(section, value_offset, value_size)
                     .await
                     .map_err(Error::Journal)?;
@@ -326,7 +319,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Prune index journal and value blob
         let (index_result, value_result) =
-            join(self.index_journal.prune(min), self.value_blob.prune(min)).await;
+            join(self.index_journal.prune(min), self.glob.prune(min)).await;
         index_result.map_err(Error::Journal)?;
         value_result.map_err(Error::Journal)?;
 
@@ -382,7 +375,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
         // Write value to blob storage (returns offset and size)
         let section = self.section(index);
         let (value_offset, value_size) = self
-            .value_blob
+            .glob
             .append(section, &data)
             .await
             .map_err(Error::Journal)?;
@@ -426,24 +419,26 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        // Collect pending sections
+        // Collect pending sections and update metrics
         let pending: Vec<u64> = self.pending.iter().copied().collect();
-
-        // Sync index journal concurrently
-        let mut index_syncs = Vec::with_capacity(pending.len());
-        for section in pending.iter() {
-            index_syncs.push(self.index_journal.sync(*section));
+        for _ in &pending {
             self.syncs.inc();
         }
-        futures::future::try_join_all(index_syncs).await?;
 
-        // Sync value blob sections sequentially (requires &mut self)
-        for section in pending.iter() {
-            self.value_blob
-                .sync(*section)
-                .await
-                .map_err(Error::Journal)?;
-        }
+        // Sync index journal and value blob concurrently
+        let index_syncs: Vec<_> = pending
+            .iter()
+            .map(|s| self.index_journal.sync(*s))
+            .collect();
+        let value_syncs: Vec<_> = pending.iter().map(|s| self.glob.sync(*s)).collect();
+
+        let (index_results, value_results) = join(
+            futures::future::try_join_all(index_syncs),
+            futures::future::try_join_all(value_syncs),
+        )
+        .await;
+        index_results?;
+        value_results.map_err(Error::Journal)?;
 
         self.pending.clear();
         Ok(())
@@ -472,7 +467,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
     async fn destroy(self) -> Result<(), Error> {
         // Destroy index journal and value blob
         let (index_result, value_result) =
-            join(self.index_journal.destroy(), self.value_blob.destroy()).await;
+            join(self.index_journal.destroy(), self.glob.destroy()).await;
         index_result.map_err(Error::Journal)?;
         value_result.map_err(Error::Journal)?;
         Ok(())
