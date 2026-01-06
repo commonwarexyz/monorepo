@@ -356,7 +356,7 @@ where
                                             )
                                             .await;
                                         if let Some(ack) = response {
-                                            let payload = Message::<V, C::PublicKey>::Ack(ack).encode().freeze();
+                                            let payload = Message::<V, C::PublicKey>::Ack(ack).encode();
                                             if let Err(e) = round_sender
                                                 .send(Recipients::One(sender_pk.clone()), payload, true)
                                                 .await
@@ -400,7 +400,7 @@ where
                             let block_epoch = bounds.epoch();
                             let phase = bounds.phase();
                             let relative_height = bounds.relative();
-                            info!(epoch = %block_epoch, relative_height, "processing finalized block");
+                            info!(epoch = %block_epoch, relative_height = %relative_height, "processing finalized block");
 
                             // Skip blocks from previous epochs (can happen on restart if we
                             // persisted state but crashed before acknowledging)
@@ -574,9 +574,7 @@ where
             }
 
             // Send to remote player
-            let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg)
-                .encode()
-                .freeze();
+            let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg).encode();
             match sender
                 .send(Recipients::One(player.clone()), payload, true)
                 .await

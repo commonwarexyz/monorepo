@@ -525,7 +525,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Write the new entry
         table
-            .write_at(update.encode(), table_offset + start)
+            .write_at(update.encode_mut(), table_offset + start)
             .await
             .map_err(Error::Runtime)
     }

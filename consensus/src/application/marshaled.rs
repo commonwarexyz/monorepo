@@ -367,7 +367,7 @@ where
                 // a re-proposal of the boundary block.
                 let Some(block_bounds) = epocher.containing(block.height()) else {
                     debug!(
-                        height = block.height(),
+                        height = %block.height(),
                         "block height not covered by epoch strategy"
                     );
                     let _ = tx.send(false);
@@ -390,10 +390,10 @@ where
                 }
 
                 // Validate that heights are contiguous.
-                if parent.height().checked_add(1) != Some(block.height()) {
+                if parent.height().next() != block.height() {
                     debug!(
-                        parent_height = parent.height(),
-                        block_height = block.height(),
+                        parent_height = %parent.height(),
+                        block_height = %block.height(),
                         "block height is not contiguous with parent height"
                     );
                     let _ = tx.send(false);
@@ -468,7 +468,7 @@ where
             warn!(
                 round = %round,
                 commitment = %block.commitment(),
-                height = block.height(),
+                height = %block.height(),
                 "skipping requested broadcast of block with mismatched commitment"
             );
             return;
@@ -477,7 +477,7 @@ where
         debug!(
             round = %round,
             commitment = %block.commitment(),
-            height = block.height(),
+            height = %block.height(),
             "requested broadcast of built block"
         );
         self.marshal.proposed(round, block).await;

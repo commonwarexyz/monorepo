@@ -253,7 +253,7 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(1u32);
 
-        let mut encoded = set.encode();
+        let mut encoded = set.encode_mut();
         encoded.put_u8(0xFF); // Add extra byte
 
         // Use decode_cfg which enforces buffer is fully consumed

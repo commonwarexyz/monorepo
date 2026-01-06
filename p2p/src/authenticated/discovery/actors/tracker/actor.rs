@@ -348,7 +348,7 @@ mod tests {
         let mut signature = signer.sign(ip_namespace, &(ingress.clone(), timestamp).encode());
 
         if make_sig_invalid && !signature.as_ref().is_empty() {
-            let mut sig_bytes = signature.encode();
+            let mut sig_bytes = signature.encode_mut();
             sig_bytes[0] = sig_bytes[0].wrapping_add(1);
             signature = Signature::decode(sig_bytes).unwrap();
         }

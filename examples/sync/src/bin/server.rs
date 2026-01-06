@@ -346,8 +346,8 @@ where
         outgoing = response_receiver.next() => {
             if let Some(response) = outgoing {
                 // We have a response to send to the client.
-                let response_data = response.encode().to_vec();
-                if let Err(err) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
+                let response_data = response.encode();
+                if let Err(err) = send_frame(&mut sink, response_data, MAX_MESSAGE_SIZE).await {
                     info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
                     state.error_counter.inc();
                     return Ok(());
