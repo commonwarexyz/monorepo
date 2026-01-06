@@ -20,7 +20,7 @@ use core::{
     mem::ManuallyDrop,
 };
 use subtle::ConstantTimeEq;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Zeroize memory at the given pointer using volatile writes.
 ///
@@ -135,7 +135,13 @@ impl<const N: usize> Eq for Secret<[u8; N]> {}
 
 impl PartialEq for Secret<Scalar> {
     fn eq(&self, other: &Self) -> bool {
-        self.expose(|a| other.expose(|b| a.as_slice().ct_eq(&b.as_slice()).into()))
+        self.expose(|a| {
+            other.expose(|b| {
+                let a = Zeroizing::new(a.as_slice());
+                let b = Zeroizing::new(b.as_slice());
+                a.ct_eq(&*b).into()
+            })
+        })
     }
 }
 
