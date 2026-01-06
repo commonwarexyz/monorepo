@@ -364,11 +364,9 @@ cfg_if! {
         ///
         /// ```rust
         /// use commonware_parallel::{Strategy, Rayon};
-        /// use rayon::ThreadPoolBuilder;
-        /// use std::sync::Arc;
+        /// use std::num::NonZeroUsize;
         ///
-        /// let pool = Arc::new(ThreadPoolBuilder::new().num_threads(2).build().unwrap());
-        /// let strategy = Rayon::new(pool);
+        /// let strategy = Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap();
         ///
         /// let data: Vec<i64> = (0..1000).collect();
         /// let sum = strategy.fold(&data, || 0i64, |acc, &n| acc + n, |a, b| a + b);
