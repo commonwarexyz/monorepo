@@ -1204,6 +1204,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-math",
  "commonware-parallel",
+ "commonware-utils",
  "ed25519-zebra",
  "libfuzzer-sys",
  "p256",

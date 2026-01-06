@@ -17,8 +17,7 @@ use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Additive;
-#[cfg(feature = "std")]
-use rayon::{prelude::*, ThreadPoolBuilder};
+use commonware_parallel::Strategy;
 
 /// An aggregated public key from multiple individual public keys.
 ///
@@ -224,60 +223,28 @@ where
 
 /// Combines multiple messages into a single message hash.
 ///
-/// When `concurrency > 1` and the `std` feature is enabled, this function uses
-/// parallel processing via rayon.
-///
 /// # Warning
 ///
 /// It is not safe to provide duplicate messages.
-pub fn combine_messages<'a, V, I>(
-    messages: I,
-    #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
-) -> Message<V>
+pub fn combine_messages<'a, V, I>(messages: I, strategy: &impl Strategy) -> Message<V>
 where
     V: Variant,
-    I: IntoIterator<Item = &'a (&'a [u8], &'a [u8])> + Send + Sync,
-    I::IntoIter: Send + Sync,
+    I: IntoIterator<Item = &'a (&'a [u8], &'a [u8])> + Send,
+    I::IntoIter: Send,
 {
-    #[cfg(not(feature = "std"))]
-    {
-        let mut sum = Message::zero();
-        for (namespace, msg) in messages {
-            sum.add(&hash_with_namespace::<V>(V::MESSAGE, namespace, msg));
-        }
-        sum
-    }
-
-    #[cfg(feature = "std")]
-    {
-        if concurrency == 1 {
-            let mut sum = Message::zero();
-            for (namespace, msg) in messages {
-                sum.add(&hash_with_namespace::<V>(V::MESSAGE, namespace, msg));
-            }
+    strategy.fold(
+        messages,
+        Message::zero,
+        |mut sum, (namespace, msg)| {
+            let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, msg);
+            sum.add(&hm);
             sum
-        } else {
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(concurrency)
-                .build()
-                .expect("unable to build thread pool");
-
-            pool.install(move || {
-                messages
-                    .into_iter()
-                    .par_bridge()
-                    .fold(Message::zero, |mut sum, (namespace, msg)| {
-                        let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, msg);
-                        sum.add(&hm);
-                        sum
-                    })
-                    .reduce(Message::zero, |mut a, b| {
-                        a.combine(&b);
-                        a
-                    })
-            })
-        }
-    }
+        },
+        |mut a, b| {
+            a.combine(&b);
+            a
+        },
+    )
 }
 
 /// Verifies the aggregate signature over a single message from multiple public keys.
@@ -337,7 +304,8 @@ mod tests {
     };
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
-    use commonware_utils::{test_rng, union_unique};
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::{test_rng, union_unique, NZUsize};
 
     fn blst_aggregate_verify_same_message<'a, V, I>(
         public: I,
@@ -514,11 +482,12 @@ mod tests {
 
         let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
 
-        let combined_msg = aggregate::combine_messages::<V, _>(&messages, 1);
+        let combined_msg = aggregate::combine_messages::<V, _>(&messages, &Sequential);
         aggregate::verify_same_signer::<V>(&public, &combined_msg, &aggregate_sig)
             .expect("Aggregated signature should be valid");
 
-        let combined_msg_parallel = aggregate::combine_messages::<V, _>(&messages, 4);
+        let parallel = Rayon::new(NZUsize!(4)).unwrap();
+        let combined_msg_parallel = aggregate::combine_messages::<V, _>(&messages, &parallel);
         aggregate::verify_same_signer::<V>(&public, &combined_msg_parallel, &aggregate_sig)
             .expect("Aggregated signature should be valid with parallelism");
 
