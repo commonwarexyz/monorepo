@@ -77,8 +77,53 @@ impl QmdbChanges {
             if !account.is_touched() {
                 continue;
             }
-            self.accounts
-                .insert(*address, account_update_from_evm_account(account));
+            let update = account_update_from_evm_account(account);
+            match self.accounts.entry(*address) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(update);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().merge(update);
+                }
+            }
+        }
+    }
+}
+
+impl AccountUpdate {
+    fn merge(&mut self, update: AccountUpdate) {
+        let AccountUpdate {
+            created,
+            selfdestructed,
+            nonce,
+            balance,
+            code_hash,
+            code,
+            storage,
+        } = update;
+
+        if created {
+            self.storage.clear();
+            self.created = true;
+        }
+
+        if selfdestructed {
+            self.storage.clear();
+        }
+
+        self.selfdestructed = selfdestructed;
+        self.nonce = nonce;
+        self.balance = balance;
+
+        if self.code_hash != code_hash || code.is_some() {
+            self.code = code;
+        }
+        self.code_hash = code_hash;
+
+        if !selfdestructed {
+            for (slot, value) in storage {
+                self.storage.insert(slot, value);
+            }
         }
     }
 }
