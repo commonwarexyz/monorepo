@@ -2,8 +2,7 @@
 
 use crate::{Error, Read};
 use ::bytes::Buf;
-#[cfg(feature = "std")]
-use std::cmp::Ordering;
+use core::cmp::Ordering;
 
 pub mod btree_map;
 pub mod btree_set;
@@ -19,7 +18,6 @@ pub mod tuple;
 pub mod vec;
 
 /// Read items from [Buf] in ascending order.
-#[cfg(feature = "std")]
 fn read_ordered_set<K, F>(
     buf: &mut impl Buf,
     len: usize,
