@@ -60,7 +60,7 @@ use core::fmt;
 cfg_if! {
     if #[cfg(feature = "std")] {
         use rayon::{
-            iter::{ParallelBridge, ParallelIterator},
+            iter::{IntoParallelIterator, ParallelIterator},
             ThreadPool,
         };
         use std::sync::Arc;
@@ -407,35 +407,26 @@ cfg_if! {
                 RD: Fn(R, R) -> R + Send + Sync,
             {
                 self.thread_pool.install(|| {
-                    // Enumerate items to track their original positions for order preservation.
-                    // par_bridge() doesn't preserve order, so we sort by index after processing.
-                    let mut indexed_results: Vec<(usize, R)> = iter
-                        .into_iter()
-                        .enumerate()
-                        .par_bridge()
+                    // Collecting into a vec first enables `into_par_iter()` which provides
+                    // contiguous partitions. This allows each partition to accumulate with
+                    // `fold_op`, producing ~num_threads intermediate R values instead of N.
+                    // The final reduce then merges ~num_threads results instead of N.
+                    //
+                    // Alternative approaches like `par_bridge()` don't provide contiguous
+                    // partitions, which forces each item to produce its own R value that
+                    // must then be reduced one-by-one.
+                    let items: Vec<I::Item> = iter.into_iter().collect();
+                    items
+                        .into_par_iter()
                         .fold(
-                            || (init(), Vec::new()),
-                            |(mut init_val, mut results), (idx, item)| {
-                                let single_result = fold_op(identity(), &mut init_val, item);
-                                results.push((idx, single_result));
-                                (init_val, results)
+                            || (init(), identity()),
+                            |(mut init_val, acc), item| {
+                                let new_acc = fold_op(acc, &mut init_val, item);
+                                (init_val, new_acc)
                             },
                         )
-                        .map(|(_, results)| results)
-                        .reduce(Vec::new, |mut a, b| {
-                            a.extend(b);
-                            a
-                        });
-
-                    // Sort by original index to restore ordering
-                    indexed_results.sort_by_key(|(idx, _)| *idx);
-
-                    // Reduce in order
-                    indexed_results
-                        .into_iter()
-                        .map(|(_, r)| r)
-                        .reduce(reduce_op)
-                        .unwrap_or_else(identity)
+                        .map(|(_, acc)| acc)
+                        .reduce(&identity, reduce_op)
                 })
             }
         }
