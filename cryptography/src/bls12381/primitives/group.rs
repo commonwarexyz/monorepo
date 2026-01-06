@@ -45,8 +45,8 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
     ptr,
 };
+use ctutils::CtEq;
 use rand_core::CryptoRngCore;
-use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
@@ -350,13 +350,11 @@ impl Hash for Scalar {
     }
 }
 
-impl PartialEq for Secret<Scalar> {
-    fn eq(&self, other: &Self) -> bool {
-        self.expose(|a| other.expose(|b| a.0.l.ct_eq(&b.0.l)).into())
+impl CtEq for Scalar {
+    fn ct_eq(&self, other: &Self) -> ctutils::Choice {
+        self.0.l.ct_eq(&other.0.l)
     }
 }
-
-impl Eq for Secret<Scalar> {}
 
 impl PartialOrd for Scalar {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {

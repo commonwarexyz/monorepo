@@ -18,7 +18,7 @@ use core::{
     fmt::{Debug, Display, Formatter},
     mem::ManuallyDrop,
 };
-use subtle::ConstantTimeEq;
+use ctutils::CtEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Zeroize memory at the given pointer using volatile writes.
@@ -128,13 +128,13 @@ impl<T: Clone> Clone for Secret<T> {
     }
 }
 
-impl<const N: usize> PartialEq for Secret<[u8; N]> {
+impl<T: CtEq> PartialEq for Secret<T> {
     fn eq(&self, other: &Self) -> bool {
         self.expose(|a| other.expose(|b| a.ct_eq(b).into()))
     }
 }
 
-impl<const N: usize> Eq for Secret<[u8; N]> {}
+impl<T: CtEq> Eq for Secret<T> {}
 
 #[cfg(test)]
 mod tests {
