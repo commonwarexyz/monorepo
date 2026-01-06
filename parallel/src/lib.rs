@@ -61,7 +61,7 @@ use core::fmt;
 cfg_if! {
     if #[cfg(feature = "std")] {
         use rayon::{
-            iter::{IntoParallelIterator, ParallelIterator},
+            iter::{ParallelBridge, ParallelIterator},
             ThreadPool,
         };
         use std::sync::Arc;
@@ -126,7 +126,7 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
         reduce_op: RD,
     ) -> R
     where
-        I: IntoStrategyIterator + Send,
+        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
         INIT: Fn() -> T + Send + Sync,
         T: Send,
         R: Send,
@@ -167,7 +167,7 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
     /// ```
     fn fold<I, R, ID, F, RD>(&self, iter: I, identity: ID, fold_op: F, reduce_op: RD) -> R
     where
-        I: IntoStrategyIterator + Send,
+        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
         R: Send,
         ID: Fn() -> R + Send + Sync,
         F: Fn(R, I::Item) -> R + Send + Sync,
@@ -207,7 +207,7 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
     /// ```
     fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
     where
-        I: IntoStrategyIterator + Send,
+        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
         F: Fn(I::Item) -> T + Send + Sync,
         T: Send,
     {
@@ -260,7 +260,7 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
     /// ```
     fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
     where
-        I: IntoStrategyIterator + Send,
+        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
         INIT: Fn() -> T + Send + Sync,
         T: Send,
         F: Fn(&mut T, I::Item) -> R + Send + Sync,
@@ -322,85 +322,6 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
         RO: Send;
 }
 
-/// A trait for types that can be converted into a parallel iterator.
-///
-/// This trait extends [`IntoIterator`] to also support conversion into a parallel
-/// iterator when the `std` feature is enabled. It serves as a bridge between
-/// standard iterators and rayon's parallel iterators.
-///
-/// # Feature Flags
-///
-/// - With `std`: Provides [`into_par_iter`](IntoStrategyIterator::into_par_iter)
-///   for parallel iteration
-/// - Without `std`: Acts as a marker trait with no additional methods
-///
-/// # Blanket Implementation
-///
-/// This trait is automatically implemented for all types that implement both
-/// [`IntoIterator`] and rayon's [`IntoParallelIterator`] (when `std` is enabled).
-/// This includes common collection types like `Vec<T>`, `&[T]`, ranges, etc.
-///
-/// # Examples
-///
-/// ```
-/// use commonware_parallel::IntoStrategyIterator;
-///
-/// // Vec implements IntoStrategyIterator
-/// let vec = vec![1, 2, 3];
-/// let _iter = vec.into_iter(); // Can use as regular iterator
-///
-/// // Slices also implement it
-/// let slice: &[i32] = &[1, 2, 3];
-/// let _iter = slice.into_iter();
-///
-/// // Ranges work too
-/// let range = 0..100;
-/// let _iter = range.into_iter();
-/// ```
-pub trait IntoStrategyIterator: IntoIterator {
-    cfg_if! {
-        if #[cfg(feature = "std")] {
-            /// The parallel iterator type that this converts into.
-            ///
-            /// This is the type returned by [`into_par_iter`](Self::into_par_iter).
-            type ParIter: ParallelIterator<Item = <Self as IntoIterator>::Item>;
-
-            /// Converts this type into a parallel iterator.
-            ///
-            /// This is used by [`Parallel::fold`] to enable parallel processing of the
-            /// collection.
-            ///
-            /// # Examples
-            ///
-            /// ```
-            /// use commonware_parallel::IntoStrategyIterator;
-            /// use rayon::iter::ParallelIterator;
-            ///
-            /// let data = vec![1, 2, 3, 4, 5];
-            /// let sum: i32 = data.into_par_iter().sum();
-            /// assert_eq!(sum, 15);
-            /// ```
-            fn into_par_iter(self) -> Self::ParIter;
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl<T> IntoStrategyIterator for T
-where
-    T: IntoIterator,
-    T: IntoParallelIterator<Item = <T as IntoIterator>::Item>,
-{
-    type ParIter = <T as IntoParallelIterator>::Iter;
-
-    fn into_par_iter(self) -> Self::ParIter {
-        IntoParallelIterator::into_par_iter(self)
-    }
-}
-
-#[cfg(not(feature = "std"))]
-impl<T> IntoStrategyIterator for T where T: IntoIterator {}
-
 /// A sequential execution strategy.
 ///
 /// This strategy executes all operations on the current thread without any
@@ -435,7 +356,7 @@ impl Strategy for Sequential {
         _reduce_op: RD,
     ) -> R
     where
-        I: IntoStrategyIterator + Send,
+        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
         INIT: Fn() -> T + Send + Sync,
         T: Send,
         R: Send,
@@ -528,7 +449,7 @@ cfg_if! {
                 reduce_op: RD,
             ) -> R
             where
-                I: IntoStrategyIterator + Send,
+                I: IntoIterator<IntoIter: Send, Item: Send> + Send,
                 INIT: Fn() -> T + Send + Sync,
                 T: Send,
                 R: Send,
@@ -537,28 +458,34 @@ cfg_if! {
                 RD: Fn(R, R) -> R + Send + Sync,
             {
                 self.thread_pool.install(|| {
-                    // Use Option<R> to track whether any elements were processed,
-                    // matching the same fix applied to fold() for empty collection handling.
-                    iter.into_par_iter()
+                    // Enumerate items to track their original positions for order preservation.
+                    // par_bridge() doesn't preserve order, so we sort by index after processing.
+                    let mut indexed_results: Vec<(usize, R)> = iter
+                        .into_iter()
+                        .enumerate()
+                        .par_bridge()
                         .fold(
-                            || (None, init()),
-                            |(acc, mut init_val), item| {
-                                let new_acc = Some(match acc {
-                                    Some(a) => fold_op(a, &mut init_val, item),
-                                    None => fold_op(identity(), &mut init_val, item),
-                                });
-                                (new_acc, init_val)
+                            || (init(), Vec::new()),
+                            |(mut init_val, mut results), (idx, item)| {
+                                let single_result = fold_op(identity(), &mut init_val, item);
+                                results.push((idx, single_result));
+                                (init_val, results)
                             },
                         )
-                        .map(|(acc, _)| acc)
-                        .reduce(
-                            || None,
-                            |a, b| match (a, b) {
-                                (Some(a), Some(b)) => Some(reduce_op(a, b)),
-                                (i @ Some(_), None) | (None, i @ Some(_)) => i,
-                                (None, None) => None,
-                            },
-                        )
+                        .map(|(_, results)| results)
+                        .reduce(Vec::new, |mut a, b| {
+                            a.extend(b);
+                            a
+                        });
+
+                    // Sort by original index to restore ordering
+                    indexed_results.sort_by_key(|(idx, _)| *idx);
+
+                    // Reduce in order
+                    indexed_results
+                        .into_iter()
+                        .map(|(_, r)| r)
+                        .reduce(|a, b| reduce_op(a, b))
                         .unwrap_or_else(identity)
                 })
             }
