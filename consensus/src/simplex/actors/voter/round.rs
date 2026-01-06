@@ -11,16 +11,6 @@ use std::{
 };
 use tracing::debug;
 
-/// Result of attempting to certify a proposal.
-pub enum CertifyResult<T> {
-    /// Proposal is ready for certification.
-    Ready(T),
-    /// Has notarization but proposal not yet available.
-    Pending,
-    /// Certification not needed (already certified, no notarization, or handle exists).
-    Skip,
-}
-
 /// Tracks the leader of a round.
 #[derive(Debug, Clone)]
 pub struct Leader<P: PublicKey> {
@@ -129,16 +119,23 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Attempt to certify this round's proposal.
-    pub fn should_certify(&mut self) -> CertifyResult<Proposal<D>> {
+    ///
+    /// Returns `Some(proposal)` if ready for certification, `None` otherwise.
+    pub fn try_certify(&mut self) -> Option<Proposal<D>> {
         // Skip if no notarization, already certified, or handle exists
         if self.notarization.is_none() || self.certified.is_some() || self.certify_handle.is_some()
         {
-            return CertifyResult::Skip;
+            return None;
         }
-        self.proposal
-            .proposal()
-            .cloned()
-            .map_or(CertifyResult::Pending, CertifyResult::Ready)
+        self.proposal.proposal().cloned()
+    }
+
+    /// Returns true if certification is pending (has notarization but no proposal yet).
+    pub const fn certify_pending(&self) -> bool {
+        self.notarization.is_some()
+            && self.certified.is_none()
+            && self.certify_handle.is_none()
+            && self.proposal.proposal().is_none()
     }
 
     /// Sets the handle for the certification request.

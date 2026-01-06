@@ -1,4 +1,4 @@
-use super::round::{CertifyResult, Round};
+use super::round::Round;
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
@@ -232,6 +232,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Inserts a notarization certificate and prepares the next view's leader.
     ///
     /// Does not advance into the next view until certification passes.
+    /// Automatically adds to certification candidates if successful.
     pub fn add_notarization(
         &mut self,
         notarization: Notarization<S, D>,
@@ -239,7 +240,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let view = notarization.view();
         // Do not advance to the next view until the certification passes
         self.set_leader(view.next(), Some(&notarization.certificate));
-        self.create_round(view).add_notarization(notarization)
+        let result = self.create_round(view).add_notarization(notarization);
+        if result.0 && view > self.last_finalized {
+            self.certification_candidates.insert(view);
+        }
+        result
     }
 
     /// Inserts a nullification certificate and advances into the next view.
@@ -450,11 +455,20 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Attempt to certify a view's proposal.
-    pub fn try_certify(&mut self, view: View) -> CertifyResult<Proposal<D>> {
-        let Some(round) = self.views.get_mut(&view) else {
-            return CertifyResult::Skip;
-        };
-        round.should_certify()
+    ///
+    /// Returns `Some(proposal)` if ready for certification, `None` otherwise.
+    /// If certification is pending (has notarization but no proposal yet),
+    /// the view is automatically re-added to candidates for later retry.
+    pub fn try_certify(&mut self, view: View) -> Option<Proposal<D>> {
+        let round = self.views.get_mut(&view)?;
+        if let Some(proposal) = round.try_certify() {
+            return Some(proposal);
+        }
+        // Re-add to candidates if pending
+        if round.certify_pending() {
+            self.certification_candidates.insert(view);
+        }
+        None
     }
 
     /// Store the abort handle for an in-flight certification request.
@@ -464,13 +478,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         };
         round.set_certify_handle(handle);
         self.outstanding_certifications.insert(view);
-    }
-
-    /// Adds a view to the set of certification candidates if it's above last finalized.
-    pub fn add_certification_candidate(&mut self, view: View) {
-        if view > self.last_finalized {
-            self.certification_candidates.insert(view);
-        }
     }
 
     /// Takes all certification candidates, returning them and clearing the set.

@@ -1,6 +1,5 @@
 use super::{
     ingress::Message,
-    round::CertifyResult,
     state::{Config as StateConfig, State},
     Config, Mailbox,
 };
@@ -324,21 +323,10 @@ impl<
     }
 
     /// Attempt to certify a proposal for the given view.
-    ///
-    /// If the proposal is not yet available but certification is pending,
-    /// the view is re-added to candidates for later retry.
     async fn try_certify(&mut self, view: View) -> Option<Request<Rnd, bool>> {
-        match self.state.try_certify(view) {
-            CertifyResult::Ready(proposal) => {
-                let receiver = self.automaton.certify(proposal.payload).await;
-                Some(Request(proposal.round, receiver))
-            }
-            CertifyResult::Pending => {
-                self.state.add_certification_candidate(view);
-                None
-            }
-            CertifyResult::Skip => None,
-        }
+        let proposal = self.state.try_certify(view)?;
+        let receiver = self.automaton.certify(proposal.payload).await;
+        Some(Request(proposal.round, receiver))
     }
 
     /// Handle a timeout.
@@ -418,7 +406,6 @@ impl<
         let artifact = Artifact::Notarization(notarization.clone());
         let (added, equivocator) = self.state.add_notarization(notarization);
         if added {
-            self.state.add_certification_candidate(view);
             self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
