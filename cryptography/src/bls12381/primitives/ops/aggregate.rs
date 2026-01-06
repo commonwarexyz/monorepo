@@ -17,8 +17,6 @@ use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Additive;
-#[cfg(feature = "std")]
-use rayon::{prelude::*, ThreadPoolBuilder};
 
 /// An aggregated public key from multiple individual public keys.
 ///
@@ -124,58 +122,6 @@ where
     }
 }
 
-/// A combined message hash from multiple individual messages.
-///
-/// This type is returned by [`combine_messages`] and ensures that
-/// combined message hashes are not confused with individual message hashes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Message<V: Variant>(V::Signature);
-
-impl<V: Variant> Message<V> {
-    /// Creates a zero combined message.
-    pub fn zero() -> Self {
-        Self(V::Signature::zero())
-    }
-
-    /// Adds another hashed message to this one.
-    pub(crate) fn add(&mut self, other: &V::Signature) {
-        self.0 += other;
-    }
-
-    /// Combines another [Message] into this one.
-    pub(crate) fn combine(&mut self, other: &Self) {
-        self.0 += &other.0;
-    }
-}
-
-impl<V: Variant> Write for Message<V> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.0.write(writer);
-    }
-}
-
-impl<V: Variant> Read for Message<V> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self(V::Signature::read(reader)?))
-    }
-}
-
-impl<V: Variant> FixedSize for Message<V> {
-    const SIZE: usize = V::Signature::SIZE;
-}
-
-#[cfg(feature = "arbitrary")]
-impl<V: Variant> arbitrary::Arbitrary<'_> for Message<V>
-where
-    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self(V::Signature::arbitrary(u)?))
-    }
-}
-
 /// Combines multiple public keys into an aggregate public key.
 ///
 /// # Warning
@@ -215,64 +161,6 @@ where
         s.add(sig);
     }
     s
-}
-
-/// Combines multiple messages into a single message hash.
-///
-/// When `concurrency > 1` and the `std` feature is enabled, this function uses
-/// parallel processing via rayon.
-///
-/// # Warning
-///
-/// It is not safe to provide duplicate messages.
-pub fn combine_messages<'a, V, I>(
-    messages: I,
-    #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
-) -> Message<V>
-where
-    V: Variant,
-    I: IntoIterator<Item = &'a (&'a [u8], &'a [u8])> + Send + Sync,
-    I::IntoIter: Send + Sync,
-{
-    #[cfg(not(feature = "std"))]
-    {
-        let mut sum = Message::zero();
-        for (namespace, msg) in messages {
-            sum.add(&hash_with_namespace::<V>(V::MESSAGE, namespace, msg));
-        }
-        sum
-    }
-
-    #[cfg(feature = "std")]
-    {
-        if concurrency == 1 {
-            let mut sum = Message::zero();
-            for (namespace, msg) in messages {
-                sum.add(&hash_with_namespace::<V>(V::MESSAGE, namespace, msg));
-            }
-            sum
-        } else {
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(concurrency)
-                .build()
-                .expect("unable to build thread pool");
-
-            pool.install(move || {
-                messages
-                    .into_iter()
-                    .par_bridge()
-                    .fold(Message::zero, |mut sum, (namespace, msg)| {
-                        let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, msg);
-                        sum.add(&hm);
-                        sum
-                    })
-                    .reduce(Message::zero, |mut a, b| {
-                        a.combine(&b);
-                        a
-                    })
-            })
-        }
-    }
 }
 
 /// Verifies the aggregate signature over a single message from multiple public keys.
@@ -446,7 +334,6 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<PublicKey<MinSig>>,
-            CodecConformance<Message<MinSig>>,
             CodecConformance<Signature<MinSig>>,
         }
     }
