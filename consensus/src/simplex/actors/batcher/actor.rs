@@ -399,12 +399,6 @@ impl<
                         continue;
                     }
 
-                    // Update per-peer latest vote metric (only if higher than current)
-                    let _ = self
-                        .latest_vote
-                        .get_or_create(&Peer::new(&sender))
-                        .try_set_max(message.view().get());
-
                     // If the view isn't interesting, we can skip
                     let view = message.view();
                     if !interesting(
@@ -418,12 +412,19 @@ impl<
                     }
 
                     // Add the vote to the verifier
+                    let peer = Peer::new(&sender);
                     if work
                         .entry(view)
                         .or_insert_with(|| self.new_round())
                         .add_network(sender, message)
                         .await {
                             self.added.inc();
+
+                            // Update per-peer latest vote metric (only if higher than current)
+                            let _ = self
+                                .latest_vote
+                                .get_or_create(&peer)
+                                .try_set_max(view.get());
                         }
                     updated_view = view;
                 },
