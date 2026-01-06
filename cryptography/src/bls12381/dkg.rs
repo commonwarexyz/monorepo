@@ -2395,6 +2395,8 @@ mod test {
     use super::{test_plan::*, *};
     use crate::{bls12381::primitives::variant::MinPk, ed25519};
     use anyhow::anyhow;
+    use commonware_math::algebra::Random;
+    use commonware_utils::test_rng;
     use core::num::NonZeroI32;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
@@ -2568,6 +2570,14 @@ mod test {
         assert!(log1.check(&info).is_none());
 
         Ok(())
+    }
+
+    #[test]
+    fn test_dealer_priv_msg_redacted() {
+        let mut rng = test_rng();
+        let msg = DealerPrivMsg::new(Scalar::random(&mut rng));
+        let debug = format!("{:?}", msg);
+        assert!(debug.contains("REDACTED"));
     }
 
     #[cfg(feature = "arbitrary")]

@@ -404,7 +404,7 @@ impl Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ed25519;
+    use crate::{ed25519, Signer as _};
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
@@ -798,6 +798,29 @@ mod tests {
         }
         let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
         assert!(!public_key.verify_inner(None, &message, &bad_signature));
+    }
+
+    #[test]
+    fn test_from_signing_key() {
+        let signing_key = ed25519_consensus::SigningKey::new(OsRng);
+        let expected_public = signing_key.verification_key();
+        let private_key = PrivateKey::from(signing_key);
+        assert_eq!(private_key.public_key().key, expected_public);
+    }
+
+    #[test]
+    fn test_private_key_redacted() {
+        let private_key = PrivateKey::random(&mut OsRng);
+        let debug = format!("{:?}", private_key);
+        let display = format!("{}", private_key);
+        assert!(debug.contains("REDACTED"));
+        assert!(display.contains("REDACTED"));
+    }
+
+    #[test]
+    fn test_from_private_key_to_public_key() {
+        let private_key = PrivateKey::random(&mut OsRng);
+        assert_eq!(private_key.public_key(), PublicKey::from(private_key));
     }
 
     #[cfg(feature = "arbitrary")]

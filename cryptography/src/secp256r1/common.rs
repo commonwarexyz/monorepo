@@ -799,6 +799,15 @@ pub(crate) mod tests {
         (public_key, sig, message, true)
     }
 
+    #[test]
+    fn test_private_key_redacted() {
+        let private_key = create_private_key();
+        let debug = format!("{:?}", private_key);
+        let display = format!("{}", private_key);
+        assert!(debug.contains("REDACTED"));
+        assert!(display.contains("REDACTED"));
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;

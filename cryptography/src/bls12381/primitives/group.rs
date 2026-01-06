@@ -1565,6 +1565,16 @@ mod tests {
         assert_ne!(s1, s3);
     }
 
+    #[test]
+    fn test_share_redacted() {
+        let mut rng = test_rng();
+        let share = Share::new(1, Scalar::random(&mut rng));
+        let debug = format!("{:?}", share);
+        let display = format!("{}", share);
+        assert!(debug.contains("REDACTED"));
+        assert!(display.contains("REDACTED"));
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;

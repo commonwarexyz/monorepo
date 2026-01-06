@@ -403,8 +403,10 @@ impl BatchVerifier<PublicKey> for Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381;
+    use crate::{bls12381, Signer as _, Verifier as _};
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_math::algebra::Random;
+    use commonware_utils::test_rng;
 
     #[test]
     fn test_codec_private_key() {
@@ -461,6 +463,27 @@ mod tests {
                 .unwrap()
                 .as_ref(),
         )
+    }
+
+    #[test]
+    fn test_from_scalar() {
+        let mut rng = test_rng();
+        let scalar = Scalar::random(&mut rng);
+        let private_key = PrivateKey::from(scalar);
+        // Verify the key works by signing and verifying
+        let msg = b"test message";
+        let sig = private_key.sign(b"ns", msg);
+        assert!(private_key.public_key().verify(b"ns", msg, &sig));
+    }
+
+    #[test]
+    fn test_private_key_redacted() {
+        let mut rng = test_rng();
+        let private_key = PrivateKey::random(&mut rng);
+        let debug = format!("{:?}", private_key);
+        let display = format!("{}", private_key);
+        assert!(debug.contains("REDACTED"));
+        assert!(display.contains("REDACTED"));
     }
 
     #[cfg(feature = "arbitrary")]
