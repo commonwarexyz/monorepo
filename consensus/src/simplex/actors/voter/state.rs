@@ -463,6 +463,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             return;
         };
         round.set_certify_handle(handle);
+        self.outstanding_certifications.insert(view);
     }
 
     /// Adds a view to the set of certification candidates if it's above last finalized.
@@ -475,11 +476,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Takes all certification candidates, returning them and clearing the set.
     pub fn take_certification_candidates(&mut self) -> BTreeSet<View> {
         take(&mut self.certification_candidates)
-    }
-
-    /// Adds a view to the set of outstanding certifications.
-    pub fn add_outstanding_certification(&mut self, view: View) {
-        self.outstanding_certifications.insert(view);
     }
 
     /// Marks proposal certification as complete and returns the notarization.
