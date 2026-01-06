@@ -269,7 +269,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Marks proposal certification as complete.
     ///
     /// Can be called from `Ready` state during replay when journaled certification
-    /// results are being restored.
+    /// results are being restored. Can also be called from `Aborted` state due to
+    /// a race where certification completes just before finalization is processed.
     pub fn certified(&mut self, is_success: bool) {
         match &self.certify {
             CertifyState::Ready | CertifyState::Outstanding(_) => {}
@@ -277,7 +278,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 assert_eq!(*v, is_success, "certification should not conflict");
                 return;
             }
-            CertifyState::Aborted => panic!("cannot certify after abort"),
+            CertifyState::Aborted => {
+                // Certification completed just before abort was processed.
+                // Ignore the result since the view was finalized.
+                return;
+            }
         }
         self.certify = CertifyState::Certified(is_success);
     }
@@ -980,5 +985,45 @@ mod tests {
         // Has notarization and proposal came from certificate
         // try_certify returns the proposal from the certificate
         assert!(matches!(round.try_certify(), CertifyResult::Ready(_)));
+    }
+
+    #[test]
+    fn certified_after_abort_handles_race_condition() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let namespace = b"ns";
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519::fixture(&mut rng, namespace, 4);
+        let local_scheme = schemes[0].clone();
+
+        let now = SystemTime::UNIX_EPOCH;
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
+
+        let mut round = Round::new(local_scheme, round_info, now);
+        round.set_leader(0);
+        assert!(round.set_proposal(proposal.clone()));
+
+        // Add notarization
+        let notarization_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+        let (added, _) = round.add_notarization(notarization);
+        assert!(added);
+
+        // Set a certify handle (simulating in-flight certification)
+        let mut pool = commonware_utils::futures::AbortablePool::<()>::default();
+        let handle = pool.push(futures::future::pending());
+        round.set_certify_handle(handle);
+
+        // Abort certification (simulating finalization arriving first)
+        round.abort_certify();
+
+        // Certification result arrives after abort (race condition).
+        // This should not panic - the result is simply ignored.
+        round.certified(true);
     }
 }
