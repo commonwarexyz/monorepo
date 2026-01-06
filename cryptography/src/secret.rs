@@ -78,7 +78,7 @@ impl<T> Secret<T> {
         // SAFETY: self.0 is initialized
         let value = unsafe { ManuallyDrop::take(&mut self.0) };
         // SAFETY: self.0 memory is still allocated, just logically moved-from
-        unsafe { zeroize_ptr(&mut self.0 as *mut _ as *mut T) };
+        unsafe { zeroize_ptr(&raw mut *self.0) };
         // Prevent Secret::drop from running (would double-zeroize)
         core::mem::forget(self);
         value
@@ -87,7 +87,7 @@ impl<T> Secret<T> {
 
 impl<T> Drop for Secret<T> {
     fn drop(&mut self) {
-        let ptr = &mut *self.0 as *mut T;
+        let ptr = &raw mut *self.0;
         // SAFETY:
         // - Pointer obtained while self.0 is still initialized
         // - ManuallyDrop::drop: self.0 is initialized and we have exclusive access
