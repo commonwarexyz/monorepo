@@ -1,10 +1,12 @@
 //! Types used in [aggregation](super).
 
-use crate::{aggregation::scheme, types::Epoch};
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+use crate::{
+    aggregation::scheme,
+    types::{Epoch, Height},
+    Heightable,
 };
+use bytes::{Buf, BufMut, Bytes};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
     certificate::{self, Attestation, Scheme, Subject},
     Digest,
@@ -50,17 +52,17 @@ pub enum Error {
     #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
     AckEpochOutsideBounds(Epoch, Epoch, Epoch),
     /// The acknowledgment's height is outside the accepted bounds
-    #[error("Non-useful ack index {0}")]
-    AckIndex(Index),
+    #[error("Non-useful ack height {0}")]
+    AckHeight(Height),
     /// The acknowledgment's digest is incorrect
     #[error("Invalid ack digest {0}")]
-    AckDigest(Index),
-    /// Duplicate acknowledgment for the same index
-    #[error("Duplicate ack from sender {0} for index {1}")]
-    AckDuplicate(String, Index),
-    /// The acknowledgement is for an index that already has a certificate
-    #[error("Ack for index {0} already has been certified")]
-    AckCertified(Index),
+    AckDigest(Height),
+    /// Duplicate acknowledgment for the same height
+    #[error("Duplicate ack from sender {0} for height {1}")]
+    AckDuplicate(String, Height),
+    /// The acknowledgement is for a height that already has a certificate
+    #[error("Ack for height {0} already has been certified")]
+    AckCertified(Height),
     /// The epoch is unknown
     #[error("Unknown epoch {0}")]
     UnknownEpoch(Epoch),
@@ -72,10 +74,6 @@ impl Error {
         matches!(self, Self::PeerMismatch | Self::InvalidAckSignature)
     }
 }
-
-/// Index represents the sequential position of items being aggregated.
-/// Indices are monotonically increasing within each epoch.
-pub type Index = u64;
 
 /// Suffix used to identify an acknowledgment (ack) namespace for domain separation.
 /// Used when signing and verifying acks to prevent signature reuse across different message types.
@@ -104,18 +102,24 @@ impl certificate::Namespace for Namespace {
 }
 
 /// Item represents a single element being aggregated in the protocol.
-/// Each item has a unique index and contains a digest that validators sign.
+/// Each item has a unique height and contains a digest that validators sign.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Item<D: Digest> {
     /// Sequential position of this item within the current epoch
-    pub index: Index,
+    pub height: Height,
     /// Cryptographic digest of the data being aggregated
     pub digest: D,
 }
 
+impl<D: Digest> Heightable for Item<D> {
+    fn height(&self) -> Height {
+        self.height
+    }
+}
+
 impl<D: Digest> Write for Item<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.index).write(writer);
+        self.height.write(writer);
         self.digest.write(writer);
     }
 }
@@ -124,15 +128,15 @@ impl<D: Digest> Read for Item<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let index = UInt::read(reader)?.into();
+        let height = Height::read(reader)?;
         let digest = D::read(reader)?;
-        Ok(Self { index, digest })
+        Ok(Self { height, digest })
     }
 }
 
 impl<D: Digest> EncodeSize for Item<D> {
     fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + self.digest.encode_size()
+        self.height.encode_size() + self.digest.encode_size()
     }
 }
 
@@ -154,9 +158,9 @@ where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let index = u.arbitrary::<u64>()?;
+        let height = u.arbitrary::<Height>()?;
         let digest = u.arbitrary::<D>()?;
-        Ok(Self { index, digest })
+        Ok(Self { height, digest })
     }
 }
 
@@ -256,8 +260,8 @@ where
 /// This combines a validator's vote with their view of consensus progress.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TipAck<S: Scheme, D: Digest> {
-    /// The peer's local view of the tip (the lowest index that is not yet confirmed).
-    pub tip: Index,
+    /// The peer's local view of the tip (the lowest height that is not yet confirmed).
+    pub tip: Height,
 
     /// The peer's acknowledgement (vote) for an item.
     pub ack: Ack<S, D>,
@@ -265,7 +269,7 @@ pub struct TipAck<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Write for TipAck<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.tip).write(writer);
+        self.tip.write(writer);
         self.ack.write(writer);
     }
 }
@@ -274,7 +278,7 @@ impl<S: Scheme, D: Digest> Read for TipAck<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let tip = UInt::read(reader)?.into();
+        let tip = Height::read(reader)?;
         let ack = Ack::read(reader)?;
         Ok(Self { tip, ack })
     }
@@ -282,7 +286,7 @@ impl<S: Scheme, D: Digest> Read for TipAck<S, D> {
 
 impl<S: Scheme, D: Digest> EncodeSize for TipAck<S, D> {
     fn encode_size(&self) -> usize {
-        UInt(self.tip).encode_size() + self.ack.encode_size()
+        self.tip.encode_size() + self.ack.encode_size()
     }
 }
 
@@ -293,7 +297,7 @@ where
     Ack<S, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let tip = u.arbitrary::<u64>()?;
+        let tip = u.arbitrary::<Height>()?;
         let ack = u.arbitrary::<Ack<S, D>>()?;
         Ok(Self { tip, ack })
     }
@@ -380,8 +384,8 @@ pub enum Activity<S: Scheme, D: Digest> {
     /// Certified an [Item].
     Certified(Certificate<S, D>),
 
-    /// Moved the tip to a new index.
-    Tip(Index),
+    /// Moved the tip to a new height.
+    Tip(Height),
 }
 
 impl<S: Scheme, D: Digest> Write for Activity<S, D> {
@@ -395,9 +399,9 @@ impl<S: Scheme, D: Digest> Write for Activity<S, D> {
                 1u8.write(writer);
                 certificate.write(writer);
             }
-            Self::Tip(index) => {
+            Self::Tip(height) => {
                 2u8.write(writer);
-                UInt(*index).write(writer);
+                height.write(writer);
             }
         }
     }
@@ -410,7 +414,7 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
         match u8::read(reader)? {
             0 => Ok(Self::Ack(Ack::read(reader)?)),
             1 => Ok(Self::Certified(Certificate::read_cfg(reader, cfg)?)),
-            2 => Ok(Self::Tip(UInt::read(reader)?.into())),
+            2 => Ok(Self::Tip(Height::read(reader)?)),
             _ => Err(CodecError::Invalid(
                 "consensus::aggregation::Activity",
                 "Invalid type",
@@ -424,7 +428,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
         1 + match self {
             Self::Ack(ack) => ack.encode_size(),
             Self::Certified(certificate) => certificate.encode_size(),
-            Self::Tip(index) => UInt(*index).encode_size(),
+            Self::Tip(height) => height.encode_size(),
         }
     }
 }
@@ -441,7 +445,7 @@ where
         match choice {
             0 => Ok(Self::Ack(u.arbitrary::<Ack<S, D>>()?)),
             1 => Ok(Self::Certified(u.arbitrary::<Certificate<S, D>>()?)),
-            2 => Ok(Self::Tip(u.arbitrary::<u64>()?)),
+            2 => Ok(Self::Tip(u.arbitrary::<Height>()?)),
             _ => unreachable!(),
         }
     }
@@ -483,7 +487,7 @@ mod tests {
         let fixture = fixture(&mut rng, NAMESPACE, 4);
         let schemes = &fixture.schemes;
         let item = Item {
-            index: 100,
+            height: Height::new(100),
             digest: Sha256::hash(b"test_item"),
         };
 
@@ -505,11 +509,11 @@ mod tests {
         // Test TipAck codec
         let tip_ack = TipAck {
             ack: ack.clone(),
-            tip: 42,
+            tip: Height::new(42),
         };
         let encoded_tip_ack = tip_ack.encode();
         let restored_tip_ack: TipAck<S, Sha256Digest> = TipAck::decode(encoded_tip_ack).unwrap();
-        assert_eq!(restored_tip_ack.tip, 42);
+        assert_eq!(restored_tip_ack.tip, Height::new(42));
         assert_eq!(restored_tip_ack.ack.item, item);
         assert_eq!(restored_tip_ack.ack.epoch, Epoch::new(1));
 
@@ -548,12 +552,12 @@ mod tests {
         }
 
         // Test Activity codec - Tip variant
-        let activity_tip: Activity<S, Sha256Digest> = Activity::Tip(123);
+        let activity_tip: Activity<S, Sha256Digest> = Activity::Tip(Height::new(123));
         let encoded_tip = activity_tip.encode();
         let restored_activity_tip: Activity<S, Sha256Digest> =
             Activity::decode_cfg(encoded_tip, &cfg).unwrap();
-        if let Activity::Tip(index) = restored_activity_tip {
-            assert_eq!(index, 123);
+        if let Activity::Tip(height) = restored_activity_tip {
+            assert_eq!(height, Height::new(123));
         } else {
             panic!("Expected Activity::Tip");
         }
