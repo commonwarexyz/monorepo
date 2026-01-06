@@ -5,7 +5,7 @@ use crate::{
     types::{Epoch, Height},
     Heightable,
 };
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
     certificate::{self, Attestation, Namespace, Provider, Scheme},
@@ -803,9 +803,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
         R: CryptoRngCore,
         S: scheme::Scheme<P, D>,
     {
-        let ctx = AckSubject {
-            chunk: &self.chunk,
-        };
+        let ctx = AckSubject { chunk: &self.chunk };
         scheme.verify_attestation::<_, D>(rng, ctx, &self.attestation, strategy)
     }
 
@@ -1074,9 +1072,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
         R: CryptoRngCore,
         S: scheme::Scheme<P, D>,
     {
-        let ctx = AckSubject {
-            chunk: &self.chunk,
-        };
+        let ctx = AckSubject { chunk: &self.chunk };
         scheme.verify_certificate::<R, D, N3f1>(rng, ctx, &self.certificate, strategy)
     }
 }
@@ -1878,7 +1874,11 @@ mod tests {
 
         // Now create a parent with invalid certificate
         // Generate certificate for a different chunk (wrong payload)
-        let wrong_chunk = Chunk::new(public_key, 0, sample_digest(99));
+        let wrong_chunk = Chunk::new(
+            parent_chunk.sequencer.clone(),
+            Height::zero(),
+            sample_digest(99),
+        );
         let wrong_ctx = AckSubject {
             chunk: &wrong_chunk,
         };
@@ -2110,7 +2110,6 @@ mod tests {
 
         // Create a parent with a dummy certificate (content doesn't matter for this test)
         let dummy_chunk = Chunk::new(public_key, Height::zero(), sample_digest(0));
-        let dummy_epoch = Epoch::new(5);
         let ctx = AckSubject {
             chunk: &dummy_chunk,
         };
