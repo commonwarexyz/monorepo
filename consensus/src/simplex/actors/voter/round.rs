@@ -18,6 +18,18 @@ pub struct Leader<P: PublicKey> {
     pub key: P,
 }
 
+/// Tracks the certification state for a round.
+enum CertifyState {
+    /// Ready to attempt certification.
+    Ready,
+    /// Certification request in progress.
+    Outstanding(Aborter),
+    /// Certification completed: true if succeeded, false if automaton declined.
+    Certified(bool),
+    /// Certification was cancelled due to finalization.
+    Aborted,
+}
+
 /// Per-[Rnd] state machine.
 pub struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
@@ -43,8 +55,7 @@ pub struct Round<S: Scheme, D: Digest> {
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
-    certified: Option<bool>,
-    certify_handle: Option<Aborter>,
+    certify: CertifyState,
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
@@ -67,8 +78,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
-            certified: None,
-            certify_handle: None,
+            certify: CertifyState::Ready,
         }
     }
 
@@ -122,11 +132,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     ///
     /// Returns `(Some(proposal), _)` if ready for certification.
     /// Returns `(None, true)` if pending (has notarization but no proposal yet).
-    /// Returns `(None, false)` if not ready (no notarization, already certified, or handle exists).
+    /// Returns `(None, false)` if not ready (no notarization or not in pending state).
     pub fn try_certify(&mut self) -> (Option<Proposal<D>>, bool) {
-        // Skip if no notarization, already certified, or handle exists
-        if self.notarization.is_none() || self.certified.is_some() || self.certify_handle.is_some()
-        {
+        if self.notarization.is_none() || !matches!(self.certify, CertifyState::Ready) {
             return (None, false);
         }
         self.proposal
@@ -137,12 +145,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Sets the handle for the certification request.
     pub fn set_certify_handle(&mut self, handle: Aborter) {
-        self.certify_handle = Some(handle);
+        self.certify = CertifyState::Outstanding(handle);
     }
 
-    /// Aborts the in-flight certification request by dropping the handle.
+    /// Aborts the in-flight certification request.
     pub fn abort_certify(&mut self) {
-        self.certify_handle = None;
+        if let CertifyState::Outstanding(handle) = replace(&mut self.certify, CertifyState::Aborted)
+        {
+            drop(handle);
+        }
     }
 
     /// Returns the elected leader (if any) for this round.
@@ -189,8 +200,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns true if we have explicitly certified the proposal.
-    pub fn is_certified(&self) -> bool {
-        self.certified == Some(true)
+    pub const fn is_certified(&self) -> bool {
+        matches!(self.certify, CertifyState::Certified(true))
     }
 
     /// Returns how much time elapsed since the round started, if the clock monotonicity holds.
@@ -245,12 +256,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Marks proposal certification as complete.
     pub fn certified(&mut self, is_success: bool) {
-        assert!(
-            self.certified.is_none_or(|v| v == is_success),
-            "certification should not conflict"
-        );
-        self.certified = Some(is_success);
-        self.certify_handle = None;
+        match &self.certify {
+            CertifyState::Ready | CertifyState::Outstanding(_) => {}
+            CertifyState::Certified(v) => {
+                assert_eq!(*v, is_success, "certification should not conflict");
+                return;
+            }
+            CertifyState::Aborted => panic!("cannot certify after abort"),
+        }
+        self.certify = CertifyState::Certified(is_success);
     }
 
     pub const fn proposal(&self) -> Option<&Proposal<D>> {
@@ -882,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn try_certify_allowed_after_abort() {
+    fn try_certify_blocked_after_abort() {
         let mut rng = StdRng::seed_from_u64(42);
         let namespace = b"ns";
         let Fixture {
@@ -917,11 +931,11 @@ mod tests {
         // try_certify blocked by handle
         assert!(round.try_certify().0.is_none());
 
-        // Abort clears the handle
+        // Abort transitions to Aborted state
         round.abort_certify();
 
-        // Now try_certify should succeed again
-        assert!(round.try_certify().0.is_some());
+        // try_certify still blocked after abort (no re-certification allowed)
+        assert!(round.try_certify().0.is_none());
     }
 
     #[test]
