@@ -5,6 +5,7 @@ use rand::{CryptoRng, RngCore};
 use std::{
     future::Future,
     net::SocketAddr,
+    ops::RangeInclusive,
     time::{Duration, SystemTime},
 };
 
@@ -222,8 +223,9 @@ where
         &self,
         partition: &str,
         name: &[u8],
-    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
-        self.as_present().open(partition, name)
+        versions: RangeInclusive<u16>,
+    ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send {
+        self.as_present().open(partition, name, versions)
     }
 
     fn remove(

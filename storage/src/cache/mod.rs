@@ -138,6 +138,7 @@ mod tests {
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
 
     #[test_traced]
     fn test_cache_compression_then_none() {
@@ -219,8 +220,8 @@ mod tests {
 
             // Corrupt the value
             let section = (index / DEFAULT_ITEMS_PER_BLOB) * DEFAULT_ITEMS_PER_BLOB;
-            let (blob, _) = context
-                .open("test_partition", &section.to_be_bytes())
+            let (blob, _, _) = context
+                .open("test_partition", &section.to_be_bytes(), TEST_VERSIONS)
                 .await
                 .unwrap();
             let value_location = 4 /* journal size */ + UInt(1u64).encode_size() as u64 /* index */ + 4 /* value length */;

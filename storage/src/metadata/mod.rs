@@ -94,6 +94,8 @@ mod tests {
     use commonware_utils::{hex, sequence::U64};
     use rand::{Rng, RngCore};
 
+    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
+
     #[test_traced]
     fn test_put_get_clear() {
         // Initialize the deterministic context
@@ -315,7 +317,7 @@ mod tests {
             drop(metadata);
 
             // Corrupt the metadata store
-            let (blob, _) = context.open("test", b"left").await.unwrap();
+            let (blob, _, _) = context.open("test", b"left", TEST_VERSIONS).await.unwrap();
             blob.write_at(b"corrupted".to_vec(), 0).await.unwrap();
             blob.sync().await.unwrap();
 
@@ -370,10 +372,10 @@ mod tests {
             drop(metadata);
 
             // Corrupt the metadata store
-            let (blob, _) = context.open("test", b"left").await.unwrap();
+            let (blob, _, _) = context.open("test", b"left", TEST_VERSIONS).await.unwrap();
             blob.write_at(b"corrupted".to_vec(), 0).await.unwrap();
             blob.sync().await.unwrap();
-            let (blob, _) = context.open("test", b"right").await.unwrap();
+            let (blob, _, _) = context.open("test", b"right", TEST_VERSIONS).await.unwrap();
             blob.write_at(b"corrupted".to_vec(), 0).await.unwrap();
             blob.sync().await.unwrap();
 
@@ -432,7 +434,7 @@ mod tests {
             drop(metadata);
 
             // Corrupt the metadata store
-            let (blob, len) = context.open("test", b"left").await.unwrap();
+            let (blob, len, _) = context.open("test", b"left", TEST_VERSIONS).await.unwrap();
             blob.resize(len - 8).await.unwrap();
             blob.sync().await.unwrap();
 
@@ -485,7 +487,7 @@ mod tests {
             drop(metadata);
 
             // Corrupt the metadata store
-            let (blob, _) = context.open("test", b"left").await.unwrap();
+            let (blob, _, _) = context.open("test", b"left", TEST_VERSIONS).await.unwrap();
             blob.resize(5).await.unwrap();
             blob.sync().await.unwrap();
 

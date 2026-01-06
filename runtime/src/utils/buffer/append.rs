@@ -329,6 +329,9 @@ mod tests {
     const PAGE_SIZE: usize = 1024;
     const BUFFER_SIZE: usize = PAGE_SIZE * 2;
 
+    /// Default version range for tests
+    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
+
     #[test_traced]
     #[should_panic(expected = "not implemented")]
     fn test_append_blob_write_panics() {
@@ -336,8 +339,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         // Start the test within the executor
         executor.start(|context| async move {
-            let (blob, size) = context
-                .open("test", "blob".as_bytes())
+            let (blob, size, _) = context
+                .open("test", "blob".as_bytes(), TEST_VERSIONS)
                 .await
                 .expect("Failed to open blob");
             let pool_ref = PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(10));
@@ -355,8 +358,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         // Start the test within the executor
         executor.start(|context| async move {
-            let (blob, size) = context
-                .open("test", "blob".as_bytes())
+            let (blob, size, _) = context
+                .open("test", "blob".as_bytes(), TEST_VERSIONS)
                 .await
                 .expect("Failed to open blob");
             assert_eq!(size, 0);
@@ -375,8 +378,8 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Make sure blob has expected size when reopened.
-            let (blob, size) = context
-                .open("test", "blob".as_bytes())
+            let (blob, size, _) = context
+                .open("test", "blob".as_bytes(), TEST_VERSIONS)
                 .await
                 .expect("Failed to open blob");
             assert_eq!(size, 11 * PAGE_SIZE as u64);
@@ -390,8 +393,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         // Start the test within the executor
         executor.start(|context| async move {
-            let (blob, size) = context
-                .open("test", "blob".as_bytes())
+            let (blob, size, _) = context
+                .open("test", "blob".as_bytes(), TEST_VERSIONS)
                 .await
                 .expect("Failed to open blob");
             assert_eq!(size, 0);
@@ -485,8 +488,8 @@ mod tests {
     fn test_append_blob_tracks_physical_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (blob, size) = context
-                .open("test", "blob".as_bytes())
+            let (blob, size, _) = context
+                .open("test", "blob".as_bytes(), TEST_VERSIONS)
                 .await
                 .expect("Failed to open blob");
 
@@ -524,8 +527,8 @@ mod tests {
             assert_eq!(blob.buffer.read().await.1, 250);
 
             // Close and reopen.
-            let (blob, size) = context
-                .open("test", "blob".as_bytes())
+            let (blob, size, _) = context
+                .open("test", "blob".as_bytes(), TEST_VERSIONS)
                 .await
                 .expect("Failed to reopen blob");
 

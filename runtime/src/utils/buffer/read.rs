@@ -11,10 +11,13 @@ use std::num::NonZeroUsize;
 /// use commonware_utils::NZUsize;
 /// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic};
 ///
+/// const BLOB_VERSION: u16 = 0;
+///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
 ///     // Open a blob and add some data (e.g., a journal file)
-///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to open blob");
+///     let (blob, size, blob_version) = context.open("my_partition", b"my_data", BLOB_VERSION..=BLOB_VERSION).await.expect("unable to open blob");
+///     assert_eq!(blob_version, BLOB_VERSION);
 ///     let data = b"Hello, world! This is a test.".to_vec();
 ///     let size = data.len() as u64;
 ///     blob.write_at(data, 0).await.expect("unable to write data");

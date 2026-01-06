@@ -18,22 +18,31 @@ impl<S: crate::Storage> Storage<S> {
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
+    async fn open(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
         self.auditor.event(b"open", |hasher| {
             hasher.update(partition.as_bytes());
             hasher.update(name);
         });
-        self.inner.open(partition, name).await.map(|(blob, len)| {
-            (
-                Blob {
-                    auditor: self.auditor.clone(),
-                    inner: blob,
-                    partition: partition.into(),
-                    name: name.to_vec(),
-                },
-                len,
-            )
-        })
+        self.inner
+            .open(partition, name, versions)
+            .await
+            .map(|(blob, len, app_version)| {
+                (
+                    Blob {
+                        auditor: self.auditor.clone(),
+                        inner: blob,
+                        partition: partition.into(),
+                        name: name.to_vec(),
+                    },
+                    len,
+                    app_version,
+                )
+            })
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -114,6 +123,9 @@ mod tests {
     };
     use std::sync::Arc;
 
+    /// Default version range for tests
+    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
+
     #[tokio::test]
     async fn test_audited_storage() {
         let inner = MemStorage::default();
@@ -138,8 +150,14 @@ mod tests {
         let storage2 = AuditedStorage::new(inner2, auditor2.clone());
 
         // Perform a sequence of operations on both storages simultaneously
-        let (blob1, _) = storage1.open("partition", b"test_blob").await.unwrap();
-        let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
+        let (blob1, _, _) = storage1
+            .open("partition", b"test_blob", TEST_VERSIONS)
+            .await
+            .unwrap();
+        let (blob2, _, _) = storage2
+            .open("partition", b"test_blob", TEST_VERSIONS)
+            .await
+            .unwrap();
 
         // Write data to the blobs
         blob1.write_at(b"hello world".to_vec(), 0).await.unwrap();

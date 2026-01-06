@@ -15,6 +15,9 @@ use std::{
 };
 use tracing::{debug, warn};
 
+/// Current version of the ordinal blob format.
+const BLOB_VERSION: std::ops::RangeInclusive<u16> = 0..=0;
+
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
 struct Record<V: CodecFixed<Cfg = ()>> {
@@ -120,7 +123,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
         // Open all blobs and check for partial records
         for name in stored_blobs {
-            let (blob, mut len) = context.open(&config.partition, &name).await?;
+            let (blob, mut len, _) = context.open(&config.partition, &name, BLOB_VERSION).await?;
             let index = match name.try_into() {
                 Ok(index) => u64::from_be_bytes(index),
                 Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
@@ -255,9 +258,9 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let items_per_blob = self.config.items_per_blob.get();
         let section = index / items_per_blob;
         if let Entry::Vacant(entry) = self.blobs.entry(section) {
-            let (blob, len) = self
+            let (blob, len, _) = self
                 .context
-                .open(&self.config.partition, &section.to_be_bytes())
+                .open(&self.config.partition, &section.to_be_bytes(), BLOB_VERSION)
                 .await?;
             entry.insert(Write::new(blob, len, self.config.write_buffer));
             debug!(section, "created blob");

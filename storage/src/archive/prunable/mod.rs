@@ -198,6 +198,7 @@ mod tests {
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -295,8 +296,8 @@ mod tests {
 
             // Corrupt the value
             let section = (index / DEFAULT_ITEMS_PER_SECTION) * DEFAULT_ITEMS_PER_SECTION;
-            let (blob, _) = context
-                .open("test_partition", &section.to_be_bytes())
+            let (blob, _, _) = context
+                .open("test_partition", &section.to_be_bytes(), TEST_VERSIONS)
                 .await
                 .unwrap();
             let value_location = 4 /* journal size */ + UInt(1u64).encode_size() as u64 /* index */ + 64 + 4 /* value length */;

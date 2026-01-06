@@ -842,6 +842,7 @@ mod tests {
 
     const PAGE_SIZE: usize = 111;
     const PAGE_CACHE_SIZE: usize = 5;
+    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
 
     fn test_config() -> Config {
         Config {
@@ -1136,8 +1137,8 @@ mod tests {
             // 497. Simulate a partial write by corrupting the last parent's checksum by truncating
             // the last blob by a single byte.
             let partition: String = "journal_partition".into();
-            let (blob, len) = context
-                .open(&partition, &71u64.to_be_bytes())
+            let (blob, len, _) = context
+                .open(&partition, &71u64.to_be_bytes(), TEST_VERSIONS)
                 .await
                 .expect("Failed to open blob");
             assert_eq!(len, 36); // N+4 = 36 bytes per node, 1 node in the last blob
@@ -1169,8 +1170,8 @@ mod tests {
                 .remove(&partition, Some(&71u64.to_be_bytes()))
                 .await
                 .expect("Failed to remove blob");
-            let (blob, len) = context
-                .open(&partition, &70u64.to_be_bytes())
+            let (blob, len, _) = context
+                .open(&partition, &70u64.to_be_bytes(), TEST_VERSIONS)
                 .await
                 .expect("Failed to open blob");
             assert_eq!(len, 36 * 7); // this blob should be full.

@@ -98,6 +98,15 @@ pub enum Error {
     BlobSyncFailed(String, String, IoError),
     #[error("blob insufficient length")]
     BlobInsufficientLength,
+    #[error("blob magic mismatch: expected {:?}, found {found:?}", Header::MAGIC)]
+    BlobMagicMismatch { found: [u8; Header::MAGIC_LENGTH] },
+    #[error("blob header version mismatch: expected {expected}, found {found}")]
+    BlobHeaderVersionMismatch { expected: u16, found: u16 },
+    #[error("blob application version mismatch: expected one of {expected:?}, found {found}")]
+    BlobApplicationVersionMismatch {
+        expected: std::ops::RangeInclusive<u16>,
+        found: u16,
+    },
     #[error("offset overflow")]
     OffsetOverflow,
     #[error("io error: {0}")]
@@ -514,11 +523,25 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// writing to the same blob concurrently may lead to undefined behavior.
     ///
     /// An Ok result indicates the blob is durably created (or already exists).
+    ///
+    /// # Versions
+    ///
+    /// The blob's [Header] contains an application version.
+    /// `versions` specifies the range of acceptable application versions for an opened blob.
+    /// If the blob already exists and its version is not in `versions`, returns
+    /// [Error::BlobApplicationVersionMismatch].
+    /// If the blob does not exist, it is created with the application version set to the last
+    /// value in `versions`.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (blob, logical_size, application_version).
     fn open(
         &self,
         partition: &str,
         name: &[u8],
-    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send;
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send;
 
     /// Remove a blob from a given partition.
     ///
@@ -535,6 +558,87 @@ pub trait Storage: Clone + Send + Sync + 'static {
     fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
 }
 
+/// Fixed-size header at the start of each [Blob].
+///
+/// On-disk layout (8 bytes, big-endian):
+/// - Bytes 0-3: [Header::MAGIC]
+/// - Bytes 4-5: Header Version (u16)
+/// - Bytes 6-7: Application Version (u16)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Header {
+    magic: [u8; 4],
+    header_version: u16,
+    application_version: u16,
+}
+
+impl Header {
+    /// Size of the header in bytes.
+    pub const SIZE: usize = 8;
+
+    /// Size of the header as u64 for offset calculations.
+    pub const SIZE_U64: u64 = Self::SIZE as u64;
+
+    /// Length of magic bytes.
+    pub const MAGIC_LENGTH: usize = 4;
+
+    /// Length of version fields.
+    pub const VERSION_LENGTH: usize = 2;
+
+    /// Magic bytes identifying a valid commonware blob.
+    pub const MAGIC: [u8; Self::MAGIC_LENGTH] = *b"CWIC"; // Commonware Is CWIC
+
+    /// The current version of the header format.
+    pub const HEADER_VERSION: u16 = 0;
+
+    /// Creates a new header with the given application version.
+    pub const fn new(app_version: u16) -> Self {
+        Self {
+            magic: Self::MAGIC,
+            header_version: Self::HEADER_VERSION,
+            application_version: app_version,
+        }
+    }
+
+    /// Parses a header from bytes (big-endian format).
+    pub fn from_bytes(bytes: [u8; Self::SIZE]) -> Self {
+        Self {
+            magic: bytes[..4].try_into().unwrap(),
+            header_version: u16::from_be_bytes(bytes[4..6].try_into().unwrap()),
+            application_version: u16::from_be_bytes(bytes[6..8].try_into().unwrap()),
+        }
+    }
+
+    /// Serializes the header to bytes (big-endian format).
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[..4].copy_from_slice(&self.magic);
+        bytes[4..6].copy_from_slice(&self.header_version.to_be_bytes());
+        bytes[6..8].copy_from_slice(&self.application_version.to_be_bytes());
+        bytes
+    }
+
+    /// Validates the magic bytes, header version, and application version.
+    /// `app_versions` is the range of acceptable application versions.
+    pub fn validate(&self, app_versions: &std::ops::RangeInclusive<u16>) -> Result<(), Error> {
+        if self.magic != Self::MAGIC {
+            return Err(Error::BlobMagicMismatch { found: self.magic });
+        }
+        if self.header_version != Self::HEADER_VERSION {
+            return Err(Error::BlobHeaderVersionMismatch {
+                expected: Self::HEADER_VERSION,
+                found: self.header_version,
+            });
+        }
+        if !app_versions.contains(&self.application_version) {
+            return Err(Error::BlobApplicationVersionMismatch {
+                expected: app_versions.clone(),
+                found: self.application_version,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Interface to read and write to a blob.
 ///
 /// To support blob implementations that enable concurrent reads and
@@ -549,6 +653,12 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// When a blob is dropped, any unsynced changes may be discarded. Implementations
 /// may attempt to sync during drop but errors will go unhandled. Call `sync`
 /// before dropping to ensure all changes are durably persisted.
+///
+/// # Header
+///
+/// All blobs have a [`Header`] at the start. The header is read on open
+/// (for existing blobs) or written (for new blobs). All I/O operations use logical
+/// offsets that start after the header; the header offset is handled internally.
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
     /// Read from the blob at the given offset.
@@ -603,6 +713,98 @@ mod tests {
     };
     use tracing::{error, Level};
     use utils::reschedule;
+
+    /// Default version range for tests
+    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
+
+    #[test]
+    fn test_header_fields() {
+        let header = Header::new(*TEST_VERSIONS.end());
+        assert_eq!(header.header_version, Header::HEADER_VERSION);
+        assert_eq!(header.application_version, *TEST_VERSIONS.end());
+
+        // Verify byte serialization
+        let bytes = header.to_bytes();
+        assert_eq!(&bytes[..4], &Header::MAGIC);
+        assert_eq!(&bytes[4..6], &Header::HEADER_VERSION.to_be_bytes());
+        assert_eq!(&bytes[6..8], &TEST_VERSIONS.end().to_be_bytes());
+
+        // Verify round-trip
+        let parsed = Header::from_bytes(bytes);
+        assert_eq!(parsed, header);
+    }
+
+    #[test]
+    fn test_header_validate_success() {
+        let header = Header::new(*TEST_VERSIONS.end());
+        assert!(header.validate(&TEST_VERSIONS).is_ok());
+    }
+
+    #[test]
+    fn test_header_validate_magic_wrong_bytes() {
+        let header = Header::from_bytes([0u8; Header::SIZE]);
+        let result = header.validate(&TEST_VERSIONS);
+        match result {
+            Err(Error::BlobMagicMismatch { found }) => {
+                assert_eq!(found, [0u8; 4]);
+            }
+            _ => panic!("expected BlobMagicMismatch error"),
+        }
+
+        let mut bytes = Header::new(*TEST_VERSIONS.end()).to_bytes();
+        bytes[0] = b'X'; // Corrupt first byte
+        let header = Header::from_bytes(bytes);
+        let result = header.validate(&TEST_VERSIONS);
+        match result {
+            Err(Error::BlobMagicMismatch { found }) => {
+                assert_eq!(found[0], b'X');
+            }
+            _ => panic!("expected BlobMagicMismatch error"),
+        }
+    }
+
+    #[test]
+    fn test_header_validate_app_version_mismatch() {
+        let header = Header::new(5);
+        let result = header.validate(&(10..=20));
+        match result {
+            Err(Error::BlobApplicationVersionMismatch { expected, found }) => {
+                assert_eq!(expected, 10..=20);
+                assert_eq!(found, 5);
+            }
+            _ => panic!("expected BlobApplicationVersionMismatch error"),
+        }
+    }
+
+    #[test]
+    fn test_header_bytes_round_trip() {
+        // Test round-trip with default version
+        let original = Header::new(0);
+        let bytes = original.to_bytes();
+        let restored = Header::from_bytes(bytes);
+        assert_eq!(original, restored);
+
+        // Test round-trip with non-zero version
+        let original = Header::new(42);
+        let bytes = original.to_bytes();
+        let restored = Header::from_bytes(bytes);
+        assert_eq!(original, restored);
+        assert_eq!(restored.application_version, 42);
+
+        // Test round-trip with max version
+        let original = Header::new(u16::MAX);
+        let bytes = original.to_bytes();
+        let restored = Header::from_bytes(bytes);
+        assert_eq!(original, restored);
+        assert_eq!(restored.application_version, u16::MAX);
+
+        // Verify byte layout explicitly
+        let header = Header::new(0x1234);
+        let bytes = header.to_bytes();
+        assert_eq!(&bytes[..4], &Header::MAGIC);
+        assert_eq!(&bytes[4..6], &Header::HEADER_VERSION.to_be_bytes());
+        assert_eq!(&bytes[6..8], &0x1234u16.to_be_bytes());
+    }
 
     fn test_error_future<R: Runner>(runner: R) {
         async fn error_future() -> Result<&'static str, &'static str> {
@@ -891,11 +1093,17 @@ mod tests {
             let partition = "test_partition";
             let name = b"test_blob";
 
-            // Open a new blob
-            let (blob, _) = context
-                .open(partition, name)
+            // Open a new blob and verify returned version
+            let (blob, size, app_version) = context
+                .open(partition, name, TEST_VERSIONS)
                 .await
                 .expect("Failed to open blob");
+            assert_eq!(size, 0, "new blob should have size 0");
+            assert_eq!(
+                app_version,
+                *TEST_VERSIONS.end(),
+                "new blob should have app version from end of range"
+            );
 
             // Write data to the blob
             let data = b"Hello, Storage!";
@@ -923,12 +1131,17 @@ mod tests {
                 .expect("Failed to scan partition");
             assert!(blobs.contains(&name.to_vec()));
 
-            // Reopen the blob
-            let (blob, len) = context
-                .open(partition, name)
+            // Reopen the blob and verify version persists
+            let (blob, len, app_version) = context
+                .open(partition, name, TEST_VERSIONS)
                 .await
                 .expect("Failed to reopen blob");
             assert_eq!(len, data.len() as u64);
+            assert_eq!(
+                app_version,
+                *TEST_VERSIONS.end(),
+                "reopened blob should have same app version"
+            );
 
             // Read data part of message back
             let read = blob
@@ -974,8 +1187,8 @@ mod tests {
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let (blob, _) = context
-                .open(partition, name)
+            let (blob, _, _) = context
+                .open(partition, name, TEST_VERSIONS)
                 .await
                 .expect("Failed to open blob");
 
@@ -1030,8 +1243,8 @@ mod tests {
             let name = b"test_blob_resize";
 
             // Open and write to a new blob
-            let (blob, _) = context
-                .open(partition, name)
+            let (blob, _, _) = context
+                .open(partition, name, TEST_VERSIONS)
                 .await
                 .expect("Failed to open blob");
 
@@ -1042,7 +1255,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after write");
 
             // Re-open and check length
-            let (blob, len) = context.open(partition, name).await.unwrap();
+            let (blob, len, _) = context.open(partition, name, TEST_VERSIONS).await.unwrap();
             assert_eq!(len, data.len() as u64);
 
             // Resize to extend the file
@@ -1053,7 +1266,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after resize");
 
             // Re-open and check length again
-            let (blob, len) = context.open(partition, name).await.unwrap();
+            let (blob, len, _) = context.open(partition, name, TEST_VERSIONS).await.unwrap();
             assert_eq!(len, new_len);
 
             // Read original data
@@ -1072,7 +1285,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // Reopen to check truncation
-            let (blob, size) = context.open(partition, name).await.unwrap();
+            let (blob, size, _) = context.open(partition, name, TEST_VERSIONS).await.unwrap();
             assert_eq!(size, data.len() as u64);
 
             // Read truncated data
@@ -1094,8 +1307,8 @@ mod tests {
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
-                let (blob, _) = context
-                    .open(partition, name)
+                let (blob, _, _) = context
+                    .open(partition, name, TEST_VERSIONS)
                     .await
                     .expect("Failed to open blob");
 
@@ -1113,8 +1326,8 @@ mod tests {
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
-                let (blob, len) = context
-                    .open(partition, name)
+                let (blob, len, _) = context
+                    .open(partition, name, TEST_VERSIONS)
                     .await
                     .expect("Failed to open blob");
                 assert_eq!(len, (data1.len() + data2.len() + additional) as u64);
@@ -1139,8 +1352,8 @@ mod tests {
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let (blob, _) = context
-                .open(partition, name)
+            let (blob, _, _) = context
+                .open(partition, name, TEST_VERSIONS)
                 .await
                 .expect("Failed to open blob");
 
@@ -1169,8 +1382,8 @@ mod tests {
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let (blob, _) = context
-                .open(partition, name)
+            let (blob, _, _) = context
+                .open(partition, name, TEST_VERSIONS)
                 .await
                 .expect("Failed to open blob");
 

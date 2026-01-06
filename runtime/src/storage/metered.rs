@@ -4,7 +4,10 @@ use prometheus_client::{
     metrics::{counter::Counter, gauge::Gauge},
     registry::Registry,
 };
-use std::{ops::Deref, sync::Arc};
+use std::{
+    ops::{Deref, RangeInclusive},
+    sync::Arc,
+};
 
 pub struct Metrics {
     pub open_blobs: Gauge,
@@ -74,15 +77,21 @@ impl<S> Storage<S> {
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
+    async fn open(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
         self.metrics.open_blobs.inc();
-        let (inner, len) = self.inner.open(partition, name).await?;
+        let (inner, len, app_version) = self.inner.open(partition, name, versions).await?;
         Ok((
             Blob {
                 inner,
                 metrics: Arc::new(MetricsHandle(self.metrics.clone())),
             },
             len,
+            app_version,
         ))
     }
 
@@ -161,6 +170,9 @@ mod tests {
     };
     use prometheus_client::registry::Registry;
 
+    /// Default version range for tests
+    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
+
     #[tokio::test]
     async fn test_metered_storage() {
         let mut registry = Registry::default();
@@ -178,7 +190,10 @@ mod tests {
         let storage = Storage::new(inner, &mut registry);
 
         // Open a blob
-        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+        let (blob, _, _) = storage
+            .open("partition", b"test_blob", TEST_VERSIONS)
+            .await
+            .unwrap();
 
         // Verify that the open_blobs metric is incremented
         let open_blobs = storage.metrics.open_blobs.get();
@@ -234,8 +249,14 @@ mod tests {
         let storage = Storage::new(inner, &mut registry);
 
         // Open multiple blobs
-        let (blob1, _) = storage.open("partition", b"blob1").await.unwrap();
-        let (blob2, _) = storage.open("partition", b"blob2").await.unwrap();
+        let (blob1, _, _) = storage
+            .open("partition", b"blob1", TEST_VERSIONS)
+            .await
+            .unwrap();
+        let (blob2, _, _) = storage
+            .open("partition", b"blob2", TEST_VERSIONS)
+            .await
+            .unwrap();
 
         // Verify that the open_blobs metric is incremented correctly
         let open_blobs = storage.metrics.open_blobs.get();
@@ -275,7 +296,10 @@ mod tests {
         let storage = Storage::new(inner, &mut registry);
 
         // Open a blob
-        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+        let (blob, _, _) = storage
+            .open("partition", b"test_blob", TEST_VERSIONS)
+            .await
+            .unwrap();
 
         // Verify that the open_blobs metric is incremented
         assert_eq!(
