@@ -1,7 +1,7 @@
 use crate::{
     simplex::types::{Activity, Finalization, Notarization},
-    types::Round,
-    Block, Reporter,
+    types::{Height, Round},
+    Block, Heightable, Reporter,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_storage::archive;
@@ -22,7 +22,7 @@ use tracing::error;
 /// An identifier for a block request.
 pub enum Identifier<D: Digest> {
     /// The height of the block to retrieve.
-    Height(u64),
+    Height(Height),
     /// The commitment of the block to retrieve.
     Commitment(D),
     /// The highest finalized block. It may be the case that marshal does not have some of the
@@ -30,9 +30,9 @@ pub enum Identifier<D: Digest> {
     Latest,
 }
 
-// Allows using u64 directly for convenience.
-impl<D: Digest> From<u64> for Identifier<D> {
-    fn from(src: u64) -> Self {
+// Allows using Height directly for convenience.
+impl<D: Digest> From<Height> for Identifier<D> {
+    fn from(src: Height) -> Self {
         Self::Height(src)
     }
 }
@@ -48,7 +48,7 @@ impl<D: Digest> From<&D> for Identifier<D> {
 impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
     fn from(src: archive::Identifier<'_, D>) -> Self {
         match src {
-            archive::Identifier::Index(index) => Self::Height(index),
+            archive::Identifier::Index(index) => Self::Height(Height::new(index)),
             archive::Identifier::Key(key) => Self::Commitment(*key),
         }
     }
@@ -66,7 +66,7 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// The identifier of the block to get the information of.
         identifier: Identifier<B::Commitment>,
         /// A channel to send the retrieved (height, commitment).
-        response: oneshot::Sender<Option<(u64, B::Commitment)>>,
+        response: oneshot::Sender<Option<(Height, B::Commitment)>>,
     },
     /// A request to retrieve a block by its identifier.
     ///
@@ -81,7 +81,7 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     /// A request to retrieve a finalization by height.
     GetFinalization {
         /// The height of the finalization to retrieve.
-        height: u64,
+        height: Height,
         /// A channel to send the retrieved finalization.
         response: oneshot::Sender<Option<Finalization<S, B::Commitment>>>,
     },
@@ -97,7 +97,7 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     /// target set.
     HintFinalized {
         /// The height of the finalization to fetch.
-        height: u64,
+        height: Height,
         /// Target peers to fetch from. Added to any existing targets for this height.
         targets: NonEmptyVec<S::PublicKey>,
     },
@@ -136,7 +136,7 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     /// The default floor is 0.
     SetFloor {
         /// The candidate floor height.
-        height: u64,
+        height: Height,
     },
 
     // -------------------- Consensus Engine Messages --------------------
@@ -168,7 +168,7 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     pub async fn get_info(
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
-    ) -> Option<(u64, B::Commitment)> {
+    ) -> Option<(Height, B::Commitment)> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
@@ -215,7 +215,7 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     /// storage. It is not an indication to go fetch the [Finalization] from the network.
     pub async fn get_finalization(
         &mut self,
-        height: u64,
+        height: Height,
     ) -> Option<Finalization<S, B::Commitment>> {
         let (tx, rx) = oneshot::channel();
         if self
@@ -250,7 +250,7 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     ///
     /// This is fire-and-forget: the finalization will be stored in marshal and delivered
     /// via the normal finalization flow when available.
-    pub async fn hint_finalized(&mut self, height: u64, targets: NonEmptyVec<S::PublicKey>) {
+    pub async fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
         if self
             .sender
             .send(Message::HintFinalized { height, targets })
@@ -338,7 +338,7 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     /// from tip), prune the finalized stores directly.
     ///
     /// The default floor is 0.
-    pub async fn set_floor(&mut self, height: u64) {
+    pub async fn set_floor(&mut self, height: Height) {
         if self
             .sender
             .send(Message::SetFloor { height })
@@ -401,12 +401,12 @@ impl<S: Scheme, B: Block> AncestorStream<S, B> {
     /// Panics if the initial blocks are not contiguous in height.
     pub(crate) fn new(marshal: Mailbox<S, B>, initial: impl IntoIterator<Item = B>) -> Self {
         let mut buffered = initial.into_iter().collect::<Vec<B>>();
-        buffered.sort_by_key(Block::height);
+        buffered.sort_by_key(Heightable::height);
 
         // Check that the initial blocks are contiguous in height.
         buffered.windows(2).for_each(|window| {
             assert_eq!(
-                window[0].height() + 1,
+                window[0].height().next(),
                 window[1].height(),
                 "initial blocks must be contiguous in height"
             );
@@ -425,7 +425,7 @@ impl<S: Scheme, B: Block> Stream for AncestorStream<S, B> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Because marshal cannot currently yield the genesis block, we stop at height 1.
-        const END_BOUND: u64 = 1;
+        const END_BOUND: Height = Height::new(1);
 
         let mut this = self.project();
 

@@ -16,7 +16,7 @@ use crate::{
         scheme::Scheme,
         types::{Finalization, Notarization},
     },
-    types::{Epoch, Epocher, Round, ViewDelta},
+    types::{Epoch, Epocher, Height, Round, ViewDelta},
     Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
@@ -63,7 +63,7 @@ const LATEST_KEY: U64 = U64::new(0xFF);
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
 struct PendingAck<B: Block, A: Acknowledgement> {
-    height: u64,
+    height: Height,
     commitment: B::Commitment,
     #[pin]
     receiver: A::Waiter,
@@ -133,11 +133,11 @@ where
     // Last view processed
     last_processed_round: Round,
     // Last height processed by the application
-    last_processed_height: u64,
+    last_processed_height: Height,
     // Pending application acknowledgement, if any
     pending_ack: OptionFuture<PendingAck<B, A>>,
     // Highest known finalized height
-    tip: u64,
+    tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
@@ -145,7 +145,7 @@ where
     // Prunable cache
     cache: cache::Manager<E, B, P::Scheme>,
     // Metadata tracking application progress
-    application_metadata: Metadata<E, U64, u64>,
+    application_metadata: Metadata<E, U64, Height>,
     // Finalizations stored by height
     finalizations_by_height: FC,
     // Finalized blocks stored by height
@@ -174,7 +174,7 @@ where
         finalizations_by_height: FC,
         finalized_blocks: FB,
         config: Config<B, P, ES>,
-    ) -> (Self, Mailbox<P::Scheme, B>, u64) {
+    ) -> (Self, Mailbox<P::Scheme, B>, Height) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -200,7 +200,10 @@ where
         )
         .await
         .expect("failed to initialize application metadata");
-        let last_processed_height = application_metadata.get(&LATEST_KEY).copied().unwrap_or(0);
+        let last_processed_height = application_metadata
+            .get(&LATEST_KEY)
+            .copied()
+            .unwrap_or(Height::zero());
 
         // Create metrics
         let finalized_height = Gauge::default();
@@ -215,7 +218,7 @@ where
             "Processed height of application",
             processed_height.clone(),
         );
-        let _ = processed_height.try_set(last_processed_height);
+        let _ = processed_height.try_set(last_processed_height.get());
 
         // Initialize mailbox
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
@@ -231,7 +234,7 @@ where
                 last_processed_round: Round::zero(),
                 last_processed_height,
                 pending_ack: None.into(),
-                tip: 0,
+                tip: Height::zero(),
                 block_subscriptions: BTreeMap::new(),
                 cache,
                 application_metadata,
@@ -283,7 +286,7 @@ where
         if let Some((height, commitment)) = tip {
             application.report(Update::Tip(height, commitment)).await;
             self.tip = height;
-            let _ = self.finalized_height.try_set(height);
+            let _ = self.finalized_height.try_set(height.get());
         }
 
         // Attempt to dispatch the next finalized block to the application, if it is ready.
@@ -319,13 +322,13 @@ where
                                 .handle_block_processed(height, commitment, &mut resolver)
                                 .await
                             {
-                                error!(?e, height, "failed to update application progress");
+                                error!(?e, %height, "failed to update application progress");
                                 return;
                             }
                             self.try_dispatch_block(&mut application).await;
                         }
                         Err(e) => {
-                            error!(?e, height, "application did not acknowledge block");
+                            error!(?e, %height, "application did not acknowledge block");
                             return;
                         }
                     }
@@ -351,7 +354,7 @@ where
                                     .map(|b| (b.height(), commitment)),
                                 BlockID::Height(height) => self
                                     .finalizations_by_height
-                                    .get(ArchiveID::Index(height))
+                                    .get(ArchiveID::Index(height.get()))
                                     .await
                                     .ok()
                                     .flatten()
@@ -403,7 +406,7 @@ where
                                     &mut resolver,
                                 )
                                 .await;
-                                debug!(?round, height, "finalized block stored");
+                                debug!(?round, %height, "finalized block stored");
                             } else {
                                 // Otherwise, fetch the block from the network.
                                 debug!(?round, ?commitment, "finalized block missing");
@@ -497,14 +500,14 @@ where
                         Message::SetFloor { height } => {
                             if let Some(stored_height) = self.application_metadata.get(&LATEST_KEY) {
                                 if *stored_height >= height {
-                                    warn!(height, existing = stored_height, "floor not updated, lower than existing");
+                                    warn!(%height, existing = %stored_height, "floor not updated, lower than existing");
                                     continue;
                                 }
                             }
 
                             // Update the processed height
                             if let Err(err) = self.set_processed_height(height, &mut resolver).await {
-                                error!(?err, height, "failed to update floor");
+                                error!(?err, %height, "failed to update floor");
                                 return;
                             }
 
@@ -529,7 +532,7 @@ where
                                     Ok::<_, BoxedError>(())
                                 }
                             ) {
-                                error!(?err, height, "failed to prune finalized archives");
+                                error!(?err, %height, "failed to prune finalized archives");
                                 return;
                             }
                         }
@@ -555,13 +558,13 @@ where
                                 Request::Finalized { height } => {
                                     // Get finalization
                                     let Some(finalization) = self.get_finalization_by_height(height).await else {
-                                        debug!(height, "finalization missing on request");
+                                        debug!(%height, "finalization missing on request");
                                         continue;
                                     };
 
                                     // Get block
                                     let Some(block) = self.get_finalized_block(height).await else {
-                                        debug!(height, "finalized block missing on request");
+                                        debug!(%height, "finalized block missing on request");
                                         continue;
                                     };
 
@@ -613,7 +616,7 @@ where
                                         &mut resolver,
                                     )
                                     .await;
-                                    debug!(?commitment, height, "received block");
+                                    debug!(?commitment, %height, "received block");
                                     let _ = response.send(true);
                                 },
                                 Request::Finalized { height } => {
@@ -647,7 +650,7 @@ where
                                     }
 
                                     // Valid finalization received
-                                    debug!(height, "received finalization");
+                                    debug!(%height, "received finalization");
                                     let _ = response.send(true);
                                     self.finalize(
                                         height,
@@ -753,7 +756,7 @@ where
             return;
         }
 
-        let next_height = self.last_processed_height.saturating_add(1);
+        let next_height = self.last_processed_height.next();
         let Some(block) = self.get_finalized_block(next_height).await else {
             return;
         };
@@ -776,7 +779,7 @@ where
     /// Handle acknowledgement from the application that a block has been processed.
     async fn handle_block_processed(
         &mut self,
-        height: u64,
+        height: Height,
         commitment: B::Commitment,
         resolver: &mut impl Resolver<Key = Request<B>>,
     ) -> Result<(), metadata::Error> {
@@ -827,8 +830,12 @@ where
     // -------------------- Immutable Storage --------------------
 
     /// Get a finalized block from the immutable archive.
-    async fn get_finalized_block(&self, height: u64) -> Option<B> {
-        match self.finalized_blocks.get(ArchiveID::Index(height)).await {
+    async fn get_finalized_block(&self, height: Height) -> Option<B> {
+        match self
+            .finalized_blocks
+            .get(ArchiveID::Index(height.get()))
+            .await
+        {
             Ok(block) => block,
             Err(e) => panic!("failed to get block: {e}"),
         }
@@ -837,11 +844,11 @@ where
     /// Get a finalization from the archive by height.
     async fn get_finalization_by_height(
         &self,
-        height: u64,
+        height: Height,
     ) -> Option<Finalization<P::Scheme, B::Commitment>> {
         match self
             .finalizations_by_height
-            .get(ArchiveID::Index(height))
+            .get(ArchiveID::Index(height.get()))
             .await
         {
             Ok(finalization) => finalization,
@@ -854,7 +861,7 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn finalize(
         &mut self,
-        height: u64,
+        height: Height,
         commitment: B::Commitment,
         block: B,
         finalization: Option<Finalization<P::Scheme, B::Commitment>>,
@@ -874,7 +881,7 @@ where
     /// application.
     async fn store_finalization(
         &mut self,
-        height: u64,
+        height: Height,
         commitment: B::Commitment,
         block: B,
         finalization: Option<Finalization<P::Scheme, B::Commitment>>,
@@ -907,7 +914,7 @@ where
         if height > self.tip {
             application.report(Update::Tip(height, commitment)).await;
             self.tip = height;
-            let _ = self.finalized_height.try_set(height);
+            let _ = self.finalized_height.try_set(height.get());
         }
 
         self.try_dispatch_block(application).await;
@@ -925,7 +932,7 @@ where
     /// yet be found in the `finalizations_by_height` archive. While not checked explicitly, we
     /// should have the associated block (in the `finalized_blocks` archive) for the information
     /// returned.
-    async fn get_latest(&mut self) -> Option<(u64, B::Commitment)> {
+    async fn get_latest(&mut self) -> Option<(Height, B::Commitment)> {
         let height = self.finalizations_by_height.last_index()?;
         let finalization = self
             .get_finalization_by_height(height)
@@ -966,7 +973,7 @@ where
         resolver: &mut impl Resolver<Key = Request<B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
-        let start = self.last_processed_height.saturating_add(1);
+        let start = self.last_processed_height.next();
         'cache_repair: loop {
             let (gap_start, Some(gap_end)) = self.finalized_blocks.next_gap(start) else {
                 // No gaps detected
@@ -982,7 +989,7 @@ where
             // Compute the lower bound of the recursive repair. `gap_start` is `Some`
             // if `start` is not in a gap. We add one to it to ensure we don't
             // re-persist it to the database in the repair loop below.
-            let gap_start = gap_start.map(|s| s.saturating_add(1)).unwrap_or(start);
+            let gap_start = gap_start.map(|s| s.next()).unwrap_or(start);
 
             // Iterate backwards, repairing blocks as we go.
             while cursor.height() > gap_start {
@@ -997,7 +1004,7 @@ where
                         application,
                     )
                     .await;
-                    debug!(height = block.height(), "repaired block");
+                    debug!(height = %block.height(), "repaired block");
                     cursor = block;
                 } else {
                     // Request the next missing block digest
@@ -1028,14 +1035,16 @@ where
     /// outstanding requests below the new processed height.
     async fn set_processed_height(
         &mut self,
-        height: u64,
+        height: Height,
         resolver: &mut impl Resolver<Key = Request<B>>,
     ) -> Result<(), metadata::Error> {
         self.application_metadata
             .put_sync(LATEST_KEY.clone(), height)
             .await?;
         self.last_processed_height = height;
-        let _ = self.processed_height.try_set(self.last_processed_height);
+        let _ = self
+            .processed_height
+            .try_set(self.last_processed_height.get());
 
         // Cancel any existing requests below the new floor.
         resolver

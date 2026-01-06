@@ -72,7 +72,7 @@ pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 pub mod store;
 
-use crate::Block;
+use crate::{types::Height, Block};
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 
 /// An update reported to the application, either a new finalized tip or a finalized block.
@@ -82,7 +82,7 @@ use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 #[derive(Clone, Debug)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// A new finalized tip.
-    Tip(u64, B::Commitment),
+    Tip(Height, B::Commitment),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///
     /// To ensure all blocks are delivered at least once, marshal waits to mark a block as delivered
@@ -112,8 +112,8 @@ mod tests {
             scheme::bls12381_threshold,
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
-        types::{Epoch, Epocher, FixedEpocher, Round, View, ViewDelta},
-        Automaton, Block as _, Reporter, VerifyingApplication,
+        types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
+        Automaton, Heightable, Reporter, VerifyingApplication,
     };
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
@@ -177,7 +177,7 @@ mod tests {
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
-        u64,
+        Height,
     ) {
         let config = Config {
             provider,
@@ -448,7 +448,7 @@ mod tests {
             let mut blocks = Vec::<B>::new();
             let mut parent = Sha256::hash(b"");
             for i in 1..=NUM_BLOCKS {
-                let block = B::new::<Sha256>(parent, i, i);
+                let block = B::new::<Sha256>(parent, Height::new(i), i);
                 parent = block.digest();
                 blocks.push(block);
             }
@@ -459,14 +459,17 @@ mod tests {
             for block in blocks.iter() {
                 // Skip genesis block
                 let height = block.height();
-                assert!(height > 0, "genesis block should not have been generated");
+                assert!(
+                    !height.is_zero(),
+                    "genesis block should not have been generated"
+                );
 
                 // Calculate the epoch and round for the block
                 let bounds = epocher.containing(height).unwrap();
-                let round = Round::new(bounds.epoch(), View::new(height));
+                let round = Round::new(bounds.epoch(), View::new(height.get()));
 
                 // Broadcast block by one validator
-                let actor_index: usize = (height % (NUM_VALIDATORS as u64)) as usize;
+                let actor_index: usize = (height.get() % (NUM_VALIDATORS as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
                 actor.proposed(round, block.clone()).await;
                 actor.verified(round, block.clone()).await;
@@ -478,7 +481,7 @@ mod tests {
                 // Notarize block by the validator that broadcasted it
                 let proposal = Proposal {
                     round,
-                    parent: View::new(height.checked_sub(1).unwrap()),
+                    parent: View::new(height.previous().unwrap().get()),
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -500,7 +503,7 @@ mod tests {
                         .enumerate()
                     {
                         if (do_finalize && i < QUORUM as usize)
-                            || height == NUM_BLOCKS
+                            || height == Height::new(NUM_BLOCKS)
                             || height == bounds.last()
                         {
                             actor.report(Activity::Finalization(fin.clone())).await;
@@ -510,7 +513,9 @@ mod tests {
                     // If `quorum_sees_finalization` is not set, finalize randomly with a 20% chance for each
                     // individual participant.
                     for actor in actors.iter_mut() {
-                        if context.gen_bool(0.2) || height == NUM_BLOCKS || height == bounds.last()
+                        if context.gen_bool(0.2)
+                            || height == Height::new(NUM_BLOCKS)
+                            || height == bounds.last()
                         {
                             actor.report(Activity::Finalization(fin.clone())).await;
                         }
@@ -538,7 +543,7 @@ mod tests {
                         finished = false;
                         break;
                     };
-                    if height < NUM_BLOCKS {
+                    if height < Height::new(NUM_BLOCKS) {
                         finished = false;
                         break;
                     }
@@ -594,7 +599,7 @@ mod tests {
             let mut blocks = Vec::<B>::new();
             let mut parent = Sha256::hash(b"");
             for i in 1..=NUM_BLOCKS {
-                let block = B::new::<Sha256>(parent, i, i);
+                let block = B::new::<Sha256>(parent, Height::new(i), i);
                 parent = block.digest();
                 blocks.push(block);
             }
@@ -604,14 +609,17 @@ mod tests {
             for block in blocks.iter() {
                 // Skip genesis block
                 let height = block.height();
-                assert!(height > 0, "genesis block should not have been generated");
+                assert!(
+                    !height.is_zero(),
+                    "genesis block should not have been generated"
+                );
 
                 // Calculate the epoch and round for the block
                 let bounds = epocher.containing(height).unwrap();
-                let round = Round::new(bounds.epoch(), View::new(height));
+                let round = Round::new(bounds.epoch(), View::new(height.get()));
 
                 // Broadcast block by one validator
-                let actor_index: usize = (height % (applications.len() as u64)) as usize;
+                let actor_index: usize = (height.get() % (applications.len() as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
                 actor.proposed(round, block.clone()).await;
                 actor.verified(round, block.clone()).await;
@@ -623,7 +631,7 @@ mod tests {
                 // Notarize block by the validator that broadcasted it
                 let proposal = Proposal {
                     round,
-                    parent: View::new(height.checked_sub(1).unwrap()),
+                    parent: View::new(height.previous().unwrap().get()),
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -655,7 +663,7 @@ mod tests {
                         finished = false;
                         break;
                     };
-                    if height < NUM_BLOCKS {
+                    if height < Height::new(NUM_BLOCKS) {
                         finished = false;
                         break;
                     }
@@ -677,10 +685,13 @@ mod tests {
 
             const NEW_SYNC_FLOOR: u64 = 100;
             let second_actor = &mut actors[1];
-            let latest_finalization = second_actor.get_finalization(NUM_BLOCKS).await.unwrap();
+            let latest_finalization = second_actor
+                .get_finalization(Height::new(NUM_BLOCKS))
+                .await
+                .unwrap();
 
             // Set the sync height floor of the first actor to block #100.
-            actor.set_floor(NEW_SYNC_FLOOR).await;
+            actor.set_floor(Height::new(NEW_SYNC_FLOOR)).await;
 
             // Notify the first actor of the latest finalization to the first actor to trigger backfill.
             // The sync should only reach the sync height floor.
@@ -703,7 +714,7 @@ mod tests {
                     finished = false;
                     continue;
                 };
-                if height < NUM_BLOCKS {
+                if height < Height::new(NUM_BLOCKS) {
                     finished = false;
                     continue;
                 }
@@ -711,11 +722,13 @@ mod tests {
 
             // Check that the first actor has blocks from NEW_SYNC_FLOOR onward, but not before.
             for height in 1..=NUM_BLOCKS {
-                let block = actor.get_block(Identifier::Height(height)).await;
+                let block = actor
+                    .get_block(Identifier::Height(Height::new(height)))
+                    .await;
                 if height <= NEW_SYNC_FLOOR {
                     assert!(block.is_none());
                 } else {
-                    assert_eq!(block.unwrap().height(), height);
+                    assert_eq!(block.unwrap().height(), Height::new(height));
                 }
             }
         })
@@ -748,7 +761,7 @@ mod tests {
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, 1, 1);
+            let block = B::new::<Sha256>(parent, Height::new(1), 1);
             let commitment = block.digest();
 
             let subscription_rx = actor
@@ -772,7 +785,7 @@ mod tests {
 
             let received_block = subscription_rx.await.unwrap();
             assert_eq!(received_block.digest(), block.digest());
-            assert_eq!(received_block.height(), 1);
+            assert_eq!(received_block.height(), Height::new(1));
         })
     }
 
@@ -803,8 +816,8 @@ mod tests {
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent, 1, 1);
-            let block2 = B::new::<Sha256>(block1.digest(), 2, 2);
+            let block1 = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block2 = B::new::<Sha256>(block1.digest(), Height::new(2), 2);
             let commitment1 = block1.digest();
             let commitment2 = block2.digest();
 
@@ -846,9 +859,9 @@ mod tests {
             assert_eq!(received1_sub1.digest(), block1.digest());
             assert_eq!(received2.digest(), block2.digest());
             assert_eq!(received1_sub3.digest(), block1.digest());
-            assert_eq!(received1_sub1.height(), 1);
-            assert_eq!(received2.height(), 2);
-            assert_eq!(received1_sub3.height(), 1);
+            assert_eq!(received1_sub1.height(), Height::new(1));
+            assert_eq!(received2.height(), Height::new(2));
+            assert_eq!(received1_sub3.height(), Height::new(1));
         })
     }
 
@@ -879,8 +892,8 @@ mod tests {
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent, 1, 1);
-            let block2 = B::new::<Sha256>(block1.digest(), 2, 2);
+            let block1 = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block2 = B::new::<Sha256>(block1.digest(), Height::new(2), 2);
             let commitment1 = block1.digest();
             let commitment2 = block2.digest();
 
@@ -916,7 +929,7 @@ mod tests {
 
             let received2 = sub2_rx.await.unwrap();
             assert_eq!(received2.digest(), block2.digest());
-            assert_eq!(received2.height(), 2);
+            assert_eq!(received2.height(), Height::new(2));
         })
     }
 
@@ -947,11 +960,11 @@ mod tests {
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent, 1, 1);
-            let block2 = B::new::<Sha256>(block1.digest(), 2, 2);
-            let block3 = B::new::<Sha256>(block2.digest(), 3, 3);
-            let block4 = B::new::<Sha256>(block3.digest(), 4, 4);
-            let block5 = B::new::<Sha256>(block4.digest(), 5, 5);
+            let block1 = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block2 = B::new::<Sha256>(block1.digest(), Height::new(2), 2);
+            let block3 = B::new::<Sha256>(block2.digest(), Height::new(3), 3);
+            let block4 = B::new::<Sha256>(block3.digest(), Height::new(4), 4);
+            let block5 = B::new::<Sha256>(block4.digest(), Height::new(5), 5);
 
             let sub1_rx = actor.subscribe(None, block1.digest()).await;
             let sub2_rx = actor.subscribe(None, block2.digest()).await;
@@ -968,7 +981,7 @@ mod tests {
             // Block1: delivered
             let received1 = sub1_rx.await.unwrap();
             assert_eq!(received1.digest(), block1.digest());
-            assert_eq!(received1.height(), 1);
+            assert_eq!(received1.height(), Height::new(1));
 
             // Block2: Verified by the actor
             actor
@@ -978,7 +991,7 @@ mod tests {
             // Block2: delivered
             let received2 = sub2_rx.await.unwrap();
             assert_eq!(received2.digest(), block2.digest());
-            assert_eq!(received2.height(), 2);
+            assert_eq!(received2.height(), Height::new(2));
 
             // Block3: Notarized by the actor
             let proposal3 = Proposal {
@@ -995,7 +1008,7 @@ mod tests {
             // Block3: delivered
             let received3 = sub3_rx.await.unwrap();
             assert_eq!(received3.digest(), block3.digest());
-            assert_eq!(received3.height(), 3);
+            assert_eq!(received3.height(), Height::new(3));
 
             // Block4: Finalized by the actor
             let finalization4 = make_finalization(
@@ -1015,7 +1028,7 @@ mod tests {
             // Block4: delivered
             let received4 = sub4_rx.await.unwrap();
             assert_eq!(received4.digest(), block4.digest());
-            assert_eq!(received4.height(), 4);
+            assert_eq!(received4.height(), Height::new(4));
 
             // Block5: Broadcasted by a remote node (different actor)
             let remote_actor = &mut actors[1].clone();
@@ -1027,7 +1040,7 @@ mod tests {
             // Block5: delivered
             let received5 = sub5_rx.await.unwrap();
             assert_eq!(received5.digest(), block5.digest());
-            assert_eq!(received5.height(), 5);
+            assert_eq!(received5.height(), Height::new(5));
         })
     }
 
@@ -1056,11 +1069,11 @@ mod tests {
             assert!(actor.get_info(Identifier::Latest).await.is_none());
 
             // Before finalization, specific height returns None
-            assert!(actor.get_info(1).await.is_none());
+            assert!(actor.get_info(Height::new(1)).await.is_none());
 
             // Create and verify a block, then finalize it
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, 1, 1);
+            let block = B::new::<Sha256>(parent, Height::new(1), 1);
             let digest = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round, block.clone()).await;
@@ -1074,16 +1087,25 @@ mod tests {
             actor.report(Activity::Finalization(finalization)).await;
 
             // Latest should now be the finalized block
-            assert_eq!(actor.get_info(Identifier::Latest).await, Some((1, digest)));
+            assert_eq!(
+                actor.get_info(Identifier::Latest).await,
+                Some((Height::new(1), digest))
+            );
 
             // Height 1 now present
-            assert_eq!(actor.get_info(1).await, Some((1, digest)));
+            assert_eq!(
+                actor.get_info(Height::new(1)).await,
+                Some((Height::new(1), digest))
+            );
 
             // Commitment should map to its height
-            assert_eq!(actor.get_info(&digest).await, Some((1, digest)));
+            assert_eq!(
+                actor.get_info(&digest).await,
+                Some((Height::new(1), digest))
+            );
 
             // Missing height
-            assert!(actor.get_info(2).await.is_none());
+            assert!(actor.get_info(Height::new(2)).await.is_none());
 
             // Missing commitment
             let missing = Sha256::hash(b"missing");
@@ -1117,7 +1139,7 @@ mod tests {
 
             // Build and finalize heights 1..=3
             let parent0 = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent0, 1, 1);
+            let block1 = B::new::<Sha256>(parent0, Height::new(1), 1);
             let d1 = block1.digest();
             actor
                 .verified(Round::new(Epoch::new(0), View::new(1)), block1.clone())
@@ -1133,9 +1155,9 @@ mod tests {
             );
             actor.report(Activity::Finalization(f1)).await;
             let latest = actor.get_info(Identifier::Latest).await;
-            assert_eq!(latest, Some((1, d1)));
+            assert_eq!(latest, Some((Height::new(1), d1)));
 
-            let block2 = B::new::<Sha256>(d1, 2, 2);
+            let block2 = B::new::<Sha256>(d1, Height::new(2), 2);
             let d2 = block2.digest();
             actor
                 .verified(Round::new(Epoch::new(0), View::new(2)), block2.clone())
@@ -1151,9 +1173,9 @@ mod tests {
             );
             actor.report(Activity::Finalization(f2)).await;
             let latest = actor.get_info(Identifier::Latest).await;
-            assert_eq!(latest, Some((2, d2)));
+            assert_eq!(latest, Some((Height::new(2), d2)));
 
-            let block3 = B::new::<Sha256>(d2, 3, 3);
+            let block3 = B::new::<Sha256>(d2, Height::new(3), 3);
             let d3 = block3.digest();
             actor
                 .verified(Round::new(Epoch::new(0), View::new(3)), block3.clone())
@@ -1169,7 +1191,7 @@ mod tests {
             );
             actor.report(Activity::Finalization(f3)).await;
             let latest = actor.get_info(Identifier::Latest).await;
-            assert_eq!(latest, Some((3, d3)));
+            assert_eq!(latest, Some((Height::new(3), d3)));
         })
     }
 
@@ -1200,7 +1222,7 @@ mod tests {
 
             // Finalize a block at height 1
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, 1, 1);
+            let block = B::new::<Sha256>(parent, Height::new(1), 1);
             let commitment = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round, block.clone()).await;
@@ -1213,21 +1235,24 @@ mod tests {
             actor.report(Activity::Finalization(finalization)).await;
 
             // Get by height
-            let by_height = actor.get_block(1).await.expect("missing block by height");
-            assert_eq!(by_height.height(), 1);
+            let by_height = actor
+                .get_block(Height::new(1))
+                .await
+                .expect("missing block by height");
+            assert_eq!(by_height.height(), Height::new(1));
             assert_eq!(by_height.digest(), commitment);
-            assert_eq!(application.tip(), Some((1, commitment)));
+            assert_eq!(application.tip(), Some((Height::new(1), commitment)));
 
             // Get by latest
             let by_latest = actor
                 .get_block(Identifier::Latest)
                 .await
                 .expect("missing block by latest");
-            assert_eq!(by_latest.height(), 1);
+            assert_eq!(by_latest.height(), Height::new(1));
             assert_eq!(by_latest.digest(), commitment);
 
             // Missing height
-            let by_height = actor.get_block(2).await;
+            let by_height = actor.get_block(Height::new(2)).await;
             assert!(by_height.is_none());
         })
     }
@@ -1254,7 +1279,7 @@ mod tests {
 
             // 1) From cache via verified
             let parent = Sha256::hash(b"");
-            let ver_block = B::new::<Sha256>(parent, 1, 1);
+            let ver_block = B::new::<Sha256>(parent, Height::new(1), 1);
             let ver_commitment = ver_block.digest();
             let round1 = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round1, ver_block.clone()).await;
@@ -1265,7 +1290,7 @@ mod tests {
             assert_eq!(got.digest(), ver_commitment);
 
             // 2) From finalized archive
-            let fin_block = B::new::<Sha256>(ver_commitment, 2, 2);
+            let fin_block = B::new::<Sha256>(ver_commitment, Height::new(2), 2);
             let fin_commitment = fin_block.digest();
             let round2 = Round::new(Epoch::new(0), View::new(2));
             actor.verified(round2, fin_block.clone()).await;
@@ -1281,7 +1306,7 @@ mod tests {
                 .await
                 .expect("missing block from finalized archive");
             assert_eq!(got.digest(), fin_commitment);
-            assert_eq!(got.height(), 2);
+            assert_eq!(got.height(), Height::new(2));
 
             // 3) Missing commitment
             let missing = Sha256::hash(b"definitely-missing");
@@ -1311,12 +1336,12 @@ mod tests {
             .await;
 
             // Before any finalization, get_finalization should be None
-            let finalization = actor.get_finalization(1).await;
+            let finalization = actor.get_finalization(Height::new(1)).await;
             assert!(finalization.is_none());
 
             // Finalize a block at height 1
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, 1, 1);
+            let block = B::new::<Sha256>(parent, Height::new(1), 1);
             let commitment = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round, block.clone()).await;
@@ -1330,7 +1355,7 @@ mod tests {
 
             // Get finalization by height
             let finalization = actor
-                .get_finalization(1)
+                .get_finalization(Height::new(1))
                 .await
                 .expect("missing finalization by height");
             assert_eq!(finalization.proposal.parent, View::new(0));
@@ -1340,7 +1365,7 @@ mod tests {
             );
             assert_eq!(finalization.proposal.payload, commitment);
 
-            assert!(actor.get_finalization(2).await.is_none());
+            assert!(actor.get_finalization(Height::new(2)).await.is_none());
         })
     }
 
@@ -1387,7 +1412,7 @@ mod tests {
             // Validator 0: Create and finalize blocks 1-5
             let mut parent = Sha256::hash(b"");
             for i in 1..=5u64 {
-                let block = B::new::<Sha256>(parent, i, i);
+                let block = B::new::<Sha256>(parent, Height::new(i), i);
                 let commitment = block.digest();
                 let round = Round::new(Epoch::new(0), View::new(i));
 
@@ -1409,21 +1434,21 @@ mod tests {
             }
 
             // Validator 1 should not have block 5 yet
-            assert!(actor1.get_finalization(5).await.is_none());
+            assert!(actor1.get_finalization(Height::new(5)).await.is_none());
 
             // Validator 1: hint that block 5 is finalized, targeting validator 0
             actor1
-                .hint_finalized(5, NonEmptyVec::new(participants[0].clone()))
+                .hint_finalized(Height::new(5), NonEmptyVec::new(participants[0].clone()))
                 .await;
 
             // Wait for the fetch to complete
-            while actor1.get_finalization(5).await.is_none() {
+            while actor1.get_finalization(Height::new(5)).await.is_none() {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
             // Verify validator 1 now has the finalization
             let finalization = actor1
-                .get_finalization(5)
+                .get_finalization(Height::new(5))
                 .await
                 .expect("finalization should be fetched");
             assert_eq!(finalization.proposal.round.view(), View::new(5));
@@ -1453,7 +1478,7 @@ mod tests {
             // Finalize blocks at heights 1-5
             let mut parent = Sha256::hash(b"");
             for i in 1..=5 {
-                let block = B::new::<Sha256>(parent, i, i);
+                let block = B::new::<Sha256>(parent, Height::new(i), i);
                 let commitment = block.digest();
                 let round = Round::new(Epoch::new(0), View::new(i));
                 actor.verified(round, block.clone()).await;
@@ -1476,7 +1501,7 @@ mod tests {
             // Ensure correct delivery order: 5,4,3,2,1
             assert_eq!(blocks.len(), 5);
             (0..5).for_each(|i| {
-                assert_eq!(blocks[i].height(), 5 - i as u64);
+                assert_eq!(blocks[i].height(), Height::new(5 - i as u64));
             });
         })
     }
@@ -1536,7 +1561,7 @@ mod tests {
             .await;
 
             // Create genesis block
-            let genesis = B::new::<Sha256>(Sha256::hash(b""), 0, 0);
+            let genesis = B::new::<Sha256>(Sha256::hash(b""), Height::zero(), 0);
 
             // Wrap with Marshaled verifier
             let mock_app = MockVerifyingApp {
@@ -1555,8 +1580,11 @@ mod tests {
             // With BLOCKS_PER_EPOCH=20: epoch 0 is heights 0-19, epoch 1 is heights 20-39
             //
             // Store honest parent at height 21 (epoch 1)
-            let honest_parent =
-                B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH.get() + 1, 1000);
+            let honest_parent = B::new::<Sha256>(
+                genesis.commitment(),
+                Height::new(BLOCKS_PER_EPOCH.get() + 1),
+                1000,
+            );
             let parent_commitment = honest_parent.commitment();
             let parent_round = Round::new(Epoch::new(1), View::new(21));
             marshal
@@ -1567,8 +1595,11 @@ mod tests {
             // Byzantine proposer broadcasts malicious block at height 35
             // In reality this would come via buffered broadcast, but for test simplicity
             // we call broadcast() directly which makes it available for subscription
-            let malicious_block =
-                B::new::<Sha256>(parent_commitment, BLOCKS_PER_EPOCH.get() + 15, 2000);
+            let malicious_block = B::new::<Sha256>(
+                parent_commitment,
+                Height::new(BLOCKS_PER_EPOCH.get() + 15),
+                2000,
+            );
             let malicious_commitment = malicious_block.commitment();
             marshal
                 .clone()
@@ -1607,8 +1638,11 @@ mod tests {
             // Test case 2: Mismatched parent commitment
             //
             // Create another malicious block with correct height but invalid parent commitment
-            let malicious_block =
-                B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH.get() + 2, 3000);
+            let malicious_block = B::new::<Sha256>(
+                genesis.commitment(),
+                Height::new(BLOCKS_PER_EPOCH.get() + 2),
+                3000,
+            );
             let malicious_commitment = malicious_block.commitment();
             marshal
                 .clone()
@@ -1673,7 +1707,7 @@ mod tests {
 
             // Create block at height 1
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, 1, 1);
+            let block = B::new::<Sha256>(parent, Height::new(1), 1);
             let commitment = block.digest();
 
             // Both validators verify the block
@@ -1720,14 +1754,14 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Verify both validators stored the block correctly
-            let block0 = actors[0].get_block(1).await.unwrap();
-            let block1 = actors[1].get_block(1).await.unwrap();
+            let block0 = actors[0].get_block(Height::new(1)).await.unwrap();
+            let block1 = actors[1].get_block(Height::new(1)).await.unwrap();
             assert_eq!(block0, block);
             assert_eq!(block1, block);
 
             // Verify both validators have finalizations stored
-            let fin0 = actors[0].get_finalization(1).await.unwrap();
-            let fin1 = actors[1].get_finalization(1).await.unwrap();
+            let fin0 = actors[0].get_finalization(Height::new(1)).await.unwrap();
+            let fin1 = actors[1].get_finalization(Height::new(1)).await.unwrap();
 
             // Verify the finalizations have the expected different views
             assert_eq!(fin0.proposal.payload, block.commitment());
@@ -1736,8 +1770,14 @@ mod tests {
             assert_eq!(fin1.round().view(), View::new(2));
 
             // Both validators can retrieve block by height
-            assert_eq!(actors[0].get_info(1).await, Some((1, commitment)));
-            assert_eq!(actors[1].get_info(1).await, Some((1, commitment)));
+            assert_eq!(
+                actors[0].get_info(Height::new(1)).await,
+                Some((Height::new(1), commitment))
+            );
+            assert_eq!(
+                actors[1].get_info(Height::new(1)).await,
+                Some((Height::new(1), commitment))
+            );
 
             // Test that a validator receiving BOTH finalizations handles it correctly
             // (the second one should be ignored since archive ignores duplicates for same height)
@@ -1750,11 +1790,11 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Validator 0 should still have the original finalization (v1)
-            let fin0_after = actors[0].get_finalization(1).await.unwrap();
+            let fin0_after = actors[0].get_finalization(Height::new(1)).await.unwrap();
             assert_eq!(fin0_after.round().view(), View::new(1));
 
             // Validator 1 should still have the original finalization (v2)
-            let fin0_after = actors[1].get_finalization(1).await.unwrap();
+            let fin0_after = actors[1].get_finalization(Height::new(1)).await.unwrap();
             assert_eq!(fin0_after.round().view(), View::new(2));
         })
     }
@@ -1779,13 +1819,13 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
-            assert_eq!(initial_height, 0);
+            assert_eq!(initial_height, Height::zero());
 
             // Process multiple blocks (1, 2, 3)
             let mut parent = Sha256::hash(b"");
             let mut blocks = Vec::new();
             for i in 1..=3 {
-                let block = B::new::<Sha256>(parent, i, i);
+                let block = B::new::<Sha256>(parent, Height::new(i), i);
                 let commitment = block.digest();
                 let round = Round::new(Epoch::new(0), View::new(i));
 
@@ -1808,12 +1848,15 @@ mod tests {
             }
 
             // Set marshal's processed height to 3
-            actor.set_floor(3).await;
+            actor.set_floor(Height::new(3)).await;
             context.sleep(Duration::from_millis(10)).await;
 
             // Verify application received all blocks
             assert_eq!(application.blocks().len(), 3);
-            assert_eq!(application.tip(), Some((3, blocks[2].digest())));
+            assert_eq!(
+                application.tip(),
+                Some((Height::new(3), blocks[2].digest()))
+            );
 
             // Test 2: Restart with marshal processed height = 3
             let (_restart_application, _restart_actor, restart_height) = setup_validator(
@@ -1824,7 +1867,7 @@ mod tests {
             )
             .await;
 
-            assert_eq!(restart_height, 3);
+            assert_eq!(restart_height, Height::new(3));
         })
     }
 
@@ -1870,7 +1913,7 @@ mod tests {
         }
 
         impl Epocher for LimitedEpocher {
-            fn containing(&self, height: u64) -> Option<crate::types::EpochInfo> {
+            fn containing(&self, height: Height) -> Option<crate::types::EpochInfo> {
                 let bounds = self.inner.containing(height)?;
                 if bounds.epoch().get() > self.max_epoch {
                     None
@@ -1879,7 +1922,7 @@ mod tests {
                 }
             }
 
-            fn first(&self, epoch: Epoch) -> Option<u64> {
+            fn first(&self, epoch: Epoch) -> Option<Height> {
                 if epoch.get() > self.max_epoch {
                     None
                 } else {
@@ -1887,7 +1930,7 @@ mod tests {
                 }
             }
 
-            fn last(&self, epoch: Epoch) -> Option<u64> {
+            fn last(&self, epoch: Epoch) -> Option<Height> {
                 if epoch.get() > self.max_epoch {
                     None
                 } else {
@@ -1914,7 +1957,7 @@ mod tests {
             )
             .await;
 
-            let genesis = B::new::<Sha256>(Sha256::hash(b""), 0, 0);
+            let genesis = B::new::<Sha256>(Sha256::hash(b""), Height::zero(), 0);
 
             let mock_app = MockVerifyingApp {
                 genesis: genesis.clone(),
@@ -1927,13 +1970,13 @@ mod tests {
                 Marshaled::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
 
             // Create a parent block at height 19 (last block in epoch 0, which is supported)
-            let parent = B::new::<Sha256>(genesis.commitment(), 19, 1000);
+            let parent = B::new::<Sha256>(genesis.commitment(), Height::new(19), 1000);
             let parent_commitment = parent.commitment();
             let parent_round = Round::new(Epoch::new(0), View::new(19));
             marshal.clone().verified(parent_round, parent).await;
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
-            let block = B::new::<Sha256>(parent_commitment, 20, 2000);
+            let block = B::new::<Sha256>(parent_commitment, Height::new(20), 2000);
             let block_commitment = block.commitment();
             marshal
                 .clone()
@@ -1983,7 +2026,7 @@ mod tests {
 
             // Create block at height 1
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, 1, 1);
+            let block = B::new::<Sha256>(parent, Height::new(1), 1);
             let commitment = block.digest();
 
             // Broadcast the block
