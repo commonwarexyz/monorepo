@@ -137,8 +137,7 @@ fn main() {
     // Create context
     let executor = tokio::Runner::default();
     executor.start(|context| async move {
-        let thread_pool = context.clone().create_pool(NZUsize!(2)).unwrap();
-        let strategy = Rayon::new(thread_pool);
+        let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
 
         for network in networks {
             let network = from_hex(network).expect("Network not well-formed");

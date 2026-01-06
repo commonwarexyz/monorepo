@@ -24,7 +24,7 @@
 
 use bytes::{Buf, BufMut};
 use commonware_macros::select;
-use commonware_parallel::ThreadPool;
+use commonware_parallel::{Rayon, ThreadPool};
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
 use rayon::ThreadPoolBuildError;
@@ -230,12 +230,24 @@ pub trait RayonPoolSpawner: Spawner + Metrics {
     /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
     ///
     /// # Arguments
-    /// - `context`: The runtime context implementing the [Spawner] trait.
     /// - `concurrency`: The number of tasks to execute concurrently in the pool.
     ///
     /// # Returns
-    /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot be built.
+    /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot
+    /// be built.
     fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError>;
+
+    /// Creates a clone-able [Rayon] strategy for use with [commonware_parallel].
+    ///
+    /// # Arguments
+    /// - `concurrency`: The number of tasks to execute concurrently in the pool.
+    ///
+    /// # Returns
+    /// A `Result` containing the configured [Rayon] strategy or a [rayon::ThreadPoolBuildError] if the pool cannot be
+    /// built.
+    fn create_strategy(&self, concurrency: NonZeroUsize) -> Result<Rayon, ThreadPoolBuildError> {
+        self.create_pool(concurrency).map(Rayon::new)
+    }
 }
 
 /// Interface to register and encode metrics.
