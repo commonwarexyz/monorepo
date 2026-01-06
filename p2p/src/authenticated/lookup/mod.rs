@@ -72,7 +72,7 @@
 //!
 //! // Configure context
 //! let runtime_cfg = deterministic::Config::default();
-//! let runner = deterministic::Runner::new(runtime_cfg.clone());
+//! let runner = deterministic::Runner::new(runtime_cfg);
 //!
 //! // Generate identity
 //! //
