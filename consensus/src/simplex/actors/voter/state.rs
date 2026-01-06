@@ -1,4 +1,4 @@
-use super::round::Round;
+use super::round::{CertifyResult, Round};
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
@@ -122,12 +122,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.last_finalized
     }
 
-    /// Returns true if the view is eligible for certification (not yet finalized).
-    #[inline]
-    fn is_certify_candidate(&self, view: View) -> bool {
-        view > self.last_finalized
-    }
-
     /// Returns the lowest view that must remain in memory to satisfy the activity timeout.
     pub const fn min_active(&self) -> View {
         min_active(self.activity_timeout, self.last_finalized)
@@ -247,7 +241,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         // Do not advance to the next view until the certification passes
         self.set_leader(view.next(), Some(&notarization.certificate));
         let result = self.create_round(view).add_notarization(notarization);
-        if result.0 && self.is_certify_candidate(view) {
+        if result.0 && view > self.last_finalized {
             self.certification_candidates.insert(view);
         }
         result
@@ -266,7 +260,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         &mut self,
         finalization: Finalization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
-        // If this finalization increases our last finalized view, update it
         let view = finalization.view();
         if view > self.last_finalized {
             self.last_finalized = view;
@@ -470,27 +463,21 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Takes all certification candidates and returns proposals ready for certification.
-    ///
-    /// Views that are pending (have notarization but no proposal yet) are re-added
-    /// to candidates for later retry.
     pub fn certify_candidates(&mut self) -> Vec<Proposal<D>> {
         let candidates = take(&mut self.certification_candidates);
-        let mut ready = Vec::new();
-        for view in candidates {
-            if !self.is_certify_candidate(view) {
-                continue;
-            }
-            let Some(round) = self.views.get_mut(&view) else {
-                continue;
-            };
-            let (proposal, pending) = round.try_certify();
-            if let Some(proposal) = proposal {
-                ready.push(proposal);
-            } else if pending {
-                self.certification_candidates.insert(view);
-            }
-        }
-        ready
+        candidates
+            .into_iter()
+            .filter_map(|view| {
+                if view <= self.last_finalized {
+                    return None;
+                }
+                let round = self.views.get_mut(&view)?;
+                match round.try_certify() {
+                    CertifyResult::Ready(proposal) => Some(proposal),
+                    CertifyResult::Skip => None,
+                }
+            })
+            .collect()
     }
 
     /// Marks proposal certification as complete and returns the notarization.
@@ -881,7 +868,10 @@ mod tests {
             // The parent is still not certified
             assert!(state.parent_payload(&proposal).is_none());
 
-            // Certify the parent
+            // Set certify handle then certify the parent
+            let mut pool = commonware_utils::futures::AbortablePool::<()>::default();
+            let handle = pool.push(futures::future::pending());
+            state.set_certify_handle(parent_view, handle);
             state.certified(parent_view, true);
             let digest = state.parent_payload(&proposal).expect("parent payload");
             assert_eq!(digest, parent_payload);
