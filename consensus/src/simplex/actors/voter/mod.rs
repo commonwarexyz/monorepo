@@ -804,76 +804,21 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Setup application mock
+            // Setup application mock and voter
             let elector = L::default();
-            let reporter_cfg = mocks::reporter::Config {
-                participants: participants.clone().try_into().unwrap(),
-                scheme: schemes[0].clone(),
-                elector: elector.clone(),
-            };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: participants[0].clone(),
-                propose_latency: (1.0, 0.0),
-                verify_latency: (1.0, 0.0),
-                certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Sometimes,
-            };
-            let (actor, application) =
-                mocks::application::Application::new(context.with_label("app"), application_cfg);
-            actor.start();
-
-            // Initialize voter actor
-            let voter_cfg = Config {
-                scheme: schemes[0].clone(),
-                elector,
-                blocker: oracle.control(participants[0].clone()),
-                automaton: application.clone(),
-                relay: application.clone(),
-                reporter: reporter.clone(),
-                partition: "voter_finalization_test".to_string(),
-                epoch: Epoch::new(333),
-                mailbox_size: 128,
-                leader_timeout: Duration::from_millis(500),
-                notarization_timeout: Duration::from_secs(1000),
-                nullify_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
-
-            // Resolver and batcher mailboxes
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
-            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
-
-            // Register network channels for the validator
-            let me = participants[0].clone();
-            let (vote_sender, _vote_receiver) = oracle
-                .control(me.clone())
-                .register(0, TEST_QUOTA)
-                .await
-                .unwrap();
-            let (certificate_sender, _certificate_receiver) = oracle
-                .control(me.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
-
-            // Start the actor
-            voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
+                setup_voter(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    elector,
+                    Duration::from_millis(500),
+                    Duration::from_secs(1000),
+                    Duration::from_secs(1000),
+                    mocks::application::Certifier::Sometimes,
+                )
+                .await;
 
             // Wait for batcher to be notified
             let message = batcher_receiver.next().await.unwrap();
@@ -986,76 +931,21 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Setup application mock
+            // Setup application mock and voter
             let elector = L::default();
-            let reporter_cfg = mocks::reporter::Config {
-                participants: participants.clone().try_into().unwrap(),
-                scheme: schemes[0].clone(),
-                elector: elector.clone(),
-            };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: participants[0].clone(),
-                propose_latency: (1.0, 0.0),
-                verify_latency: (1.0, 0.0),
-                certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Sometimes,
-            };
-            let (actor, application) =
-                mocks::application::Application::new(context.with_label("app"), application_cfg);
-            actor.start();
-
-            // Initialize voter actor
-            let voter_cfg = Config {
-                scheme: schemes[0].clone(),
-                elector,
-                blocker: oracle.control(participants[0].clone()),
-                automaton: application.clone(),
-                relay: application.clone(),
-                reporter: reporter.clone(),
-                partition: "voter_certificate_conflicts_proposal_test".to_string(),
-                epoch: Epoch::new(333),
-                mailbox_size: 128,
-                leader_timeout: Duration::from_millis(500),
-                notarization_timeout: Duration::from_secs(1000),
-                nullify_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
-
-            // Resolver and batcher mailboxes
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
-            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
-
-            // Register network channels
-            let me = participants[0].clone();
-            let (vote_sender, _) = oracle
-                .control(me.clone())
-                .register(0, TEST_QUOTA)
-                .await
-                .unwrap();
-            let (certificate_sender, _certificate_receiver) = oracle
-                .control(me.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
-
-            // Start the voter
-            voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
+                setup_voter(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    elector,
+                    Duration::from_millis(500),
+                    Duration::from_secs(1000),
+                    Duration::from_secs(1000),
+                    mocks::application::Certifier::Sometimes,
+                )
+                .await;
 
             // Wait for initial batcher notification
             let message = batcher_receiver.next().await.unwrap();
@@ -1180,71 +1070,21 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            // Setup application mock and voter
             let elector = L::default();
-            let reporter_cfg = mocks::reporter::Config {
-                participants: participants.clone().try_into().unwrap(),
-                scheme: schemes[0].clone(),
-                elector: elector.clone(),
-            };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: participants[0].clone(),
-                propose_latency: (1.0, 0.0),
-                verify_latency: (1.0, 0.0),
-                certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Sometimes,
-            };
-            let (actor, application) =
-                mocks::application::Application::new(context.with_label("app"), application_cfg);
-            actor.start();
-
-            let voter_cfg = Config {
-                scheme: schemes[0].clone(),
-                elector,
-                blocker: oracle.control(participants[0].clone()),
-                automaton: application.clone(),
-                relay: application.clone(),
-                reporter: reporter.clone(),
-                partition: "voter_proposal_conflicts_certificate_test".to_string(),
-                epoch: Epoch::new(333),
-                mailbox_size: 128,
-                leader_timeout: Duration::from_millis(500),
-                notarization_timeout: Duration::from_secs(1000),
-                nullify_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
-
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
-            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
-
-            let me = participants[0].clone();
-            let (vote_sender, _) = oracle
-                .control(me.clone())
-                .register(0, TEST_QUOTA)
-                .await
-                .unwrap();
-            let (certificate_sender, _) = oracle
-                .control(me.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
-
-            voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
+                setup_voter(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    elector,
+                    Duration::from_millis(500),
+                    Duration::from_secs(1000),
+                    Duration::from_secs(1000),
+                    mocks::application::Certifier::Sometimes,
+                )
+                .await;
 
             // Wait for initial batcher notification
             let message = batcher_receiver.next().await.unwrap();
@@ -1986,76 +1826,20 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Setup application mock
+            // Setup application mock and voter
             let elector = L::default();
-            let reporter_cfg = mocks::reporter::Config {
-                participants: participants.clone().try_into().unwrap(),
-                scheme: schemes[0].clone(),
-                elector: elector.clone(),
-            };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: participants[0].clone(),
-                propose_latency: (1.0, 0.0),
-                verify_latency: (1.0, 0.0),
-                certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Sometimes,
-            };
-            let (actor, application) =
-                mocks::application::Application::new(context.with_label("app"), application_cfg);
-            actor.start();
-
-            // Initialize voter actor
-            let voter_cfg = Config {
-                scheme: schemes[0].clone(),
+            let (mut mailbox, mut batcher_receiver, _, _, reporter) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
                 elector,
-                blocker: oracle.control(participants[0].clone()),
-                automaton: application.clone(),
-                relay: application.clone(),
-                reporter: reporter.clone(),
-                partition: "finalization_from_resolver".to_string(),
-                epoch: Epoch::new(333),
-                mailbox_size: 128,
-                leader_timeout: Duration::from_millis(500),
-                notarization_timeout: Duration::from_secs(1000),
-                nullify_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
-
-            // Resolver and batcher mailboxes
-            let (resolver_sender, _) = mpsc::channel(8);
-            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
-            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
-
-            // Register network channels for the validator
-            let me = participants[0].clone();
-            let (vote_sender, _vote_receiver) = oracle
-                .control(me.clone())
-                .register(0, TEST_QUOTA)
-                .await
-                .unwrap();
-            let (certificate_sender, _certificate_receiver) = oracle
-                .control(me.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
-
-            // Start the actor
-            voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+                Duration::from_millis(500),
+                Duration::from_secs(1000),
+                Duration::from_secs(1000),
+                mocks::application::Certifier::Sometimes,
+            )
+            .await;
 
             // Wait for batcher to be notified
             let message = batcher_receiver.next().await.unwrap();
@@ -2148,76 +1932,21 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Setup application mock
+            // Setup application mock and voter
             let elector = L::default();
-            let reporter_cfg = mocks::reporter::Config {
-                participants: participants.clone().try_into().unwrap(),
-                scheme: schemes[0].clone(),
-                elector: elector.clone(),
-            };
-            let reporter =
-                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: participants[0].clone(),
-                propose_latency: (1.0, 0.0),
-                verify_latency: (1.0, 0.0),
-                certify_latency: (1.0, 0.0),
-                should_certify: mocks::application::Certifier::Sometimes,
-            };
-            let (actor, application) =
-                mocks::application::Application::new(context.with_label("app"), application_cfg);
-            actor.start();
-
-            // Initialize voter actor
-            let voter_cfg = Config {
-                scheme: schemes[0].clone(),
-                elector,
-                blocker: oracle.control(participants[0].clone()),
-                automaton: application.clone(),
-                relay: application.clone(),
-                reporter: reporter.clone(),
-                partition: "no_resolver_boomerang".to_string(),
-                epoch: Epoch::new(333),
-                mailbox_size: 128,
-                leader_timeout: Duration::from_millis(500),
-                notarization_timeout: Duration::from_secs(1000),
-                nullify_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
-
-            // Resolver and batcher mailboxes
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
-            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
-            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
-            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
-
-            // Register network channels for the validator
-            let me = participants[0].clone();
-            let (vote_sender, _vote_receiver) = oracle
-                .control(me.clone())
-                .register(0, TEST_QUOTA)
-                .await
-                .unwrap();
-            let (certificate_sender, _certificate_receiver) = oracle
-                .control(me.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
-
-            // Start the actor
-            voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
+                setup_voter(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    elector,
+                    Duration::from_millis(500),
+                    Duration::from_secs(1000),
+                    Duration::from_secs(1000),
+                    mocks::application::Certifier::Sometimes,
+                )
+                .await;
 
             // Wait for batcher to be notified
             let message = batcher_receiver.next().await.unwrap();
