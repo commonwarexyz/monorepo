@@ -8,6 +8,7 @@
 
 use crate::{
     commitment::{commit_state_root, AccountChange, StateChanges},
+    qmdb::QmdbChanges,
     types::{StateRoot, Tx},
 };
 use alloy_evm::{
@@ -55,6 +56,8 @@ pub struct ExecutionOutcome {
     pub state_root: StateRoot,
     /// Canonical per-transaction state deltas used to compute `state_root`.
     pub tx_changes: Vec<StateChanges>,
+    /// Per-account changes used to persist finalized blocks to QMDB.
+    pub qmdb_changes: QmdbChanges,
 }
 
 /// Execute a batch of transactions and commit them to the provided DB.
@@ -79,6 +82,7 @@ where
 
     let mut state_root = prev_root;
     let mut tx_changes = Vec::with_capacity(txs.len());
+    let mut qmdb_changes = QmdbChanges::default();
 
     for tx in txs {
         let tx_env = tx_env_from_db(evm.db_mut(), tx, chain_id).context("build tx env")?;
@@ -86,6 +90,7 @@ where
         let ResultAndState { result: _, state } = evm.transact_raw(tx_env).context("execute tx")?;
 
         let changes = state_changes_from_evm_state(&state);
+        qmdb_changes.apply_evm_state(&state);
         state_root = commit_state_root(state_root, &changes);
 
         evm.db_mut().commit(state);
@@ -98,6 +103,7 @@ where
         ExecutionOutcome {
             state_root,
             tx_changes,
+            qmdb_changes,
         },
     ))
 }
