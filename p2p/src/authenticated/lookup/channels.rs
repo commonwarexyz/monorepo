@@ -4,7 +4,7 @@ use crate::{
     utils::limited::{CheckedSender, LimitedSender},
     Channel, Message, Recipients,
 };
-use bytes::Bytes;
+use bytes::Buf;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use futures::{channel::mpsc, StreamExt};
@@ -27,11 +27,11 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     async fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: Bytes,
+        message: impl Buf + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        if message.len() > self.max_size as usize {
-            return Err(Error::MessageTooLarge(message.len()));
+        if message.remaining() > self.max_size as usize {
+            return Err(Error::MessageTooLarge(message.remaining()));
         }
 
         Ok(self

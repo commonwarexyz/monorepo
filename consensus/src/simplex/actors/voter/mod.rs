@@ -2199,7 +2199,7 @@ mod tests {
             );
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay
-                .broadcast(&leader, (proposal.payload, contents.into()))
+                .broadcast(&leader, (proposal.payload, contents))
                 .await;
             mailbox.proposal(proposal).await;
 
@@ -2391,7 +2391,7 @@ mod tests {
 
             // Broadcast payload and send proposal
             let contents = (proposal3.round, proposal2.payload, 0u64).encode();
-            relay.broadcast(&me, (digest3, contents.into())).await;
+            relay.broadcast(&me, (digest3, contents)).await;
             mailbox.proposal(proposal3.clone()).await;
 
             // Send notarization
@@ -2708,7 +2708,7 @@ mod tests {
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay
-                .broadcast(&leader, (proposal.payload, contents.into()))
+                .broadcast(&leader, (proposal.payload, contents))
                 .await;
             mailbox.proposal(proposal.clone()).await;
 

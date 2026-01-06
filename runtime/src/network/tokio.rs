@@ -1,5 +1,5 @@
 use crate::Error;
-use commonware_utils::StableBuf;
+use bytes::{Buf, BufMut};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
@@ -18,9 +18,9 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), Error> {
+    async fn send(&mut self, mut msg: impl Buf + Send) -> Result<(), Error> {
         // Time out if we take too long to write
-        timeout(self.write_timeout, self.sink.write_all(msg.into().as_ref()))
+        timeout(self.write_timeout, self.sink.write_all_buf(&mut msg))
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::SendFailed)?;
@@ -38,19 +38,30 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, Error> {
-        let mut buf = buf.into();
-        if buf.is_empty() {
-            return Ok(buf);
-        }
+    async fn recv(&mut self, mut buf: impl BufMut + Send) -> Result<(), Error> {
+        let read_fut = async {
+            let mut read = 0;
+            let len = buf.remaining_mut();
+            while read < len {
+                let n = self
+                    .stream
+                    .read_buf(&mut buf)
+                    .await
+                    .map_err(|_| Error::RecvFailed)?;
+
+                if n == 0 {
+                    return Err(Error::RecvFailed);
+                }
+
+                read += n;
+            }
+            Ok(())
+        };
 
         // Time out if we take too long to read
-        timeout(self.read_timeout, self.stream.read_exact(buf.as_mut()))
+        timeout(self.read_timeout, read_fut)
             .await
             .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::RecvFailed)?;
-
-        Ok(buf)
     }
 }
 
@@ -290,7 +301,8 @@ mod tests {
 
             // Read a small message (much smaller than the 64KB buffer)
             let start = Instant::now();
-            let buf = stream.recv(vec![0u8; 10]).await.unwrap();
+            let mut buf = vec![0u8; 10];
+            stream.recv(&mut buf[..]).await.unwrap();
             let elapsed = start.elapsed();
 
             (buf, elapsed)
@@ -299,13 +311,13 @@ mod tests {
         // Connect and send a small message
         let (mut sink, _stream) = network.dial(addr).await.unwrap();
         let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        sink.send(msg.clone()).await.unwrap();
+        sink.send(msg.as_slice()).await.unwrap();
 
         // Wait for the reader to complete
         let (received, elapsed) = reader.await.unwrap();
 
         // Verify we got the right data
-        assert_eq!(received.as_ref(), &msg[..]);
+        assert_eq!(received, &msg[..]);
 
         // Verify it completed quickly (well under the read timeout)
         // Should complete in milliseconds, not seconds
@@ -331,7 +343,8 @@ mod tests {
 
             // Try to read 100 bytes, but only 5 will be sent
             let start = Instant::now();
-            let result = stream.recv(vec![0u8; 100]).await;
+            let mut buf = [0u8; 100];
+            let result = stream.recv(&mut buf[..]).await;
             let elapsed = start.elapsed();
 
             (result, elapsed)
@@ -339,7 +352,7 @@ mod tests {
 
         // Connect and send only partial data
         let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        sink.send(vec![1u8, 2, 3, 4, 5]).await.unwrap();
+        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
 
         // Wait for the reader to complete
         let (result, elapsed) = reader.await.unwrap();
@@ -370,21 +383,23 @@ mod tests {
             let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
             // Read messages without buffering
-            let buf1 = stream.recv(vec![0u8; 5]).await.unwrap();
-            let buf2 = stream.recv(vec![0u8; 5]).await.unwrap();
+            let mut buf1 = vec![0u8; 5];
+            let mut buf2 = vec![0u8; 5];
+            stream.recv(&mut buf1[..]).await.unwrap();
+            stream.recv(&mut buf2[..]).await.unwrap();
             (buf1, buf2)
         });
 
         // Connect and send two messages
         let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        sink.send(vec![1u8, 2, 3, 4, 5]).await.unwrap();
-        sink.send(vec![6u8, 7, 8, 9, 10]).await.unwrap();
+        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
+        sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
 
         // Wait for the reader to complete
         let (buf1, buf2) = reader.await.unwrap();
 
         // Verify we got the right data
-        assert_eq!(buf1.as_ref(), &[1u8, 2, 3, 4, 5]);
-        assert_eq!(buf2.as_ref(), &[6u8, 7, 8, 9, 10]);
+        assert_eq!(buf1.as_slice(), &[1u8, 2, 3, 4, 5]);
+        assert_eq!(buf2.as_slice(), &[6u8, 7, 8, 9, 10]);
     }
 }

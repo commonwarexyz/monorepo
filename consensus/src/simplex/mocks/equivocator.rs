@@ -140,15 +140,15 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
 
             // Broadcast payloads via relay so nodes can verify
             let me = &self.scheme.participants()[self.scheme.me().unwrap() as usize];
-            self.relay.broadcast(me, (digest_a, payload_a.into())).await;
-            self.relay.broadcast(me, (digest_b, payload_b.into())).await;
+            self.relay.broadcast(me, (digest_a, payload_a)).await;
+            self.relay.broadcast(me, (digest_b, payload_b)).await;
 
             // Notarize proposal A and send it to victim only
             let notarize_a = Notarize::<S, _>::sign(&self.scheme, proposal_a).expect("sign failed");
             vote_sender
                 .send(
                     Recipients::One(victim.clone()),
-                    Vote::Notarize(notarize_a).encode().into(),
+                    Vote::Notarize(notarize_a).encode(),
                     true,
                 )
                 .await
@@ -167,7 +167,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
             vote_sender
                 .send(
                     Recipients::Some(non_victims),
-                    Vote::Notarize(notarize_b).encode().into(),
+                    Vote::Notarize(notarize_b).encode(),
                     true,
                 )
                 .await

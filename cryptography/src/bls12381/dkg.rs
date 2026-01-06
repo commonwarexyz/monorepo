@@ -1610,7 +1610,7 @@ mod test_plan {
             &self,
             info: &Info<V, P>,
         ) -> anyhow::Result<(bool, Transcript)> {
-            let mut summary_bs = info.summary.encode();
+            let mut summary_bs = info.summary.encode_mut();
             let modified = apply_mask(&mut summary_bs, &self.info_summary);
             let summary = Summary::read(&mut summary_bs)?;
             Ok((modified, Transcript::resume(summary)))
@@ -1625,11 +1625,11 @@ mod test_plan {
             let (mut modified, transcript) = self.transcript_for_round(info)?;
             let mut transcript = transcript.fork(SIG_ACK);
 
-            let mut dealer_bs = dealer.encode();
+            let mut dealer_bs = dealer.encode_mut();
             modified |= apply_mask(&mut dealer_bs, &self.dealer);
             transcript.commit(&mut dealer_bs);
 
-            let mut pub_msg_bs = pub_msg.encode();
+            let mut pub_msg_bs = pub_msg.encode_mut();
             modified |= apply_mask(&mut pub_msg_bs, &self.pub_msg);
             transcript.commit(&mut pub_msg_bs);
 
@@ -1644,7 +1644,7 @@ mod test_plan {
             let (mut modified, transcript) = self.transcript_for_round(info)?;
             let mut transcript = transcript.fork(SIG_LOG);
 
-            let mut log_bs = log.encode();
+            let mut log_bs = log.encode_mut();
             modified |= apply_mask(&mut log_bs, &self.log);
             transcript.commit(&mut log_bs);
 
