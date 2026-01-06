@@ -91,7 +91,7 @@ pub trait GaugeExt {
 
     /// Atomically sets the [`Gauge`] to the maximum of the current value and the provided value.
     /// Returns the previous value.
-    fn set_max<T: TryInto<i64> + Copy>(&self, val: T) -> Result<i64, T::Error>;
+    fn try_set_max<T: TryInto<i64> + Copy>(&self, val: T) -> Result<i64, T::Error>;
 }
 
 impl GaugeExt for Gauge {
@@ -102,7 +102,7 @@ impl GaugeExt for Gauge {
         Ok(out)
     }
 
-    fn set_max<T: TryInto<i64> + Copy>(&self, val: T) -> Result<i64, T::Error> {
+    fn try_set_max<T: TryInto<i64> + Copy>(&self, val: T) -> Result<i64, T::Error> {
         let val = val.try_into()?;
         Ok(self.inner().fetch_max(val, Ordering::Relaxed))
     }

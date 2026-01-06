@@ -91,8 +91,7 @@ impl<
             "view of latest vote received per peer",
             latest_vote.clone(),
         );
-        let participants = cfg.scheme.participants().clone();
-        for participant in participants.iter() {
+        for participant in cfg.scheme.participants().iter() {
             latest_vote.get_or_create(&Peer::new(participant)).set(0);
         }
         context.register(
@@ -119,7 +118,7 @@ impl<
             Self {
                 context: ContextCell::new(context),
 
-                participants,
+                participants: cfg.scheme.participants().clone(),
                 scheme: cfg.scheme,
 
                 blocker: cfg.blocker,
@@ -404,7 +403,7 @@ impl<
                     let _ = self
                         .latest_vote
                         .get_or_create(&Peer::new(&sender))
-                        .set_max(message.view().get());
+                        .try_set_max(message.view().get());
 
                     // If the view isn't interesting, we can skip
                     let view = message.view();
