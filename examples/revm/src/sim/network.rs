@@ -1,17 +1,17 @@
-//! Simulated network setup for the deterministic simulation.
+//! Simulated network setup for the tokio runtime simulation.
 //!
-//! The example uses `commonware_p2p::simulated` with deterministic timing and a full mesh of links.
+//! The example uses `commonware_p2p::simulated` with a full mesh of links.
 
 use super::{MAX_MSG_SIZE, P2P_LINK_LATENCY_MS};
 use anyhow::Context as _;
 use commonware_cryptography::ed25519;
 use commonware_p2p::{simulated, Manager as _};
-use commonware_runtime::{deterministic, Metrics as _};
+use commonware_runtime::{tokio, Metrics as _};
 use commonware_utils::ordered::Set;
 use std::time::Duration;
 
 pub(super) async fn start_network(
-    context: &deterministic::Context,
+    context: &tokio::Context,
     participants: Set<ed25519::PublicKey>,
 ) -> simulated::Oracle<ed25519::PublicKey> {
     let (network, oracle) = simulated::Network::new(
@@ -28,7 +28,7 @@ pub(super) async fn start_network(
     oracle
 }
 
-/// Connect all peers in a full mesh with deterministic links.
+/// Connect all peers in a full mesh with fixed links.
 pub(super) async fn connect_all_peers(
     oracle: &mut simulated::Oracle<ed25519::PublicKey>,
     peers: &[ed25519::PublicKey],

@@ -1,14 +1,14 @@
-//! Deterministic simulation harness for the example chain.
+//! Simulation harness for the example chain.
 //!
-//! Spawns N nodes in a single process using the deterministic runtime and the simulated P2P
-//! transport. The harness waits for a fixed number of finalized blocks and asserts all nodes
-//! converge on the same head, state commitment, and balances.
+//! Spawns N nodes in a single process using the tokio runtime and the simulated P2P transport.
+//! The harness waits for a fixed number of finalized blocks and asserts all nodes converge on the
+//! same head, state commitment, and balances.
 
 use crate::ConsensusDigest;
 use alloy_evm::revm::primitives::{B256, U256};
 use commonware_consensus::simplex;
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
-use commonware_runtime::{deterministic, Runner as _};
+use commonware_runtime::{tokio, Runner as _};
 
 type ThresholdScheme =
     simplex::signing_scheme::bls12381_threshold::Scheme<ed25519::PublicKey, MinSig>;
@@ -33,7 +33,7 @@ pub(super) const BLOCK_CODEC_MAX_CALLDATA: usize = 1024;
 pub(super) const P2P_LINK_LATENCY_MS: u64 = 5;
 
 #[derive(Clone, Copy, Debug)]
-/// Configuration for a deterministic simulation run.
+/// Configuration for a simulation run.
 pub struct SimConfig {
     pub nodes: usize,
     pub blocks: u64,
@@ -53,13 +53,13 @@ pub struct SimOutcome {
     pub to_balance: U256,
 }
 
-/// Run the multi-node deterministic simulation and return the final outcome.
+/// Run the multi-node simulation and return the final outcome.
 pub fn simulate(cfg: SimConfig) -> anyhow::Result<SimOutcome> {
-    let executor = deterministic::Runner::seeded(cfg.seed);
+    let executor = tokio::Runner::default();
     executor.start(|context| async move { run_sim(context, cfg).await })
 }
 
-async fn run_sim(context: deterministic::Context, cfg: SimConfig) -> anyhow::Result<SimOutcome> {
+async fn run_sim(context: tokio::Context, cfg: SimConfig) -> anyhow::Result<SimOutcome> {
     let (participants_vec, schemes) = dkg::threshold_schemes(cfg.seed, cfg.nodes)?;
     let participants_set = dkg::participants_set(&participants_vec)?;
 

@@ -1,4 +1,4 @@
-//! Node wiring for the deterministic simulation.
+//! Node wiring for the tokio runtime simulation.
 //!
 //! Each node runs:
 //! - a marshal instance (block dissemination, backfill, and finalized block delivery), and
@@ -19,7 +19,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 use commonware_p2p::{simulated, utils::requester};
-use commonware_runtime::{buffer::PoolRef, deterministic, Metrics as _};
+use commonware_runtime::{buffer::PoolRef, tokio, Metrics as _};
 use commonware_storage::archive::immutable;
 use commonware_utils::{NZUsize, NZU32, NZU64};
 use futures::channel::mpsc;
@@ -88,7 +88,7 @@ struct MarshalStart<M> {
 
 /// Spawn all nodes (application + consensus) for a simulation run.
 pub(super) async fn start_all_nodes(
-    context: &deterministic::Context,
+    context: &tokio::Context,
     oracle: &mut simulated::Oracle<ed25519::PublicKey>,
     participants: &[ed25519::PublicKey],
     schemes: &[ThresholdScheme],
@@ -126,7 +126,7 @@ pub(super) async fn start_all_nodes(
 }
 
 async fn start_node(
-    context: &deterministic::Context,
+    context: &tokio::Context,
     oracle: &mut simulated::Oracle<Peer>,
     init: NodeInit<'_>,
 ) -> anyhow::Result<application::NodeHandle> {
@@ -152,7 +152,14 @@ async fn start_node(
     } = register_channels(&mut control, quota).await?;
 
     let block_cfg = block_codec_cfg();
-    let state = application::Shared::new(demo.alloc.clone());
+    let state = application::Shared::init(
+        context.with_label(&format!("state_{index}")),
+        buffer_pool.clone(),
+        format!("revm-qmdb-{index}"),
+        demo.alloc.clone(),
+    )
+    .await
+    .context("init qmdb")?;
 
     let handle = application::NodeHandle::new(state.clone());
     let app =
@@ -191,7 +198,7 @@ async fn start_node(
     // activity (notarizations/finalizations).
     let reporter = Reporters::from((seed_reporter, marshal_mailbox.clone()));
 
-    // Submit the deterministic demo transfer before starting consensus so the first leader can
+    // Submit the demo transfer before starting consensus so the first leader can
     // include it without relying on a hardcoded "height == 1" rule.
     let _ = handle.submit_tx(demo.tx.clone()).await;
 
@@ -269,7 +276,7 @@ const fn block_codec_cfg() -> crate::types::BlockCfg {
 }
 
 async fn start_marshal<M>(
-    context: &deterministic::Context,
+    context: &tokio::Context,
     start: MarshalStart<M>,
 ) -> anyhow::Result<marshal::Mailbox<ThresholdScheme, crate::Block>>
 where
