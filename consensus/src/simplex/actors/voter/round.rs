@@ -22,8 +22,8 @@ pub struct Leader<P: PublicKey> {
 enum CertifyState {
     /// Ready to attempt certification.
     Ready,
-    /// Certification request in progress.
-    Outstanding(Aborter),
+    /// Certification request in progress (dropped to abort).
+    Outstanding(#[allow(dead_code)] Aborter),
     /// Certification completed: true if succeeded, false if automaton declined.
     Certified(bool),
     /// Certification was cancelled due to finalization.
@@ -169,9 +169,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Aborts the in-flight certification request.
     pub fn abort_certify(&mut self) {
-        if let CertifyState::Outstanding(handle) = replace(&mut self.certify, CertifyState::Aborted)
-        {
-            drop(handle);
+        match &self.certify {
+            CertifyState::Certified(_) | CertifyState::Aborted => {}
+            CertifyState::Ready => self.certify = CertifyState::Aborted,
+            CertifyState::Outstanding(_) => {
+                drop(replace(&mut self.certify, CertifyState::Aborted));
+            }
         }
     }
 
@@ -280,22 +283,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Marks proposal certification as complete.
-    ///
-    /// Can be called from `Ready` state during replay when journaled certification
-    /// results are being restored. Can also be called from `Aborted` state due to
-    /// a race where certification completes just before finalization is processed.
     pub fn certified(&mut self, is_success: bool) {
         match &self.certify {
-            CertifyState::Ready | CertifyState::Outstanding(_) => {}
             CertifyState::Certified(v) => {
                 assert_eq!(*v, is_success, "certification should not conflict");
                 return;
             }
-            CertifyState::Aborted => {
-                // Certification completed just before abort was processed.
-                // Ignore the result since the view was finalized.
-                return;
-            }
+            CertifyState::Ready | CertifyState::Outstanding(_) | CertifyState::Aborted => {}
         }
         self.certify = CertifyState::Certified(is_success);
     }
