@@ -30,15 +30,15 @@ const RESIZE_THRESHOLD: u64 = 50;
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
-pub struct Cursor([u8; u64::SIZE + u32::SIZE + u32::SIZE]);
+pub struct Cursor([u8; u64::SIZE + u64::SIZE + u64::SIZE]);
 
 impl Cursor {
     /// Create a new [Cursor].
-    fn new(section: u64, offset: u32, size: u32) -> Self {
-        let mut buf = [0u8; u64::SIZE + u32::SIZE + u32::SIZE];
+    fn new(section: u64, offset: u64, size: u64) -> Self {
+        let mut buf = [0u8; u64::SIZE + u64::SIZE + u64::SIZE];
         buf[..u64::SIZE].copy_from_slice(&section.to_be_bytes());
-        buf[u64::SIZE..u64::SIZE + u32::SIZE].copy_from_slice(&offset.to_be_bytes());
-        buf[u64::SIZE + u32::SIZE..].copy_from_slice(&size.to_be_bytes());
+        buf[u64::SIZE..u64::SIZE + u64::SIZE].copy_from_slice(&offset.to_be_bytes());
+        buf[u64::SIZE + u64::SIZE..].copy_from_slice(&size.to_be_bytes());
         Self(buf)
     }
 
@@ -48,13 +48,13 @@ impl Cursor {
     }
 
     /// Get the offset of the cursor.
-    fn offset(&self) -> u32 {
-        u32::from_be_bytes(self.0[u64::SIZE..u64::SIZE + u32::SIZE].try_into().unwrap())
+    fn offset(&self) -> u64 {
+        u64::from_be_bytes(self.0[u64::SIZE..u64::SIZE + u64::SIZE].try_into().unwrap())
     }
 
     /// Get the size of the value.
-    fn size(&self) -> u32 {
-        u32::from_be_bytes(self.0[u64::SIZE + u32::SIZE..].try_into().unwrap())
+    fn size(&self) -> u64 {
+        u64::from_be_bytes(self.0[u64::SIZE + u64::SIZE..].try_into().unwrap())
     }
 }
 
@@ -62,7 +62,7 @@ impl Read for Cursor {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        <[u8; u64::SIZE + u32::SIZE + u32::SIZE]>::read(buf).map(Self)
+        <[u8; u64::SIZE + u64::SIZE + u64::SIZE]>::read(buf).map(Self)
     }
 }
 
@@ -73,7 +73,7 @@ impl CodecWrite for Cursor {
 }
 
 impl FixedSize for Cursor {
-    const SIZE: usize = u64::SIZE + u32::SIZE + u32::SIZE;
+    const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE;
 }
 
 impl commonware_utils::Span for Cursor {}
@@ -289,14 +289,14 @@ struct KeyEntry<K: Array> {
     next_section: u64,
     next_position: u32,
     /// Offset in value journal (same section).
-    value_offset: u32,
+    value_offset: u64,
     /// Size of value data in the variable journal.
-    value_size: u32,
+    value_size: u64,
 }
 
 impl<K: Array> KeyEntry<K> {
     /// Create a new [KeyEntry].
-    fn new(key: K, next: Option<(u64, u32)>, value_offset: u32, value_size: u32) -> Self {
+    fn new(key: K, next: Option<(u64, u32)>, value_offset: u64, value_size: u64) -> Self {
         let (next_section, next_position) = next.unwrap_or((NO_NEXT_SECTION, NO_NEXT_POSITION));
         Self {
             key,
@@ -333,8 +333,8 @@ impl<K: Array> Read for KeyEntry<K> {
         let key = K::read(buf)?;
         let next_section = u64::read(buf)?;
         let next_position = u32::read(buf)?;
-        let value_offset = u32::read(buf)?;
-        let value_size = u32::read(buf)?;
+        let value_offset = u64::read(buf)?;
+        let value_size = u64::read(buf)?;
 
         Ok(Self {
             key,
@@ -348,15 +348,15 @@ impl<K: Array> Read for KeyEntry<K> {
 
 impl<K: Array> FixedSize for KeyEntry<K> {
     // key + next_section + next_position + value_offset + value_size
-    const SIZE: usize = K::SIZE + u64::SIZE + u32::SIZE + u32::SIZE + u32::SIZE;
+    const SIZE: usize = K::SIZE + u64::SIZE + u32::SIZE + u64::SIZE + u64::SIZE;
 }
 
 impl<K: Array> OversizedEntryTrait for KeyEntry<K> {
-    fn value_location(&self) -> (u32, u32) {
+    fn value_location(&self) -> (u64, u64) {
         (self.value_offset, self.value_size)
     }
 
-    fn with_location(mut self, offset: u32, size: u32) -> Self {
+    fn with_location(mut self, offset: u64, size: u64) -> Self {
         self.value_offset = offset;
         self.value_size = size;
         self
@@ -373,8 +373,8 @@ where
             key: K::arbitrary(u)?,
             next_section: u64::arbitrary(u)?,
             next_position: u32::arbitrary(u)?,
-            value_offset: u32::arbitrary(u)?,
-            value_size: u32::arbitrary(u)?,
+            value_offset: u64::arbitrary(u)?,
+            value_size: u64::arbitrary(u)?,
         })
     }
 }

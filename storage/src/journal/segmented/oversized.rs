@@ -50,12 +50,12 @@ use tracing::{debug, warn};
 /// and a way to set the location when appending.
 pub trait OversizedEntry: CodecFixed<Cfg = ()> + Clone {
     /// Returns `(value_offset, value_size)` for crash recovery validation.
-    fn value_location(&self) -> (u32, u32);
+    fn value_location(&self) -> (u64, u64);
 
     /// Returns a new entry with the value location set.
     ///
     /// Called during `append` after the value is written to glob storage.
-    fn with_location(self, offset: u32, size: u32) -> Self;
+    fn with_location(self, offset: u64, size: u64) -> Self;
 }
 
 /// Configuration for oversized journal.
@@ -150,7 +150,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
             match self.index.get(section, last_pos).await {
                 Ok(entry) => {
                     let (value_offset, value_size) = entry.value_location();
-                    let entry_end = value_offset as u64 + value_size as u64;
+                    let entry_end = value_offset + value_size;
 
                     if entry_end <= glob_size {
                         // Last entry valid - all entries in this section are valid
@@ -168,7 +168,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
                         match self.index.get(section, pos).await {
                             Ok(entry) => {
                                 let (offset, size) = entry.value_location();
-                                if offset as u64 + size as u64 <= glob_size {
+                                if offset + size <= glob_size {
                                     valid_count = pos + 1;
                                     break;
                                 }
@@ -197,7 +197,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
                         match self.index.get(section, pos).await {
                             Ok(entry) => {
                                 let (offset, size) = entry.value_location();
-                                if offset as u64 + size as u64 <= glob_size {
+                                if offset + size <= glob_size {
                                     valid_count = pos + 1;
                                     break;
                                 }
@@ -229,7 +229,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
         section: u64,
         entry: I,
         value: &V,
-    ) -> Result<(u32, u32, u32), Error> {
+    ) -> Result<(u32, u64, u64), Error> {
         // Write value first (glob)
         let (offset, size) = self.values.append(section, value).await?;
 
@@ -246,7 +246,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
     }
 
     /// Get value using offset/size from entry.
-    pub async fn get_value(&self, section: u64, offset: u32, size: u32) -> Result<V, Error> {
+    pub async fn get_value(&self, section: u64, offset: u64, size: u64) -> Result<V, Error> {
         self.values.get(section, offset, size).await
     }
 
@@ -279,13 +279,13 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
         Ok(())
     }
 
-    /// Prune both journals.
-    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+    /// Prune both journals. Returns true if any sections were pruned.
+    pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
         let (index_result, value_result) =
             join(self.index.prune(min), self.values.prune(min)).await;
-        index_result?;
-        value_result?;
-        Ok(())
+        let index_pruned = index_result?;
+        let value_pruned = value_result?;
+        Ok(index_pruned || value_pruned)
     }
 
     /// Rewind both journals to specific sizes for a section.
@@ -341,12 +341,12 @@ mod tests {
     #[derive(Debug, Clone, PartialEq)]
     struct TestEntry {
         id: u64,
-        value_offset: u32,
-        value_size: u32,
+        value_offset: u64,
+        value_size: u64,
     }
 
     impl TestEntry {
-        fn new(id: u64, value_offset: u32, value_size: u32) -> Self {
+        fn new(id: u64, value_offset: u64, value_size: u64) -> Self {
             Self {
                 id,
                 value_offset,
@@ -368,8 +368,8 @@ mod tests {
 
         fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             let id = u64::read(buf)?;
-            let value_offset = u32::read(buf)?;
-            let value_size = u32::read(buf)?;
+            let value_offset = u64::read(buf)?;
+            let value_size = u64::read(buf)?;
             Ok(Self {
                 id,
                 value_offset,
@@ -379,15 +379,15 @@ mod tests {
     }
 
     impl FixedSize for TestEntry {
-        const SIZE: usize = u64::SIZE + u32::SIZE + u32::SIZE;
+        const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE;
     }
 
     impl OversizedEntry for TestEntry {
-        fn value_location(&self) -> (u32, u32) {
+        fn value_location(&self) -> (u64, u64) {
             (self.value_offset, self.value_size)
         }
 
-        fn with_location(mut self, offset: u32, size: u32) -> Self {
+        fn with_location(mut self, offset: u64, size: u64) -> Self {
             self.value_offset = offset;
             self.value_size = size;
             self
@@ -475,7 +475,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             // Calculate size to keep first 3 entries
-            let keep_size = locations[2].1 as u64 + locations[2].2 as u64;
+            let keep_size = locations[2].1 + locations[2].2;
             blob.resize(keep_size).await.expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
@@ -721,7 +721,7 @@ mod tests {
                 .open(&cfg.value_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let keep_size = section1_locations[0].1 as u64 + section1_locations[0].2 as u64;
+            let keep_size = section1_locations[0].1 + section1_locations[0].2;
             blob.resize(keep_size).await.expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
@@ -731,7 +731,7 @@ mod tests {
                 .open(&cfg.value_partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let keep_size = section2_locations[2].1 as u64 + section2_locations[2].2 as u64;
+            let keep_size = section2_locations[2].1 + section2_locations[2].2;
             blob.resize(keep_size).await.expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
@@ -946,7 +946,7 @@ mod tests {
             // Last entry needs: offset + size bytes
             // Truncate to offset + size - 1 (missing 1 byte)
             let last = &locations[2];
-            let truncate_to = last.1 as u64 + last.2 as u64 - 1;
+            let truncate_to = last.1 + last.2 - 1;
             blob.resize(truncate_to).await.expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
@@ -1042,7 +1042,7 @@ mod tests {
                 .open(&cfg.value_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let keep_size = locations[1].1 as u64 + locations[1].2 as u64;
+            let keep_size = locations[1].1 + locations[1].2;
             blob.resize(keep_size).await.expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
             drop(blob);

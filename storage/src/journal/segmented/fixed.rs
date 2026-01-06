@@ -563,4 +563,42 @@ mod tests {
             journal.destroy().await.expect("failed to destroy");
         });
     }
+
+    /// Protect against accidental changes to the journal disk format.
+    #[test_traced]
+    fn test_segmented_fixed_conformance() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            // Append 100 items
+            for i in 0u64..100 {
+                journal
+                    .append(1, test_digest(i))
+                    .await
+                    .expect("failed to append");
+            }
+            journal.sync(1).await.expect("failed to sync");
+            drop(journal);
+
+            // Hash blob contents
+            let (blob, size) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("failed to open blob");
+            assert!(size > 0);
+            let buf = blob
+                .read_at(vec![0u8; size as usize], 0)
+                .await
+                .expect("failed to read blob");
+            let digest = Sha256::hash(buf.as_ref());
+            assert_eq!(
+                commonware_utils::hex(&digest),
+                "cb58147a2baf8b6b85f7642cf49d970a6b30c4c659e809a816a303039bc93d01",
+            );
+        });
+    }
 }

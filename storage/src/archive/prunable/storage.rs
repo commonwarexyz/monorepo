@@ -27,14 +27,14 @@ struct IndexEntry<K: Array> {
     /// The key for this entry.
     key: K,
     /// Offset in value journal (same section).
-    value_offset: u32,
+    value_offset: u64,
     /// Size of value data in the variable journal.
-    value_size: u32,
+    value_size: u64,
 }
 
 impl<K: Array> IndexEntry<K> {
     /// Create a new [IndexEntry].
-    const fn new(index: u64, key: K, value_offset: u32, value_size: u32) -> Self {
+    const fn new(index: u64, key: K, value_offset: u64, value_size: u64) -> Self {
         Self {
             index,
             key,
@@ -59,8 +59,8 @@ impl<K: Array> Read for IndexEntry<K> {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let index = u64::read(buf)?;
         let key = K::read(buf)?;
-        let value_offset = u32::read(buf)?;
-        let value_size = u32::read(buf)?;
+        let value_offset = u64::read(buf)?;
+        let value_size = u64::read(buf)?;
         Ok(Self {
             index,
             key,
@@ -72,15 +72,15 @@ impl<K: Array> Read for IndexEntry<K> {
 
 impl<K: Array> FixedSize for IndexEntry<K> {
     // index + key + value_offset + value_size
-    const SIZE: usize = u64::SIZE + K::SIZE + u32::SIZE + u32::SIZE;
+    const SIZE: usize = u64::SIZE + K::SIZE + u64::SIZE + u64::SIZE;
 }
 
 impl<K: Array> OversizedEntryTrait for IndexEntry<K> {
-    fn value_location(&self) -> (u32, u32) {
+    fn value_location(&self) -> (u64, u64) {
         (self.value_offset, self.value_size)
     }
 
-    fn with_location(mut self, offset: u32, size: u32) -> Self {
+    fn with_location(mut self, offset: u64, size: u64) -> Self {
         self.value_offset = offset;
         self.value_size = size;
         self
@@ -96,8 +96,8 @@ where
         Ok(Self {
             index: u64::arbitrary(u)?,
             key: K::arbitrary(u)?,
-            value_offset: u32::arbitrary(u)?,
-            value_size: u32::arbitrary(u)?,
+            value_offset: u64::arbitrary(u)?,
+            value_size: u64::arbitrary(u)?,
         })
     }
 }
@@ -128,7 +128,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     keys: Index<T, u64>,
 
     /// Maps index to (position in index journal, value_offset, value_size).
-    indices: BTreeMap<u64, (u32, u32, u32)>,
+    indices: BTreeMap<u64, (u32, u64, u64)>,
 
     /// Interval tracking for gap detection.
     intervals: RMap,

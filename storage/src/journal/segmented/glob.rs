@@ -90,7 +90,7 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
     ///
     /// The returned size is the total bytes written (compressed_data + crc32).
     /// This size should be stored in the index entry for later retrieval.
-    pub async fn append(&mut self, section: u64, value: &V) -> Result<(u32, u32), Error> {
+    pub async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u64), Error> {
         // Encode and optionally compress
         let encoded = value.encode();
         let compressed = if let Some(level) = self.compression {
@@ -104,16 +104,12 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
             .len()
             .checked_add(4)
             .ok_or(Error::OffsetOverflow)?;
-        let entry_size_u32: u32 = entry_size
-            .try_into()
-            .map_err(|_| Error::ItemTooLarge(entry_size))?;
 
         // Get or create blob for this section
         let writer = self.manager.get_or_create(section).await?;
 
         // Get current offset (logical size including buffered data)
         let offset = writer.size().await;
-        let offset_u32: u32 = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
 
         // Pre-allocate buffer with exact size: compressed data + checksum
         let mut buf = Vec::with_capacity(entry_size);
@@ -123,13 +119,13 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
         // Write via buffered writer (handles batching internally)
         writer.write_at(buf, offset).await?;
 
-        Ok((offset_u32, entry_size_u32))
+        Ok((offset, entry_size as u64))
     }
 
     /// Read value at offset with known size (from index entry).
     ///
     /// Reads directly from blob without any caching.
-    pub async fn get(&self, section: u64, offset: u32, size: u32) -> Result<V, Error> {
+    pub async fn get(&self, section: u64, offset: u64, size: u64) -> Result<V, Error> {
         let writer = self
             .manager
             .get(section)?
@@ -138,7 +134,7 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
         let size_usize = size as usize;
 
         // Read via buffered writer (handles read-through for buffered data)
-        let buf = writer.read_at(vec![0u8; size_usize], offset as u64).await?;
+        let buf = writer.read_at(vec![0u8; size_usize], offset).await?;
         let buf = buf.as_ref();
 
         // Entry format: [compressed_data] [crc32 (4 bytes)]
@@ -358,7 +354,7 @@ mod tests {
             // Corrupt the data by writing directly to the underlying blob
             let writer = glob.manager.blobs().get(&1).unwrap();
             writer
-                .write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], offset as u64)
+                .write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], offset)
                 .await
                 .expect("Failed to corrupt");
             writer.sync().await.expect("Failed to sync");
@@ -391,7 +387,7 @@ mod tests {
 
             // Rewind to after the third value
             let (third_offset, third_size) = locations[2];
-            let rewind_size = (third_offset + third_size) as u64;
+            let rewind_size = third_offset + third_size;
             glob.rewind(1, rewind_size).await.expect("Failed to rewind");
 
             // First three values should still be readable
@@ -434,6 +430,44 @@ mod tests {
             assert_eq!(retrieved, value);
 
             glob.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    /// Protect against accidental changes to the glob disk format.
+    #[test_traced]
+    fn test_glob_conformance() {
+        use commonware_cryptography::{Hasher as _, Sha256};
+        use commonware_runtime::Blob as _;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut glob: Glob<_, i32> = Glob::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to init glob");
+
+            // Append 100 values
+            for i in 0i32..100 {
+                glob.append(1, &i).await.expect("Failed to append");
+            }
+            glob.sync(1).await.expect("Failed to sync");
+            drop(glob);
+
+            // Hash blob contents
+            let (blob, size) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            assert!(size > 0);
+            let buf = blob
+                .read_at(vec![0u8; size as usize], 0)
+                .await
+                .expect("Failed to read blob");
+            let digest = Sha256::hash(buf.as_ref());
+            assert_eq!(
+                commonware_utils::hex(&digest),
+                "04d5efc9c8ccc4232747e65774426a619a74052a35643e7b94470f8af7230c77",
+            );
         });
     }
 }
