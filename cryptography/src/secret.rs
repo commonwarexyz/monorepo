@@ -80,16 +80,16 @@ impl<T> Secret<T> {
     pub fn expose_unwrap(mut self) -> T {
         let ptr = &raw mut *self.0;
         // SAFETY:
-        // - Pointer obtained while self.0 is still initialized
-        // - ManuallyDrop::take: self.0 is initialized and we have exclusive access
-        // - zeroize_ptr: uses raw pointer (not reference) to zero memory after drop
-        let value = unsafe {
-            let value = ManuallyDrop::take(&mut self.0);
-            zeroize_ptr(ptr);
-            value
-        };
-        // Prevent Secret::drop from running (would double-zeroize)
+        // Pointer obtained while self.0 is still initialized,
+        // self.0 is initialized and we have exclusive access
+        let value = unsafe { ManuallyDrop::take(&mut self.0) };
+
+        // Prevent Secret::drop from running (would double-zeroize or double-free on panic)
         core::mem::forget(self);
+
+        // SAFETY: uses raw pointer (not reference) to zero memory after drop
+        unsafe { zeroize_ptr(ptr) };
+
         value
     }
 }
