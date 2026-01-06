@@ -61,6 +61,11 @@ impl<T> Secret<T> {
     /// this does not prevent copying or cloning the secret value within
     /// the closure (e.g., `secret.expose(|s| s.clone())`). Callers should
     /// avoid leaking secrets through such patterns.
+    ///
+    /// Additionally, any temporaries derived from the secret (e.g.
+    /// `s.as_slice()`) may leave secret data on the stack that will not be
+    /// automatically zeroized. Callers should wrap such temporaries in
+    /// [`zeroize::Zeroizing`] if they contain sensitive data.
     #[inline]
     pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a T) -> R) -> R {
         f(&self.0)
