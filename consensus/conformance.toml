@@ -20,7 +20,7 @@ hash = "d22d425105d9dda042400a4040dfd06ddcc61957cffebad4b2d5c527979b07f3"
 
 ["commonware_consensus::marshal::ingress::handler::tests::conformance::CodecConformance<Request<B>>"]
 n_cases = 65536
-hash = "85cd899b2ae04636d34a4559d6ffdde0e186f3bd8045282a832868491c608e6f"
+hash = "01475715f7713d6b0e856d97aa5789e6546178dacc8319de7ce17fe79a41d2d8"
 
 ["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Ack<PublicKey,Scheme,Sha256Digest>>"]
 n_cases = 65536
@@ -127,6 +127,10 @@ n_cases = 65536
 hash = "dec7851b91f56833b8f917c7e3ba16a28cd2683c68dda6c021c5d3c5c2400a37"
 
 ["commonware_consensus::types::tests::conformance::CodecConformance<Epoch>"]
+n_cases = 65536
+hash = "56ab85978136cb50f12ea89c8d25ce24451788172fe9d3d3c063f7ae6342d279"
+
+["commonware_consensus::types::tests::conformance::CodecConformance<Height>"]
 n_cases = 65536
 hash = "56ab85978136cb50f12ea89c8d25ce24451788172fe9d3d3c063f7ae6342d279"
 

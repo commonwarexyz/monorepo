@@ -16,7 +16,7 @@ use super::{
     AckManager, Config, TipManager,
 };
 use crate::{
-    types::{Epoch, EpochDelta},
+    types::{Epoch, EpochDelta, Height, HeightDelta},
     Automaton, Monitor, Relay, Reporter,
 };
 use commonware_codec::Encode;
@@ -118,7 +118,7 @@ pub struct Engine<
     //
     // For example, if the current tip for a sequencer is at height 100,
     // and the height_bound is 10, then acks for heights 100-110 are accepted.
-    height_bound: u64,
+    height_bound: HeightDelta,
 
     ////////////////////////////////////////
     // Messaging
@@ -364,7 +364,7 @@ impl<
                 receiver = propose => {
                     // Clear the pending proposal
                     let (context, _) = pending.take().unwrap();
-                    debug!(height = context.height, "propose");
+                    debug!(height = %context.height, "propose");
 
                     // Error handling for dropped proposals
                     let Ok(payload) = receiver else {
@@ -421,7 +421,7 @@ impl<
                     // Note, this node may be a duplicate. If it is, we will attempt to verify it and vote
                     // on it again (our original vote may have been lost).
                     self.handle_node(&node).await;
-                    debug!(?sender, height=node.chunk.height, "node");
+                    debug!(?sender, height = %node.chunk.height, "node");
                     guard.set(Status::Success);
                 },
 
@@ -452,7 +452,7 @@ impl<
                         guard.set(Status::Failure);
                         continue;
                     }
-                    debug!(?sender, epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = ack.chunk.height, "ack");
+                    debug!(?sender, epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = %ack.chunk.height, "ack");
                     guard.set(Status::Success);
                 },
 
@@ -611,7 +611,7 @@ impl<
 
         // Add the vote. If a new certificate is formed, handle it.
         if let Some(certificate) = self.ack_manager.add_ack(ack, scheme.as_ref()) {
-            debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = ack.chunk.height, "recovered certificate");
+            debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = %ack.chunk.height, "recovered certificate");
             self.metrics.certificates.inc();
             self.handle_certificate(&ack.chunk, ack.epoch, certificate)
                 .await;
@@ -634,7 +634,7 @@ impl<
                 .metrics
                 .sequencer_heights
                 .get_or_create(&metrics::SequencerLabel::from(&node.chunk.sequencer))
-                .try_set(node.chunk.height);
+                .try_set(node.chunk.height.get());
 
             // Append to journal if the `Node` is new, making sure to sync the journal
             // to prevent sending two conflicting chunks to the automaton, even if
@@ -684,14 +684,14 @@ impl<
         match self.tip_manager.get(&me) {
             None => Some(Context {
                 sequencer: me,
-                height: 0,
+                height: Height::zero(),
             }),
             Some(tip) => self
                 .ack_manager
                 .get_certificate(&me, tip.chunk.height)
                 .map(|_| Context {
                     sequencer: me,
-                    height: tip.chunk.height.checked_add(1).unwrap(),
+                    height: tip.chunk.height.next(),
                 }),
         }
     }
@@ -725,7 +725,7 @@ impl<
             .ok_or(Error::IAmNotASequencer(self.epoch))?;
 
         // Get parent Chunk and certificate
-        let mut height = 0;
+        let mut height = Height::zero();
         let mut parent = None;
         if let Some(tip) = self.tip_manager.get(&me) {
             // Get certificate, or, if it doesn't exist, return an error
@@ -736,7 +736,7 @@ impl<
             };
 
             // Update height and parent
-            height = tip.chunk.height + 1;
+            height = tip.chunk.height.next();
             parent = Some(Parent::new(tip.chunk.payload, epoch, certificate.clone()));
         }
 
@@ -930,8 +930,8 @@ impl<
                 .tip_manager
                 .get(&ack.chunk.sequencer)
                 .map(|t| t.chunk.height)
-                .unwrap_or(0);
-            let bound_hi = bound_lo + self.height_bound;
+                .unwrap_or(Height::zero());
+            let bound_hi = bound_lo.saturating_add(self.height_bound);
             if ack.chunk.height < bound_lo || ack.chunk.height > bound_hi {
                 return Err(Error::AckHeightOutsideBounds(
                     ack.chunk.height,
@@ -992,8 +992,8 @@ impl<
     ////////////////////////////////////////
 
     /// Returns the section of the journal for the given height.
-    const fn get_journal_section(&self, height: u64) -> u64 {
-        height / self.journal_heights_per_section
+    const fn get_journal_section(&self, height: Height) -> u64 {
+        height.get() / self.journal_heights_per_section
     }
 
     /// Ensures the journal exists and is initialized for the given sequencer.
@@ -1080,7 +1080,7 @@ impl<
     }
 
     /// Syncs (ensures all data is written to disk) and prunes the journal for the given sequencer and height.
-    async fn journal_sync(&mut self, sequencer: &C::PublicKey, height: u64) {
+    async fn journal_sync(&mut self, sequencer: &C::PublicKey, height: Height) {
         let section = self.get_journal_section(height);
 
         // Get journal

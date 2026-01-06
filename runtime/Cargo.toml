@@ -28,6 +28,7 @@ opentelemetry.workspace = true
 pin-project = { workspace = true, optional = true }
 prometheus-client.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 rayon.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true

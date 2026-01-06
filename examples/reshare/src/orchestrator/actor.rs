@@ -213,7 +213,7 @@ where
                     ?from,
                     %their_epoch,
                     %our_epoch,
-                    boundary_height,
+                    %boundary_height,
                     "received backup message from future epoch, ensuring boundary finalization"
                 );
                 self.marshal.hint_finalized(boundary_height, NonEmptyVec::new(from)).await;
