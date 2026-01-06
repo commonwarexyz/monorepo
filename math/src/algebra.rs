@@ -201,7 +201,7 @@ pub trait Space<R>:
     /// that they have the same length.
     ///
     /// For empty slices, the result should be [`Additive::zero`];
-    fn msm<S: ParStrategy>(points: &[Self], scalars: &[R], _strategy: &S) -> Self {
+    fn msm(points: &[Self], scalars: &[R], _strategy: &impl ParStrategy) -> Self {
         msm_naive(points, scalars)
     }
 }

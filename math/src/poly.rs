@@ -318,7 +318,7 @@ impl<'a, R, K: Space<R>> Mul<&'a R> for Poly<K> {
 }
 
 impl<R: Sync, K: Space<R> + Send> Space<R> for Poly<K> {
-    fn msm<S: ParStrategy>(polys: &[Self], scalars: &[R], strategy: &S) -> Self {
+    fn msm(polys: &[Self], scalars: &[R], strategy: &impl ParStrategy) -> Self {
         if polys.len() < MIN_POINTS_FOR_MSM {
             return msm_naive(polys, scalars);
         }
