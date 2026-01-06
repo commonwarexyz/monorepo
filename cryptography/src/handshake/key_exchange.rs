@@ -4,7 +4,7 @@ use rand_core::CryptoRngCore;
 
 /// A shared secret derived from X25519 key exchange.
 pub struct SharedSecret {
-    pub secret: Secret<x25519_dalek::SharedSecret>,
+    pub(crate) secret: Secret<x25519_dalek::SharedSecret>,
 }
 
 impl SharedSecret {
