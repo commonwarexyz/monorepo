@@ -302,10 +302,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         let blocked_until = self.context.current() + self.block_duration;
         self.blocked.put(peer.clone(), blocked_until);
-        self.metrics
+        let _ = self
+            .metrics
             .blocked
             .get_or_create(&metrics::Peer::new(peer))
-            .set(1);
+            .try_set(blocked_until.epoch_millis());
     }
 
     // ---------- Getters ----------
@@ -582,13 +583,13 @@ mod tests {
             directory.block(&unknown_pk);
 
             // Metrics should have an entry for the blocked peer
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&unknown_pk))
-                    .get(),
-                1,
+                    .get()
+                    > 0,
                 "Blocking nonexistent peer should create metric entry"
             );
 
@@ -684,69 +685,69 @@ mod tests {
 
             // Block registered peer multiple times
             directory.block(&registered_pk);
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&registered_pk))
-                    .get(),
-                1,
+                    .get()
+                    > 0,
                 "Registered peer should be marked blocked"
             );
 
             directory.block(&registered_pk);
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&registered_pk))
-                    .get(),
-                1,
+                    .get()
+                    > 0,
                 "Blocking same registered peer twice should not change metric"
             );
 
             directory.block(&registered_pk);
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&registered_pk))
-                    .get(),
-                1,
+                    .get()
+                    > 0,
                 "Blocking same registered peer thrice should not change metric"
             );
 
             // Block a nonexistent peer multiple times
             directory.block(&unknown_pk);
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&unknown_pk))
-                    .get(),
-                1,
+                    .get()
+                    > 0,
                 "Unknown peer should be marked blocked"
             );
 
             directory.block(&unknown_pk);
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&unknown_pk))
-                    .get(),
-                1,
+                    .get()
+                    > 0,
                 "Blocking same nonexistent peer twice should not change metric"
             );
 
             directory.block(&unknown_pk);
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&unknown_pk))
-                    .get(),
-                1,
+                    .get()
+                    > 0,
                 "Blocking same nonexistent peer thrice should not change metric"
             );
         });
@@ -911,32 +912,32 @@ mod tests {
             directory.add_set(0, peer_set);
             directory.block(&pk_1);
             assert!(directory.blocked.contains(&pk_1));
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&pk_1))
-                    .get(),
-                1,
+                    .get()
+                    > 0,
                 "pk_1 should be marked blocked"
             );
 
             // Add a new set that evicts pk_1 (max_sets=1)
-            // The blocked metric should remain 1 since the block persists
+            // The blocked metric should remain since the block persists
             let peer_set_2: OrderedSet<_> = [pk_2.clone()].into_iter().try_collect().unwrap();
             directory.add_set(1, peer_set_2);
             assert!(
                 !directory.peers.contains_key(&pk_1),
                 "pk_1 should be removed"
             );
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&pk_1))
-                    .get(),
-                1,
-                "blocked metric should still be 1 after peer removal"
+                    .get()
+                    > 0,
+                "blocked metric should persist after peer removal"
             );
 
             // Re-add pk_1 - should still be blocked because block persists
@@ -946,14 +947,14 @@ mod tests {
                 directory.blocked.contains(&pk_1),
                 "Re-added pk_1 should still be blocked"
             );
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&pk_1))
-                    .get(),
-                1,
-                "blocked metric should still be 1 after re-add"
+                    .get()
+                    > 0,
+                "blocked metric should persist after re-add"
             );
 
             // Advance time past block duration
@@ -1010,43 +1011,43 @@ mod tests {
 
             // Block all three peers
             directory.block(&pk_1);
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&pk_1))
-                    .get(),
-                1
+                    .get()
+                    > 0
             );
             directory.block(&pk_2);
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&pk_2))
-                    .get(),
-                1
+                    .get()
+                    > 0
             );
             directory.block(&pk_3);
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&pk_3))
-                    .get(),
-                1
+                    .get()
+                    > 0
             );
             assert_eq!(directory.blocked(), 3);
 
             // Blocking again should not change anything
             directory.block(&pk_1);
-            assert_eq!(
+            assert!(
                 directory
                     .metrics
                     .blocked
                     .get_or_create(&metrics::Peer::new(&pk_1))
-                    .get(),
-                1
+                    .get()
+                    > 0
             );
 
             // Advance time and unblock all
