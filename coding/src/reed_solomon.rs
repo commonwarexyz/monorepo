@@ -477,10 +477,10 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 
     type Error = Error;
 
-    fn encode<S: Parallel>(
+    fn encode(
         config: &Config,
         mut data: impl Buf,
-        strategy: &S,
+        strategy: &impl Parallel,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         encode(total_shards(config)?, config.minimum_shards, data, strategy)
@@ -518,12 +518,12 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         Ok(reshard)
     }
 
-    fn decode<S: Parallel>(
+    fn decode(
         config: &Config,
         commitment: &Self::Commitment,
         _checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
-        strategy: &S,
+        strategy: &impl Parallel,
     ) -> Result<Vec<u8>, Self::Error> {
         decode(
             total_shards(config)?,

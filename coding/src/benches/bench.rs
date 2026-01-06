@@ -38,8 +38,9 @@ pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                         data.as_slice(),
                                         &ParallelRayon::new(pool.clone()),
                                     )
+                                    .unwrap()
                                 } else {
-                                    S::encode(&config, data.as_slice(), &ParallelNone)
+                                    S::encode(&config, data.as_slice(), &ParallelNone).unwrap()
                                 }
                             },
                             BatchSize::SmallInput,
@@ -129,6 +130,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                         &checked_shards,
                                         &ParallelRayon::new(pool.clone()),
                                     )
+                                    .unwrap()
                                 } else {
                                     S::decode(
                                         &config,
@@ -137,6 +139,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                         &checked_shards,
                                         &ParallelNone,
                                     )
+                                    .unwrap()
                                 }
                             },
                             BatchSize::SmallInput,

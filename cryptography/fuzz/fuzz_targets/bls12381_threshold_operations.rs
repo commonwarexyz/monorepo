@@ -391,22 +391,14 @@ fn fuzz(op: FuzzOperation) {
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();
-                if concurrency > 1 {
-                    let pool =
-                        commonware_parallel::create_pool(NonZeroUsize::new(concurrency).unwrap())
-                            .unwrap();
-                    let _ = threshold::recover_multiple::<MinPk, _, _>(
-                        &sharing,
-                        groups_refs,
-                        &ParallelRayon::new(pool),
-                    );
-                } else {
-                    let _ = threshold::recover_multiple::<MinPk, _, _>(
-                        &sharing,
-                        groups_refs,
-                        &ParallelNone,
-                    );
-                }
+                let pool =
+                    commonware_parallel::create_pool(NonZeroUsize::new(concurrency).unwrap())
+                        .unwrap();
+                let _ = threshold::recover_multiple::<MinPk, _, _>(
+                    &sharing,
+                    groups_refs,
+                    &ParallelRayon::new(pool),
+                );
             }
         }
 
@@ -420,22 +412,14 @@ fn fuzz(op: FuzzOperation) {
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();
-                if concurrency > 1 {
-                    let pool =
-                        commonware_parallel::create_pool(NonZeroUsize::new(concurrency).unwrap())
-                            .unwrap();
-                    let _ = threshold::recover_multiple::<MinSig, _, _>(
-                        &sharing,
-                        groups_refs,
-                        &ParallelRayon::new(pool),
-                    );
-                } else {
-                    let _ = threshold::recover_multiple::<MinSig, _, _>(
-                        &sharing,
-                        groups_refs,
-                        &ParallelNone,
-                    );
-                }
+                let pool =
+                    commonware_parallel::create_pool(NonZeroUsize::new(concurrency).unwrap())
+                        .unwrap();
+                let _ = threshold::recover_multiple::<MinSig, _, _>(
+                    &sharing,
+                    groups_refs,
+                    &ParallelRayon::new(pool),
+                );
             }
         }
 

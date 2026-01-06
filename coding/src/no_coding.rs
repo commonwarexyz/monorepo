@@ -93,10 +93,10 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
 
     type Error = Error;
 
-    fn encode<S: Parallel>(
+    fn encode(
         config: &crate::Config,
         mut data: impl bytes::Buf,
-        _strategy: &S,
+        _strategy: &impl Parallel,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         let commitment = H::new().update(&data).finalize();
@@ -129,12 +129,12 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         Ok(())
     }
 
-    fn decode<S: Parallel>(
+    fn decode(
         _config: &Config,
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         _shards: &[Self::CheckedShard],
-        _strategy: &S,
+        _strategy: &impl Parallel,
     ) -> Result<Vec<u8>, Self::Error> {
         Ok(checking_data)
     }

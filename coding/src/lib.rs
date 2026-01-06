@@ -147,10 +147,10 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// Each shard and proof is intended for exactly one participant. The number of shards returned
     /// should equal `config.minimum_shards + config.extra_shards`.
     #[allow(clippy::type_complexity)]
-    fn encode<S: Parallel>(
+    fn encode(
         config: &Config,
         data: impl Buf,
-        strategy: &S,
+        strategy: &impl Parallel,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
     /// Take your own shard, check it, and produce a [Scheme::ReShard] to forward to others.
@@ -194,12 +194,12 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// In other words, when using the decoding function in a broader system, you
     /// get a guarantee that every participant decoding will see the same final
     /// data, even if they receive different shards, or receive them in a different order.
-    fn decode<S: Parallel>(
+    fn decode(
         config: &Config,
         commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
-        strategy: &S,
+        strategy: &impl Parallel,
     ) -> Result<Vec<u8>, Self::Error>;
 }
 

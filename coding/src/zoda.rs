@@ -621,10 +621,10 @@ impl<H: Hasher> Scheme for Zoda<H> {
 
     type Error = Error;
 
-    fn encode<S: Parallel>(
+    fn encode(
         config: &Config,
         data: impl bytes::Buf,
-        strategy: &S,
+        strategy: &impl Parallel,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
@@ -726,12 +726,12 @@ impl<H: Hasher> Scheme for Zoda<H> {
         checking_data.check(index, &reshard)
     }
 
-    fn decode<S: Parallel>(
+    fn decode(
         _config: &Config,
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
-        _strategy: &S,
+        _strategy: &impl Parallel,
     ) -> Result<Vec<u8>, Self::Error> {
         let Topology {
             encoded_rows,
