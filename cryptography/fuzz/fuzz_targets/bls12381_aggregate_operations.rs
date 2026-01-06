@@ -9,10 +9,7 @@ use commonware_cryptography::bls12381::primitives::{
 use libfuzzer_sys::fuzz_target;
 
 mod common;
-use common::{
-    arbitrary_bytes, arbitrary_g1, arbitrary_g2, arbitrary_messages, arbitrary_vec_g1,
-    arbitrary_vec_g2,
-};
+use common::{arbitrary_g1, arbitrary_g2, arbitrary_messages, arbitrary_vec_g1, arbitrary_vec_g2};
 
 #[derive(Debug)]
 enum FuzzOperation {
@@ -27,18 +24,6 @@ enum FuzzOperation {
     },
     CombineSignaturesMinSig {
         signatures: Vec<G1>,
-    },
-    VerifySameMessageMinPk {
-        public_keys: Vec<G1>,
-        namespace: Vec<u8>,
-        message: Vec<u8>,
-        signature: G2,
-    },
-    VerifySameMessageMinSig {
-        public_keys: Vec<G2>,
-        namespace: Vec<u8>,
-        message: Vec<u8>,
-        signature: G1,
     },
     VerifySameSignerMinPk {
         public_key: G1,
@@ -56,7 +41,7 @@ enum FuzzOperation {
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=7)?;
+        let choice = u.int_in_range(0..=5)?;
 
         match choice {
             0 => Ok(FuzzOperation::CombinePublicKeysMinPk {
@@ -71,25 +56,13 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             3 => Ok(FuzzOperation::CombineSignaturesMinSig {
                 signatures: arbitrary_vec_g1(u, 0, 20)?,
             }),
-            4 => Ok(FuzzOperation::VerifySameMessageMinPk {
-                public_keys: arbitrary_vec_g1(u, 0, 20)?,
-                namespace: arbitrary_bytes(u, 0, 50)?,
-                message: arbitrary_bytes(u, 0, 100)?,
-                signature: arbitrary_g2(u)?,
-            }),
-            5 => Ok(FuzzOperation::VerifySameMessageMinSig {
-                public_keys: arbitrary_vec_g2(u, 0, 20)?,
-                namespace: arbitrary_bytes(u, 0, 50)?,
-                message: arbitrary_bytes(u, 0, 100)?,
-                signature: arbitrary_g1(u)?,
-            }),
-            6 => Ok(FuzzOperation::VerifySameSignerMinPk {
+            4 => Ok(FuzzOperation::VerifySameSignerMinPk {
                 public_key: arbitrary_g1(u)?,
                 messages: arbitrary_messages(u, 0, 20)?,
                 signature: arbitrary_g2(u)?,
                 concurrency: u.int_in_range(1..=8)?,
             }),
-            7 => Ok(FuzzOperation::VerifySameSignerMinSig {
+            5 => Ok(FuzzOperation::VerifySameSignerMinSig {
                 public_key: arbitrary_g2(u)?,
                 messages: arbitrary_messages(u, 0, 20)?,
                 signature: arbitrary_g1(u)?,
@@ -125,36 +98,6 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::CombineSignaturesMinSig { signatures } => {
             if !signatures.is_empty() {
                 let _result = aggregate::combine_signatures::<MinSig, _>(&signatures);
-            }
-        }
-
-        FuzzOperation::VerifySameMessageMinPk {
-            public_keys,
-            namespace,
-            message,
-            signature,
-        } => {
-            if !public_keys.is_empty() {
-                let agg_pk = aggregate::combine_public_keys::<MinPk, _>(&public_keys);
-                let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
-                let _ = aggregate::verify_same_message::<MinPk>(
-                    &agg_pk, &namespace, &message, &agg_sig,
-                );
-            }
-        }
-
-        FuzzOperation::VerifySameMessageMinSig {
-            public_keys,
-            namespace,
-            message,
-            signature,
-        } => {
-            if !public_keys.is_empty() {
-                let agg_pk = aggregate::combine_public_keys::<MinSig, _>(&public_keys);
-                let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
-                let _ = aggregate::verify_same_message::<MinSig>(
-                    &agg_pk, &namespace, &message, &agg_sig,
-                );
             }
         }
 

@@ -249,13 +249,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         // Verify the aggregate signature.
         let agg_public = aggregate::combine_public_keys::<V, _>(&publics);
-        aggregate::verify_same_message::<V>(
-            &agg_public,
+        let hm = ops::hash_with_namespace::<V>(
+            V::MESSAGE,
             subject.namespace(&self.namespace),
             &subject.message(),
-            &certificate.signature,
-        )
-        .is_ok()
+        );
+        V::verify(agg_public.inner(), &hm, certificate.signature.inner()).is_ok()
     }
 
     /// Verifies multiple certificates (no batch optimization for BLS multisig).
