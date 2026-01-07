@@ -311,26 +311,41 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
         Ok(index_pruned || value_pruned)
     }
 
-    /// Rewind both journals to specific sizes for a section.
-    pub async fn rewind(
-        &mut self,
-        section: u64,
-        index_size: u64,
-        value_size: u64,
-    ) -> Result<(), Error> {
-        try_join(
-            self.index.rewind_section(section, index_size),
-            self.values.rewind_section(section, value_size),
-        )
-        .await
-        .map(|_| ())
+    /// Rewind both journals to a specific index size for a section.
+    ///
+    /// The value size is derived from the last entry after rewinding the index.
+    pub async fn rewind(&mut self, section: u64, index_size: u64) -> Result<(), Error> {
+        // Rewind index first
+        self.index.rewind_section(section, index_size).await?;
+
+        // Derive value size from last entry
+        let value_size = self.index.last(section).await?.map_or(0, |entry| {
+            let (offset, size) = entry.value_location();
+            offset + u64::from(size)
+        });
+
+        // Rewind values
+        self.values.rewind_section(section, value_size).await
     }
 
-    /// Get sizes for checkpoint.
+    /// Get index size for checkpoint.
     ///
-    /// Returns `(index_size, value_size)` for the given section.
-    pub async fn sizes(&self, section: u64) -> Result<(u64, u64), Error> {
-        try_join(self.index.size(section), self.values.size(section)).await
+    /// The value size can be derived from the last entry's location when needed.
+    pub async fn size(&self, section: u64) -> Result<u64, Error> {
+        self.index.size(section).await
+    }
+
+    /// Get the value size for a section, derived from the last entry's location.
+    pub async fn value_size(&self, section: u64) -> Result<u64, Error> {
+        match self.index.last(section).await {
+            Ok(Some(entry)) => {
+                let (offset, size) = entry.value_location();
+                Ok(offset + u64::from(size))
+            }
+            Ok(None) => Ok(0),
+            Err(Error::SectionOutOfRange(_)) => Ok(0),
+            Err(e) => Err(e),
+        }
     }
 
     /// Returns the oldest section number, if any exist.

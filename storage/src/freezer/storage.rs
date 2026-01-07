@@ -125,10 +125,8 @@ pub struct Checkpoint {
     epoch: u64,
     /// The section of the last committed operation.
     section: u64,
-    /// The size of the key index journal in the last committed section.
-    key_size: u64,
-    /// The size of the value journal in the last committed section.
-    value_size: u64,
+    /// The size of the oversized index journal in the last committed section.
+    oversized_size: u64,
     /// The size of the table.
     table_size: u32,
 }
@@ -140,8 +138,7 @@ impl Checkpoint {
             table_size,
             epoch: 0,
             section: 0,
-            key_size: 0,
-            value_size: 0,
+            oversized_size: 0,
         }
     }
 }
@@ -151,14 +148,12 @@ impl Read for Checkpoint {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
-        let key_size = u64::read(buf)?;
-        let value_size = u64::read(buf)?;
+        let oversized_size = u64::read(buf)?;
         let table_size = u32::read(buf)?;
         Ok(Self {
             epoch,
             section,
-            key_size,
-            value_size,
+            oversized_size,
             table_size,
         })
     }
@@ -168,14 +163,13 @@ impl CodecWrite for Checkpoint {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
         self.section.write(buf);
-        self.key_size.write(buf);
-        self.value_size.write(buf);
+        self.oversized_size.write(buf);
         self.table_size.write(buf);
     }
 }
 
 impl FixedSize for Checkpoint {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE + u64::SIZE + u32::SIZE;
+    const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE + u32::SIZE;
 }
 
 /// Name of the table blob.
@@ -660,8 +654,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             (0, Some(checkpoint)) => {
                 assert_eq!(checkpoint.epoch, 0);
                 assert_eq!(checkpoint.section, 0);
-                assert_eq!(checkpoint.key_size, 0);
-                assert_eq!(checkpoint.value_size, 0);
+                assert_eq!(checkpoint.oversized_size, 0);
                 assert_eq!(checkpoint.table_size, 0);
 
                 Self::init_table(&table, config.table_initial_size).await?;
@@ -675,13 +668,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                     "table_size must be a power of 2"
                 );
 
-                // Rewind oversized to the committed section and offsets
+                // Rewind oversized to the committed section and key size
                 oversized
-                    .rewind(
-                        checkpoint.section,
-                        checkpoint.key_size,
-                        checkpoint.value_size,
-                    )
+                    .rewind(checkpoint.section, checkpoint.oversized_size)
                     .await?;
 
                 // Sync oversized
@@ -736,14 +725,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 }
 
                 // Get sizes from oversized (crash recovery already ran during init)
-                let (key_size, value_size) = oversized.sizes(max_section).await?;
+                let oversized_size = oversized.size(max_section).await?;
 
                 (
                     Checkpoint {
                         epoch: max_epoch,
                         section: max_section,
-                        key_size,
-                        value_size,
+                        oversized_size,
                         table_size,
                     },
                     resizable,
@@ -823,7 +811,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// Determine which blob section to write to based on current blob size.
     async fn update_section(&mut self) -> Result<(), Error> {
         // Get the current value blob section size
-        let (_, value_size) = self.oversized.sizes(self.current_section).await?;
+        let value_size = self.oversized.value_size(self.current_section).await?;
 
         // If the current section has reached the target size, create a new section
         if value_size >= self.blob_target_size {
@@ -1094,14 +1082,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let stored_epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
 
-        // Get sizes from oversized
-        let (key_size, value_size) = self.oversized.sizes(self.current_section).await?;
+        // Get size from oversized
+        let oversized_size = self.oversized.size(self.current_section).await?;
 
         Ok(Checkpoint {
             epoch: stored_epoch,
             section: self.current_section,
-            key_size,
-            value_size,
+            oversized_size,
             table_size: self.table_size,
         })
     }
