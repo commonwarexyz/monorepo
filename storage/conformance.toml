@@ -1,10 +1,10 @@
 ["commonware_storage::archive::conformance::ArchiveImmutable"]
 n_cases = 128
-hash = "ea152dc8558b0fa71d974b7240402ecc1cca3018c014b4e2d70463ae9994afaf"
+hash = "1fb629cfd9c3dfacd97cf674147387b4c9c1e36a1d64568fa0f782f96589e2e9"
 
 ["commonware_storage::archive::conformance::ArchivePrunable"]
 n_cases = 128
-hash = "be966f6ebb64ed42ab1dd71bec7e13b1e2a5c1e4e833ada62971a5fa10aa09fd"
+hash = "674e81c769c06a3965dc691b1f8c0327374f427e8a4bf67895c6ad4e566fed20"
 
 ["commonware_storage::archive::immutable::storage::conformance::CodecConformance<Record>"]
 n_cases = 65536
@@ -34,10 +34,6 @@ hash = "fcb0baa781f374ca04f2c967abc3c82c7b99d26239b387472de23c85aebd2790"
 n_cases = 65536
 hash = "035babcc7aa34c3d4b263924865c4da8206b226e7c372484b89e5430166068c3"
 
-["commonware_storage::cache::storage::conformance::CodecConformance<Record<u64>>"]
-n_cases = 65536
-hash = "9add8634d4f06c3fb7f6dfd80630f38013ecb20849c18accd0579d7eb2ca11d5"
-
 ["commonware_storage::freezer::storage::conformance::CodecConformance<Checkpoint>"]
 n_cases = 65536
 hash = "b0979a7998b8bde23262563837f9f42a461a69b83ca095d50da9b0f8f52f2ed0"
@@ -64,11 +60,11 @@ hash = "13b3e99a8c74b50dc18150194a92306de670b94e6642758feb6d9b6e9881f827"
 
 ["commonware_storage::journal::conformance::ContiguousFixed"]
 n_cases = 512
-hash = "1cf15a4778cfb1d745515929ba97fca9944890b4428d0a08b412595b4c16a01c"
+hash = "134bb8b838241c2dedf98d96130f014bea19f1bc7580307c9798540466eb81c6"
 
 ["commonware_storage::journal::conformance::ContiguousVariable"]
 n_cases = 512
-hash = "1af2d7b935ee3d437c9ad3d8329d88ba1bd791d57a0f2ad8f08f3c617ecf2cf8"
+hash = "29d37f2309943dd27d4344710a900bb3b992c0a1089ff9734cddbfa78c039200"
 
 ["commonware_storage::journal::conformance::FixedJournal"]
 n_cases = 512
@@ -76,7 +72,7 @@ hash = "9cd764e31b5dbc0bd78cd0908851ba1d645f083884beacd2c8a63f66de0fb9db"
 
 ["commonware_storage::journal::conformance::SegmentedFixed"]
 n_cases = 512
-hash = "a65712945961a547dd79cf75578a67c9322a00297a57b1f85709c7d4b5e3838b"
+hash = "505611ba11d6380254c159eb6234f87cc19a62b0919bc96d59e83de498b458fa"
 
 ["commonware_storage::journal::conformance::SegmentedFixedJournal"]
 n_cases = 512
@@ -84,15 +80,15 @@ hash = "cc21c23946ca33bc828d4734e1871cd84a37ac359f8a957d82a636efe1f4f675"
 
 ["commonware_storage::journal::conformance::SegmentedGlob"]
 n_cases = 512
-hash = "93a8fb3cd5746096fc61af4fb3004a65ac4922fb84fcc4025ac908fd6a8e0276"
+hash = "adb1efeef12c203c05879ce4d1d03ef443c767737a6c6b57433189100eec9197"
 
 ["commonware_storage::journal::conformance::SegmentedOversized"]
 n_cases = 512
-hash = "a0ded1cfc94637cd0d88b484e512b6d1ef8d83e415508ee0b3cdec7ca85bf881"
+hash = "b98d56d2eb039657b3452135666795eeeefdc83e9d6f3cb070e7ca114b4621a1"
 
 ["commonware_storage::journal::conformance::SegmentedVariable"]
 n_cases = 512
-hash = "78465362cebd2d2c17e98f9c48baa511dc0ad9ad73a728fa2f42ae3b535817fe"
+hash = "cd79e09ca53917f78c290e67efe08bf17b3ec0d0faf1b5f6507d4665749574b1"
 
 ["commonware_storage::journal::conformance::VariableJournal"]
 n_cases = 512
