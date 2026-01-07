@@ -217,7 +217,9 @@ pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
     /// Generate a non-zero scalar from the randomly populated buffer.
-    fn from_bytes(mut ikm: [u8; 64]) -> Self {
+    ///
+    /// The buffer is zeroized after use.
+    fn from_bytes(ikm: &mut [u8; 64]) -> Self {
         let mut sc = blst_scalar::default();
         let mut ret = blst_fr::default();
         // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
@@ -227,7 +229,7 @@ impl Scalar {
             blst_fr_from_scalar(&mut ret, &sc);
         }
 
-        // Zeroize the ikm buffer
+        // Zeroize the ikm buffer in place
         ikm.zeroize();
 
         Self(ret)
@@ -496,7 +498,7 @@ impl Random for Scalar {
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut ikm = [0u8; 64];
         rng.fill_bytes(&mut ikm);
-        Self::from_bytes(ikm)
+        Self::from_bytes(&mut ikm)
     }
 }
 
@@ -1158,7 +1160,9 @@ mod tests {
         type Strategy = BoxedStrategy<Self>;
 
         fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<[u8; 64]>().prop_map(Self::from_bytes).boxed()
+            any::<[u8; 64]>()
+                .prop_map(|mut b| Self::from_bytes(&mut b))
+                .boxed()
         }
     }
 
