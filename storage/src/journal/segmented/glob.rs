@@ -442,4 +442,50 @@ mod tests {
             glob.destroy().await.expect("Failed to destroy");
         });
     }
+
+    #[test_traced]
+    fn test_glob_get_invalid_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut glob: Glob<_, i32> = Glob::init(context.clone(), test_cfg())
+                .await
+                .expect("Failed to init glob");
+
+            let (offset, _size) = glob.append(1, &42).await.expect("Failed to append");
+            glob.sync(1).await.expect("Failed to sync");
+
+            // Size 0 - should fail
+            assert!(glob.get(1, offset, 0).await.is_err());
+
+            // Size < CRC_SIZE (1, 2, 3 bytes) - should fail with BlobInsufficientLength
+            for size in 1..4u32 {
+                let result = glob.get(1, offset, size).await;
+                assert!(matches!(
+                    result,
+                    Err(Error::Runtime(RError::BlobInsufficientLength))
+                ));
+            }
+
+            glob.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_glob_get_wrong_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut glob: Glob<_, i32> = Glob::init(context.clone(), test_cfg())
+                .await
+                .expect("Failed to init glob");
+
+            let (offset, correct_size) = glob.append(1, &42).await.expect("Failed to append");
+            glob.sync(1).await.expect("Failed to sync");
+
+            // Size too small (but >= CRC_SIZE) - checksum mismatch
+            let result = glob.get(1, offset, correct_size - 1).await;
+            assert!(matches!(result, Err(Error::ChecksumMismatch(_, _))));
+
+            glob.destroy().await.expect("Failed to destroy");
+        });
+    }
 }

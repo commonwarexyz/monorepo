@@ -1767,4 +1767,62 @@ mod tests {
             oversized.destroy().await.expect("Failed to destroy");
         });
     }
+
+    #[test_traced]
+    fn test_oversized_get_value_invalid_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), test_cfg())
+                    .await
+                    .expect("Failed to init");
+
+            let value: TestValue = [42; 16];
+            let entry = TestEntry::new(1, 0, 0);
+            let (_, offset, _size) = oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(1).await.expect("Failed to sync");
+
+            // Size 0 - should fail
+            assert!(oversized.get_value(1, offset, 0).await.is_err());
+
+            // Size < CRC_SIZE (1, 2, 3 bytes) - should fail with BlobInsufficientLength
+            for size in 1..4u32 {
+                let result = oversized.get_value(1, offset, size).await;
+                assert!(matches!(
+                    result,
+                    Err(Error::Runtime(commonware_runtime::Error::BlobInsufficientLength))
+                ));
+            }
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_get_value_wrong_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), test_cfg())
+                    .await
+                    .expect("Failed to init");
+
+            let value: TestValue = [42; 16];
+            let entry = TestEntry::new(1, 0, 0);
+            let (_, offset, correct_size) = oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(1).await.expect("Failed to sync");
+
+            // Size too small (but >= CRC_SIZE) - checksum mismatch
+            let result = oversized.get_value(1, offset, correct_size - 1).await;
+            assert!(matches!(result, Err(Error::ChecksumMismatch(_, _))));
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
 }
