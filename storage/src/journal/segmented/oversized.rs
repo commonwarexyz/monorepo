@@ -40,7 +40,7 @@ use super::{
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed};
 use commonware_runtime::{Metrics, Storage};
-use futures::{future::join, stream::Stream};
+use futures::{future::try_join, stream::Stream};
 use std::{marker::PhantomData, num::NonZeroUsize};
 use tracing::{debug, warn};
 
@@ -310,20 +310,16 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
 
     /// Sync both journals for given section.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
-        let (index_result, value_result) =
-            join(self.index.sync(section), self.values.sync(section)).await;
-        index_result?;
-        value_result?;
-        Ok(())
+        try_join(self.index.sync(section), self.values.sync(section))
+            .await
+            .map(|_| ())
     }
 
     /// Sync all sections.
     pub async fn sync_all(&self) -> Result<(), Error> {
-        let (index_result, value_result) =
-            join(self.index.sync_all(), self.values.sync_all()).await;
-        index_result?;
-        value_result?;
-        Ok(())
+        try_join(self.index.sync_all(), self.values.sync_all())
+            .await
+            .map(|_| ())
     }
 
     /// Prune both journals. Returns true if any sections were pruned.
@@ -344,23 +340,19 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
         index_size: u64,
         value_size: u64,
     ) -> Result<(), Error> {
-        let (index_result, value_result) = join(
+        try_join(
             self.index.rewind_section(section, index_size),
             self.values.rewind(section, value_size),
         )
-        .await;
-        index_result?;
-        value_result?;
-        Ok(())
+        .await
+        .map(|_| ())
     }
 
     /// Get sizes for checkpoint.
     ///
     /// Returns `(index_size, value_size)` for the given section.
     pub async fn sizes(&self, section: u64) -> Result<(u64, u64), Error> {
-        let (index_size, value_size) =
-            join(self.index.size(section), self.values.size(section)).await;
-        Ok((index_size?, value_size?))
+        try_join(self.index.size(section), self.values.size(section)).await
     }
 
     /// Returns the oldest section number, if any exist.
@@ -370,10 +362,9 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
 
     /// Destroy all underlying storage.
     pub async fn destroy(self) -> Result<(), Error> {
-        let (index_result, value_result) = join(self.index.destroy(), self.values.destroy()).await;
-        index_result?;
-        value_result?;
-        Ok(())
+        try_join(self.index.destroy(), self.values.destroy())
+            .await
+            .map(|_| ())
     }
 }
 

@@ -10,6 +10,7 @@ use commonware_runtime::{
     Blob, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
+use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 use tracing::debug;
@@ -199,10 +200,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Sync all sections to storage.
     pub async fn sync_all(&self) -> Result<(), Error> {
-        for blob in self.blobs.values() {
-            self.synced.inc();
-            blob.sync().await.map_err(Error::Runtime)?;
-        }
+        let futures: Vec<_> = self.blobs.values().map(|blob| blob.sync()).collect();
+        let results = try_join_all(futures).await.map_err(Error::Runtime)?;
+        self.synced.inc_by(results.len() as u64);
         Ok(())
     }
 
