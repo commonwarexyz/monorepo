@@ -31,6 +31,8 @@ pub struct Config<
     S: commonware_cryptography::certificate::Scheme,
     B: Blocker<PublicKey = S::PublicKey>,
 > {
+    /// Namespace for domain separation in signatures.
+    pub namespace: Vec<u8>,
     /// Signing scheme.
     pub scheme: S,
     /// Network blocker.
@@ -55,6 +57,7 @@ pub struct Actor<
     D: Digest,
 > {
     context: ContextCell<E>,
+    namespace: Vec<u8>,
     scheme: S,
     blocker: Option<B>,
 
@@ -80,6 +83,7 @@ impl<
         (
             Self {
                 context: ContextCell::new(context),
+                namespace: cfg.namespace,
                 scheme: cfg.scheme,
                 blocker: Some(cfg.blocker),
 
@@ -190,7 +194,7 @@ impl<
                     );
                     return None;
                 }
-                if !notarization.verify(&mut self.context, &self.scheme) {
+                if !notarization.verify(&mut self.context, &self.namespace, &self.scheme) {
                     debug!(%view, "notarization failed verification");
                     return None;
                 }
@@ -210,7 +214,7 @@ impl<
                     );
                     return None;
                 }
-                if !nullification.verify::<_, D>(&mut self.context, &self.scheme) {
+                if !nullification.verify::<_, D>(&mut self.context, &self.namespace, &self.scheme) {
                     debug!(%view, "nullification failed verification");
                     return None;
                 }

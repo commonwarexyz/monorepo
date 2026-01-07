@@ -39,6 +39,8 @@ pub struct AttributableReporter<
 > {
     /// RNG for certificate verification
     rng: E,
+    /// Namespace for domain separation in signatures
+    namespace: Vec<u8>,
     /// Signing scheme for verification
     scheme: S,
     /// Inner reporter that receives filtered activities
@@ -55,9 +57,10 @@ impl<
     > AttributableReporter<E, S, D, R>
 {
     /// Creates a new `AttributableReporter` that wraps an inner reporter.
-    pub const fn new(rng: E, scheme: S, reporter: R, verify: bool) -> Self {
+    pub fn new(rng: E, namespace: Vec<u8>, scheme: S, reporter: R, verify: bool) -> Self {
         Self {
             rng,
+            namespace,
             scheme,
             reporter,
             verify,
@@ -76,13 +79,13 @@ impl<
 
     async fn report(&mut self, activity: Self::Activity) {
         // Verify peer activities if verification is enabled
-        if self.verify && !activity.verified() && !activity.verify(&mut self.rng, &self.scheme) {
+        if self.verify && !activity.verified() && !activity.verify(&mut self.rng, &self.namespace, &self.scheme) {
             // Drop unverified peer activity
             return;
         }
 
         // Filter based on scheme attributability
-        if !S::is_attributable() {
+        if !self.scheme.is_attributable() {
             match activity {
                 Activity::Notarize(_)
                 | Activity::Nullify(_)

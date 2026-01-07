@@ -357,7 +357,7 @@ mod integration_tests {
     fn all_online<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
         L: ElectorConfig<S>,
     {
         // Create context
@@ -388,7 +388,7 @@ mod integration_tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, &namespace, n);
+            } = fixture(&mut context, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -410,6 +410,7 @@ mod integration_tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -431,6 +432,7 @@ mod integration_tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    namespace: namespace.clone(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                     blocker,

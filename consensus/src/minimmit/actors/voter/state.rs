@@ -66,6 +66,7 @@ pub(crate) fn interesting(
 
 /// Configuration for initializing [`State`].
 pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
+    pub namespace: Vec<u8>,
     pub scheme: S,
     pub elector: L,
     pub epoch: Epoch,
@@ -85,6 +86,7 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
 /// - Only tracks notarization and nullification certificates
 pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest> {
     context: E,
+    namespace: Vec<u8>,
     scheme: S,
     elector: L::Elector,
     epoch: Epoch,
@@ -127,6 +129,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         Self {
             context,
+            namespace: cfg.namespace,
             scheme: cfg.scheme,
             elector,
             epoch: cfg.epoch,
@@ -248,7 +251,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let Some(retry) = self.create_round(view).construct_nullify() else {
             return (false, None, None);
         };
-        let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view));
+        let nullify = Nullify::sign::<D>(&self.namespace, &self.scheme, Rnd::new(self.epoch, view));
 
         // If was retry, we need to get entry certificate for the previous view
         let entry_view = view.previous().unwrap_or(GENESIS_VIEW);
@@ -314,7 +317,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         // Signing can only fail if we are a verifier, so we don't need to worry about
         // unwinding our broadcast toggle.
-        Notarize::sign(&self.scheme, candidate)
+        Notarize::sign(&self.namespace, &self.scheme, candidate)
     }
 
     /// Construct a nullify vote for contradiction if conditions are met.
@@ -328,7 +331,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.views
             .get_mut(&view)?
             .construct_nullify_by_contradiction(m_threshold)?;
-        Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))
+        Nullify::sign::<D>(&self.namespace, &self.scheme, Rnd::new(self.epoch, view))
     }
 
     /// Construct a notarization certificate once the round has quorum.

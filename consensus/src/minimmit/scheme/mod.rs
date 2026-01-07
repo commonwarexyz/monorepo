@@ -5,7 +5,7 @@
 //! Signing schemes differ in whether per-validator activities can be used as evidence of either
 //! liveness or of committing a fault:
 //!
-//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`], [`secp256r1`]): Individual signatures can be
+//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`]): Individual signatures can be
 //!   presented to some third party as evidence of either liveness or of committing a fault. Certificates contain signer
 //!   indices alongside individual signatures, enabling secure per-validator activity tracking and conflict detection.
 //!
@@ -29,7 +29,6 @@ pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
 pub mod reporter;
-pub mod secp256r1;
 
 /// Pre-computed namespaces for minimmit voting subjects.
 ///
@@ -57,26 +56,17 @@ impl Namespace {
     }
 }
 
-impl certificate::Namespace for Namespace {
-    fn derive(namespace: &[u8]) -> Self {
-        Self::new(namespace)
-    }
-}
-
 impl<'a, D: Digest> certificate::Subject for Subject<'a, D> {
-    type Namespace = Namespace;
-
-    fn namespace<'b>(&self, derived: &'b Self::Namespace) -> &'b [u8] {
+    fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
         match self {
-            Self::Notarize { .. } => &derived.notarize,
-            Self::Nullify { .. } => &derived.nullify,
-        }
-    }
-
-    fn message(&self) -> Bytes {
-        match self {
-            Self::Notarize { proposal } => proposal.encode().freeze(),
-            Self::Nullify { round } => round.encode().freeze(),
+            Self::Notarize { proposal } => {
+                let ns = notarize_namespace(namespace);
+                (ns.into(), proposal.encode().freeze())
+            }
+            Self::Nullify { round } => {
+                let ns = nullify_namespace(namespace);
+                (ns.into(), round.encode().freeze())
+            }
         }
     }
 }

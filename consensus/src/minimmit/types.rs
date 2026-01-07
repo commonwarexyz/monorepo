@@ -693,11 +693,11 @@ pub struct Notarize<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Signs a notarize vote for the provided proposal.
-    pub fn sign(scheme: &S, proposal: Proposal<D>) -> Option<Self>
+    pub fn sign(namespace: &[u8], scheme: &S, proposal: Proposal<D>) -> Option<Self>
     where
         S: scheme::Scheme<D>,
     {
-        let attestation = scheme.sign::<D>(Subject::Notarize {
+        let attestation = scheme.sign::<D>(namespace, Subject::Notarize {
             proposal: &proposal,
         })?;
 
@@ -710,13 +710,12 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Verifies the notarize vote against the provided signing scheme.
     ///
     /// This ensures that the notarize signature is valid for the claimed proposal.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify(&self, namespace: &[u8], scheme: &S) -> bool
     where
-        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<_, D>(
-            rng,
+        scheme.verify_attestation::<D>(
+            namespace,
             Subject::Notarize {
                 proposal: &self.proposal,
             },
@@ -839,12 +838,13 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Verifies the notarization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
     where
         S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(
             rng,
+            namespace,
             Subject::Notarize {
                 proposal: &self.proposal,
             },
@@ -956,11 +956,11 @@ impl<S: Scheme> Hash for Nullify<S> {
 
 impl<S: Scheme> Nullify<S> {
     /// Signs a nullify vote for the given round.
-    pub fn sign<D: Digest>(scheme: &S, round: Round) -> Option<Self>
+    pub fn sign<D: Digest>(namespace: &[u8], scheme: &S, round: Round) -> Option<Self>
     where
         S: scheme::Scheme<D>,
     {
-        let attestation = scheme.sign::<D>(Subject::Nullify { round })?;
+        let attestation = scheme.sign::<D>(namespace, Subject::Nullify { round })?;
 
         Some(Self { round, attestation })
     }
@@ -968,13 +968,12 @@ impl<S: Scheme> Nullify<S> {
     /// Verifies the nullify vote against the provided signing scheme.
     ///
     /// This ensures that the nullify signature is valid for the given round.
-    pub fn verify<R, D: Digest>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<D: Digest>(&self, namespace: &[u8], scheme: &S) -> bool
     where
-        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<_, D>(
-            rng,
+        scheme.verify_attestation::<D>(
+            namespace,
             Subject::Nullify { round: self.round },
             &self.attestation,
         )
@@ -1066,12 +1065,13 @@ impl<S: Scheme> Nullification<S> {
     /// Verifies the nullification certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed round.
-    pub fn verify<R: CryptoRngCore, D: Digest>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R: CryptoRngCore, D: Digest>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
     where
         S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(
             rng,
+            namespace,
             Subject::Nullify { round: self.round },
             &self.certificate,
         )
@@ -1317,21 +1317,21 @@ impl<S: Scheme, D: Digest> Read for NullifyNotarize<S, D> {
 
 impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
     /// Verifies both notarize votes.
-    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify(&self, namespace: &[u8], scheme: &S) -> bool
     where
         S: scheme::Scheme<D>,
     {
-        self.first.verify(rng, scheme) && self.second.verify(rng, scheme)
+        self.first.verify(namespace, scheme) && self.second.verify(namespace, scheme)
     }
 }
 
 impl<S: Scheme, D: Digest> NullifyNotarize<S, D> {
     /// Verifies both the notarize and nullify votes.
-    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify(&self, namespace: &[u8], scheme: &S) -> bool
     where
         S: scheme::Scheme<D>,
     {
-        self.notarize.verify(rng, scheme) && self.nullify.verify::<_, D>(rng, scheme)
+        self.notarize.verify(namespace, scheme) && self.nullify.verify::<D>(namespace, scheme)
     }
 }
 
@@ -1357,17 +1357,17 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// This method **always** performs verification regardless of whether the activity has been
     /// previously verified. Callers can use [`Activity::verified`] to check if verification is
     /// necessary before calling this method.
-    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
     where
         S: scheme::Scheme<D>,
     {
         match self {
-            Self::Notarize(n) => n.verify(rng, scheme),
-            Self::Notarization(n) => n.verify(rng, scheme),
-            Self::Nullify(n) => n.verify::<_, D>(rng, scheme),
-            Self::Nullification(n) => n.verify::<_, D>(rng, scheme),
-            Self::ConflictingNotarize(c) => c.verify(rng, scheme),
-            Self::NullifyNotarize(c) => c.verify(rng, scheme),
+            Self::Notarize(n) => n.verify(namespace, scheme),
+            Self::Notarization(n) => n.verify(rng, namespace, scheme),
+            Self::Nullify(n) => n.verify::<D>(namespace, scheme),
+            Self::Nullification(n) => n.verify::<_, D>(rng, namespace, scheme),
+            Self::ConflictingNotarize(c) => c.verify(namespace, scheme),
+            Self::NullifyNotarize(c) => c.verify(namespace, scheme),
         }
     }
 }

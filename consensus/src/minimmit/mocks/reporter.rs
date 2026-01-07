@@ -31,6 +31,7 @@ type Faults<S, D> = HashMap<<S as Scheme>::PublicKey, HashMap<View, HashSet<Acti
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
 pub struct Config<S: Scheme, L: ElectorConfig<S>> {
+    pub namespace: Vec<u8>,
     pub participants: Set<S::PublicKey>,
     pub scheme: S,
     pub elector: L,
@@ -39,6 +40,7 @@ pub struct Config<S: Scheme, L: ElectorConfig<S>> {
 #[derive(Clone)]
 pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest> {
     context: E,
+    namespace: Vec<u8>,
     pub participants: Set<S::PublicKey>,
     scheme: S,
     elector: L::Elector,
@@ -69,6 +71,7 @@ where
 
         Self {
             context,
+            namespace: cfg.namespace,
             participants: cfg.participants,
             scheme: cfg.scheme,
             elector,
@@ -114,7 +117,7 @@ where
         let verified = activity.verified();
         match &activity {
             Activity::Notarize(notarize) => {
-                if !notarize.verify(&mut self.context, &self.scheme) {
+                if !notarize.verify(&self.namespace, &self.scheme) {
                     assert!(!verified);
                     *self.invalid.lock().expect("invalid lock poisoned") += 1;
                     return;
@@ -136,6 +139,7 @@ where
                 let view = notarization.view();
                 if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
+                    &self.namespace,
                     Subject::Notarize {
                         proposal: &notarization.proposal,
                     },
@@ -167,7 +171,7 @@ where
                 }
             }
             Activity::Nullify(nullify) => {
-                if !nullify.verify::<_, D>(&mut self.context, &self.scheme) {
+                if !nullify.verify::<D>(&self.namespace, &self.scheme) {
                     assert!(!verified);
                     *self.invalid.lock().expect("invalid lock poisoned") += 1;
                     return;
@@ -187,6 +191,7 @@ where
                 let view = nullification.view();
                 if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
+                    &self.namespace,
                     Subject::Nullify {
                         round: nullification.round,
                     },
@@ -207,7 +212,7 @@ where
             }
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&mut self.context, &self.scheme) {
+                if !conflicting.verify(&self.namespace, &self.scheme) {
                     assert!(!verified);
                     *self.invalid.lock().expect("invalid lock poisoned") += 1;
                     return;
@@ -227,7 +232,7 @@ where
             }
             Activity::NullifyNotarize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&mut self.context, &self.scheme) {
+                if !conflicting.verify(&self.namespace, &self.scheme) {
                     assert!(!verified);
                     *self.invalid.lock().expect("invalid lock poisoned") += 1;
                     return;

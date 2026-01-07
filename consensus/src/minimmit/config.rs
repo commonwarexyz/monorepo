@@ -24,6 +24,12 @@ pub struct Config<
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
+    /// Namespace for domain separation in signatures.
+    ///
+    /// This namespace is prepended to all signed messages to prevent cross-protocol
+    /// signature reuse attacks. Each deployment should use a unique namespace.
+    pub namespace: Vec<u8>,
+
     /// Signing scheme for the consensus engine.
     ///
     /// Consensus messages can be signed with a cryptosystem that differs from the static

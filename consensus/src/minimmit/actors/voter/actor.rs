@@ -112,6 +112,8 @@ pub struct Config<
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
+    /// Namespace for domain separation in signatures.
+    pub namespace: Vec<u8>,
     /// Signing scheme.
     pub scheme: S,
     /// Leader elector configuration.
@@ -166,6 +168,7 @@ pub struct Actor<
     relay: R,
     reporter: F,
 
+    namespace: Vec<u8>,
     epoch: Epoch,
     activity_timeout: ViewDelta,
     m_quorum: usize,
@@ -228,6 +231,7 @@ impl<
         let state = State::new(
             context.with_label("state"),
             StateConfig {
+                namespace: cfg.namespace.clone(),
                 scheme: cfg.scheme,
                 elector: cfg.elector,
                 epoch,
@@ -246,6 +250,7 @@ impl<
                 relay: cfg.relay,
                 reporter: cfg.reporter,
 
+                namespace: cfg.namespace,
                 epoch,
                 activity_timeout,
                 m_quorum: cfg.m_quorum,
@@ -471,7 +476,7 @@ impl<
         match vote {
             Vote::Notarize(notarize) => {
                 // Verify signature
-                if !notarize.verify(&mut self.context, self.state.scheme()) {
+                if !notarize.verify(&self.namespace, self.state.scheme()) {
                     warn!(?sender, %view, "blocking peer for invalid notarize signature");
                     self.blocker.block(sender).await;
                     return;
@@ -500,7 +505,7 @@ impl<
             }
             Vote::Nullify(nullify) => {
                 // Verify signature
-                if !nullify.verify::<_, D>(&mut self.context, self.state.scheme()) {
+                if !nullify.verify::<D>(&self.namespace, self.state.scheme()) {
                     warn!(?sender, %view, "blocking peer for invalid nullify signature");
                     self.blocker.block(sender).await;
                     return;
@@ -537,7 +542,7 @@ impl<
         // Verify the certificate signature
         match &certificate {
             Certificate::Notarization(notarization) => {
-                if !notarization.verify(&mut self.context, self.state.scheme()) {
+                if !notarization.verify(&mut self.context, &self.namespace, self.state.scheme()) {
                     warn!(?sender, %view, "blocking peer for invalid notarization");
                     self.blocker.block(sender).await;
                     return;
@@ -550,7 +555,7 @@ impl<
                     .await;
             }
             Certificate::Nullification(nullification) => {
-                if !nullification.verify::<_, D>(&mut self.context, self.state.scheme()) {
+                if !nullification.verify::<_, D>(&mut self.context, &self.namespace, self.state.scheme()) {
                     warn!(?sender, %view, "blocking peer for invalid nullification");
                     self.blocker.block(sender).await;
                     return;
@@ -947,8 +952,8 @@ impl<
                 _ = &mut shutdown => {
                     debug!("context shutdown, stopping voter");
 
-                    // Sync and drop journal
-                    self.journal.take().unwrap().sync_all().await.expect("unable to sync journal");
+                    // Sync and close journal
+                    self.journal.take().unwrap().close().await.expect("unable to close journal");
 
                     // Only drop shutdown once journal is synced
                     drop(shutdown);
