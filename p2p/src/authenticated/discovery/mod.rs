@@ -1721,7 +1721,6 @@ mod tests {
 
         // Restart each non-first peer with a new port, multiple rounds
         let mut restart_counter = 0u16;
-
         for round in 0..3 {
             for restart_peer_idx in 1..n {
                 // Allocate a new unique port
@@ -1934,9 +1933,11 @@ mod tests {
             }
         }
 
-        // Shutdown all non-bootstrapper peers simultaneously
+        // Shutdown all non-bootstrapper peers simultaneously.
+        //
+        // We keep the bootstrapper (peer 0) alive to exercise the case
+        // where multiple peers churn at once.
         let restart_peers: Vec<usize> = (1..n).collect();
-
         for &idx in &restart_peers {
             if let Some(handle) = handles[idx].take() {
                 handle.abort();

@@ -1555,7 +1555,6 @@ mod tests {
 
         // Restart each non-first peer with a new port, multiple rounds
         let mut restart_counter = 0u16;
-
         for round in 0..3 {
             for restart_peer_idx in 1..n {
                 // Allocate a new unique port
@@ -1795,10 +1794,8 @@ mod tests {
             }
         }
 
-        // Shutdown all peers except peer 0 simultaneously
-        let restart_peers: Vec<usize> = (1..n).collect();
-
-        for &idx in &restart_peers {
+        // Shutdown all peers simultaneously
+        for idx in 0..n {
             if let Some(handle) = handles[idx].take() {
                 handle.abort();
             }
@@ -1823,15 +1820,8 @@ mod tests {
             })
             .collect();
 
-        // Update oracle on peer 0 (the only running peer)
-        oracles[0]
-            .as_mut()
-            .unwrap()
-            .update(1, updated_peer_set.clone().try_into().unwrap())
-            .await;
-
-        // Restart all shutdown peers with new ports
-        for &idx in &restart_peers {
+        // Restart all peers with new ports
+        for idx in 0..n {
             let peer_context = context.with_label(&format!("peer_{idx}_restarted"));
             let config = Config::test(
                 peers[idx].clone(),
