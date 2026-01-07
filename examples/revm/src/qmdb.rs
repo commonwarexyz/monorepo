@@ -3,7 +3,7 @@
 use alloy_evm::revm::{
     database::CacheDB,
     database_interface::{async_db::DatabaseAsyncRef, DBErrorMarker, DatabaseRef},
-    primitives::{Address, Bytes, B256, U256, KECCAK_EMPTY},
+    primitives::{Address, Bytes, B256, KECCAK_EMPTY, U256},
     state::{Account, AccountInfo, Bytecode, EvmState},
 };
 use bytes::{Buf, BufMut};
@@ -14,7 +14,7 @@ use commonware_storage::{
     qmdb::store::db::{Config as StoreConfig, Db},
     translator::EightCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZU64, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use futures::lock::Mutex;
 use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
@@ -48,7 +48,7 @@ pub(crate) struct QmdbConfig {
 }
 
 impl QmdbConfig {
-    pub(crate) fn new(partition_prefix: String, buffer_pool: PoolRef) -> Self {
+    pub(crate) const fn new(partition_prefix: String, buffer_pool: PoolRef) -> Self {
         Self {
             partition_prefix,
             buffer_pool,
@@ -92,8 +92,8 @@ impl QmdbChanges {
 }
 
 impl AccountUpdate {
-    fn merge(&mut self, update: AccountUpdate) {
-        let AccountUpdate {
+    fn merge(&mut self, update: Self) {
+        let Self {
             created,
             selfdestructed,
             nonce,
@@ -139,7 +139,7 @@ struct AccountRecord {
 }
 
 impl AccountRecord {
-    fn empty(storage_generation: u64) -> Self {
+    const fn empty(storage_generation: u64) -> Self {
         Self {
             exists: false,
             nonce: 0,
@@ -149,7 +149,7 @@ impl AccountRecord {
         }
     }
 
-    fn as_info(&self) -> Option<AccountInfo> {
+    const fn as_info(&self) -> Option<AccountInfo> {
         if !self.exists {
             return None;
         }
@@ -377,10 +377,7 @@ impl QmdbState {
         Ok(())
     }
 
-    async fn bootstrap_genesis(
-        &self,
-        genesis_alloc: Vec<(Address, U256)>,
-    ) -> Result<(), Error> {
+    async fn bootstrap_genesis(&self, genesis_alloc: Vec<(Address, U256)>) -> Result<(), Error> {
         if genesis_alloc.is_empty() {
             return Ok(());
         }
@@ -478,7 +475,7 @@ impl DatabaseAsyncRef for QmdbAsyncDb {
         &self,
         _number: u64,
     ) -> impl std::future::Future<Output = Result<B256, Self::Error>> + Send {
-        async move { Ok(B256::ZERO) }
+        std::future::ready(Ok(B256::ZERO))
     }
 }
 
@@ -549,11 +546,11 @@ fn account_update_from_evm_account(account: &Account) -> AccountUpdate {
     }
 }
 
-fn account_key(address: Address) -> AccountKey {
+const fn account_key(address: Address) -> AccountKey {
     AccountKey::new(address.into_array())
 }
 
-fn code_key(hash: B256) -> CodeKey {
+const fn code_key(hash: B256) -> CodeKey {
     CodeKey::new(hash.0)
 }
 
@@ -591,7 +588,7 @@ fn read_b256(buf: &mut impl Buf) -> Result<B256, CodecError> {
     Ok(B256::from(out))
 }
 
-fn store_config<C>(
+const fn store_config<C>(
     partition: String,
     buffer_pool: PoolRef,
     log_codec_config: C,

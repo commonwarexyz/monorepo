@@ -10,8 +10,7 @@ use commonware_consensus::simplex;
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 use commonware_runtime::{tokio, Runner as _};
 
-type ThresholdScheme =
-    simplex::scheme::bls12381_threshold::Scheme<ed25519::PublicKey, MinSig>;
+type ThresholdScheme = simplex::scheme::bls12381_threshold::Scheme<ed25519::PublicKey, MinSig>;
 
 mod checks;
 mod demo;

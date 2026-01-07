@@ -45,7 +45,8 @@ impl<S> RevmApplication<S> {
 impl<E, S> Application<E> for RevmApplication<S>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme<ConsensusDigest> + commonware_cryptography::certificate::Scheme<PublicKey = PublicKey>,
+    S: Scheme<ConsensusDigest>
+        + commonware_cryptography::certificate::Scheme<PublicKey = PublicKey>,
 {
     type SigningScheme = S;
     type Context = Context<ConsensusDigest, PublicKey>;
@@ -109,7 +110,8 @@ where
 impl<E, S> VerifyingApplication<E> for RevmApplication<S>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme<ConsensusDigest> + commonware_cryptography::certificate::Scheme<PublicKey = PublicKey>,
+    S: Scheme<ConsensusDigest>
+        + commonware_cryptography::certificate::Scheme<PublicKey = PublicKey>,
 {
     async fn verify(
         &mut self,

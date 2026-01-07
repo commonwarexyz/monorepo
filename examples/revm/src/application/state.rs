@@ -14,7 +14,10 @@ use crate::{
     types::{Block, StateRoot, Tx, TxId},
     ConsensusDigest,
 };
-use alloy_evm::revm::{primitives::{Address, B256, U256}, Database as _};
+use alloy_evm::revm::{
+    primitives::{Address, B256, U256},
+    Database as _,
+};
 use commonware_cryptography::Committable as _;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics};
 use futures::lock::Mutex;
@@ -175,11 +178,7 @@ impl Shared {
                 .snapshots
                 .get(&digest)
                 .ok_or_else(|| anyhow::anyhow!("missing snapshot for digest"))?;
-            (
-                inner.qmdb.clone(),
-                snapshot.qmdb_changes.clone(),
-                already,
-            )
+            (inner.qmdb.clone(), snapshot.qmdb_changes.clone(), already)
         };
 
         if already_persisted {
