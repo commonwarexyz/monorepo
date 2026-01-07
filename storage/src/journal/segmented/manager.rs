@@ -116,6 +116,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     ///
     /// Scans the partition for existing blobs and opens them.
     pub async fn init(context: E, cfg: Config<F>) -> Result<Self, Error> {
+        // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
         let stored_blobs = match context.scan(&cfg.partition).await {
             Ok(blobs) => blobs,
@@ -135,6 +136,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             blobs.insert(section, buffer);
         }
 
+        // Initialize metrics
         let tracked = Gauge::default();
         let synced = Counter::default();
         let pruned = Counter::default();
@@ -206,16 +208,20 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Prune all sections less than `min`. Returns true if any were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
+        // Prune any blobs that are smaller than the minimum
         let mut pruned = false;
         while let Some((&section, _)) = self.blobs.first_key_value() {
+            // Stop pruning if we reach the minimum
             if section >= min {
                 break;
             }
 
+            // Remove blob from map
             let blob = self.blobs.remove(&section).unwrap();
             let size = blob.size().await;
             drop(blob);
 
+            // Remove blob from storage
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
@@ -270,6 +276,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
         match self.context.remove(&self.partition, None).await {
             Ok(()) => {}
+            // Partition already removed or never existed.
             Err(RError::PartitionMissing(_)) => {}
             Err(err) => return Err(Error::Runtime(err)),
         }
@@ -280,11 +287,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 
-        // Remove all sections after this one
+        // Remove any sections beyond the given section
         let sections_to_remove: Vec<u64> =
             self.blobs.range((section + 1)..).map(|(&s, _)| s).collect();
 
         for s in sections_to_remove {
+            // Remove the underlying blob from storage
             let blob = self.blobs.remove(&s).unwrap();
             drop(blob);
             self.context
@@ -294,7 +302,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             debug!(section = s, "removed blob during rewind");
         }
 
-        // Resize the target section if it exists
+        // If the section exists, truncate it to the given size
         if let Some(blob) = self.blobs.get(&section) {
             let current_size = blob.size().await;
             if size < current_size {
@@ -315,7 +323,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 
+        // Get the blob at the given section
         if let Some(blob) = self.blobs.get(&section) {
+            // Truncate the blob to the given size
             let current = blob.size().await;
             if size < current {
                 blob.resize(size).await?;
