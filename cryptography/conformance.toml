@@ -4,7 +4,7 @@ hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
 
 ["commonware_cryptography::bloomfilter::tests::conformance::CodecConformance<BloomFilter>"]
 n_cases = 65536
-hash = "a75d6312366816126114abdc9d7fbd246891cab210eeae6a02781625aa1ad6a4"
+hash = "317e8cff35afe47fc6b795dbf27ab30b6a675784b8e92ee270eb8cf738da96a5"
 
 ["commonware_cryptography::bls12381::certificate::multisig::tests::conformance::CodecConformance<Certificate<MinSig>>"]
 n_cases = 65536
