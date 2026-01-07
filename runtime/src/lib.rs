@@ -546,7 +546,7 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// The readable/writeable storage buffer that can be opened by this Storage.
     type Blob: Blob;
 
-    /// [Storage::open_versioned] with the default blob version (0) as the only value
+    /// [`Storage::open_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only value
     /// in the versions range. The blob version is omitted from the return value.
     fn open(
         &self,
