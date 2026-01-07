@@ -62,7 +62,7 @@
 //!
 //! ```text
 //! // Maps index -> position in index journal
-//! indices: BTreeMap<u64, u32>
+//! indices: BTreeMap<u64, u64>
 //! ```
 //!
 //! _If the [Translator] provided by the caller does not uniformly distribute keys across the key
