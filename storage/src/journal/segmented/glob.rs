@@ -34,9 +34,6 @@ use commonware_runtime::{Blob as _, Error as RError, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
-/// Size of CRC32 checksum in bytes.
-const CRC_SIZE: usize = u32::SIZE;
-
 /// Configuration for blob storage.
 #[derive(Clone)]
 pub struct Config<C> {
@@ -99,12 +96,11 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
             let mut compressed =
                 compress(&encoded, level as i32).map_err(|_| Error::CompressionFailed)?;
             let checksum = crc32fast::hash(&compressed);
-            compressed.reserve(CRC_SIZE);
             compressed.put_u32(checksum);
             compressed
         } else {
             // Uncompressed: pre-allocate exact size to avoid copying
-            let entry_size = value.encode_size() + CRC_SIZE;
+            let entry_size = value.encode_size() + u32::SIZE;
             let mut buf = Vec::with_capacity(entry_size);
             value.write(&mut buf);
             let checksum = crc32fast::hash(&buf);
@@ -138,11 +134,11 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
         let buf = buf.as_ref();
 
         // Entry format: [compressed_data] [crc32 (4 bytes)]
-        if buf.len() < CRC_SIZE {
+        if buf.len() < u32::SIZE {
             return Err(Error::Runtime(RError::BlobInsufficientLength));
         }
 
-        let data_len = buf.len() - CRC_SIZE;
+        let data_len = buf.len() - u32::SIZE;
         let compressed_data = &buf[..data_len];
         let stored_checksum =
             u32::from_be_bytes(buf[data_len..].try_into().expect("checksum is 4 bytes"));
