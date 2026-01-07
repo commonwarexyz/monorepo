@@ -44,11 +44,11 @@ pub struct SendCipher {
 impl SendCipher {
     /// Creates a new sending cipher with a random key.
     pub fn new(mut rng: impl CryptoRngCore) -> Self {
-        let mut key = [0u8; 32];
-        rng.fill_bytes(&mut key[..]);
         Self {
             nonce: CounterNonce::new(),
-            inner: Secret::new(ChaCha20Poly1305::new(&key.into())),
+            inner: Secret::new(ChaCha20Poly1305::new(&ChaCha20Poly1305::generate_key(
+                &mut rng,
+            ))),
         }
     }
 
@@ -69,11 +69,11 @@ pub struct RecvCipher {
 impl RecvCipher {
     /// Creates a new receiving cipher with a random key.
     pub fn new(mut rng: impl CryptoRngCore) -> Self {
-        let mut key = [0u8; 32];
-        rng.fill_bytes(&mut key[..]);
         Self {
             nonce: CounterNonce::new(),
-            inner: Secret::new(ChaCha20Poly1305::new(&key.into())),
+            inner: Secret::new(ChaCha20Poly1305::new(&ChaCha20Poly1305::generate_key(
+                &mut rng,
+            ))),
         }
     }
 
