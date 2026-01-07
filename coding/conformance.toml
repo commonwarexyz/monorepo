@@ -16,8 +16,8 @@ hash = "1a412c5c279f981857081765537b85474184048d1b17053394f94fc42ac1dbf4"
 
 ["commonware_coding::zoda::tests::conformance::CodecConformance<ReShard<Sha256>>"]
 n_cases = 65536
-hash = "ebbbe08eb9beb1c5215a5d67ad9deddaef7c54920e53a751b56a8261e60e0e52"
+hash = "0571442797c611b3822c8a9c54138de9f54fc5b9daaf01796f611a5c74466710"
 
 ["commonware_coding::zoda::tests::conformance::CodecConformance<Shard<Sha256>>"]
 n_cases = 65536
-hash = "929ce4f95f9d5784f995c52b7e5cde8b62663ab068848925314dc9f80eb27d34"
+hash = "fbf783e8550fe15cd7000f8185e1ca3bc9641ba0baf156ba6365d3b224e2222d"
