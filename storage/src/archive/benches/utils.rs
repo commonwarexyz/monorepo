@@ -20,11 +20,11 @@ const ITEMS_PER_SECTION: u64 = 1_024;
 /// Number of bytes to buffer when replaying a [commonware_runtime::Blob].
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
-/// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: NonZeroUsize = NZUsize!(16_384);
+/// Page size for the index buffer pool.
+const PAGE_SIZE: NonZeroUsize = NZUsize!(4_096);
 
-/// The number of pages to cache in the buffer pool.
-const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
+/// The number of pages to cache in the buffer pool (8,192 × 4KB = 32MB).
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8_192);
 
 /// Key type (fixed-length) and value type (variable-length for large values).
 pub type Key = FixedBytes<64>;
