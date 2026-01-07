@@ -10,7 +10,8 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics};
 use commonware_storage::{
-    qmdb::store::{Batchable as _, Store},
+    kv::{Batchable as _, Updatable as _},
+    qmdb::store::db::{Config as StoreConfig, Db},
     translator::EightCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZU64, NZUsize};
@@ -24,9 +25,9 @@ type Context = tokio::Context;
 type AccountKey = FixedBytes<20>;
 type StorageKey = FixedBytes<60>;
 type CodeKey = FixedBytes<32>;
-type AccountStore = Store<Context, AccountKey, AccountRecord, EightCap>;
-type StorageStore = Store<Context, StorageKey, StorageRecord, EightCap>;
-type CodeStore = Store<Context, CodeKey, Vec<u8>, EightCap>;
+type AccountStore = Db<Context, AccountKey, AccountRecord, EightCap>;
+type StorageStore = Db<Context, StorageKey, StorageRecord, EightCap>;
+type CodeStore = Db<Context, CodeKey, Vec<u8>, EightCap>;
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -234,7 +235,7 @@ impl QmdbState {
         config: QmdbConfig,
         genesis_alloc: Vec<(Address, U256)>,
     ) -> Result<Self, Error> {
-        let accounts = Store::init(
+        let accounts = Db::init(
             context.with_label("accounts"),
             store_config(
                 format!("{}-accounts", config.partition_prefix),
@@ -243,7 +244,7 @@ impl QmdbState {
             ),
         )
         .await?;
-        let storage = Store::init(
+        let storage = Db::init(
             context.with_label("storage"),
             store_config(
                 format!("{}-storage", config.partition_prefix),
@@ -252,7 +253,7 @@ impl QmdbState {
             ),
         )
         .await?;
-        let code = Store::init(
+        let code = Db::init(
             context.with_label("code"),
             store_config(
                 format!("{}-code", config.partition_prefix),
@@ -264,9 +265,9 @@ impl QmdbState {
 
         let state = Self {
             inner: Arc::new(Mutex::new(QmdbInner {
-                accounts,
-                storage,
-                code,
+                accounts: Some(accounts),
+                storage: Some(storage),
+                code: Some(code),
             })),
         };
         state.bootstrap_genesis(genesis_alloc).await?;
@@ -291,14 +292,26 @@ impl QmdbState {
         }
 
         let mut inner = self.inner.lock().await;
+        let mut accounts = inner
+            .accounts
+            .take()
+            .expect("accounts initialized")
+            .into_dirty();
+        let mut storage = inner
+            .storage
+            .take()
+            .expect("storage initialized")
+            .into_dirty();
+        let mut code = inner.code.take().expect("code initialized").into_dirty();
+
         let (accounts_ops, storage_ops, code_ops) = {
-            let mut accounts_batch = inner.accounts.start_batch();
-            let mut storage_batch = inner.storage.start_batch();
-            let mut code_batch = inner.code.start_batch();
+            let mut accounts_batch = accounts.start_batch();
+            let mut storage_batch = storage.start_batch();
+            let mut code_batch = code.start_batch();
 
             for (address, update) in changes.accounts.iter() {
                 let account_key = account_key(*address);
-                let existing = inner.accounts.get(&account_key).await?;
+                let existing = accounts.get(&account_key).await?;
                 let base_generation = existing
                     .as_ref()
                     .map(|record| record.storage_generation)
@@ -352,18 +365,15 @@ impl QmdbState {
             )
         };
 
-        inner
-            .accounts
-            .write_batch(accounts_ops.into_iter())
-            .await?;
-        inner
-            .storage
-            .write_batch(storage_ops.into_iter())
-            .await?;
-        inner.code.write_batch(code_ops.into_iter()).await?;
-        inner.accounts.commit(None).await?;
-        inner.storage.commit(None).await?;
-        inner.code.commit(None).await?;
+        accounts.write_batch(accounts_ops.into_iter()).await?;
+        storage.write_batch(storage_ops.into_iter()).await?;
+        code.write_batch(code_ops.into_iter()).await?;
+        let (accounts, _) = accounts.commit(None).await?;
+        let (storage, _) = storage.commit(None).await?;
+        let (code, _) = code.commit(None).await?;
+        inner.accounts = Some(accounts);
+        inner.storage = Some(storage);
+        inner.code = Some(code);
         Ok(())
     }
 
@@ -376,8 +386,13 @@ impl QmdbState {
         }
 
         let mut inner = self.inner.lock().await;
+        let mut accounts = inner
+            .accounts
+            .take()
+            .expect("accounts initialized")
+            .into_dirty();
         let batch_ops = {
-            let mut batch = inner.accounts.start_batch();
+            let mut batch = accounts.start_batch();
             for (address, balance) in genesis_alloc {
                 let record = AccountRecord {
                     exists: true,
@@ -390,8 +405,9 @@ impl QmdbState {
             }
             batch.into_iter().collect::<Vec<_>>()
         };
-        inner.accounts.write_batch(batch_ops.into_iter()).await?;
-        inner.accounts.commit(None).await?;
+        accounts.write_batch(batch_ops.into_iter()).await?;
+        let (accounts, _) = accounts.commit(None).await?;
+        inner.accounts = Some(accounts);
         Ok(())
     }
 }
@@ -411,7 +427,8 @@ impl DatabaseAsyncRef for QmdbAsyncDb {
         let inner = self.inner.clone();
         async move {
             let inner = inner.lock().await;
-            let record = inner.accounts.get(&account_key(address)).await?;
+            let accounts = inner.accounts.as_ref().expect("accounts initialized");
+            let record = accounts.get(&account_key(address)).await?;
             Ok(record.and_then(|record| record.as_info()))
         }
     }
@@ -427,7 +444,8 @@ impl DatabaseAsyncRef for QmdbAsyncDb {
             }
 
             let inner = inner.lock().await;
-            let code = inner.code.get(&code_key(code_hash)).await?;
+            let code_db = inner.code.as_ref().expect("code initialized");
+            let code = code_db.get(&code_key(code_hash)).await?;
             let code = code.ok_or(Error::MissingCode(code_hash))?;
             Ok(Bytecode::new_raw(Bytes::copy_from_slice(&code)))
         }
@@ -441,7 +459,8 @@ impl DatabaseAsyncRef for QmdbAsyncDb {
         let inner = self.inner.clone();
         async move {
             let inner = inner.lock().await;
-            let record = inner.accounts.get(&account_key(address)).await?;
+            let accounts = inner.accounts.as_ref().expect("accounts initialized");
+            let record = accounts.get(&account_key(address)).await?;
             let Some(record) = record else {
                 return Ok(U256::ZERO);
             };
@@ -449,7 +468,8 @@ impl DatabaseAsyncRef for QmdbAsyncDb {
                 return Ok(U256::ZERO);
             }
             let key = storage_key(address, record.storage_generation, index);
-            let value = inner.storage.get(&key).await?;
+            let storage = inner.storage.as_ref().expect("storage initialized");
+            let value = storage.get(&key).await?;
             Ok(value.map(|entry| entry.0).unwrap_or_default())
         }
     }
@@ -496,9 +516,9 @@ impl DatabaseRef for QmdbRefDb {
 pub(crate) type RevmDb = CacheDB<QmdbRefDb>;
 
 struct QmdbInner {
-    accounts: AccountStore,
-    storage: StorageStore,
-    code: CodeStore,
+    accounts: Option<AccountStore>,
+    storage: Option<StorageStore>,
+    code: Option<CodeStore>,
 }
 
 fn account_update_from_evm_account(account: &Account) -> AccountUpdate {
@@ -575,8 +595,8 @@ fn store_config<C>(
     partition: String,
     buffer_pool: PoolRef,
     log_codec_config: C,
-) -> commonware_storage::qmdb::store::Config<EightCap, C> {
-    commonware_storage::qmdb::store::Config {
+) -> StoreConfig<EightCap, C> {
+    StoreConfig {
         log_partition: partition,
         log_write_buffer: NZUsize!(1024 * 1024),
         log_compression: None,
