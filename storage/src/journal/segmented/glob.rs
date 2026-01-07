@@ -396,7 +396,9 @@ mod tests {
             // Rewind to after the third value
             let (third_offset, third_size) = locations[2];
             let rewind_size = third_offset + u64::from(third_size);
-            glob.rewind_section(1, rewind_size).await.expect("Failed to rewind");
+            glob.rewind_section(1, rewind_size)
+                .await
+                .expect("Failed to rewind");
 
             // First three values should still be readable
             for (i, (offset, size)) in locations.iter().take(3).enumerate() {

@@ -1654,7 +1654,10 @@ mod tests {
             }
 
             // Rewind to section 5 (should remove sections 6-10)
-            journal.rewind(5, journal.size(5).await.unwrap()).await.unwrap();
+            journal
+                .rewind(5, journal.size(5).await.unwrap())
+                .await
+                .unwrap();
 
             // Verify sections 1-5 still exist with correct data
             for section in 1u64..=5 {
@@ -1802,7 +1805,9 @@ mod tests {
             drop(journal);
 
             // Re-init and verify only sections 1-2 exist
-            let journal = Journal::<_, i32>::init(context.clone(), cfg.clone()).await.unwrap();
+            let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
 
             // Verify sections 1-2 have data
             for section in 1u64..=2 {
