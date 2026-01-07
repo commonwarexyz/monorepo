@@ -42,7 +42,7 @@
 
 use alloc::collections::{btree_map::BTreeMap, btree_set::BTreeSet};
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
@@ -677,6 +677,9 @@ impl<H: Hasher> Read for MultiProof<H> {
         // The maximum siblings needed is bounded by the total non-leaf nodes, which is < n.
         // We use 2*n as a safe upper bound to allow for any valid proof structure.
         let max_siblings = 2usize.saturating_mul(leaf_count as usize);
+        // Cap by remaining bytes to avoid allocating far beyond the encoded input size.
+        let max_siblings_by_bytes = reader.remaining() / H::Digest::SIZE;
+        let max_siblings = max_siblings.min(max_siblings_by_bytes);
         let siblings = Vec::<H::Digest>::read_range(reader, ..=max_siblings)?;
         Ok(Self {
             leaf_count,
@@ -2549,6 +2552,16 @@ mod tests {
 
         // Should fail to deserialize
         assert!(MultiProof::<Sha256>::decode(&mut serialized).is_err());
+    }
+
+    #[test]
+    fn test_multi_proof_decode_length_exceeds_buffer() {
+        let mut serialized = Vec::new();
+        serialized.extend_from_slice(&u32::MAX.encode());
+        serialized.extend_from_slice(&1usize.encode());
+
+        let err = MultiProof::<Sha256>::decode(serialized.as_slice()).unwrap_err();
+        assert!(matches!(err, commonware_codec::Error::InvalidLength(_)));
     }
 
     #[test]
