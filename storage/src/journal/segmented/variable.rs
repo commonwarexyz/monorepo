@@ -1707,7 +1707,7 @@ mod tests {
             // Append 5 items and record sizes after each
             let mut sizes = Vec::new();
             for i in 0..5 {
-                journal.append(1, i as i32).await.unwrap();
+                journal.append(1, i).await.unwrap();
                 journal.sync(1).await.unwrap();
                 sizes.push(journal.size(1).await.unwrap());
             }
