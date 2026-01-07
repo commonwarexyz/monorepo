@@ -678,8 +678,10 @@ impl<H: Hasher> Proof<H> {
         }
 
         // Get required sibling positions (validates positions and checks for duplicates)
-        let sibling_positions =
-            siblings_required_for_multi_proof(self.leaf_count, elements.iter().map(|(_, pos)| *pos))?;
+        let sibling_positions = siblings_required_for_multi_proof(
+            self.leaf_count,
+            elements.iter().map(|(_, pos)| *pos),
+        )?;
 
         // Verify we have the exact number of siblings needed
         if sibling_positions.len() != self.siblings.len() {
@@ -708,13 +710,12 @@ impl<H: Hasher> Proof<H> {
         // This ensures O(elements * levels) complexity instead of O(leaf_count * levels),
         // preventing DoS attacks with maliciously large leaf_count values.
         let mut level_size = self.leaf_count as usize;
-        for level in 0..levels_count - 1 {
+        for siblings in siblings_by_level.iter().take(levels_count - 1) {
             // Add siblings for this level
-            current.extend(siblings_by_level[level].iter().map(|(&k, &v)| (k, v)));
+            current.extend(siblings.iter().map(|(&k, &v)| (k, v)));
 
             // Compute unique parent indices from current level nodes
-            let candidate_parents: BTreeSet<usize> =
-                current.keys().map(|idx| idx / 2).collect();
+            let candidate_parents: BTreeSet<usize> = current.keys().map(|idx| idx / 2).collect();
 
             // Compute parent digests
             let mut next: BTreeMap<usize, H::Digest> = BTreeMap::new();
