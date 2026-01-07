@@ -183,9 +183,16 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
         self.manager.size(section).await
     }
 
-    /// Rewind a section to a specific size (for crash recovery).
+    /// Rewind to a specific section and size.
     ///
-    /// Truncates the section to the given size and discards any buffered data.
+    /// Truncates the section to the given size and removes all sections after it.
+    pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.manager.rewind(section, size).await
+    }
+
+    /// Rewind only the given section to a specific size.
+    ///
+    /// Unlike `rewind`, this does not affect other sections.
     pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.manager.rewind_section(section, size).await
     }

@@ -311,10 +311,29 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
         Ok(index_pruned || value_pruned)
     }
 
-    /// Rewind both journals to a specific index size for a section.
+    /// Rewind both journals to a specific section and index size.
     ///
-    /// The value size is derived from the last entry after rewinding the index.
+    /// This rewinds the section to the given index size and removes all sections
+    /// after the given section. The value size is derived from the last entry.
     pub async fn rewind(&mut self, section: u64, index_size: u64) -> Result<(), Error> {
+        // Rewind index first (this also removes sections after `section`)
+        self.index.rewind(section, index_size).await?;
+
+        // Derive value size from last entry
+        let value_size = self.index.last(section).await?.map_or(0, |entry| {
+            let (offset, size) = entry.value_location();
+            offset + u64::from(size)
+        });
+
+        // Rewind values (this also removes sections after `section`)
+        self.values.rewind(section, value_size).await
+    }
+
+    /// Rewind only the given section to a specific index size.
+    ///
+    /// Unlike `rewind`, this does not affect other sections.
+    /// The value size is derived from the last entry after rewinding the index.
+    pub async fn rewind_section(&mut self, section: u64, index_size: u64) -> Result<(), Error> {
         // Rewind index first
         self.index.rewind_section(section, index_size).await?;
 
