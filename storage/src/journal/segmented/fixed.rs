@@ -268,6 +268,11 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         self.manager.oldest_section()
     }
 
+    /// Returns the newest section number, if any blobs exist.
+    pub fn newest_section(&self) -> Option<u64> {
+        self.manager.newest_section()
+    }
+
     /// Returns an iterator over all section numbers.
     pub fn sections(&self) -> impl Iterator<Item = u64> + '_ {
         self.manager.sections_from(0).map(|(section, _)| *section)

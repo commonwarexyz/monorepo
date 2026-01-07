@@ -338,6 +338,11 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
         self.index.oldest_section()
     }
 
+    /// Returns the newest section number, if any exist.
+    pub fn newest_section(&self) -> Option<u64> {
+        self.index.newest_section()
+    }
+
     /// Destroy all underlying storage.
     pub async fn destroy(self) -> Result<(), Error> {
         try_join(self.index.destroy(), self.values.destroy())

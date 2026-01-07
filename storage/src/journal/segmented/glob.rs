@@ -200,6 +200,11 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
         self.manager.oldest_section()
     }
 
+    /// Returns the number of the newest section.
+    pub fn newest_section(&self) -> Option<u64> {
+        self.manager.newest_section()
+    }
+
     /// Close all blobs (syncs first).
     pub async fn close(&mut self) -> Result<(), Error> {
         self.sync_all().await
