@@ -47,8 +47,9 @@ use crate::{
     simplex::types::Context,
     types::{Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
-    VerifyingApplication, Viewable,
+    VerifyingApplication,
 };
+use commonware_codec::RangeCfg;
 use commonware_cryptography::{certificate::Scheme, Committable};
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{self, Metadata};
@@ -61,13 +62,13 @@ use futures::{
 };
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
-use std::{sync::Arc, time::Instant};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tracing::{debug, warn};
 
 type VerificationContexts<E, B, S> = Metadata<
     E,
     <B as Committable>::Commitment,
-    Context<<B as Committable>::Commitment, <S as Scheme>::PublicKey>,
+    BTreeMap<Round, Context<<B as Committable>::Commitment, <S as Scheme>::PublicKey>>,
 >;
 
 /// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
@@ -145,7 +146,7 @@ where
             context.with_label("verification_contexts_metadata"),
             metadata::Config {
                 partition: format!("{partition_prefix}_verification_contexts"),
-                codec_config: (),
+                codec_config: (RangeCfg::from(..), ((), ())),
             },
         )
         .await
@@ -184,6 +185,7 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
+        let verification_contexts = self.verification_contexts.clone();
 
         let (mut tx, rx) = oneshot::channel();
         self.context
@@ -193,6 +195,24 @@ where
                 // us to cancel work early.
                 let tx_closed = tx.closed();
                 pin_mut!(tx_closed);
+
+                // Helper to clean up verification context for this round
+                let cleanup = || async {
+                    let mut contexts_guard = verification_contexts.lock().await;
+                    if let Some(map) = contexts_guard.get_mut(&digest) {
+                        map.remove(&context.round);
+
+                        // Retain context maps for digests that relate to future rounds only.
+                        contexts_guard.retain(|_, map| {
+                            map.iter().any(|(m_round, _)| m_round > &context.round)
+                        });
+
+                        contexts_guard
+                            .sync()
+                            .await
+                            .expect("must persist verification context cleanup");
+                    }
+                };
 
                 let (parent_view, parent_commitment) = context.parent;
                 let parent_request = fetch_parent(
@@ -230,12 +250,12 @@ where
                     let last_in_epoch = epocher
                         .last(context.epoch())
                         .expect("current epoch should exist");
-                    if block.height() == last_in_epoch {
+                    let is_valid = block.height() == last_in_epoch;
+                    if is_valid {
                         marshal.verified(context.round, block).await;
-                        tx.send_lossy(true);
-                    } else {
-                        tx.send_lossy(false);
                     }
+                    cleanup().await;
+                    let _ = tx.send(is_valid);
                     return;
                 }
 
@@ -246,10 +266,12 @@ where
                         height = %block.height(),
                         "block height not covered by epoch strategy"
                     );
+                    cleanup().await;
                     tx.send_lossy(false);
                     return;
                 };
                 if block_bounds.epoch() != context.epoch() {
+                    cleanup().await;
                     tx.send_lossy(false);
                     return;
                 }
@@ -261,6 +283,7 @@ where
                         expected_parent = %parent.commitment(),
                         "block parent commitment does not match expected parent"
                     );
+                    cleanup().await;
                     tx.send_lossy(false);
                     return;
                 }
@@ -272,6 +295,7 @@ where
                         block_height = %block.height(),
                         "block height is not contiguous with parent height"
                     );
+                    cleanup().await;
                     tx.send_lossy(false);
                     return;
                 }
@@ -298,6 +322,7 @@ where
                 if application_valid {
                     marshal.verified(context.round, block).await;
                 }
+                cleanup().await;
                 tx.send_lossy(application_valid);
             });
 
@@ -317,7 +342,9 @@ where
     ) {
         let mut contexts_guard = lock.lock().await;
         contexts_guard
-            .put_sync(digest, context)
+            .upsert_sync(digest, |map| {
+                map.insert(context.round, context);
+            })
             .await
             .expect("must persist verification context");
     }
@@ -534,12 +561,17 @@ where
     ES: Epocher,
 {
     async fn certify(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        // Note: We intentionally don't remove the context from metadata here. Verification contexts
-        // are kept on disk until the block is finalized (via `report`) to support crash recovery.
-        // If we crash before finalization, consensus will replay and re-attempt certification; the
-        // context must still be available on disk to succeed.
-        let contexts_guard = self.verification_contexts.lock().await;
-        let context = contexts_guard.get(&payload).cloned();
+        // Look up context by block digest and pop the oldest (by round) context from the map.
+        // Using pop_first ensures each concurrent certification for the same digest gets a
+        // unique context, which is critical when a block is re-proposed across multiple views.
+        //
+        // This works because the voter certifies views in ascending order: when the same block
+        // appears in multiple views (e.g., re-proposals at epoch boundaries), certify is called
+        // for the lower view first.
+        let mut contexts_guard = self.verification_contexts.lock().await;
+        let context = contexts_guard
+            .get_mut(&payload)
+            .and_then(|map| map.pop_first().map(|(_, ctx)| ctx));
         drop(contexts_guard);
 
         if let Some(context) = context {
@@ -613,29 +645,8 @@ where
 {
     type Activity = A::Activity;
 
-    /// Relays a report to the underlying [`Application`] and cleans up verification contexts.
-    ///
-    /// Verification contexts are kept on disk until finalization to support crash recovery.
-    /// When a block is finalized, its context (and its ancestors' contexts) is no longer
-    /// needed and is removed here.
+    /// Relays a report to the underlying [`Application`].
     async fn report(&mut self, update: Self::Activity) {
-        if let Update::Block(ref block, _) = update {
-            let mut contexts_guard = self.verification_contexts.lock().await;
-            // Prune all contexts that are below the view of the finalized block, as they
-            // are no longer needed.
-            if let Some(ours) = contexts_guard.get(&block.commitment()).cloned() {
-                contexts_guard.retain(|_, theirs| {
-                    theirs.epoch() > ours.epoch()
-                        || (theirs.epoch() == ours.epoch() && theirs.view() > ours.view())
-                });
-                contexts_guard
-                    .sync()
-                    .await
-                    .expect("must sync verification contexts");
-            }
-            drop(contexts_guard);
-        }
-
         self.application.report(update).await
     }
 }
