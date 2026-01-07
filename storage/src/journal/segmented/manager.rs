@@ -264,6 +264,29 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.blobs.range(start_section..)
     }
 
+    /// Returns an iterator over all section numbers.
+    pub fn sections(&self) -> impl Iterator<Item = u64> + '_ {
+        self.blobs.keys().copied()
+    }
+
+    /// Remove a specific section. Returns true if the section existed and was removed.
+    pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
+        self.prune_guard(section)?;
+
+        if let Some(blob) = self.blobs.remove(&section) {
+            let size = blob.size().await;
+            drop(blob);
+            self.context
+                .remove(&self.partition, Some(&section.to_be_bytes()))
+                .await?;
+            self.tracked.dec();
+            debug!(section, size, "removed section");
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Remove all underlying blobs.
     pub async fn destroy(self) -> Result<(), Error> {
         for (section, blob) in self.blobs.into_iter() {

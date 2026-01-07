@@ -205,6 +205,16 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
         self.manager.newest_section()
     }
 
+    /// Returns an iterator over all section numbers.
+    pub fn sections(&self) -> impl Iterator<Item = u64> + '_ {
+        self.manager.sections()
+    }
+
+    /// Remove a specific section. Returns true if the section existed and was removed.
+    pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
+        self.manager.remove_section(section).await
+    }
+
     /// Close all blobs (syncs first).
     pub async fn close(&mut self) -> Result<(), Error> {
         self.sync_all().await

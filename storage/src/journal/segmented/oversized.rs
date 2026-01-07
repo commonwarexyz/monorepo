@@ -23,12 +23,13 @@
 //!
 //! On unclean shutdown, the index journal and glob may have different lengths:
 //! - Index entry pointing to non-existent glob data (dangerous)
-//! - Glob value without index entry (orphan - acceptable)
+//! - Glob value without index entry (orphan - acceptable but cleaned up)
+//! - Glob sections without corresponding index sections (orphan sections - removed)
 //!
-//! During initialization, each index entry's glob reference is validated:
-//! 1. Check `value_offset + value_size <= glob_size`
-//! 2. Invalid entries are skipped
-//! 3. Index journal is rewound to exclude trailing invalid entries
+//! During initialization, crash recovery is performed:
+//! 1. Each index entry's glob reference is validated (`value_offset + value_size <= glob_size`)
+//! 2. Invalid entries are skipped and the index journal is rewound
+//! 3. Orphan value sections (sections in glob but not in index) are removed
 //!
 //! This allows async writes (glob first, then index) while ensuring consistency
 //! after recovery.
@@ -41,7 +42,7 @@ use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed};
 use commonware_runtime::{Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
-use std::num::NonZeroUsize;
+use std::{collections::HashSet, num::NonZeroUsize};
 use tracing::{debug, warn};
 
 /// Trait for index entries that reference oversized values in glob storage.
@@ -187,6 +188,35 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
                 self.index.rewind_section(section, valid_size).await?;
                 self.values.rewind_section(section, glob_target).await?;
             }
+        }
+
+        // Clean up orphan value sections that don't exist in index
+        self.cleanup_orphan_value_sections().await?;
+
+        Ok(())
+    }
+
+    /// Remove any value sections that don't have corresponding index sections.
+    ///
+    /// This can happen if a crash occurs after writing to values but before
+    /// writing to index for a new section. Since sections don't have to be
+    /// contiguous, we compare the actual sets of sections rather than just
+    /// comparing the newest section numbers.
+    async fn cleanup_orphan_value_sections(&mut self) -> Result<(), Error> {
+        // Collect index sections into a set for O(1) lookup
+        let index_sections: HashSet<u64> = self.index.sections().collect();
+
+        // Find value sections that don't exist in index
+        let orphan_sections: Vec<u64> = self
+            .values
+            .sections()
+            .filter(|s| !index_sections.contains(s))
+            .collect();
+
+        // Remove each orphan section
+        for section in orphan_sections {
+            warn!(section, "removing orphan value section");
+            self.values.remove_section(section).await?;
         }
 
         Ok(())
@@ -1823,6 +1853,420 @@ mod tests {
             // Size too small (but >= CRC_SIZE) - checksum mismatch
             let result = oversized.get_value(1, offset, correct_size - 1).await;
             assert!(matches!(result, Err(Error::ChecksumMismatch(_, _))));
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_values_has_orphan_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate with sections 1 and 2
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            for section in 1u64..=2 {
+                let value: TestValue = [section as u8; 16];
+                let entry = TestEntry::new(section, 0, 0);
+                oversized
+                    .append(section, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                oversized.sync(section).await.expect("Failed to sync");
+            }
+            drop(oversized);
+
+            // Manually create an orphan value section (section 3) without corresponding index
+            let glob_cfg = GlobConfig {
+                partition: cfg.value_partition.clone(),
+                compression: cfg.compression,
+                codec_config: (),
+                write_buffer: cfg.value_write_buffer,
+            };
+            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob");
+            let orphan_value: TestValue = [99; 16];
+            glob.append(3, &orphan_value)
+                .await
+                .expect("Failed to append orphan");
+            glob.sync(3).await.expect("Failed to sync glob");
+            drop(glob);
+
+            // Reinitialize - should detect and remove the orphan section
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to reinit");
+
+            // Sections 1 and 2 should still be valid
+            assert!(oversized.get(1, 0).await.is_ok());
+            assert!(oversized.get(2, 0).await.is_ok());
+
+            // Newest section should be 2 (orphan was removed)
+            assert_eq!(oversized.newest_section(), Some(2));
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_values_has_multiple_orphan_sections() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate with only section 1
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            let value: TestValue = [1; 16];
+            let entry = TestEntry::new(1, 0, 0);
+            oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Manually create multiple orphan value sections (2, 3, 4)
+            let glob_cfg = GlobConfig {
+                partition: cfg.value_partition.clone(),
+                compression: cfg.compression,
+                codec_config: (),
+                write_buffer: cfg.value_write_buffer,
+            };
+            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob");
+
+            for section in 2u64..=4 {
+                let orphan_value: TestValue = [section as u8; 16];
+                glob.append(section, &orphan_value)
+                    .await
+                    .expect("Failed to append orphan");
+                glob.sync(section).await.expect("Failed to sync glob");
+            }
+            drop(glob);
+
+            // Reinitialize - should detect and remove all orphan sections
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to reinit");
+
+            // Section 1 should still be valid
+            assert!(oversized.get(1, 0).await.is_ok());
+
+            // Newest section should be 1 (orphans removed)
+            assert_eq!(oversized.newest_section(), Some(1));
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_index_empty_but_values_exist() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Manually create value sections without any index entries
+            let glob_cfg = GlobConfig {
+                partition: cfg.value_partition.clone(),
+                compression: cfg.compression,
+                codec_config: (),
+                write_buffer: cfg.value_write_buffer,
+            };
+            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob");
+
+            for section in 1u64..=3 {
+                let orphan_value: TestValue = [section as u8; 16];
+                glob.append(section, &orphan_value)
+                    .await
+                    .expect("Failed to append orphan");
+                glob.sync(section).await.expect("Failed to sync glob");
+            }
+            drop(glob);
+
+            // Initialize oversized - should remove all orphan value sections
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            // No sections should exist
+            assert_eq!(oversized.newest_section(), None);
+            assert_eq!(oversized.oldest_section(), None);
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_orphan_section_append_after() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate with section 1
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            let value: TestValue = [1; 16];
+            let entry = TestEntry::new(1, 0, 0);
+            let (_, offset1, size1) = oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Manually create orphan value sections (2, 3)
+            let glob_cfg = GlobConfig {
+                partition: cfg.value_partition.clone(),
+                compression: cfg.compression,
+                codec_config: (),
+                write_buffer: cfg.value_write_buffer,
+            };
+            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob");
+
+            for section in 2u64..=3 {
+                let orphan_value: TestValue = [section as u8; 16];
+                glob.append(section, &orphan_value)
+                    .await
+                    .expect("Failed to append orphan");
+                glob.sync(section).await.expect("Failed to sync glob");
+            }
+            drop(glob);
+
+            // Reinitialize - should remove orphan sections
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to reinit");
+
+            // Section 1 should still be valid
+            let entry = oversized.get(1, 0).await.expect("Failed to get");
+            assert_eq!(entry.id, 1);
+            let value = oversized
+                .get_value(1, offset1, size1)
+                .await
+                .expect("Failed to get value");
+            assert_eq!(value, [1; 16]);
+
+            // Should be able to append to section 2 after recovery
+            let new_value: TestValue = [42; 16];
+            let new_entry = TestEntry::new(42, 0, 0);
+            let (pos, offset, size) = oversized
+                .append(2, new_entry, &new_value)
+                .await
+                .expect("Failed to append after recovery");
+            assert_eq!(pos, 0);
+
+            // Verify the new entry
+            let retrieved = oversized.get(2, 0).await.expect("Failed to get");
+            assert_eq!(retrieved.id, 42);
+            let retrieved_value = oversized
+                .get_value(2, offset, size)
+                .await
+                .expect("Failed to get value");
+            assert_eq!(retrieved_value, new_value);
+
+            // Sync and restart to verify persistence
+            oversized.sync(2).await.expect("Failed to sync");
+            drop(oversized);
+
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg)
+                    .await
+                    .expect("Failed to reinit after append");
+
+            // Both sections should be valid
+            assert!(oversized.get(1, 0).await.is_ok());
+            assert!(oversized.get(2, 0).await.is_ok());
+            assert_eq!(oversized.newest_section(), Some(2));
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_no_orphan_sections() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate with sections 1, 2, 3 (no orphans)
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            for section in 1u64..=3 {
+                let value: TestValue = [section as u8; 16];
+                let entry = TestEntry::new(section, 0, 0);
+                oversized
+                    .append(section, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                oversized.sync(section).await.expect("Failed to sync");
+            }
+            drop(oversized);
+
+            // Reinitialize - no orphan cleanup needed
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg)
+                    .await
+                    .expect("Failed to reinit");
+
+            // All sections should be valid
+            for section in 1u64..=3 {
+                let entry = oversized.get(section, 0).await.expect("Failed to get");
+                assert_eq!(entry.id, section);
+            }
+            assert_eq!(oversized.newest_section(), Some(3));
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_orphan_with_empty_index_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate section 1 with entries
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            let value: TestValue = [1; 16];
+            let entry = TestEntry::new(1, 0, 0);
+            oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Manually create orphan value section 2
+            let glob_cfg = GlobConfig {
+                partition: cfg.value_partition.clone(),
+                compression: cfg.compression,
+                codec_config: (),
+                write_buffer: cfg.value_write_buffer,
+            };
+            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob");
+            let orphan_value: TestValue = [2; 16];
+            glob.append(2, &orphan_value)
+                .await
+                .expect("Failed to append orphan");
+            glob.sync(2).await.expect("Failed to sync glob");
+            drop(glob);
+
+            // Now truncate index section 1 to 0 (making it empty but still tracked)
+            let (blob, _) = context
+                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            blob.resize(0).await.expect("Failed to truncate");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Reinitialize - should handle empty index section and remove orphan value section
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg)
+                    .await
+                    .expect("Failed to reinit");
+
+            // Section 1 should exist but have no entries (empty after truncation)
+            assert!(oversized.get(1, 0).await.is_err());
+
+            // Orphan section 2 should be removed
+            assert_eq!(oversized.newest_section(), Some(1));
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_orphan_sections_with_gaps() {
+        // Test non-contiguous sections: index has [1, 3, 5], values has [1, 2, 3, 4, 5, 6]
+        // Orphan sections 2, 4, 6 should be removed
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create index with sections 1, 3, 5 (gaps)
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            for section in [1u64, 3, 5] {
+                let value: TestValue = [section as u8; 16];
+                let entry = TestEntry::new(section, 0, 0);
+                oversized
+                    .append(section, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                oversized.sync(section).await.expect("Failed to sync");
+            }
+            drop(oversized);
+
+            // Manually create orphan value sections 2, 4, 6 (filling gaps and beyond)
+            let glob_cfg = GlobConfig {
+                partition: cfg.value_partition.clone(),
+                compression: cfg.compression,
+                codec_config: (),
+                write_buffer: cfg.value_write_buffer,
+            };
+            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob");
+
+            for section in [2u64, 4, 6] {
+                let orphan_value: TestValue = [section as u8; 16];
+                glob.append(section, &orphan_value)
+                    .await
+                    .expect("Failed to append orphan");
+                glob.sync(section).await.expect("Failed to sync glob");
+            }
+            drop(glob);
+
+            // Reinitialize - should remove orphan sections 2, 4, 6
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg)
+                    .await
+                    .expect("Failed to reinit");
+
+            // Sections 1, 3, 5 should still be valid
+            for section in [1u64, 3, 5] {
+                let entry = oversized.get(section, 0).await.expect("Failed to get");
+                assert_eq!(entry.id, section);
+            }
+
+            // Verify only sections 1, 3, 5 exist (orphans removed)
+            assert_eq!(oversized.oldest_section(), Some(1));
+            assert_eq!(oversized.newest_section(), Some(5));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
