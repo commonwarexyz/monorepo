@@ -707,16 +707,10 @@ where
 /// Returns the number of levels in a tree with `leaf_count` leaves.
 /// A tree with 1 leaf has 1 level, a tree with 2 leaves has 2 levels, etc.
 const fn levels_in_tree(leaf_count: u32) -> usize {
-    if leaf_count == 0 {
-        return 1; // Empty tree still has one level (the empty root)
+    match leaf_count {
+        0 | 1 => 1,
+        n => (u32::BITS - (n - 1).leading_zeros() + 1) as usize,
     }
-    let mut levels = 1usize;
-    let mut size = leaf_count as usize;
-    while size > 1 {
-        levels += 1;
-        size = size.div_ceil(2);
-    }
-    levels
 }
 
 /// Returns the sorted, deduplicated positions of siblings required to prove
@@ -731,16 +725,19 @@ fn siblings_required_for_multi_proof(
         return Err(Error::NoLeaves);
     }
 
-    // Check for duplicates and validate positions
-    let mut seen = BTreeSet::new();
-    for &pos in positions {
-        if pos >= leaf_count {
-            return Err(Error::InvalidPosition(pos));
-        }
-        if !seen.insert(pos) {
-            return Err(Error::DuplicatePosition(pos));
-        }
+    // Validate positions and check for duplicates
+    if let Some(&pos) = positions.iter().find(|&&p| p >= leaf_count) {
+        return Err(Error::InvalidPosition(pos));
     }
+    positions
+        .iter()
+        .try_fold(BTreeSet::new(), |mut set, &pos| {
+            if set.insert(pos) {
+                Ok(set)
+            } else {
+                Err(Error::DuplicatePosition(pos))
+            }
+        })?;
 
     // Collect all sibling positions needed
     let mut sibling_positions = BTreeSet::new();
@@ -1235,35 +1232,6 @@ mod tests {
     }
 
     #[test]
-    fn test_odd_tree_duplicate_index_proof() {
-        // Create transactions and digests
-        let txs = [b"tx1", b"tx2", b"tx3"];
-        let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(*tx)).collect();
-
-        // Build tree
-        let mut builder = Builder::new(txs.len());
-        for digest in &digests {
-            builder.add(digest);
-        }
-        let tree = builder.build();
-        let root = tree.root();
-
-        // The tree was built with 3 leaves; index 2 is the last valid index.
-        let proof = tree.proof(2).unwrap();
-
-        // Verification should succeed for the proper index 2.
-        let mut hasher = Sha256::default();
-        assert!(proof.verify(&mut hasher, &digests[2], 2, &root).is_ok());
-
-        // Should not be able to generate a proof for an out-of-range index (e.g. 3).
-        assert!(tree.proof(3).is_err());
-
-        // Attempting to verify using an out-of-range index (e.g. 3, which would correspond
-        // to a duplicate leaf that doesn't actually exist) should fail.
-        assert!(proof.verify(&mut hasher, &digests[2], 3, &root).is_err());
-    }
-
-    #[test]
     fn test_tampered_proof_no_siblings() {
         // Create transactions and digests
         let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
@@ -1449,6 +1417,35 @@ mod tests {
         let mut hasher = Sha256::default();
         proof.siblings[0] = Sha256::hash(b"modified");
         assert!(proof.verify(&mut hasher, &digests[2], 2, &root).is_err());
+    }
+
+    #[test]
+    fn test_odd_tree_duplicate_index_proof() {
+        // Create transactions and digests
+        let txs = [b"tx1", b"tx2", b"tx3"];
+        let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(*tx)).collect();
+
+        // Build tree
+        let mut builder = Builder::new(txs.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+
+        // The tree was built with 3 leaves; index 2 is the last valid index.
+        let proof = tree.proof(2).unwrap();
+
+        // Verification should succeed for the proper index 2.
+        let mut hasher = Sha256::default();
+        assert!(proof.verify(&mut hasher, &digests[2], 2, &root).is_ok());
+
+        // Should not be able to generate a proof for an out-of-range index (e.g. 3).
+        assert!(tree.proof(3).is_err());
+
+        // Attempting to verify using an out-of-range index (e.g. 3, which would correspond
+        // to a duplicate leaf that doesn't actually exist) should fail.
+        assert!(proof.verify(&mut hasher, &digests[2], 3, &root).is_err());
     }
 
     #[test]
