@@ -161,13 +161,23 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
                 Err(e) => return Err(e),
             };
             let entry_count = index_size / chunk_size;
+            let aligned_size = entry_count * chunk_size;
+
+            // Truncate any trailing partial entry
+            if aligned_size < index_size {
+                debug!(
+                    section,
+                    index_size, aligned_size, "truncating partial trailing entry"
+                );
+                self.index.rewind_section(section, aligned_size).await?;
+            }
+
             if entry_count == 0 {
                 // Partial entry only (crash during write), rewind to 0
                 debug!(
                     section,
                     index_size, "partial entry detected, rewinding to 0"
                 );
-                self.index.rewind_section(section, 0).await?;
                 self.values.rewind(section, 0).await?;
                 continue;
             }
@@ -699,7 +709,7 @@ mod tests {
             drop(blob);
 
             // Reinitialize - should recover and rewind index to 0
-            let oversized: Oversized<_, TestEntry, TestValue> =
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.clone(), cfg)
                     .await
                     .expect("Failed to reinit");
@@ -707,6 +717,23 @@ mod tests {
             // No entries should be accessible
             let result = oversized.get(1, 0).await;
             assert!(result.is_err());
+
+            // Should be able to append after recovery
+            let value: TestValue = [99; 16];
+            let entry = TestEntry::new(100, 0, 0);
+            let (pos, offset, size) = oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append after recovery");
+            assert_eq!(pos, 0);
+
+            let retrieved = oversized.get(1, 0).await.expect("Failed to get");
+            assert_eq!(retrieved.id, 100);
+            let retrieved_value = oversized
+                .get_value(1, offset, size)
+                .await
+                .expect("Failed to get value");
+            assert_eq!(retrieved_value, value);
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -850,7 +877,7 @@ mod tests {
             drop(blob);
 
             // Reinitialize - should detect corruption and scan backwards
-            let oversized: Oversized<_, TestEntry, TestValue> =
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.clone(), cfg)
                     .await
                     .expect("Failed to reinit");
@@ -863,6 +890,23 @@ mod tests {
 
             // Entry 4 should be gone (corrupted and rewound)
             assert!(oversized.get(1, 4).await.is_err());
+
+            // Should be able to append after recovery
+            let value: TestValue = [99; 16];
+            let entry = TestEntry::new(100, 0, 0);
+            let (pos, offset, size) = oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append after recovery");
+            assert_eq!(pos, 4);
+
+            let retrieved = oversized.get(1, 4).await.expect("Failed to get");
+            assert_eq!(retrieved.id, 100);
+            let retrieved_value = oversized
+                .get_value(1, offset, size)
+                .await
+                .expect("Failed to get value");
+            assert_eq!(retrieved_value, value);
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -998,7 +1042,7 @@ mod tests {
             drop(blob);
 
             // Reinitialize
-            let oversized: Oversized<_, TestEntry, TestValue> =
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.clone(), cfg)
                     .await
                     .expect("Failed to reinit");
@@ -1009,6 +1053,23 @@ mod tests {
 
             // Entry 2 should be gone (truncated)
             assert!(oversized.get(1, 2).await.is_err());
+
+            // Should be able to append after recovery
+            let value: TestValue = [99; 16];
+            let entry = TestEntry::new(100, 0, 0);
+            let (pos, offset, size) = oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append after recovery");
+            assert_eq!(pos, 2);
+
+            let retrieved = oversized.get(1, 2).await.expect("Failed to get");
+            assert_eq!(retrieved.id, 100);
+            let retrieved_value = oversized
+                .get_value(1, offset, size)
+                .await
+                .expect("Failed to get value");
+            assert_eq!(retrieved_value, value);
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -1471,7 +1532,7 @@ mod tests {
             drop(blob);
 
             // Reinitialize - should handle partial entry gracefully
-            let oversized: Oversized<_, TestEntry, TestValue> =
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to reinit");
@@ -1484,6 +1545,24 @@ mod tests {
 
             // Entry 3 should not exist (partial entry was removed)
             assert!(oversized.get(1, 3).await.is_err());
+
+            // Append new entry after recovery
+            let value: TestValue = [42; 16];
+            let entry = TestEntry::new(100, 0, 0);
+            let (pos, offset, size) = oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append after recovery");
+            assert_eq!(pos, 3);
+
+            // Verify we can read the new entry
+            let retrieved = oversized.get(1, 3).await.expect("Failed to get new entry");
+            assert_eq!(retrieved.id, 100);
+            let retrieved_value = oversized
+                .get_value(1, offset, size)
+                .await
+                .expect("Failed to get new value");
+            assert_eq!(retrieved_value, value);
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -1520,13 +1599,30 @@ mod tests {
             drop(blob);
 
             // Reinitialize - should handle gracefully (rewind to 0)
-            let oversized: Oversized<_, TestEntry, TestValue> =
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
             // No entries should exist
             assert!(oversized.get(1, 0).await.is_err());
+
+            // Should be able to append after recovery
+            let value: TestValue = [99; 16];
+            let entry = TestEntry::new(100, 0, 0);
+            let (pos, offset, size) = oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append after recovery");
+            assert_eq!(pos, 0);
+
+            let retrieved = oversized.get(1, 0).await.expect("Failed to get");
+            assert_eq!(retrieved.id, 100);
+            let retrieved_value = oversized
+                .get_value(1, offset, size)
+                .await
+                .expect("Failed to get value");
+            assert_eq!(retrieved_value, value);
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -1635,7 +1731,7 @@ mod tests {
             drop(blob);
 
             // Reinitialize - recovery should detect index entries pointing beyond glob
-            let oversized: Oversized<_, TestEntry, TestValue> =
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to reinit");
@@ -1648,6 +1744,23 @@ mod tests {
 
             // Entries 2-4 should be gone (index rewound during recovery)
             assert!(oversized.get(1, 2).await.is_err());
+
+            // Should be able to append after recovery
+            let value: TestValue = [99; 16];
+            let entry = TestEntry::new(100, 0, 0);
+            let (pos, offset, size) = oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append after recovery");
+            assert_eq!(pos, 2);
+
+            let retrieved = oversized.get(1, 2).await.expect("Failed to get");
+            assert_eq!(retrieved.id, 100);
+            let retrieved_value = oversized
+                .get_value(1, offset, size)
+                .await
+                .expect("Failed to get value");
+            assert_eq!(retrieved_value, value);
 
             oversized.destroy().await.expect("Failed to destroy");
         });
