@@ -12,10 +12,10 @@ use std::num::NonZeroUsize;
 
 /// Number of bytes that can be buffered in a section before being written to a
 /// [commonware_runtime::Blob].
-const WRITE_BUFFER: usize = 1024 * 1024; // 1MB
+const WRITE_BUFFER: usize = 8 * 1024 * 1024; // 8MB
 
 /// Number of items per section (the granularity of pruning).
-const ITEMS_PER_SECTION: u64 = 1_024;
+const ITEMS_PER_SECTION: u64 = 16_384;
 
 /// Number of bytes to buffer when replaying a [commonware_runtime::Blob].
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
@@ -70,7 +70,7 @@ impl Archive {
                     freezer_key_partition: "archive_bench_key".into(),
                     freezer_key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     freezer_value_partition: "archive_bench_value".into(),
-                    freezer_value_target_size: 1024 * 1024 * 10, // 10MB (smaller than production for faster benchmarks)
+                    freezer_value_target_size: 128 * 1024 * 1024,
                     freezer_value_compression: compression,
                     ordinal_partition: "archive_bench_ordinal".into(),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),
