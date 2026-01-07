@@ -292,10 +292,10 @@ impl Conformance for SegmentedOversized {
             }
 
             // Distribute items across sections 0, 1, 2
-            for (i, (idx, item)) in data_to_write.iter().enumerate().enumerate() {
+            for (i, item) in data_to_write.iter().enumerate() {
                 let section = (i % 3) as u64;
                 let entry = TestEntry {
-                    id: idx as u64,
+                    id: i as u64,
                     value_offset: 0,
                     value_size: 0,
                 };
