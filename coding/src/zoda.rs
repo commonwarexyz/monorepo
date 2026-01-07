@@ -668,12 +668,11 @@ impl<H: Hasher> Scheme for Zoda<H> {
         // Step 6: Multiply the data with the checking matrix.
         let checksum = Arc::new(data.mul(&checking_matrix));
 
-        // Step 7: Produce the shards.
-        // We can't use "chunks" because we need to handle a sample size of 0
-        let index_chunks = (0..topology.total_shards)
-            .map(|i| &shuffled_indices[i * topology.samples..(i + 1) * topology.samples]);
-        let shards = index_chunks
-            .map(|indices| {
+        // Step 7: Produce the shards in parallel.
+        let shard_results: Vec<Result<Shard<H>, Error>> =
+            strategy.map_collect_vec(0..topology.total_shards, |shard_idx| {
+                let indices = &shuffled_indices
+                    [shard_idx * topology.samples..(shard_idx + 1) * topology.samples];
                 let rows = Matrix::init(
                     indices.len(),
                     topology.data_cols,
@@ -691,7 +690,9 @@ impl<H: Hasher> Scheme for Zoda<H> {
                     rows,
                     checksum: checksum.clone(),
                 })
-            })
+            });
+        let shards = shard_results
+            .into_iter()
             .collect::<Result<Vec<_>, Error>>()?;
         Ok((commitment, shards))
     }
