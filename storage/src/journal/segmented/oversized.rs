@@ -41,7 +41,7 @@ use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed};
 use commonware_runtime::{Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
-use std::{marker::PhantomData, num::NonZeroUsize};
+use std::num::NonZeroUsize;
 use tracing::{debug, warn};
 
 /// Trait for index entries that reference oversized values in glob storage.
@@ -90,7 +90,6 @@ pub struct Config<C> {
 pub struct Oversized<E: Storage + Metrics, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
-    _phantom: PhantomData<I>,
 }
 
 impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
@@ -116,11 +115,7 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
         };
         let values = Glob::init(context.with_label("values"), value_cfg).await?;
 
-        let mut oversized = Self {
-            index,
-            values,
-            _phantom: PhantomData,
-        };
+        let mut oversized = Self { index, values };
 
         // Perform crash recovery validation
         oversized.recover().await?;

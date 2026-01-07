@@ -31,7 +31,7 @@ use crate::journal::Error;
 use bytes::BufMut;
 use commonware_codec::{Codec, FixedSize};
 use commonware_runtime::{Blob as _, Error as RError, Metrics, Storage};
-use std::{io::Cursor, marker::PhantomData, num::NonZeroUsize};
+use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
 /// Size of CRC32 checksum in bytes.
@@ -66,8 +66,6 @@ pub struct Glob<E: Storage + Metrics, V: Codec> {
 
     /// Codec configuration.
     codec_config: V::Cfg,
-
-    _phantom: PhantomData<V>,
 }
 
 impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
@@ -85,7 +83,6 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
             manager,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
-            _phantom: PhantomData,
         })
     }
 

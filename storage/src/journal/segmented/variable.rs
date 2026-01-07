@@ -94,7 +94,7 @@ use commonware_runtime::{
     Blob, Error as RError, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
-use std::{io::Cursor, marker::PhantomData, num::NonZeroUsize};
+use std::{io::Cursor, num::NonZeroUsize};
 use tracing::{trace, warn};
 use zstd::{bulk::compress, decode_all};
 
@@ -132,8 +132,6 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
 
     /// Codec configuration.
     codec_config: V::Cfg,
-
-    _phantom: PhantomData<V>,
 }
 
 impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
@@ -156,7 +154,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             manager,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
-            _phantom: PhantomData,
         })
     }
 
