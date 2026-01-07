@@ -1276,4 +1276,94 @@ mod tests {
             oversized.destroy().await.expect("Failed to destroy");
         });
     }
+
+    #[test_traced]
+    fn test_recovery_glob_synced_but_index_not() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            // Append entries and sync
+            let mut locations = Vec::new();
+            for i in 0..3u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                let loc = oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                locations.push(loc);
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Simulate crash: truncate INDEX but leave GLOB intact
+            // This creates orphan data in glob (glob ahead of index)
+            let (blob, _size) = context
+                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+
+            // Keep only first 2 index entries
+            let chunk_size = (TestEntry::SIZE + 4) as u64; // entry + CRC32
+            blob.resize(2 * chunk_size)
+                .await
+                .expect("Failed to truncate");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Reinitialize - glob has orphan data from entry 3
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to reinit");
+
+            // First 2 entries should be valid
+            for i in 0..2u8 {
+                let (position, offset, size) = locations[i as usize];
+                let entry = oversized.get(1, position).await.expect("Failed to get");
+                assert_eq!(entry.id, i as u64);
+
+                let value = oversized
+                    .get_value(1, offset, size)
+                    .await
+                    .expect("Failed to get value");
+                assert_eq!(value, [i; 16]);
+            }
+
+            // Entry at position 2 should fail (index was truncated)
+            assert!(oversized.get(1, 2).await.is_err());
+
+            // Append new entries - should work despite orphan data in glob
+            for i in 10..13u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                let (position, offset, size) = oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append after recovery");
+
+                // New entries start at position 2 (after the 2 valid entries)
+                assert_eq!(position, (i - 10 + 2) as u32);
+
+                // Verify we can read the new entry
+                let retrieved = oversized.get(1, position).await.expect("Failed to get");
+                assert_eq!(retrieved.id, i as u64);
+
+                let retrieved_value = oversized
+                    .get_value(1, offset, size)
+                    .await
+                    .expect("Failed to get value");
+                assert_eq!(retrieved_value, value);
+            }
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
 }
