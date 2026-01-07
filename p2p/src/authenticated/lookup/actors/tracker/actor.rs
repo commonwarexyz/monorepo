@@ -13,7 +13,7 @@ use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::ordered::Set;
+use commonware_utils::{channels::fallible::FallibleExt, ordered::Set};
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use std::{
@@ -144,9 +144,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
-                    subscriber
-                        .unbounded_send((index, peer_keys.clone(), self.directory.tracked()))
-                        .is_ok()
+                    subscriber.try_send_checked((
+                        index,
+                        peer_keys.clone(),
+                        self.directory.tracked(),
+                    ))
                 });
             }
             Message::PeerSet { index, responder } => {
@@ -160,9 +162,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
                     let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
-                    sender
-                        .unbounded_send((latest_set_id, latest_set, self.directory.tracked()))
-                        .ok();
+                    sender.try_send((latest_set_id, latest_set, self.directory.tracked()));
                 }
                 self.subscribers.push(sender);
 

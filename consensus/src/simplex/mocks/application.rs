@@ -65,19 +65,16 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Genesis { epoch, response })
-            .await
-            .expect("Failed to send genesis");
+        let _ = self.sender.send(Message::Genesis { epoch, response }).await;
         receiver.await.expect("Failed to receive genesis")
     }
 
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
-        self.sender
+        let _ = self
+            .sender
             .send(Message::Propose { context, response })
-            .await
-            .expect("Failed to send propose");
+            .await;
         receiver
     }
 
@@ -87,14 +84,14 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
-        self.sender
+        let _ = self
+            .sender
             .send(Message::Verify {
                 context,
                 payload,
                 response,
             })
-            .await
-            .expect("Failed to send verify");
+            .await;
         receiver
     }
 }
@@ -102,13 +99,13 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
     async fn certify(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
-        self.sender
+        let _ = self
+            .sender
             .send(Message::Certify {
                 payload,
                 response: tx,
             })
-            .await
-            .expect("Failed to send certify");
+            .await;
         rx
     }
 }
@@ -117,10 +114,7 @@ impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
     type Digest = D;
 
     async fn broadcast(&mut self, payload: Self::Digest) {
-        self.sender
-            .send(Message::Broadcast { payload })
-            .await
-            .expect("Failed to send broadcast");
+        let _ = self.sender.send(Message::Broadcast { payload }).await;
     }
 }
 

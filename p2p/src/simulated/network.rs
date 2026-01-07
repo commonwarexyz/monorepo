@@ -19,7 +19,11 @@ use commonware_runtime::{
     Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::{channels::ring, ordered::Set, NZUsize, TryCollect};
+use commonware_utils::{
+    channels::{fallible::FallibleExt, ring},
+    ordered::Set,
+    NZUsize, TryCollect,
+};
 use either::Either;
 use futures::{
     channel::{mpsc, oneshot},
@@ -309,7 +313,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let all = self.all_tracked_peers();
                 let notification = (id, peers, all);
                 self.subscribers
-                    .retain(|subscriber| subscriber.unbounded_send(notification.clone()).is_ok());
+                    .retain(|subscriber| subscriber.try_send_checked(notification.clone()));
 
                 // Broadcast updated peer list to LimitedSender subscribers
                 self.broadcast_peer_list().await;
@@ -375,7 +379,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 if let Some((index, peers)) = self.peer_sets.last_key_value() {
                     let all = self.all_tracked_peers();
                     let notification = (*index, peers.clone(), all);
-                    let _ = sender.unbounded_send(notification);
+                    sender.try_send(notification);
                 }
                 self.subscribers.push(sender);
             }
@@ -742,17 +746,13 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
     type PublicKey = P;
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
-        let (response_tx, response_rx) = oneshot::channel();
-        let _ = self
-            .sender
-            .unbounded_send(ingress::Message::SubscribeConnected {
-                response: response_tx,
-            });
-        // If the network is closed, return an empty receiver
-        response_rx.await.unwrap_or_else(|_| {
-            let (_sender, receiver) = ring::channel(NZUsize!(1));
-            receiver
-        })
+        self.sender
+            .request(|response| ingress::Message::SubscribeConnected { response })
+            .await
+            .unwrap_or_else(|| {
+                let (_sender, receiver) = ring::channel(NZUsize!(1));
+                receiver
+            })
     }
 }
 

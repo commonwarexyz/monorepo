@@ -225,12 +225,12 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Ingress, Manager, Receiver, Recipients, Sender};
+    use crate::{Blocker, Ingress, Manager, Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        deterministic, tokio, Clock, Handle, Metrics, Network as RNetwork, Quota, Resolver, Runner,
-        Spawner,
+        count_running_tasks, deterministic, tokio, Clock, Handle, Metrics, Network as RNetwork,
+        Quota, Resolver, Runner, Spawner,
     };
     use commonware_utils::{hostname, ordered::Set, TryCollect, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -2235,5 +2235,110 @@ mod tests {
 
             assert_no_rate_limiting(&context);
         });
+    }
+
+    #[test_traced]
+    fn test_operations_after_shutdown_do_not_panic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let peer = ed25519::PrivateKey::from_seed(0);
+            let address = peer.public_key();
+
+            let peer_context = context.with_label("peer");
+            let config = Config::test(
+                peer.clone(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5000),
+                vec![],
+                MAX_MESSAGE_SIZE,
+            );
+            let (mut network, mut oracle) =
+                Network::new(peer_context.with_label("network"), config);
+
+            // Register channel and peer set
+            let (mut sender, _receiver) =
+                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            let peers: Set<ed25519::PublicKey> = vec![address.clone()].try_into().unwrap();
+            oracle.update(0, peers.clone()).await;
+
+            // Start and immediately abort the network
+            let handle = network.start();
+            handle.abort();
+
+            // Wait for shutdown to propagate
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Oracle operations should not panic even after shutdown
+            oracle.update(1, peers.clone()).await;
+            let _ = oracle.peer_set(0).await;
+            let _ = oracle.subscribe().await;
+            oracle.block(address.clone()).await;
+
+            // Sender operations should not panic even after shutdown
+            let sent = sender
+                .send(Recipients::All, address.as_ref(), true)
+                .await
+                .unwrap();
+            assert!(sent.is_empty());
+        });
+    }
+
+    fn clean_shutdown(seed: u64) {
+        let cfg = deterministic::Config::default()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|context| async move {
+            let peer = ed25519::PrivateKey::from_seed(0);
+
+            let peer_context = context.with_label("peer");
+            let config = Config::test(
+                peer.clone(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5000),
+                vec![],
+                MAX_MESSAGE_SIZE,
+            );
+            let (mut network, mut oracle) =
+                Network::new(peer_context.with_label("network"), config);
+
+            // Register channel and peer set
+            let (_, _) =
+                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            let peers: Set<ed25519::PublicKey> = vec![peer.public_key()].try_into().unwrap();
+            oracle.update(0, peers).await;
+
+            // Start the network
+            let handle = network.start();
+
+            // Allow tasks to start
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Count running tasks under the network prefix
+            let running_before = count_running_tasks(&context, "peer_network");
+            assert!(
+                running_before > 0,
+                "at least one network task should be running"
+            );
+
+            // Abort the network
+            handle.abort();
+            let _ = handle.await;
+
+            // Give the runtime a tick to process aborts
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify all network tasks are stopped
+            let running_after = count_running_tasks(&context, "peer_network");
+            assert_eq!(
+                running_after, 0,
+                "all network tasks should be stopped, but {running_after} still running"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_clean_shutdown() {
+        for seed in 0..25 {
+            clean_shutdown(seed);
+        }
     }
 }

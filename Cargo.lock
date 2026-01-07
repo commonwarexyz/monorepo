@@ -1609,6 +1609,7 @@ dependencies = [
  "cfg-if",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-macros",
  "criterion",
  "futures",
  "getrandom 0.2.16",

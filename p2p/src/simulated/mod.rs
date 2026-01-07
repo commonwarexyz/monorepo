@@ -193,7 +193,9 @@ mod tests {
         Signer as _,
     };
     use commonware_macros::select;
-    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner, Spawner};
+    use commonware_runtime::{
+        count_running_tasks, deterministic, Clock, Metrics, Quota, Runner, Spawner,
+    };
     use commonware_utils::{hostname, ordered::Map, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;
@@ -3100,5 +3102,164 @@ mod tests {
             let (_, received3) = receiver.recv().await.unwrap();
             assert_eq!(received3, msg3);
         });
+    }
+
+    #[test]
+    fn test_operations_after_shutdown_do_not_panic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let network_context = context.with_label("network");
+            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            let handle = network.start();
+
+            // Create peers
+            let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
+
+            // Register peer set
+            let mut manager = oracle.manager();
+            manager
+                .update(0, [pk1.clone(), pk2.clone()].try_into().unwrap())
+                .await;
+
+            // Register channels
+            let mut control1 = oracle.control(pk1.clone());
+            let (mut sender, _receiver) = control1.register(0, TEST_QUOTA).await.unwrap();
+
+            // Add link
+            let link = ingress::Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(pk1.clone(), pk2.clone(), link.clone())
+                .await
+                .unwrap();
+
+            // Abort the network
+            handle.abort();
+            context.sleep(Duration::from_millis(100)).await;
+
+            // All of these operations should not panic after shutdown
+
+            // Sending messages should not panic (returns empty or error)
+            let msg = Bytes::from_static(b"test");
+            let result = sender.send(Recipients::One(pk2.clone()), msg, false).await;
+            assert!(
+                result.is_err() || result.unwrap().is_empty(),
+                "send after shutdown should fail or return empty"
+            );
+
+            // Manager operations should not panic
+            manager.update(1, [pk1.clone()].try_into().unwrap()).await;
+            let _ = manager.peer_set(0).await;
+            let _ = manager.subscribe().await;
+
+            // Oracle operations should not panic
+            let _ = oracle
+                .add_link(pk1.clone(), pk2.clone(), link.clone())
+                .await;
+            let _ = oracle.remove_link(pk1.clone(), pk2.clone()).await;
+            let _ = oracle.blocked().await;
+
+            // Control operations should not panic
+            let _ = control1.register(1, TEST_QUOTA).await;
+        });
+    }
+
+    fn clean_shutdown(seed: u64) {
+        let cfg = deterministic::Config::default()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let network_context = context.with_label("network");
+            let (network, mut oracle) = Network::new(network_context, cfg);
+            let handle = network.start();
+
+            // Create peers
+            let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
+
+            // Register peer set
+            let mut manager = oracle.manager();
+            manager
+                .update(0, [pk1.clone(), pk2.clone()].try_into().unwrap())
+                .await;
+
+            // Register channels
+            let mut control1 = oracle.control(pk1.clone());
+            let mut control2 = oracle.control(pk2.clone());
+            let (mut sender, _) = control1.register(0, TEST_QUOTA).await.unwrap();
+            let (_, mut receiver) = control2.register(0, TEST_QUOTA).await.unwrap();
+
+            // Add bidirectional links
+            let link = ingress::Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(pk1.clone(), pk2.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(pk2.clone(), pk1.clone(), link)
+                .await
+                .unwrap();
+
+            // Allow tasks to start
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Count running tasks under the network prefix
+            let running_before = count_running_tasks(&context, "network");
+            assert!(
+                running_before > 0,
+                "at least one network task should be running"
+            );
+
+            // Send and receive a message to verify network is functional
+            let msg = Bytes::from_static(b"test_message");
+            let result = sender
+                .send(Recipients::One(pk2.clone()), msg.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(result.len(), 1, "message should be sent");
+
+            let (_, received) = receiver.recv().await.unwrap();
+            assert_eq!(received, msg, "message should be received");
+
+            // Abort the network
+            handle.abort();
+            let _ = handle.await;
+
+            // Give the runtime a tick to process aborts
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify all network tasks are stopped
+            let running_after = count_running_tasks(&context, "network");
+            assert_eq!(
+                running_after, 0,
+                "all network tasks should be stopped, but {running_after} still running"
+            );
+        });
+    }
+
+    #[test]
+    fn test_clean_shutdown() {
+        for seed in 0..25 {
+            clean_shutdown(seed);
+        }
     }
 }

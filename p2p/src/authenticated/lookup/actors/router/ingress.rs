@@ -5,7 +5,7 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
-use commonware_utils::channels::ring;
+use commonware_utils::{channels::ring, NZUsize};
 use futures::channel::oneshot;
 
 /// Messages that can be processed by the router.
@@ -70,6 +70,8 @@ impl<P: PublicKey> Messenger<P> {
     }
 
     /// Sends a message to the given `recipients`.
+    ///
+    /// Returns an empty list if the router has shut down.
     pub async fn content(
         &mut self,
         recipients: Recipients<P>,
@@ -78,7 +80,8 @@ impl<P: PublicKey> Messenger<P> {
         priority: bool,
     ) -> Vec<P> {
         let (sender, receiver) = oneshot::channel();
-        self.sender
+        if self
+            .sender
             .send(Message::Content {
                 recipients,
                 channel,
@@ -87,8 +90,11 @@ impl<P: PublicKey> Messenger<P> {
                 success: sender,
             })
             .await
-            .unwrap();
-        receiver.await.unwrap()
+            .is_err()
+        {
+            return Vec::new();
+        }
+        receiver.await.unwrap_or_default()
     }
 }
 
@@ -97,10 +103,19 @@ impl<P: PublicKey> Connected for Messenger<P> {
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<P>> {
         let (sender, receiver) = oneshot::channel();
-        self.sender
+        if self
+            .sender
             .send(Message::SubscribePeers { response: sender })
             .await
-            .unwrap();
-        receiver.await.unwrap()
+            .is_err()
+        {
+            // Return a closed receiver
+            let (_, rx) = ring::channel(NZUsize!(1));
+            return rx;
+        }
+        receiver.await.unwrap_or_else(|_| {
+            let (_, rx) = ring::channel(NZUsize!(1));
+            rx
+        })
     }
 }

@@ -107,48 +107,70 @@ pub enum Message<C: PublicKey> {
 impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Send a `Connect` message to the tracker.
     pub fn connect(&mut self, public_key: C, peer: Mailbox<peer::Message>) {
-        self.send(Message::Connect { public_key, peer }).unwrap();
+        let _ = self.send(Message::Connect { public_key, peer });
     }
 
-    /// Send a `Block` message to the tracker.
+    /// Request a list of dialable peers from the tracker.
+    ///
+    /// Returns an empty list if the tracker is shut down.
     pub async fn dialable(&mut self) -> Vec<C> {
         let (sender, receiver) = oneshot::channel();
-        self.send(Message::Dialable { responder: sender }).unwrap();
-        receiver.await.unwrap()
+        if self.send(Message::Dialable { responder: sender }).is_err() {
+            return Vec::new();
+        }
+        receiver.await.unwrap_or_default()
     }
 
     /// Send a `Dial` message to the tracker.
+    ///
+    /// Returns `None` if the tracker is shut down.
     pub async fn dial(&mut self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
         let (tx, rx) = oneshot::channel();
-        self.send(Message::Dial {
-            public_key,
-            reservation: tx,
-        })
-        .unwrap();
-        rx.await.unwrap()
+        if self
+            .send(Message::Dial {
+                public_key,
+                reservation: tx,
+            })
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
     }
 
     /// Send an `Acceptable` message to the tracker.
+    ///
+    /// Returns `false` if the tracker is shut down.
     pub async fn acceptable(&mut self, public_key: C, source_ip: IpAddr) -> bool {
         let (tx, rx) = oneshot::channel();
-        self.send(Message::Acceptable {
-            public_key,
-            source_ip,
-            responder: tx,
-        })
-        .unwrap();
-        rx.await.unwrap()
+        if self
+            .send(Message::Acceptable {
+                public_key,
+                source_ip,
+                responder: tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
     }
 
     /// Send a `Listen` message to the tracker.
+    ///
+    /// Returns `None` if the tracker is shut down.
     pub async fn listen(&mut self, public_key: C) -> Option<Reservation<C>> {
         let (tx, rx) = oneshot::channel();
-        self.send(Message::Listen {
-            public_key,
-            reservation: tx,
-        })
-        .unwrap();
-        rx.await.unwrap()
+        if self
+            .send(Message::Listen {
+                public_key,
+                reservation: tx,
+            })
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
     }
 }
 
@@ -203,23 +225,36 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
 
     async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
         let (sender, receiver) = oneshot::channel();
-        self.sender
+        if self
+            .sender
             .send(Message::PeerSet {
                 index: id,
                 responder: sender,
             })
-            .unwrap();
-        receiver.await.unwrap()
+            .is_err()
+        {
+            return None;
+        }
+        receiver.await.ok().flatten()
     }
 
     async fn subscribe(
         &mut self,
     ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
         let (sender, receiver) = oneshot::channel();
-        self.sender
+        if self
+            .sender
             .send(Message::Subscribe { responder: sender })
-            .unwrap();
-        receiver.await.unwrap()
+            .is_err()
+        {
+            // Return a closed receiver
+            let (_, rx) = mpsc::unbounded();
+            return rx;
+        }
+        receiver.await.unwrap_or_else(|_| {
+            let (_, rx) = mpsc::unbounded();
+            rx
+        })
     }
 }
 
