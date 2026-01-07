@@ -135,8 +135,6 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
     /// is valid then all earlier entries must be valid too.
     async fn recover(&mut self) -> Result<(), Error> {
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
-
-        // Collect sections to avoid borrowing issues
         let sections: Vec<u64> = self.index.sections().collect();
 
         for section in sections {
@@ -160,6 +158,7 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
                 }
                 Err(e) => return Err(e),
             };
+
             let entry_count = index_size / chunk_size;
             let aligned_size = entry_count * chunk_size;
 
@@ -173,7 +172,6 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
             }
 
             if entry_count == 0 {
-                // Partial entry only (crash during write), rewind to 0
                 debug!(
                     section,
                     index_size, "partial entry detected, rewinding to 0"
@@ -182,87 +180,57 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
                 continue;
             }
 
-            // Check the LAST entry
-            let last_pos = entry_count - 1;
-            match self.index.get(section, last_pos).await {
-                Ok(entry) => {
-                    let (value_offset, value_size) = entry.value_location();
-                    let entry_end = value_offset.saturating_add(u64::from(value_size));
+            // Find last valid entry and target glob size
+            let (valid_count, glob_target) = self
+                .find_last_valid_entry(section, entry_count, glob_size)
+                .await;
 
-                    if entry_end <= glob_size {
-                        // Last entry valid - all entries in this section are valid
-                        continue;
-                    }
-
-                    // Last entry invalid - find last valid entry by scanning backwards
-                    warn!(
-                        section,
-                        last_pos, glob_size, entry_end, "invalid entry: glob truncated"
-                    );
-
-                    let valid_count = self
-                        .find_last_valid_position(section, last_pos, glob_size)
-                        .await;
-                    let valid_size = valid_count * chunk_size;
-                    debug!(section, index_size, valid_size, "rewinding index journal");
-                    self.index.rewind_section(section, valid_size).await?;
-
-                    // Trim glob to remove any trailing bytes beyond the last valid entry
-                    let glob_target = self.compute_glob_size(section, valid_count).await;
-                    self.values.rewind(section, glob_target).await?;
-                }
-                Err(_) => {
-                    // Last entry corrupted - need to scan backwards
-                    warn!(
-                        section,
-                        last_pos, "corrupted last entry, scanning backwards"
-                    );
-
-                    let valid_count = self
-                        .find_last_valid_position(section, last_pos, glob_size)
-                        .await;
-                    let valid_size = valid_count * chunk_size;
-                    debug!(section, index_size, valid_size, "rewinding index journal");
-                    self.index.rewind_section(section, valid_size).await?;
-
-                    // Trim glob to remove any trailing bytes beyond the last valid entry
-                    let glob_target = self.compute_glob_size(section, valid_count).await;
-                    self.values.rewind(section, glob_target).await?;
-                }
+            // Rewind if any entries are invalid
+            if valid_count < entry_count {
+                let valid_size = valid_count * chunk_size;
+                debug!(section, entry_count, valid_count, "rewinding journals");
+                self.index.rewind_section(section, valid_size).await?;
+                self.values.rewind(section, glob_target).await?;
             }
         }
 
         Ok(())
     }
 
-    /// Scan backwards from `before_pos` to find the last valid entry position.
+    /// Find the number of valid entries and the corresponding glob target size.
     ///
-    /// Returns the count of valid entries (i.e., `last_valid_pos + 1`), or 0 if none found.
-    async fn find_last_valid_position(&self, section: u64, before_pos: u64, glob_size: u64) -> u64 {
-        for pos in (0..before_pos).rev() {
-            if let Ok(entry) = self.index.get(section, pos).await {
-                let (offset, size) = entry.value_location();
-                let entry_end = offset.saturating_add(u64::from(size));
-                if entry_end <= glob_size {
-                    return pos + 1;
+    /// Scans backwards from the last entry until a valid one is found.
+    /// Returns `(valid_count, glob_target)` where `glob_target` is the end offset
+    /// of the last valid entry's value.
+    async fn find_last_valid_entry(
+        &self,
+        section: u64,
+        entry_count: u64,
+        glob_size: u64,
+    ) -> (u64, u64) {
+        for pos in (0..entry_count).rev() {
+            match self.index.get(section, pos).await {
+                Ok(entry) => {
+                    let (offset, size) = entry.value_location();
+                    let entry_end = offset.saturating_add(u64::from(size));
+                    if entry_end <= glob_size {
+                        return (pos + 1, entry_end);
+                    }
+                    if pos == entry_count - 1 {
+                        warn!(
+                            section,
+                            pos, glob_size, entry_end, "invalid entry: glob truncated"
+                        );
+                    }
+                }
+                Err(_) => {
+                    if pos == entry_count - 1 {
+                        warn!(section, pos, "corrupted last entry, scanning backwards");
+                    }
                 }
             }
         }
-        0
-    }
-
-    /// Compute the target glob size based on valid entry count.
-    ///
-    /// Returns 0 if no valid entries, otherwise returns the end of the last valid entry's value.
-    async fn compute_glob_size(&self, section: u64, valid_count: u64) -> u64 {
-        if valid_count == 0 {
-            return 0;
-        }
-        let last_pos = valid_count - 1;
-        self.index.get(section, last_pos).await.map_or(0, |entry| {
-            let (offset, size) = entry.value_location();
-            offset.saturating_add(u64::from(size))
-        })
+        (0, 0)
     }
 
     /// Append entry + value.
