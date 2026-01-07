@@ -165,6 +165,7 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
                 self.index.rewind_section(section, aligned_size).await?;
             }
 
+            // If there is nothing, we can exit early and rewind values to 0
             if entry_count == 0 {
                 warn!(
                     section,
