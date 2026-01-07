@@ -159,17 +159,17 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
 
             // Truncate any trailing partial entry
             if aligned_size < index_size {
-                debug!(
+                warn!(
                     section,
-                    index_size, aligned_size, "truncating partial trailing entry"
+                    index_size, aligned_size, "trailing bytes detected: truncating"
                 );
                 self.index.rewind_section(section, aligned_size).await?;
             }
 
             if entry_count == 0 {
-                debug!(
+                warn!(
                     section,
-                    index_size, "partial entry detected, rewinding to 0"
+                    index_size, "trailing bytes detected: truncating to 0"
                 );
                 self.values.rewind_section(section, 0).await?;
                 continue;
