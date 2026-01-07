@@ -60,6 +60,9 @@ mod iouring;
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
 
+/// Default [`Blob`] version used when no version is specified via [`Storage::open`].
+pub const DEFAULT_BLOB_VERSION: u16 = 0;
+
 /// Errors that can occur when interacting with the runtime.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -101,6 +104,13 @@ pub enum Error {
     BlobSyncFailed(String, String, IoError),
     #[error("blob insufficient length")]
     BlobInsufficientLength,
+    #[error("blob corrupt: {0}/{1} reason: {2}")]
+    BlobCorrupt(String, String, String),
+    #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
+    BlobVersionMismatch {
+        expected: std::ops::RangeInclusive<u16>,
+        found: u16,
+    },
     #[error("offset overflow")]
     OffsetOverflow,
     #[error("io error: {0}")]
@@ -536,6 +546,27 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// The readable/writeable storage buffer that can be opened by this Storage.
     type Blob: Blob;
 
+    /// [`Storage::open_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only value
+    /// in the versions range. The blob version is omitted from the return value.
+    fn open(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
+        let partition = partition.to_string();
+        let name = name.to_vec();
+        async move {
+            let (blob, size, _) = self
+                .open_versioned(
+                    &partition,
+                    &name,
+                    DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION,
+                )
+                .await?;
+            Ok((blob, size))
+        }
+    }
+
     /// Open an existing blob in a given partition or create a new one, returning
     /// the blob and its length.
     ///
@@ -543,11 +574,21 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// writing to the same blob concurrently may lead to undefined behavior.
     ///
     /// An Ok result indicates the blob is durably created (or already exists).
-    fn open(
+    ///
+    /// # Versions
+    ///
+    /// Blobs are versioned. If the blob's version is not in `versions`, returns
+    /// [Error::BlobVersionMismatch].
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (blob, logical_size, blob_version).
+    fn open_versioned(
         &self,
         partition: &str,
         name: &[u8],
-    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send;
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send;
 
     /// Remove a blob from a given partition.
     ///
@@ -923,10 +964,11 @@ mod tests {
             let name = b"test_blob";
 
             // Open a new blob
-            let (blob, _) = context
+            let (blob, size) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
+            assert_eq!(size, 0, "new blob should have size 0");
 
             // Write data to the blob
             let data = b"Hello, Storage!";

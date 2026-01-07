@@ -1,4 +1,4 @@
-use super::round::{CertifyResult, Round};
+use super::round::Round;
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
@@ -18,8 +18,8 @@ use commonware_utils::futures::Aborter;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use std::{
-    collections::BTreeMap,
-    mem::replace,
+    collections::{BTreeMap, BTreeSet},
+    mem::{replace, take},
     sync::atomic::AtomicI64,
     time::{Duration, SystemTime},
 };
@@ -57,6 +57,9 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
 
+    certification_candidates: BTreeSet<View>,
+    outstanding_certifications: BTreeSet<View>,
+
     current_view: Gauge,
     tracked_views: Gauge,
     skipped_views: Counter,
@@ -89,6 +92,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
+            certification_candidates: BTreeSet::new(),
+            outstanding_certifications: BTreeSet::new(),
             current_view,
             tracked_views,
             skipped_views,
@@ -227,6 +232,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Inserts a notarization certificate and prepares the next view's leader.
     ///
     /// Does not advance into the next view until certification passes.
+    /// Adds to certification candidates if successful.
     pub fn add_notarization(
         &mut self,
         notarization: Notarization<S, D>,
@@ -234,7 +240,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let view = notarization.view();
         // Do not advance to the next view until the certification passes
         self.set_leader(view.next(), Some(&notarization.certificate));
-        self.create_round(view).add_notarization(notarization)
+        let result = self.create_round(view).add_notarization(notarization);
+        if result.0 && view > self.last_finalized {
+            self.certification_candidates.insert(view);
+        }
+        result
     }
 
     /// Inserts a nullification certificate and advances into the next view.
@@ -250,10 +260,20 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         &mut self,
         finalization: Finalization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
-        // If this finalization increases our last finalized view, update it
         let view = finalization.view();
         if view > self.last_finalized {
             self.last_finalized = view;
+
+            // Prune certification candidates at or below finalized view
+            self.certification_candidates.retain(|v| *v > view);
+
+            // Abort outstanding certifications at or below finalized view
+            let keep = self.outstanding_certifications.split_off(&view.next());
+            for v in replace(&mut self.outstanding_certifications, keep) {
+                if let Some(round) = self.views.get_mut(&v) {
+                    round.abort_certify();
+                }
+            }
         }
 
         self.enter_view(view.next());
@@ -433,28 +453,27 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .unwrap_or(false)
     }
 
-    /// Attempt to certify a view's proposal.
-    pub fn try_certify(&mut self, view: View) -> CertifyResult<Proposal<D>> {
-        let Some(round) = self.views.get_mut(&view) else {
-            return CertifyResult::Skip;
-        };
-        round.should_certify()
-    }
-
     /// Store the abort handle for an in-flight certification request.
     pub fn set_certify_handle(&mut self, view: View, handle: Aborter) {
         let Some(round) = self.views.get_mut(&view) else {
             return;
         };
         round.set_certify_handle(handle);
+        self.outstanding_certifications.insert(view);
     }
 
-    /// Clear the certification handle, allowing certification to be retried.
-    pub fn retry_certification(&mut self, view: View) {
-        let Some(round) = self.views.get_mut(&view) else {
-            return;
-        };
-        round.unset_certify_handle();
+    /// Takes all certification candidates and returns proposals ready for certification.
+    pub fn certify_candidates(&mut self) -> Vec<Proposal<D>> {
+        let candidates = take(&mut self.certification_candidates);
+        candidates
+            .into_iter()
+            .filter_map(|view| {
+                if view <= self.last_finalized {
+                    return None;
+                }
+                self.views.get_mut(&view)?.try_certify()
+            })
+            .collect()
     }
 
     /// Marks proposal certification as complete and returns the notarization.
@@ -464,6 +483,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn certified(&mut self, view: View, is_success: bool) -> Option<Notarization<S, D>> {
         let round = self.views.get_mut(&view)?;
         round.certified(is_success);
+
+        // Remove from outstanding since certification is complete
+        self.outstanding_certifications.remove(&view);
 
         // Get notarization before advancing state
         let notarization = round
@@ -518,6 +540,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             None => return false,
         };
         round.nullification().is_some()
+    }
+
+    /// Returns true if certification for the view was aborted due to finalization.
+    #[cfg(test)]
+    pub fn is_certify_aborted(&self, view: View) -> bool {
+        self.views
+            .get(&view)
+            .is_some_and(|round| round.is_certify_aborted())
     }
 
     /// Finds the parent payload for a given view by walking backwards through
@@ -596,6 +626,7 @@ mod tests {
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_runtime::{deterministic, Runner};
+    use commonware_utils::futures::AbortablePool;
     use std::time::Duration;
 
     fn test_genesis() -> Sha256Digest {
@@ -842,7 +873,10 @@ mod tests {
             // The parent is still not certified
             assert!(state.parent_payload(&proposal).is_none());
 
-            // Certify the parent
+            // Set certify handle then certify the parent
+            let mut pool = AbortablePool::<()>::default();
+            let handle = pool.push(futures::future::pending());
+            state.set_certify_handle(parent_view, handle);
             state.certified(parent_view, true);
             let digest = state.parent_payload(&proposal).expect("parent payload");
             assert_eq!(digest, parent_payload);
@@ -1110,6 +1144,127 @@ mod tests {
 
             // Shouldn't finalize the certificate's proposal (proposal_b)
             assert!(restarted.construct_finalize(view).is_none());
+        });
+    }
+
+    #[test]
+    fn certification_lifecycle() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: verifier.clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            // Helper to create notarization for a view
+            let make_notarization = |view: View| {
+                let proposal = Proposal::new(
+                    Rnd::new(Epoch::new(1), view),
+                    GENESIS_VIEW,
+                    Sha256Digest::from([view.get() as u8; 32]),
+                );
+                let votes: Vec<_> = schemes
+                    .iter()
+                    .map(|s| Notarize::sign(s, proposal.clone()).unwrap())
+                    .collect();
+                Notarization::from_notarizes(&verifier, votes.iter()).unwrap()
+            };
+
+            // Helper to create finalization for a view
+            let make_finalization = |view: View| {
+                let proposal = Proposal::new(
+                    Rnd::new(Epoch::new(1), view),
+                    GENESIS_VIEW,
+                    Sha256Digest::from([view.get() as u8; 32]),
+                );
+                let votes: Vec<_> = schemes
+                    .iter()
+                    .map(|s| Finalize::sign(s, proposal.clone()).unwrap())
+                    .collect();
+                Finalization::from_finalizes(&verifier, votes.iter()).unwrap()
+            };
+
+            let mut pool = AbortablePool::<()>::default();
+
+            // Add notarizations for views 3-8
+            for i in 3..=8u64 {
+                state.add_notarization(make_notarization(View::new(i)));
+            }
+
+            // All 6 views should be candidates
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 6);
+
+            // Set certify handles for views 3, 4, 5, 7 (NOT 6 or 8)
+            for i in [3u64, 4, 5, 7] {
+                let handle = pool.push(futures::future::pending());
+                state.set_certify_handle(View::new(i), handle);
+            }
+
+            // Candidates empty (consumed by certify_candidates, handles block re-fetching)
+            assert!(state.certify_candidates().is_empty());
+
+            // Complete certification for view 7 (success)
+            let notarization = state.certified(View::new(7), true);
+            assert!(notarization.is_some());
+
+            // View 7 should not be aborted (it was certified successfully)
+            assert!(!state.is_certify_aborted(View::new(7)));
+
+            // Add finalization for view 5 - aborts handles for views 3, 4, 5
+            state.add_finalization(make_finalization(View::new(5)));
+
+            // Verify views 3, 4, 5 had their certification aborted
+            assert!(state.is_certify_aborted(View::new(3)));
+            assert!(state.is_certify_aborted(View::new(4)));
+            assert!(state.is_certify_aborted(View::new(5)));
+
+            // View 7 still not aborted (was certified, and 7 > 5)
+            assert!(!state.is_certify_aborted(View::new(7)));
+
+            // Views 6, 8 never had handles set, so they're not aborted (still Ready)
+            assert!(!state.is_certify_aborted(View::new(6)));
+            assert!(!state.is_certify_aborted(View::new(8)));
+
+            // Candidates empty: 3-5 finalized, 6/8 consumed, 7 certified
+            assert!(state.certify_candidates().is_empty());
+
+            // Add view 9, should be returned as candidate
+            state.add_notarization(make_notarization(View::new(9)));
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].round.view(), View::new(9));
+
+            // Set handle for view 9, add view 10
+            let handle9 = pool.push(futures::future::pending());
+            state.set_certify_handle(View::new(9), handle9);
+            state.add_notarization(make_notarization(View::new(10)));
+
+            // View 10 returned (view 9 has handle)
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].round.view(), View::new(10));
+
+            // Finalize view 9 - aborts view 9's handle
+            state.add_finalization(make_finalization(View::new(9)));
+            assert!(state.is_certify_aborted(View::new(9)));
+
+            // Add view 11, should be returned
+            state.add_notarization(make_notarization(View::new(11)));
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].round.view(), View::new(11));
         });
     }
 
