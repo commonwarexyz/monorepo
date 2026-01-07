@@ -53,7 +53,7 @@ fn test_private_key(data: &[u8]) {
             if let (Ok(ref_key), Ok(our_key)) = (ref_result, our_result) {
                 assert_eq!(
                     ref_key.to_bytes().as_slice(),
-                    our_key.as_ref(),
+                    our_key.encode().as_ref(),
                     "32-byte input: keys don't match"
                 );
             }

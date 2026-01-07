@@ -1,8 +1,9 @@
 use crate::{
     authenticated::{data::Data, lookup::channels::Channels, relay::Relay, Mailbox},
+    utils::limited::Connected,
     Channel, Recipients,
 };
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
 use commonware_utils::channels::ring;
 use futures::channel::oneshot;
@@ -73,7 +74,7 @@ impl<P: PublicKey> Messenger<P> {
         &mut self,
         recipients: Recipients<P>,
         channel: Channel,
-        message: Bytes,
+        mut message: impl Buf + Send,
         priority: bool,
     ) -> Vec<P> {
         let (sender, receiver) = oneshot::channel();
@@ -81,7 +82,7 @@ impl<P: PublicKey> Messenger<P> {
             .send(Message::Content {
                 recipients,
                 channel,
-                message,
+                message: message.copy_to_bytes(message.remaining()),
                 priority,
                 success: sender,
             })
@@ -89,9 +90,12 @@ impl<P: PublicKey> Messenger<P> {
             .unwrap();
         receiver.await.unwrap()
     }
+}
 
-    /// Returns a subscription channel for the peers known to the router.
-    pub async fn subscribe_peers(&mut self) -> ring::Receiver<Vec<P>> {
+impl<P: PublicKey> Connected for Messenger<P> {
+    type PublicKey = P;
+
+    async fn subscribe(&mut self) -> ring::Receiver<Vec<P>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::SubscribePeers { response: sender })

@@ -2,7 +2,8 @@ use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ri
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
-use commonware_utils::ordered::Map;
+use commonware_parallel::Strategy as ParStrategy;
+use commonware_utils::{non_empty_vec, ordered::Map, vec::NonEmptyVec, TryCollect};
 use core::{
     fmt::Debug,
     iter,
@@ -10,8 +11,6 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
-#[cfg(feature = "std")]
-use rayon::{prelude::*, ThreadPoolBuilder};
 
 // SECTION: Performance knobs.
 const MIN_POINTS_FOR_MSM: usize = 2;
@@ -20,7 +19,7 @@ const MIN_POINTS_FOR_MSM: usize = 2;
 #[derive(Clone)]
 pub struct Poly<K> {
     // Invariant: (1..=u32::MAX).contains(coeffs.len())
-    coeffs: Vec<K>,
+    coeffs: NonEmptyVec<K>,
 }
 
 impl<K> Poly<K> {
@@ -28,12 +27,11 @@ impl<K> Poly<K> {
         self.coeffs
             .len()
             .try_into()
-            .and_then(|x: u32| x.try_into())
             .expect("Impossible: polynomial length not in 1..=u32::MAX")
     }
 
     fn len_usize(&self) -> usize {
-        self.len().get() as usize
+        self.coeffs.len().get()
     }
 
     /// Internal method to construct a polynomial from an iterator.
@@ -41,11 +39,10 @@ impl<K> Poly<K> {
     /// This will panic if the iterator does not return any coefficients,
     /// so make sure that the iterator you pass to this function does that.
     fn from_iter_unchecked(iter: impl IntoIterator<Item = K>) -> Self {
-        let coeffs = iter.into_iter().collect::<Vec<_>>();
-        assert!(
-            !coeffs.is_empty(),
-            "polynomial must have a least 1 coefficient"
-        );
+        let coeffs = iter
+            .into_iter()
+            .try_collect::<NonEmptyVec<_>>()
+            .expect("polynomial must have a least 1 coefficient");
         Self { coeffs }
     }
 
@@ -83,7 +80,7 @@ impl<K> Poly<K> {
     /// polynomial.
     pub fn translate<L>(&self, f: impl Fn(&K) -> L) -> Poly<L> {
         Poly {
-            coeffs: self.coeffs.iter().map(f).collect(),
+            coeffs: self.coeffs.map(f),
         }
     }
 
@@ -129,7 +126,7 @@ impl<K> Poly<K> {
     /// This method uses more scratch space, and requires cloning values of
     /// type `R` more, but should be better if [`Space::msm`] has a better algorithm
     /// for `K`.
-    pub fn eval_msm<R: Ring>(&self, r: &R) -> K
+    pub fn eval_msm<R: Ring, S: ParStrategy>(&self, r: &R, strategy: &S) -> K
     where
         K: Space<R>,
     {
@@ -145,7 +142,7 @@ impl<K> Poly<K> {
             }
             out
         };
-        K::msm(&self.coeffs, &weights, 1)
+        K::msm(&self.coeffs, &weights, strategy)
     }
 }
 
@@ -184,7 +181,7 @@ impl<K: Read> Read for Poly<K> {
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            coeffs: Vec::<K>::read_cfg(buf, &(cfg.0.into(), cfg.1.clone()))?,
+            coeffs: NonEmptyVec::<K>::read_cfg(buf, &(cfg.0.into(), cfg.1.clone()))?,
         })
     }
 }
@@ -228,7 +225,7 @@ impl<K: Additive> Eq for Poly<K> {}
 impl<K: Additive> Poly<K> {
     fn merge_with(&mut self, rhs: &Self, f: impl Fn(&mut K, &K)) {
         self.coeffs
-            .resize(self.len_usize().max(rhs.len_usize()), K::zero());
+            .resize(self.coeffs.len().max(rhs.coeffs.len()), K::zero());
         self.coeffs
             .iter_mut()
             .zip(&rhs.coeffs)
@@ -290,7 +287,7 @@ impl<K: Additive> Neg for Poly<K> {
 
     fn neg(self) -> Self::Output {
         Self {
-            coeffs: self.coeffs.into_iter().map(Neg::neg).collect::<Vec<_>>(),
+            coeffs: self.coeffs.map_into(Neg::neg),
         }
     }
 }
@@ -298,7 +295,7 @@ impl<K: Additive> Neg for Poly<K> {
 impl<K: Additive> Additive for Poly<K> {
     fn zero() -> Self {
         Self {
-            coeffs: vec![K::zero()],
+            coeffs: non_empty_vec![K::zero()],
         }
     }
 }
@@ -320,9 +317,8 @@ impl<'a, R, K: Space<R>> Mul<&'a R> for Poly<K> {
     }
 }
 
-#[cfg(feature = "std")]
-impl<R: Sync, K: Space<R>> Space<R> for Poly<K> {
-    fn msm(polys: &[Self], scalars: &[R], concurrency: usize) -> Self {
+impl<R: Sync, K: Space<R> + Send> Space<R> for Poly<K> {
+    fn msm(polys: &[Self], scalars: &[R], strategy: &impl ParStrategy) -> Self {
         if polys.len() < MIN_POINTS_FOR_MSM {
             return msm_naive(polys, scalars);
         }
@@ -337,69 +333,18 @@ impl<R: Sync, K: Space<R>> Space<R> for Poly<K> {
             .max()
             .expect("at least 1 point");
 
-        if concurrency > 1 {
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(concurrency)
-                .build()
-                .expect("Unable to build thread pool");
-
-            let coeffs = pool.install(|| {
-                (0..rows)
-                    .into_par_iter()
-                    .map(|i| {
-                        let row: Vec<_> = polys
-                            .iter()
-                            .map(|p| p.coeffs.get(i).cloned().unwrap_or_else(K::zero))
-                            .collect();
-                        K::msm(&row, scalars, 1)
-                    })
-                    .collect()
-            });
-            return Self { coeffs };
-        }
-
-        let mut row = Vec::with_capacity(cols);
-        let coeffs = (0..rows)
-            .map(|i| {
+        let coeffs = strategy.map_init_collect_vec(
+            0..rows,
+            || Vec::with_capacity(cols),
+            |row, i| {
                 row.clear();
                 for p in polys {
                     row.push(p.coeffs.get(i).cloned().unwrap_or_else(K::zero));
                 }
-                K::msm(&row, scalars, concurrency)
-            })
-            .collect::<Vec<_>>();
-        Self { coeffs }
-    }
-}
-
-#[cfg(not(feature = "std"))]
-impl<R, K: Space<R>> Space<R> for Poly<K> {
-    fn msm(polys: &[Self], scalars: &[R], concurrency: usize) -> Self {
-        if polys.len() < MIN_POINTS_FOR_MSM {
-            return msm_naive(polys, scalars);
-        }
-
-        let cols = polys.len().min(scalars.len());
-        let polys = &polys[..cols];
-        let scalars = &scalars[..cols];
-
-        let rows = polys
-            .iter()
-            .map(|x| x.len_usize())
-            .max()
-            .expect("at least 1 point");
-
-        let mut row = Vec::with_capacity(cols);
-        let coeffs = (0..rows)
-            .map(|i| {
-                row.clear();
-                for p in polys {
-                    row.push(p.coeffs.get(i).cloned().unwrap_or_else(K::zero));
-                }
-                K::msm(&row, scalars, concurrency)
-            })
-            .collect::<Vec<_>>();
-        Self { coeffs }
+                K::msm(row, scalars, strategy)
+            },
+        );
+        Poly::from_iter_unchecked(coeffs)
     }
 }
 
@@ -426,16 +371,17 @@ impl<G: CryptoGroup> Poly<G> {
 ///
 /// ```
 /// # use commonware_math::{fields::goldilocks::F, poly::{Poly, Interpolator}};
+/// # use commonware_parallel::Sequential;
 /// # use commonware_utils::TryCollect;
 /// # fn example(f: Poly<F>, g: Poly<F>, p0: F, p1: F) {
 ///     let interpolator = Interpolator::new([(0, p0), (1, p1)]);
 ///     assert_eq!(
 ///         Some(*f.constant()),
-///         interpolator.interpolate(&[(0, f.eval(&p0)), (1, f.eval(&p1))].into_iter().try_collect().unwrap(), 1)
+///         interpolator.interpolate(&[(0, f.eval(&p0)), (1, f.eval(&p1))].into_iter().try_collect().unwrap(), &Sequential)
 ///     );
 ///     assert_eq!(
 ///         Some(*g.constant()),
-///         interpolator.interpolate(&[(1, g.eval(&p1)), (0, g.eval(&p0))].into_iter().try_collect().unwrap(), 1)
+///         interpolator.interpolate(&[(1, g.eval(&p1)), (0, g.eval(&p0))].into_iter().try_collect().unwrap(), &Sequential)
 ///     );
 /// # }
 /// ```
@@ -448,11 +394,15 @@ impl<I: PartialEq, F: Ring> Interpolator<I, F> {
     ///
     /// The indices provided here MUST match those provided to [`Self::new`] exactly,
     /// otherwise `None` will be returned.
-    pub fn interpolate<K: Space<F>>(&self, evals: &Map<I, K>, concurrency: usize) -> Option<K> {
+    pub fn interpolate<K: Space<F>, S: ParStrategy>(
+        &self,
+        evals: &Map<I, K>,
+        strategy: &S,
+    ) -> Option<K> {
         if evals.keys() != self.weights.keys() {
             return None;
         }
-        Some(K::msm(evals.values(), self.weights.values(), concurrency))
+        Some(K::msm(evals.values(), self.weights.values(), strategy))
     }
 }
 
@@ -496,12 +446,9 @@ mod fuzz {
 
     impl<'a, F: Arbitrary<'a>> Arbitrary<'a> for Poly<F> {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-            let size = u.arbitrary_len::<F>()?.max(1);
-            let coeffs = u
-                .arbitrary_iter::<F>()?
-                .take(size)
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Self { coeffs })
+            Ok(Self {
+                coeffs: u.arbitrary()?,
+            })
         }
     }
 }
@@ -524,7 +471,7 @@ mod test {
         fn arbitrary_with(size: Self::Parameters) -> Self::Strategy {
             let nonempty_size = if size.start() == 0 { size + 1 } else { size };
             proptest::collection::vec(F::arbitrary(), nonempty_size)
-                .prop_map(|coeffs| Poly { coeffs })
+                .prop_map(Poly::from_iter_unchecked)
                 .boxed()
         }
     }
@@ -547,9 +494,9 @@ mod test {
     fn test_eq() {
         fn eq(a: &[u8], b: &[u8]) -> bool {
             Poly {
-                coeffs: a.iter().copied().map(F::from).collect(),
+                coeffs: a.iter().copied().map(F::from).try_collect().unwrap(),
             } == Poly {
-                coeffs: b.iter().copied().map(F::from).collect(),
+                coeffs: b.iter().copied().map(F::from).try_collect().unwrap(),
             }
         }
         assert!(eq(&[1, 2], &[1, 2]));
@@ -585,21 +532,23 @@ mod test {
 
         #[test]
         fn test_eval_msm(f: Poly<F>, x: F) {
-            assert_eq!(f.eval(&x), f.eval_msm(&x));
+            use commonware_parallel::Sequential;
+            assert_eq!(f.eval(&x), f.eval_msm(&x, &Sequential));
         }
 
         #[test]
         fn test_interpolate(f: Poly<F>) {
+            use commonware_parallel::Sequential;
             // Make sure this isn't the zero polynomial.
             prop_assume!(f != Poly::zero());
             prop_assume!(f.required().get() < F::MAX as u32);
             let mut points = (0..f.required().get()).map(|i| F::from((i + 1) as u8)).collect::<Vec<_>>();
             let interpolator = Interpolator::new(points.iter().copied().enumerate());
             let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
-            let recovered = interpolator.interpolate(&evals, 1);
+            let recovered = interpolator.interpolate(&evals, &Sequential);
             assert_eq!(recovered.as_ref(), Some(f.constant()));
             points.pop();
-            assert!(interpolator.interpolate(&Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate()), 1).is_none());
+            assert!(interpolator.interpolate(&Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate()), &Sequential).is_none());
         }
 
         #[test]

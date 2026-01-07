@@ -1,37 +1,37 @@
-use super::types::{Activity, Index};
+use super::types::Activity;
 use crate::{
-    types::{Epoch, EpochDelta},
-    Automaton, Monitor, Reporter, ThresholdSupervisor,
+    types::{Epoch, EpochDelta, Height, HeightDelta},
+    Automaton, Monitor, Reporter,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use commonware_cryptography::{
+    certificate::{Provider, Scheme},
+    Digest,
+};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
-use commonware_utils::{Array, NonZeroDuration};
+use commonware_utils::NonZeroDuration;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Configuration for the [super::Engine].
 pub struct Config<
-    P: Array,
-    V: Variant,
+    P: Provider<Scope = Epoch>,
     D: Digest,
-    A: Automaton<Context = Index, Digest = D>,
-    Z: Reporter<Activity = Activity<V, D>>,
+    A: Automaton<Context = Height, Digest = D>,
+    Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    B: Blocker<PublicKey = P>,
-    TSu: ThresholdSupervisor<Index = Epoch, PublicKey = P>,
+    B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
 > {
     /// Tracks the current state of consensus (to determine which participants should
     /// be involved in the current broadcast attempt).
     pub monitor: M,
 
-    /// Manages the set of validators and the group identity.
-    /// Also manages the cryptographic partial share if the engine is a validator.
-    pub validators: TSu,
+    /// Provider for epoch-specific signing schemes.
+    pub provider: P,
 
     /// Proposes and verifies [Digest]s.
     pub automaton: A,
 
-    /// Notified when a chunk receives a threshold of [super::types::Ack]s.
+    /// Notified when a chunk receives a quorum of [super::types::Ack]s.
     pub reporter: Z,
 
     /// Blocker for the network.
@@ -39,14 +39,10 @@ pub struct Config<
     /// Blocking is handled by [commonware_p2p].
     pub blocker: B,
 
-    /// The application namespace used to sign over different types of messages.
-    /// Used to prevent replay attacks on other applications.
-    pub namespace: Vec<u8>,
-
     /// Whether acks are sent as priority.
     pub priority_acks: bool,
 
-    /// How often an ack is rebroadcast to all validators if no threshold is reached.
+    /// How often an ack is rebroadcast to all validators if no quorum is reached.
     pub rebroadcast_timeout: NonZeroDuration,
 
     /// A tuple representing the epochs to keep in memory.
@@ -61,8 +57,8 @@ pub struct Config<
     /// The number of chunks to process concurrently.
     pub window: NonZeroU64,
 
-    /// Number of indices to track below the tip when collecting acks and/or pruning.
-    pub activity_timeout: u64,
+    /// Number of heights to track below the tip when collecting acks and/or pruning.
+    pub activity_timeout: HeightDelta,
 
     /// Partition for the [commonware_storage::journal::segmented::variable::Journal].
     pub journal_partition: String,

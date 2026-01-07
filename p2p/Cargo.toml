@@ -24,13 +24,13 @@ commonware-stream.workspace = true
 commonware-utils.workspace = true
 either.workspace = true
 futures.workspace = true
-governor.workspace = true
 num-bigint.workspace = true
 num-integer.workspace = true
 num-rational.workspace = true
 num-traits.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 rand_distr.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -44,6 +44,7 @@ tracing-subscriber.workspace = true
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
+	"commonware-runtime/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 	"num-bigint/arbitrary",

@@ -1,10 +1,11 @@
 use commonware_codec::EncodeSize as _;
 use commonware_coding::{Config, NoCoding, ReedSolomon, Scheme, Zoda};
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use rand::{RngCore as _, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 
-const CONCURRENCY: usize = 1;
+const STRATEGY: Sequential = Sequential;
 
 fn benchmark_size<S: Scheme>(name: &str) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
@@ -24,8 +25,7 @@ fn benchmark_size<S: Scheme>(name: &str) {
                 data
             };
 
-            let (commitment, mut shards) =
-                S::encode(&config, data.as_slice(), CONCURRENCY).unwrap();
+            let (commitment, mut shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
             let shard = shards.pop().unwrap();
             println!(
                 "{} (shard)/msg_len={} chunks={}: {} B",

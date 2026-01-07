@@ -1,6 +1,5 @@
-use crate::authenticated::discovery::types::Info;
+use crate::{authenticated::discovery::types::Info, Ingress};
 use commonware_cryptography::PublicKey;
-use std::net::SocketAddr;
 use tracing::trace;
 
 /// Represents information known about a peer's address.
@@ -15,16 +14,12 @@ pub enum Address<C: PublicKey> {
 
     /// Address is provided during initialization.
     /// Can be upgraded to `Discovered`.
-    Bootstrapper(SocketAddr),
+    Bootstrapper(Ingress),
 
     /// Discovered this peer's address from other peers.
     ///
     /// The `usize` indicates the number of times dialing this record has failed.
     Discovered(Info<C>, usize),
-
-    /// Peer is blocked.
-    /// We don't care to track its information.
-    Blocked,
 }
 
 /// Represents the connection status of a peer.
@@ -83,9 +78,9 @@ impl<C: PublicKey> Record<C> {
     }
 
     /// Create a new record with a bootstrapper address.
-    pub const fn bootstrapper(socket: SocketAddr) -> Self {
+    pub fn bootstrapper(ingress: impl Into<Ingress>) -> Self {
         Self {
-            address: Address::Bootstrapper(socket),
+            address: Address::Bootstrapper(ingress.into()),
             status: Status::Inert,
             sets: 0,
             persistent: true,
@@ -100,7 +95,6 @@ impl<C: PublicKey> Record<C> {
     pub fn update(&mut self, info: Info<C>) -> bool {
         match &self.address {
             Address::Myself(_) => false,
-            Address::Blocked => false,
             Address::Unknown | Address::Bootstrapper(_) => {
                 self.address = Address::Discovered(info, 0);
                 true
@@ -125,19 +119,6 @@ impl<C: PublicKey> Record<C> {
         }
     }
 
-    /// Attempt to mark the peer as blocked.
-    ///
-    /// Returns `true` if the peer was newly blocked.
-    /// Returns `false` if the peer was already blocked or is the local node (unblockable).
-    pub fn block(&mut self) -> bool {
-        if matches!(self.address, Address::Blocked | Address::Myself(_)) {
-            return false;
-        }
-        self.address = Address::Blocked;
-        self.persistent = false;
-        true
-    }
-
     /// Increase the count of peer sets this peer is part of.
     pub const fn increment(&mut self) {
         self.sets = self.sets.checked_add(1).unwrap();
@@ -156,7 +137,7 @@ impl<C: PublicKey> Record<C> {
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
     pub const fn reserve(&mut self) -> bool {
-        if matches!(self.address, Address::Blocked | Address::Myself(_)) {
+        if matches!(self.address, Address::Myself(_)) {
             return false;
         }
         if matches!(self.status, Status::Inert) {
@@ -180,11 +161,11 @@ impl<C: PublicKey> Record<C> {
         self.status = Status::Inert;
     }
 
-    /// Indicate that there was a dial failure for this peer using the given `socket`, which is
+    /// Indicate that there was a dial failure for this peer using the given `ingress`, which is
     /// checked against the existing record to ensure that we correctly attribute the failure.
-    pub fn dial_failure(&mut self, socket: SocketAddr) {
+    pub fn dial_failure(&mut self, ingress: &Ingress) {
         if let Address::Discovered(info, fails) = &mut self.address {
-            if info.socket == socket {
+            if &info.ingress == ingress {
                 *fails += 1;
             }
         }
@@ -203,9 +184,12 @@ impl<C: PublicKey> Record<C> {
 
     // ---------- Getters ----------
 
-    /// Returns `true` if the record is blocked.
-    pub const fn blocked(&self) -> bool {
-        matches!(self.address, Address::Blocked)
+    /// Returns `true` if this peer can be blocked.
+    ///
+    /// Only `Myself` cannot be blocked. Actual blocked status is tracked
+    /// by the Directory via PrioritySet.
+    pub const fn is_blockable(&self) -> bool {
+        !matches!(self.address, Address::Myself(_))
     }
 
     /// Returns the number of peer sets this peer is part of.
@@ -216,34 +200,40 @@ impl<C: PublicKey> Record<C> {
     /// Returns `true` if the record is dialable.
     ///
     /// A record is dialable if:
-    /// - We have the socket address of the peer
+    /// - We have the ingress address of the peer
     /// - It is not ourselves
-    /// - We are not already connected
-    pub fn dialable(&self) -> bool {
-        self.status == Status::Inert
-            && matches!(
-                self.address,
-                Address::Bootstrapper(_) | Address::Discovered(_, _)
-            )
-    }
-
-    /// Returns `true` if the peer is listenable.
+    /// - We are not already connected or reserved
+    /// - The ingress address is allowed (DNS enabled, Socket IP is global or private IPs allowed)
     ///
-    /// A record is listenable if:
-    /// - The peer is allowed
-    /// - We are not already connected
-    pub fn listenable(&self) -> bool {
-        self.allowed() && self.status == Status::Inert
+    /// Note: For DNS addresses, private IP checks are performed in the dialer after resolution.
+    pub fn dialable(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
+        if self.status != Status::Inert {
+            return false;
+        }
+        let ingress = match &self.address {
+            Address::Bootstrapper(ingress) => ingress,
+            Address::Discovered(info, _) => &info.ingress,
+            _ => return false,
+        };
+        ingress.is_valid(allow_private_ips, allow_dns)
     }
 
-    /// Return the socket of the peer, if known.
-    pub const fn socket(&self) -> Option<SocketAddr> {
+    /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
+    ///
+    /// A peer is acceptable if:
+    /// - The peer is eligible (in a peer set, not ourselves)
+    /// - We are not already connected or reserved
+    pub fn acceptable(&self) -> bool {
+        self.eligible() && self.status == Status::Inert
+    }
+
+    /// Return the ingress address of the peer, if known.
+    pub const fn ingress(&self) -> Option<&Ingress> {
         match &self.address {
             Address::Unknown => None,
-            Address::Myself(info) => Some(info.socket),
-            Address::Bootstrapper(socket) => Some(*socket),
-            Address::Discovered(info, _) => Some(info.socket),
-            Address::Blocked => None,
+            Address::Myself(info) => Some(&info.ingress),
+            Address::Bootstrapper(ingress) => Some(ingress),
+            Address::Discovered(info, _) => Some(&info.ingress),
         }
     }
 
@@ -255,7 +245,6 @@ impl<C: PublicKey> Record<C> {
             Address::Myself(info) => Some(info),
             Address::Bootstrapper(_) => None,
             Address::Discovered(info, _) => (self.status == Status::Active).then_some(info),
-            Address::Blocked => None,
         }
         .cloned()
     }
@@ -268,19 +257,13 @@ impl<C: PublicKey> Record<C> {
 
     /// Returns `true` if we want to ask for updated peer information for this peer.
     ///
-    /// - Returns `false` for `Myself` and `Blocked` addresses.
+    /// - Returns `false` for `Myself` addresses.
     /// - Returns `true` for addresses for which we don't have peer info.
-    /// - Returns true for addresses for which we do have peer info if-and-only-if we have failed to
+    /// - Returns `true` for addresses for which we do have peer info if-and-only-if we have failed to
     ///   dial at least `min_fails` times.
     pub fn want(&self, min_fails: usize) -> bool {
-        // Ignore how many sets the peer is part of.
-        // If the peer is not in any sets, this function is not called anyway.
-
-        // Return true if we either:
-        // - Don't have signed peer info
-        // - Are not connected to the peer and have failed dialing it
         match self.address {
-            Address::Myself(_) | Address::Blocked => false,
+            Address::Myself(_) => false,
             Address::Unknown | Address::Bootstrapper(_) => true,
             Address::Discovered(_, fails) => self.status != Status::Active && fails >= min_fails,
         }
@@ -291,10 +274,14 @@ impl<C: PublicKey> Record<C> {
         self.sets == 0 && !self.persistent && matches!(self.status, Status::Inert)
     }
 
-    /// Returns `true` if the record is allowed to be used for connection.
-    pub const fn allowed(&self) -> bool {
+    /// Returns `true` if this peer is eligible for connection.
+    ///
+    /// A peer is eligible if:
+    /// - It is not ourselves
+    /// - It is part of at least one peer set (or is persistent, e.g., bootstrapper)
+    pub const fn eligible(&self) -> bool {
         match self.address {
-            Address::Blocked | Address::Myself(_) => false,
+            Address::Myself(_) => false,
             Address::Bootstrapper(_) | Address::Unknown | Address::Discovered(_, _) => {
                 self.sets > 0 || self.persistent
             }
@@ -304,7 +291,7 @@ impl<C: PublicKey> Record<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::Encode;
+    use crate::authenticated::discovery::types;
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use std::net::SocketAddr;
 
@@ -320,13 +307,7 @@ mod tests {
         S: commonware_cryptography::PrivateKey,
     {
         let signer = S::from_seed(signer_seed);
-        let signature = signer.sign(NAMESPACE, &(socket, timestamp).encode());
-        Info {
-            socket,
-            timestamp,
-            public_key: signer.public_key(),
-            signature,
-        }
+        types::Info::sign(&signer, NAMESPACE, socket, timestamp)
     }
 
     // Common test sockets
@@ -342,7 +323,7 @@ mod tests {
         actual: &Info<S>,
         expected: &Info<S>,
     ) -> bool {
-        actual.socket == expected.socket
+        actual.ingress == expected.ingress
             && actual.timestamp == expected.timestamp
             && actual.public_key == expected.public_key
             && actual.signature == expected.signature
@@ -363,13 +344,12 @@ mod tests {
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(!record.persistent);
-        assert_eq!(record.socket(), None);
+        assert!(record.ingress().is_none());
         assert!(record.sharable().is_none());
-        assert!(!record.blocked());
         assert!(!record.reserved());
         assert!(record.want(0), "Should want info for unknown peer");
         assert!(record.deletable());
-        assert!(!record.allowed());
+        assert!(!record.eligible());
     }
 
     #[test]
@@ -382,33 +362,32 @@ mod tests {
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
-        assert_eq!(record.socket(), Some(my_info.socket),);
+        assert_eq!(record.ingress(), Some(&my_info.ingress));
         assert!(compare_optional_peer_info(
             record.sharable().as_ref(),
             &my_info
         ));
-        assert!(!record.blocked());
         assert!(!record.reserved());
         assert!(!record.want(0), "Should not want info for myself");
         assert!(!record.deletable());
-        assert!(!record.allowed());
+        assert!(!record.eligible());
     }
 
     #[test]
     fn test_bootstrapper_initial_state() {
         let socket = test_socket();
+        let ingress = Ingress::Socket(socket);
         let record = Record::<PublicKey>::bootstrapper(socket);
-        assert!(matches!(record.address, Address::Bootstrapper(s) if s == socket));
+        assert!(matches!(&record.address, Address::Bootstrapper(i) if *i == ingress));
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
-        assert_eq!(record.socket(), Some(socket));
+        assert_eq!(record.ingress(), Some(&ingress));
         assert!(record.sharable().is_none());
-        assert!(!record.blocked());
         assert!(!record.reserved());
         assert!(record.want(0), "Should want info for bootstrapper");
         assert!(!record.deletable());
-        assert!(record.allowed());
+        assert!(record.eligible());
     }
 
     #[test]
@@ -418,7 +397,7 @@ mod tests {
         let peer_info = create_peer_info::<PrivateKey>(1, socket, 1000);
 
         assert!(record.update(peer_info.clone()));
-        assert_eq!(record.socket(), Some(socket));
+        assert_eq!(record.ingress(), Some(&peer_info.ingress));
         assert!(
             matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info)),
             "Address should be Discovered with 0 failures"
@@ -435,7 +414,7 @@ mod tests {
 
         assert!(record.persistent, "Should start as persistent");
         assert!(record.update(peer_info.clone()));
-        assert_eq!(record.socket(), Some(socket));
+        assert_eq!(record.ingress(), Some(&peer_info.ingress));
         assert!(
             matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info)),
             "Address should be Discovered with 0 failures"
@@ -454,7 +433,7 @@ mod tests {
         assert!(record.update(peer_info_old));
         assert!(record.update(peer_info_new.clone()));
 
-        assert_eq!(record.socket(), Some(socket));
+        assert_eq!(record.ingress(), Some(&peer_info_new.ingress));
         assert!(
             matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_new)),
             "Address should contain newer info"
@@ -485,25 +464,19 @@ mod tests {
     }
 
     #[test]
-    fn test_update_myself_and_blocked() {
+    fn test_update_myself() {
         let my_info = create_peer_info::<PrivateKey>(0, test_socket(), 100);
         let mut record_myself = Record::myself(my_info.clone());
         let other_info = create_peer_info::<PrivateKey>(1, test_socket2(), 200);
         let newer_my_info = create_peer_info::<PrivateKey>(0, test_socket(), 300);
 
         // Cannot update Myself record with other info or newer self info
-        assert!(!record_myself.update(other_info.clone()));
+        assert!(!record_myself.update(other_info));
         assert!(!record_myself.update(newer_my_info));
         assert!(
             matches!(&record_myself.address, Address::Myself(info) if peer_info_contents_are_equal(info, &my_info)),
             "Myself record should remain unchanged"
         );
-
-        // Cannot update a Blocked record
-        let mut record_blocked = Record::<PublicKey>::unknown();
-        assert!(record_blocked.block());
-        assert!(!record_blocked.update(other_info));
-        assert!(matches!(record_blocked.address, Address::Blocked));
     }
 
     #[test]
@@ -578,79 +551,26 @@ mod tests {
     }
 
     #[test]
-    fn test_block_behavior_and_persistence() {
-        let sample_peer_info = create_peer_info::<PrivateKey>(20, test_socket(), 1000);
-
-        // Block an Unknown record
-        let mut record_unknown = Record::<PublicKey>::unknown();
-        assert!(!record_unknown.persistent);
-        assert!(record_unknown.block()); // Newly blocked
-        assert!(record_unknown.blocked());
-        assert!(matches!(record_unknown.address, Address::Blocked));
-        assert_eq!(record_unknown.status, Status::Inert);
-        assert!(!record_unknown.persistent, "Blocking sets persistent=false");
-        assert!(!record_unknown.block()); // Already blocked
-
-        // Block a Bootstrapper record (initially persistent)
-        let mut record_boot = Record::<PublicKey>::bootstrapper(test_socket());
-        assert!(record_boot.persistent);
-        assert!(record_boot.block());
-        assert!(record_boot.blocked());
-        assert!(matches!(record_boot.address, Address::Blocked));
-        assert!(!record_boot.persistent, "Blocking sets persistent=false");
-
-        // Block a Discovered record (initially not persistent)
-        let mut record_disc = Record::<PublicKey>::unknown();
-        assert!(record_disc.update(sample_peer_info.clone()));
-        assert!(!record_disc.persistent);
-        assert!(record_disc.block());
-        assert!(record_disc.blocked());
-        assert!(matches!(record_disc.address, Address::Blocked));
-        assert!(!record_disc.persistent);
-
-        // Block a Discovered record that came from a Bootstrapper (initially persistent)
-        let mut record_disc_from_boot = Record::<PublicKey>::bootstrapper(test_socket());
-        assert!(record_disc_from_boot.update(sample_peer_info.clone()));
-        assert!(record_disc_from_boot.persistent);
-        assert!(record_disc_from_boot.block());
-        assert!(record_disc_from_boot.blocked());
-        assert!(matches!(record_disc_from_boot.address, Address::Blocked));
-        assert!(
-            !record_disc_from_boot.persistent,
-            "Blocking sets persistent=false"
-        );
-
-        // Check status remains unchanged when blocking
-        let mut record_reserved = Record::<PublicKey>::unknown();
-        assert!(record_reserved.update(sample_peer_info.clone()));
-        assert!(record_reserved.reserve());
-        assert!(record_reserved.block());
-        assert_eq!(record_reserved.status, Status::Reserved);
-
-        let mut record_active = Record::<PublicKey>::unknown();
-        assert!(record_active.update(sample_peer_info));
-        assert!(record_active.reserve());
-        record_active.connect();
-        assert!(record_active.block());
-        assert_eq!(record_active.status, Status::Active);
-    }
-
-    #[test]
-    fn test_block_myself_and_already_blocked() {
+    fn test_is_blockable() {
         let my_info = create_peer_info::<PrivateKey>(0, test_socket(), 100);
-        let mut record_myself = Record::myself(my_info.clone());
-        assert!(!record_myself.block(), "Cannot block myself");
-        assert!(
-            matches!(&record_myself.address, Address::Myself(info) if peer_info_contents_are_equal(info, &my_info))
-        );
 
-        let mut record_to_be_blocked = Record::<PublicKey>::unknown();
-        assert!(record_to_be_blocked.block());
-        assert!(
-            !record_to_be_blocked.block(),
-            "Cannot block already blocked peer"
-        );
-        assert!(matches!(record_to_be_blocked.address, Address::Blocked));
+        // Myself is not blockable
+        let record_myself = Record::myself(my_info);
+        assert!(!record_myself.is_blockable());
+
+        // Bootstrapper is blockable
+        let record_boot = Record::<PublicKey>::bootstrapper(test_socket());
+        assert!(record_boot.is_blockable());
+
+        // Unknown is blockable
+        let record_unknown = Record::<PublicKey>::unknown();
+        assert!(record_unknown.is_blockable());
+
+        // Discovered is blockable
+        let peer_info = create_peer_info::<PrivateKey>(1, test_socket(), 1000);
+        let mut record_disc = Record::<PublicKey>::unknown();
+        assert!(record_disc.update(peer_info));
+        assert!(record_disc.is_blockable());
     }
 
     #[test]
@@ -725,11 +645,6 @@ mod tests {
         let record_boot = Record::<PublicKey>::bootstrapper(socket);
         assert!(record_boot.sharable().is_none());
 
-        // Blocked: Not sharable
-        let mut record_blocked = Record::<PublicKey>::unknown();
-        record_blocked.block();
-        assert!(record_blocked.sharable().is_none());
-
         // Discovered but not Active: Not sharable
         let mut record_disc = Record::<PublicKey>::unknown();
         assert!(record_disc.update(peer_info_data.clone()));
@@ -764,11 +679,12 @@ mod tests {
     #[test]
     fn test_dial_failure_and_dial_success() {
         let socket = test_socket();
+        let ingress = Ingress::Socket(socket);
         let peer_info = create_peer_info::<PrivateKey>(18, socket, 1000);
         let mut record = Record::<PublicKey>::unknown();
 
         // Cannot fail dial before discovered
-        record.dial_failure(socket);
+        record.dial_failure(&ingress);
         assert!(matches!(record.address, Address::Unknown));
 
         // Discover
@@ -776,18 +692,19 @@ mod tests {
         assert!(matches!(&record.address, Address::Discovered(_, 0)));
 
         // Fail dial 1
-        record.dial_failure(socket);
+        record.dial_failure(&ingress);
         assert!(matches!(&record.address, Address::Discovered(_, 1)));
 
         // Fail dial 2
-        record.dial_failure(socket);
+        record.dial_failure(&ingress);
         assert!(matches!(&record.address, Address::Discovered(_, 2)));
 
-        // Fail dial for wrong socket
-        record.dial_failure(test_socket2());
+        // Fail dial for wrong ingress
+        let wrong_ingress = Ingress::Socket(test_socket2());
+        record.dial_failure(&wrong_ingress);
         assert!(
             matches!(&record.address, Address::Discovered(_, 2)),
-            "Failure count should not change for wrong socket"
+            "Failure count should not change for wrong ingress"
         );
 
         // Success resets failures
@@ -798,13 +715,14 @@ mod tests {
         );
 
         // Fail dial again
-        record.dial_failure(socket);
+        record.dial_failure(&ingress);
         assert!(matches!(&record.address, Address::Discovered(_, 1)));
     }
 
     #[test]
     fn test_want_logic_with_min_fails() {
         let socket = test_socket();
+        let ingress = Ingress::Socket(socket);
         let peer_info = create_peer_info::<PrivateKey>(13, socket, 100);
         let min_fails = 2;
 
@@ -812,11 +730,8 @@ mod tests {
         assert!(Record::<PublicKey>::unknown().want(min_fails));
         assert!(Record::<PublicKey>::bootstrapper(socket).want(min_fails));
 
-        // Myself and Blocked never want info
+        // Myself never wants info
         assert!(!Record::myself(peer_info.clone()).want(min_fails));
-        let mut blocked = Record::<PublicKey>::unknown();
-        blocked.block();
-        assert!(!blocked.want(min_fails));
 
         let mut record_disc = Record::<PublicKey>::unknown();
         assert!(record_disc.update(peer_info));
@@ -826,12 +741,12 @@ mod tests {
             !record_disc.want(min_fails),
             "Should not want when fails=0 < min_fails"
         );
-        record_disc.dial_failure(socket); // fails = 1
+        record_disc.dial_failure(&ingress); // fails = 1
         assert!(
             !record_disc.want(min_fails),
             "Should not want when fails=1 < min_fails"
         );
-        record_disc.dial_failure(socket); // fails = 2
+        record_disc.dial_failure(&ingress); // fails = 2
         assert!(
             record_disc.want(min_fails),
             "Should want when fails=2 >= min_fails"
@@ -858,9 +773,9 @@ mod tests {
             !record_disc.want(min_fails),
             "Should not want when Inert and fails=0"
         );
-        record_disc.dial_failure(socket); // fails = 1
+        record_disc.dial_failure(&ingress); // fails = 1
         assert!(!record_disc.want(min_fails));
-        record_disc.dial_failure(socket); // fails = 2
+        record_disc.dial_failure(&ingress); // fails = 2
         assert!(record_disc.want(min_fails));
     }
 
@@ -895,46 +810,33 @@ mod tests {
 
         record.decrement(); // sets = 0
         assert!(record.deletable()); // sets = 0, !persistent, Inert
-
-        // Blocking makes a record non-persistent, but deletability still depends on sets/status
-        let mut record_blocked = Record::<PublicKey>::bootstrapper(test_socket());
-        assert!(record_blocked.persistent);
-        record_blocked.increment(); // sets = 1
-        assert!(record_blocked.block());
-        assert!(!record_blocked.persistent);
-        assert!(!record_blocked.deletable()); // sets = 1
-        record_blocked.decrement(); // sets = 0
-        assert!(record_blocked.deletable()); // sets = 0, !persistent, Inert
     }
 
     #[test]
-    fn test_allowed_logic_detailed() {
+    fn test_eligible_logic() {
         let peer_info = create_peer_info::<PrivateKey>(16, test_socket(), 100);
 
-        // Blocked and Myself are never allowed
-        let mut record_blocked = Record::<PublicKey>::unknown();
-        record_blocked.block();
-        assert!(!record_blocked.allowed());
-        assert!(!Record::myself(peer_info.clone()).allowed());
+        // Myself is never eligible
+        assert!(!Record::myself(peer_info.clone()).eligible());
 
-        // Persistent records (Bootstrapper, Myself before blocking) are allowed even with sets=0
-        assert!(Record::<PublicKey>::bootstrapper(test_socket()).allowed());
+        // Persistent records (Bootstrapper) are allowed even with sets=0
+        assert!(Record::<PublicKey>::bootstrapper(test_socket()).eligible());
         let mut record_pers = Record::<PublicKey>::bootstrapper(test_socket());
         assert!(record_pers.update(peer_info.clone()));
-        assert!(record_pers.allowed());
+        assert!(record_pers.eligible());
 
         // Non-persistent records (Unknown, Discovered) require sets > 0
         let mut record_unknown = Record::<PublicKey>::unknown();
-        assert!(!record_unknown.allowed()); // sets = 0, !persistent
+        assert!(!record_unknown.eligible()); // sets = 0, !persistent
         record_unknown.increment(); // sets = 1
-        assert!(record_unknown.allowed()); // sets > 0
+        assert!(record_unknown.eligible()); // sets > 0
         record_unknown.decrement(); // sets = 0
-        assert!(!record_unknown.allowed());
+        assert!(!record_unknown.eligible());
 
         let mut record_disc = Record::<PublicKey>::unknown();
         assert!(record_disc.update(peer_info));
-        assert!(!record_disc.allowed()); // sets = 0, !persistent
+        assert!(!record_disc.eligible()); // sets = 0, !persistent
         record_disc.increment(); // sets = 1
-        assert!(record_disc.allowed()); // sets > 0
+        assert!(record_disc.eligible()); // sets > 0
     }
 }

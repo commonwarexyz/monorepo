@@ -242,7 +242,7 @@ fn fuzz(data: FuzzInput) {
         let total_written = written_indices.len();
         assert_eq!(total_items, total_written, "Items count {total_items} doesn't match written indices count {total_written}");
 
-        archive.close().await.expect("Archive operation closed unexpectedly");
+        archive.sync().await.expect("Archive sync failed");
     });
 }
 

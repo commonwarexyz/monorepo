@@ -24,7 +24,8 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_parallel::ThreadPool;
+use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::prefixed_u64::U64};
 use std::collections::HashSet;
 use tracing::{debug, error, warn};
@@ -314,7 +315,7 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
             partition: partition.to_string(),
             codec_config: ((0..).into(), ()),
         };
-        let metadata =
+        let mut metadata =
             Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
 
         let key: U64 = U64::new(PRUNED_CHUNKS_PREFIX, 0);
@@ -347,7 +348,8 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
             pinned_nodes.push(digest);
         }
 
-        metadata.close().await?;
+        metadata.sync().await?;
+        drop(metadata);
 
         let mmr = CleanMmr::init(
             Config {
@@ -401,7 +403,7 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
             metadata.put(key, digest.to_vec());
         }
 
-        metadata.close().await.map_err(MetadataError)
+        metadata.sync().await.map_err(MetadataError)
     }
 
     /// Prune all complete chunks before the chunk containing the given bit.

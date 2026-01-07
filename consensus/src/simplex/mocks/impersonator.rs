@@ -1,38 +1,35 @@
 //! Byzantine participant that sends impersonated (and invalid) notarize/finalize messages.
 
 use crate::simplex::{
-    signing_scheme::Scheme,
+    scheme,
     types::{Finalize, Notarize, Vote},
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{certificate::Scheme, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::marker::PhantomData;
 use tracing::debug;
 
 pub struct Config<S: Scheme> {
     pub scheme: S,
-    pub namespace: Vec<u8>,
 }
 
-pub struct Impersonator<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
+pub struct Impersonator<E: Clock + CryptoRngCore + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
-
-    namespace: Vec<u8>,
 
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Impersonator<E, S, H> {
+impl<E: Clock + CryptoRngCore + Spawner, S: scheme::Scheme<H::Digest>, H: Hasher>
+    Impersonator<E, S, H>
+{
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
             scheme: cfg.scheme,
-
-            namespace: cfg.namespace,
 
             _hasher: PhantomData,
         }
@@ -58,34 +55,32 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Impersonator<E,
             match msg {
                 Vote::Notarize(notarize) => {
                     // Notarize received digest
-                    let mut n =
-                        Notarize::sign(&self.scheme, &self.namespace, notarize.proposal).unwrap();
+                    let mut n = Notarize::sign(&self.scheme, notarize.proposal).unwrap();
 
                     // Manipulate index
-                    if n.signature.signer == 0 {
-                        n.signature.signer = 1;
+                    if n.attestation.signer == 0 {
+                        n.attestation.signer = 1;
                     } else {
-                        n.signature.signer = 0;
+                        n.attestation.signer = 0;
                     }
 
                     // Send invalid message
-                    let msg = Vote::Notarize(n).encode().into();
+                    let msg = Vote::Notarize(n).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Vote::Finalize(finalize) => {
                     // Finalize provided digest
-                    let mut f =
-                        Finalize::sign(&self.scheme, &self.namespace, finalize.proposal).unwrap();
+                    let mut f = Finalize::sign(&self.scheme, finalize.proposal).unwrap();
 
                     // Manipulate signature
-                    if f.signature.signer == 0 {
-                        f.signature.signer = 1;
+                    if f.attestation.signer == 0 {
+                        f.attestation.signer = 1;
                     } else {
-                        f.signature.signer = 0;
+                        f.attestation.signer = 0;
                     }
 
                     // Send invalid message
-                    let msg = Vote::Finalize(f).encode().into();
+                    let msg = Vote::Finalize(f).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,

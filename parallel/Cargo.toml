@@ -1,0 +1,24 @@
+[package]
+name = "commonware-parallel"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Parallelize fold operations with pluggable execution strategies."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/parallel"
+
+[lints]
+workspace = true
+
+[dependencies]
+cfg-if.workspace = true
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[features]
+default = [ "std" ]
+std = [ "dep:rayon" ]

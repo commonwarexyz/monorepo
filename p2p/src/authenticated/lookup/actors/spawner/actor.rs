@@ -11,22 +11,15 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use tracing::debug;
 
-pub struct Actor<
-    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
-    Si: Sink,
-    St: Stream,
-    C: PublicKey,
-> {
+pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: PublicKey> {
     context: ContextCell<E>,
 
     mailbox_size: usize,
     ping_frequency: std::time::Duration,
-    allowed_ping_rate: Quota,
 
     receiver: mpsc::Receiver<Message<Si, St, C>>,
 
@@ -36,12 +29,8 @@ pub struct Actor<
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
-        Si: Sink,
-        St: Stream,
-        C: PublicKey,
-    > Actor<E, Si, St, C>
+impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: PublicKey>
+    Actor<E, Si, St, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
         let connections = Gauge::default();
@@ -71,7 +60,6 @@ impl<
                 context: ContextCell::new(context),
                 mailbox_size: cfg.mailbox_size,
                 ping_frequency: cfg.ping_frequency,
-                allowed_ping_rate: cfg.allowed_ping_rate,
                 receiver,
                 connections,
                 sent_messages,
@@ -132,7 +120,6 @@ impl<
                                     context,
                                     peer::Config {
                                         ping_frequency: self.ping_frequency,
-                                        allowed_ping_rate: self.allowed_ping_rate,
                                         sent_messages,
                                         received_messages,
                                         rate_limited,

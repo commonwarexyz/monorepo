@@ -22,13 +22,17 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+use bytes::{Buf, BufMut};
 use commonware_macros::select;
+use commonware_parallel::{Rayon, ThreadPool};
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
+use rayon::ThreadPoolBuildError;
 use std::{
     future::Future,
     io::Error as IoError,
     net::SocketAddr,
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
@@ -56,6 +60,9 @@ mod iouring;
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
 
+/// Default [`Blob`] version used when no version is specified via [`Storage::open`].
+pub const DEFAULT_BLOB_VERSION: u16 = 0;
+
 /// Errors that can occur when interacting with the runtime.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -77,6 +84,8 @@ pub enum Error {
     SendFailed,
     #[error("recv failed")]
     RecvFailed,
+    #[error("dns resolution failed: {0}")]
+    ResolveFailed(String),
     #[error("partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}")]
     PartitionNameInvalid(String),
     #[error("partition creation failed: {0}")]
@@ -95,6 +104,13 @@ pub enum Error {
     BlobSyncFailed(String, String, IoError),
     #[error("blob insufficient length")]
     BlobInsufficientLength,
+    #[error("blob corrupt: {0}/{1} reason: {2}")]
+    BlobCorrupt(String, String, String),
+    #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
+    BlobVersionMismatch {
+        expected: std::ops::RangeInclusive<u16>,
+        found: u16,
+    },
     #[error("offset overflow")]
     OffsetOverflow,
     #[error("io error: {0}")]
@@ -218,6 +234,32 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     fn stopped(&self) -> signal::Signal;
 }
 
+/// Trait for creating [rayon]-compatible thread pools with each worker thread
+/// placed on dedicated threads via [Spawner].
+pub trait RayonPoolSpawner: Spawner + Metrics {
+    /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
+    ///
+    /// # Arguments
+    /// - `concurrency`: The number of tasks to execute concurrently in the pool.
+    ///
+    /// # Returns
+    /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot
+    /// be built.
+    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError>;
+
+    /// Creates a clone-able [Rayon] strategy for use with [commonware_parallel].
+    ///
+    /// # Arguments
+    /// - `concurrency`: The number of tasks to execute concurrently in the pool.
+    ///
+    /// # Returns
+    /// A `Result` containing the configured [Rayon] strategy or a [rayon::ThreadPoolBuildError] if the pool cannot be
+    /// built.
+    fn create_strategy(&self, concurrency: NonZeroUsize) -> Result<Rayon, ThreadPoolBuildError> {
+        self.create_pool(concurrency).map(Rayon::with_pool)
+    }
+}
+
 /// Interface to register and encode metrics.
 pub trait Metrics: Clone + Send + Sync + 'static {
     /// Get the current label of the context.
@@ -257,13 +299,27 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     fn encode(&self) -> String;
 }
 
+/// Re-export of [governor::Quota] for rate limiting configuration.
+pub use governor::Quota;
+
+/// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
+///
+/// This is a convenience type alias for creating single-entity rate limiters.
+/// For per-key rate limiting, use [KeyedRateLimiter].
+pub type RateLimiter<C> = governor::RateLimiter<
+    governor::state::NotKeyed,
+    governor::state::InMemoryState,
+    C,
+    governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
+>;
+
 /// A rate limiter keyed by `K` using the provided [governor::clock::Clock] `C`.
 ///
 /// This is a convenience type alias for creating per-peer rate limiters
 /// using governor's [HashMapStateStore].
 ///
 /// [HashMapStateStore]: governor::state::keyed::HashMapStateStore
-pub type RateLimiter<K, C> = governor::RateLimiter<
+pub type KeyedRateLimiter<K, C> = governor::RateLimiter<
     K,
     governor::state::keyed::HashMapStateStore<K>,
     C,
@@ -275,7 +331,14 @@ pub type RateLimiter<K, C> = governor::RateLimiter<
 ///
 /// It is necessary to mock time to provide deterministic execution
 /// of arbitrary tasks.
-pub trait Clock: Clone + Send + Sync + 'static {
+pub trait Clock:
+    governor::clock::Clock<Instant = SystemTime>
+    + governor::clock::ReasonablyRealtime
+    + Clone
+    + Send
+    + Sync
+    + 'static
+{
     /// Returns the current time.
     fn current(&self) -> SystemTime;
 
@@ -414,6 +477,17 @@ pub trait Network: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
 }
 
+/// Interface for DNS resolution.
+pub trait Resolver: Clone + Send + Sync + 'static {
+    /// Resolve a hostname to IP addresses.
+    ///
+    /// Returns a list of IP addresses that the hostname resolves to.
+    fn resolve(
+        &self,
+        host: &str,
+    ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, Error>> + Send;
+}
+
 /// Interface that any runtime must implement to handle
 /// incoming network connections.
 pub trait Listener: Sync + Send + 'static {
@@ -437,10 +511,11 @@ pub trait Listener: Sync + Send + 'static {
 /// messages over a network connection.
 pub trait Sink: Sync + Send + 'static {
     /// Send a message to the sink.
-    fn send(
-        &mut self,
-        msg: impl Into<StableBuf> + Send,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+    ///
+    /// # Warning
+    ///
+    /// If the sink returns an error, part of the message may still be delivered.
+    fn send(&mut self, msg: impl Buf + Send) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to receive
@@ -448,10 +523,11 @@ pub trait Sink: Sync + Send + 'static {
 pub trait Stream: Sync + Send + 'static {
     /// Receive a message from the stream, storing it in the given buffer.
     /// Reads exactly the number of bytes that fit in the buffer.
-    fn recv(
-        &mut self,
-        buf: impl Into<StableBuf> + Send,
-    ) -> impl Future<Output = Result<StableBuf, Error>> + Send;
+    ///
+    /// # Warning
+    ///
+    /// If the stream returns an error, partially read data may be discarded.
+    fn recv(&mut self, buf: impl BufMut + Send) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface to interact with storage.
@@ -470,6 +546,27 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// The readable/writeable storage buffer that can be opened by this Storage.
     type Blob: Blob;
 
+    /// [`Storage::open_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only value
+    /// in the versions range. The blob version is omitted from the return value.
+    fn open(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
+        let partition = partition.to_string();
+        let name = name.to_vec();
+        async move {
+            let (blob, size, _) = self
+                .open_versioned(
+                    &partition,
+                    &name,
+                    DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION,
+                )
+                .await?;
+            Ok((blob, size))
+        }
+    }
+
     /// Open an existing blob in a given partition or create a new one, returning
     /// the blob and its length.
     ///
@@ -477,11 +574,21 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// writing to the same blob concurrently may lead to undefined behavior.
     ///
     /// An Ok result indicates the blob is durably created (or already exists).
-    fn open(
+    ///
+    /// # Versions
+    ///
+    /// Blobs are versioned. If the blob's version is not in `versions`, returns
+    /// [Error::BlobVersionMismatch].
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (blob, logical_size, blob_version).
+    fn open_versioned(
         &self,
         partition: &str,
         name: &[u8],
-    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send;
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send;
 
     /// Remove a blob from a given partition.
     ///
@@ -547,14 +654,17 @@ mod tests {
     use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};
+    use commonware_utils::NZUsize;
     use futures::{
         channel::{mpsc, oneshot},
         future::{pending, ready},
         join, pin_mut, FutureExt, SinkExt, StreamExt,
     };
     use prometheus_client::metrics::counter::Counter;
+    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     use std::{
         collections::HashMap,
+        net::{IpAddr, Ipv4Addr, Ipv6Addr},
         pin::Pin,
         str::FromStr,
         sync::{
@@ -854,10 +964,11 @@ mod tests {
             let name = b"test_blob";
 
             // Open a new blob
-            let (blob, _) = context
+            let (blob, size) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
+            assert_eq!(size, 0, "new blob should have size 0");
 
             // Write data to the blob
             let data = b"Hello, Storage!";
@@ -1877,7 +1988,7 @@ mod tests {
 
             // Spawn a task that registers its waker and then stays pending.
             context
-                .with_label("capture-waker")
+                .with_label("capture_waker")
                 .spawn(move |_| async move {
                     CaptureWaker {
                         tx: Some(tx),
@@ -1941,6 +2052,33 @@ mod tests {
     {
         runner.start(|context| async move {
             context.with_label(METRICS_PREFIX);
+        })
+    }
+
+    fn test_metrics_label_empty<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            context.with_label("");
+        })
+    }
+
+    fn test_metrics_label_invalid_first_char<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            context.with_label("1invalid");
+        })
+    }
+
+    fn test_metrics_label_invalid_char<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            context.with_label("invalid-label");
         })
     }
 
@@ -2216,6 +2354,106 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "label must start with [a-zA-Z]")]
+    fn test_deterministic_metrics_label_empty() {
+        let executor = deterministic::Runner::default();
+        test_metrics_label_empty(executor);
+    }
+
+    #[test]
+    #[should_panic(expected = "label must start with [a-zA-Z]")]
+    fn test_deterministic_metrics_label_invalid_first_char() {
+        let executor = deterministic::Runner::default();
+        test_metrics_label_invalid_first_char(executor);
+    }
+
+    #[test]
+    #[should_panic(expected = "label must only contain [a-zA-Z0-9_]")]
+    fn test_deterministic_metrics_label_invalid_char() {
+        let executor = deterministic::Runner::default();
+        test_metrics_label_invalid_char(executor);
+    }
+
+    #[test_collect_traces]
+    fn test_deterministic_instrument_tasks(traces: TraceStorage) {
+        let executor = deterministic::Runner::new(deterministic::Config::default());
+        executor.start(|context| async move {
+            context
+                .with_label("test")
+                .instrumented()
+                .spawn(|context| async move {
+                    tracing::info!(field = "test field", "test log");
+
+                    context
+                        .with_label("inner")
+                        .instrumented()
+                        .spawn(|_| async move {
+                            tracing::info!("inner log");
+                        })
+                        .await
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+        });
+
+        let info_traces = traces.get_by_level(Level::INFO);
+        assert_eq!(info_traces.len(), 2);
+
+        // Outer log (single span)
+        info_traces
+            .expect_event_at_index(0, |event| {
+                event.metadata.expect_content_exact("test log")?;
+                event.metadata.expect_field_count(1)?;
+                event.metadata.expect_field_exact("field", "test field")?;
+                event.expect_span_count(1)?;
+                event.expect_span_at_index(0, |span| {
+                    span.expect_content_exact("task")?;
+                    span.expect_field_count(1)?;
+                    span.expect_field_exact("name", "test")
+                })
+            })
+            .unwrap();
+
+        info_traces
+            .expect_event_at_index(1, |event| {
+                event.metadata.expect_content_exact("inner log")?;
+                event.metadata.expect_field_count(0)?;
+                event.expect_span_count(1)?;
+                event.expect_span_at_index(0, |span| {
+                    span.expect_content_exact("task")?;
+                    span.expect_field_count(1)?;
+                    span.expect_field_exact("name", "test_inner")
+                })
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_deterministic_resolver() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Register DNS mappings
+            let ip1: IpAddr = "192.168.1.1".parse().unwrap();
+            let ip2: IpAddr = "192.168.1.2".parse().unwrap();
+            context.resolver_register("example.com", Some(vec![ip1, ip2]));
+
+            // Resolve registered hostname
+            let addrs = context.resolve("example.com").await.unwrap();
+            assert_eq!(addrs, vec![ip1, ip2]);
+
+            // Resolve unregistered hostname
+            let result = context.resolve("unknown.com").await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+
+            // Remove mapping
+            context.resolver_register("example.com", None);
+            let result = context.resolve("example.com").await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+        });
+    }
+
+    #[test]
     fn test_tokio_error_future() {
         let runner = tokio::Runner::default();
         test_error_future(runner);
@@ -2487,6 +2725,27 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "label must start with [a-zA-Z]")]
+    fn test_tokio_metrics_label_empty() {
+        let executor = tokio::Runner::default();
+        test_metrics_label_empty(executor);
+    }
+
+    #[test]
+    #[should_panic(expected = "label must start with [a-zA-Z]")]
+    fn test_tokio_metrics_label_invalid_first_char() {
+        let executor = tokio::Runner::default();
+        test_metrics_label_invalid_first_char(executor);
+    }
+
+    #[test]
+    #[should_panic(expected = "label must only contain [a-zA-Z0-9_]")]
+    fn test_tokio_metrics_label_invalid_char() {
+        let executor = tokio::Runner::default();
+        test_metrics_label_invalid_char(executor);
+    }
+
+    #[test]
     fn test_tokio_process_rss_metric() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
@@ -2544,7 +2803,8 @@ mod tests {
             async fn read_line<St: Stream>(stream: &mut St) -> Result<String, Error> {
                 let mut line = Vec::new();
                 loop {
-                    let byte = stream.recv(vec![0; 1]).await?;
+                    let mut byte = [0u8; 1];
+                    stream.recv(&mut byte[..]).await?;
                     if byte[0] == b'\n' {
                         if line.last() == Some(&b'\r') {
                             line.pop(); // Remove trailing \r
@@ -2577,8 +2837,9 @@ mod tests {
                 stream: &mut St,
                 content_length: usize,
             ) -> Result<String, Error> {
-                let read = stream.recv(vec![0; content_length]).await?;
-                String::from_utf8(read.into()).map_err(|_| Error::ReadFailed)
+                let mut read = vec![0; content_length];
+                stream.recv(&mut read[..]).await?;
+                String::from_utf8(read).map_err(|_| Error::ReadFailed)
             }
 
             // Simulate a client connecting to the server
@@ -2600,7 +2861,7 @@ mod tests {
                     let request = format!(
                         "GET /metrics HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
                     );
-                    sink.send(Bytes::from(request).to_vec()).await.unwrap();
+                    sink.send(Bytes::from(request)).await.unwrap();
 
                     // Read and verify the HTTP status line
                     let status_line = read_line(&mut stream).await.unwrap();
@@ -2625,58 +2886,52 @@ mod tests {
         });
     }
 
-    #[test_collect_traces]
-    fn test_deterministic_instrument_tasks(traces: TraceStorage) {
-        let executor = deterministic::Runner::new(deterministic::Config::default());
+    #[test]
+    fn test_tokio_resolver() {
+        let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            context
-                .with_label("test")
-                .instrumented()
-                .spawn(|context| async move {
-                    tracing::info!(field = "test field", "test log");
-
-                    context
-                        .with_label("inner")
-                        .instrumented()
-                        .spawn(|_| async move {
-                            tracing::info!("inner log");
-                        })
-                        .await
-                        .unwrap();
-                })
-                .await
-                .unwrap();
+            let addrs = context.resolve("localhost").await.unwrap();
+            assert!(!addrs.is_empty());
+            for addr in addrs {
+                assert!(
+                    addr == IpAddr::V4(Ipv4Addr::LOCALHOST)
+                        || addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
+                );
+            }
         });
+    }
 
-        let info_traces = traces.get_by_level(Level::INFO);
-        assert_eq!(info_traces.len(), 2);
+    #[test]
+    fn test_create_pool_tokio() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            // Create a thread pool with 4 threads
+            let pool = context.with_label("pool").create_pool(NZUsize!(4)).unwrap();
 
-        // Outer log (single span)
-        info_traces
-            .expect_event_at_index(0, |event| {
-                event.metadata.expect_content_exact("test log")?;
-                event.metadata.expect_field_count(1)?;
-                event.metadata.expect_field_exact("field", "test field")?;
-                event.expect_span_count(1)?;
-                event.expect_span_at_index(0, |span| {
-                    span.expect_content_exact("task")?;
-                    span.expect_field_count(1)?;
-                    span.expect_field_exact("name", "test")
-                })
-            })
-            .unwrap();
+            // Create a vector of numbers
+            let v: Vec<_> = (0..10000).collect();
 
-        info_traces
-            .expect_event_at_index(1, |event| {
-                event.metadata.expect_content_exact("inner log")?;
-                event.metadata.expect_field_count(0)?;
-                event.expect_span_count(1)?;
-                event.expect_span_at_index(0, |span| {
-                    span.expect_content_exact("task")?;
-                    span.expect_field_count(1)?;
-                    span.expect_field_exact("name", "test_inner")
-                })
-            })
-            .unwrap();
+            // Use the thread pool to sum the numbers
+            pool.install(|| {
+                assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
+            });
+        });
+    }
+
+    #[test]
+    fn test_create_pool_deterministic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a thread pool with 4 threads
+            let pool = context.with_label("pool").create_pool(NZUsize!(4)).unwrap();
+
+            // Create a vector of numbers
+            let v: Vec<_> = (0..10000).collect();
+
+            // Use the thread pool to sum the numbers
+            pool.install(|| {
+                assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
+            });
+        });
     }
 }

@@ -14,10 +14,14 @@ documentation = "https://docs.rs/commonware-runtime"
 workspace = true
 
 [dependencies]
+arbitrary = { workspace = true, optional = true }
 async-lock.workspace = true
 bytes.workspace = true
 cfg-if.workspace = true
+commonware-codec.workspace = true
+commonware-conformance = { workspace = true, optional = true }
 commonware-macros.workspace = true
+commonware-parallel = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
 futures.workspace = true
 governor.workspace = true
@@ -27,6 +31,7 @@ opentelemetry.workspace = true
 pin-project = { workspace = true, optional = true }
 prometheus-client.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 rayon.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
@@ -50,6 +55,12 @@ tokio = { workspace = true, features = ["full"] }
 
 [features]
 default = []
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:arbitrary",
+	"dep:commonware-conformance",
+]
 external = [ "pin-project" ]
 test-utils = []
 iouring-storage = [ "io-uring" ]

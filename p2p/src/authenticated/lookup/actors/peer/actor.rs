@@ -8,20 +8,19 @@ use crate::authenticated::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
-use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Metrics, Quota, RateLimiter, Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
+use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use futures::{channel::mpsc, SinkExt, StreamExt};
-use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
+pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     context: E,
 
     ping_frequency: Duration,
-    allowed_ping_rate: Quota,
 
     control: mpsc::Receiver<Message>,
     high: mpsc::Receiver<Data>,
@@ -33,9 +32,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     _phantom: std::marker::PhantomData<C>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
-    Actor<E, C>
-{
+impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message>, Relay<Data>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -44,7 +41,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             Self {
                 context,
                 ping_frequency: cfg.ping_frequency,
-                allowed_ping_rate: cfg.allowed_ping_rate,
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
@@ -82,7 +78,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         payload: types::Message,
     ) -> Result<(), Error> {
         let msg = payload.encode();
-        sender.send(&msg).await.map_err(Error::SendFailed)?;
+        sender.send(msg).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
         Ok(())
     }
@@ -102,16 +98,19 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
-        let ping_rate_limiter =
-            RateLimiter::direct_with_clock(self.allowed_ping_rate, self.context.clone());
+        // Use half the ping frequency for rate limiting to allow for timing
+        // jitter at message boundaries.
+        let half = (self.ping_frequency / 2).max(SYSTEM_TIME_PRECISION);
+        let ping_rate = Quota::with_period(half).unwrap();
+        let ping_rate_limiter = RateLimiter::direct_with_clock(ping_rate, self.context.clone());
 
         // Send/Receive messages from the peer
         let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
             let peer = peer.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
-                // Set the initial deadline to now to start pinging immediately
-                let mut deadline = context.current();
+                // Set the initial deadline (no need to send right away)
+                let mut deadline = context.current() + self.ping_frequency;
 
                 // Enter into the main loop
                 select_loop! {
@@ -208,10 +207,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     }
 
                     match msg {
-                        types::Message::Ping => {
-                            // We ignore ping messages, they are only used to keep
-                            // the connection alive
-                        }
                         types::Message::Data(data) => {
                             // Send message to client
                             //
@@ -221,6 +216,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             let _ = sender.send((peer.clone(), data.message)).await.inspect_err(
                                 |e| debug!(err=?e, channel=data.channel, "failed to send message to client"),
                             );
+                        }
+                        types::Message::Ping => {
+                            // We ignore ping messages, they are only used to keep
+                            // the connection alive
                         }
                     }
                 }

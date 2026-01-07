@@ -1,4 +1,4 @@
-//! An append-only log for storing fixed length items on disk.
+//! An append-only log for storing fixed length _items_ on disk.
 //!
 //! In addition to replay, stored items can be fetched directly by their `position` in the journal,
 //! where position is defined as the item's order of insertion starting from 0, unaffected by
@@ -55,9 +55,9 @@
 //!
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
-use crate::journal::{
-    contiguous::{MutableContiguous, PersistableContiguous},
-    Error,
+use crate::{
+    journal::{contiguous::MutableContiguous, Error},
+    Persistable,
 };
 use bytes::BufMut;
 use commonware_codec::{CodecFixed, DecodeExt as _, FixedSize};
@@ -498,15 +498,15 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         assert!(start_blob <= self.tail_index);
         let blobs = self.blobs.range(start_blob..).collect::<Vec<_>>();
         let full_size = items_per_blob * Self::CHUNK_SIZE_U64;
-        let mut blob_plus = blobs
-            .into_iter()
-            .map(|(blob_index, blob)| (*blob_index, blob.clone_blob(), full_size))
-            .collect::<Vec<_>>();
+        let mut blob_plus = Vec::with_capacity(blobs.len() + 1);
+        for (blob_index, blob) in blobs {
+            blob_plus.push((*blob_index, blob.clone_blob().await, full_size));
+        }
 
         // Include the tail blob.
         self.tail.sync().await?; // make sure no data is buffered
         let tail_size = self.tail.size().await;
-        blob_plus.push((self.tail_index, self.tail.clone_blob(), tail_size));
+        blob_plus.push((self.tail_index, self.tail.clone_blob().await, tail_size));
         let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
 
         // Replay all blobs in order and stream items as they are read (to avoid occupying too much
@@ -605,18 +605,6 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         Ok(())
     }
 
-    /// Syncs and closes all open sections.
-    pub async fn close(self) -> Result<(), Error> {
-        for (i, blob) in self.blobs.into_iter() {
-            blob.sync().await?;
-            debug!(blob = i, "synced blob");
-        }
-        self.tail.sync().await?;
-        debug!(blob = self.tail_index, "synced tail");
-
-        Ok(())
-    }
-
     /// Remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
@@ -688,17 +676,15 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> MutableContiguous for Journa
     }
 }
 
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> PersistableContiguous for Journal<E, A> {
+impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Persistable for Journal<E, A> {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Error> {
         Self::sync(self).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
         Self::sync(self).await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        Self::close(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -758,10 +744,10 @@ mod tests {
                 .expect("failed to append data 0");
             assert_eq!(pos, 0);
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Drop the journal and re-initialize it to simulate a restart
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
-            // Re-initialize the journal to simulate a restart
             let cfg = test_cfg(NZU64!(2));
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -905,8 +891,9 @@ mod tests {
                     .await
                     .expect("failed to append data");
             }
-            // Close, reopen, then read back.
-            journal.close().await.expect("failed to close journal");
+            // Sync, reopen, then read back.
+            journal.sync().await.expect("failed to sync journal");
+            drop(journal);
             let journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
@@ -978,7 +965,8 @@ mod tests {
                     assert_eq!(i as u64, *pos);
                 }
             }
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Corrupt one of the checksums and make sure it's detected.
             let checksum_offset = Digest::SIZE as u64
@@ -1032,7 +1020,6 @@ mod tests {
                     ITEMS_PER_BLOB.get() as usize * 100 + ITEMS_PER_BLOB.get() as usize / 2 - 1
                 );
             }
-            journal.close().await.expect("Failed to close journal");
         });
     }
 
@@ -1057,7 +1044,8 @@ mod tests {
                     .expect("failed to append data");
                 assert_eq!(pos, i);
             }
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             let buffer = context.encode();
             assert!(buffer.contains("tracked 101"));
@@ -1107,7 +1095,8 @@ mod tests {
                     .expect("failed to append data");
             }
             assert_eq!(journal.size(), item_count);
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Truncate the tail blob by one byte, which should result in the 3rd item being
             // trimmed.
@@ -1243,7 +1232,8 @@ mod tests {
             assert_eq!(journal.size(), 5);
             let buffer = context.encode();
             assert!(buffer.contains("tracked 2"));
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Manually truncate most recent blob to simulate a partial write.
             let (blob, size) = context
@@ -1262,7 +1252,7 @@ mod tests {
             assert_eq!(journal.size(), 4);
             let buffer = context.encode();
             assert!(buffer.contains("tracked 2"));
-            journal.close().await.expect("Failed to close journal");
+            drop(journal);
 
             // Delete the tail blob to simulate a sync() that wrote the last blob at the point it
             // was entirely full, but a crash happened before the next empty blob could be created.
@@ -1300,7 +1290,8 @@ mod tests {
                 .await
                 .expect("failed to append data");
             assert_eq!(journal.size(), 1);
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Manually truncate most recent blob to simulate a partial write.
             let (blob, size) = context
@@ -1347,7 +1338,8 @@ mod tests {
                 .await
                 .expect("failed to append data");
             assert_eq!(journal.size(), 1);
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Manually extend the blob by an amount at least some multiple of the chunk size to
             // simulate a failure where the file was extended, but no bytes were written due to
@@ -1451,7 +1443,8 @@ mod tests {
             const ITEMS_REMAINING: u64 = 10 * (100 - 49);
             assert_eq!(journal.size(), ITEMS_REMAINING);
 
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Repeat with a different blob size (3 items per blob)
             let mut cfg = test_cfg(NZU64!(3));
@@ -1470,7 +1463,8 @@ mod tests {
             }
             assert_eq!(journal.size(), ITEMS_REMAINING);
 
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Make sure re-opened journal is as expected
             let mut journal: Journal<_, Digest> = Journal::init(context.clone(), cfg.clone())
@@ -1520,8 +1514,9 @@ mod tests {
                     .expect("Failed to append data");
             }
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Sync and drop the journal
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Hash blob contents
             let (blob, size) = context

@@ -7,7 +7,8 @@ use commonware_cryptography::{
     Signer as _,
 };
 use commonware_math::algebra::Random;
-use commonware_utils::{ordered::Set, quorum, TryCollect};
+use commonware_parallel::{Rayon, Sequential};
+use commonware_utils::{ordered::Set, quorum, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
@@ -42,7 +43,15 @@ impl Bench {
             (None, None)
         };
         let players = dealers.clone();
-        let info = Info::new(&[], 0, output, Default::default(), dealers, players).unwrap();
+        let info = Info::new(
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_BENCH",
+            0,
+            output,
+            Default::default(),
+            dealers,
+            players,
+        )
+        .unwrap();
 
         // Create player state for every participant
         let mut player_states = private_keys
@@ -121,6 +130,7 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
         let t = quorum(n);
         let bench = Bench::new(&mut rng, reshare, n);
         for &concurrency in CONCURRENCY {
+            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
             c.bench_function(
                 &format!(
                     "{}{}/n={} t={} conc={}",
@@ -128,13 +138,17 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
                     suffix,
                     n,
                     t,
-                    concurrency
+                    concurrency,
                 ),
                 |b| {
                     b.iter_batched(
                         || bench.pre_finalize(),
                         |(player, logs)| {
-                            black_box(player.finalize(logs, concurrency).unwrap());
+                            if concurrency > 1 {
+                                black_box(player.finalize(logs, &strategy).unwrap());
+                            } else {
+                                black_box(player.finalize(logs, &Sequential).unwrap());
+                            }
                         },
                         BatchSize::SmallInput,
                     );

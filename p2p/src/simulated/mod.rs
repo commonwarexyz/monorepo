@@ -61,9 +61,8 @@
 //! ```rust
 //! use commonware_p2p::{Manager, simulated::{Config, Link, Network}};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
-//! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
+//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
 //! use commonware_utils::NZU32;
-//! use governor::Quota;
 //! use std::time::Duration;
 //!
 //! // Generate peers
@@ -180,24 +179,23 @@ pub enum Error {
 
 pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
 pub use network::{
-    Config, Network, Receiver, Sender, SplitForwarder, SplitOrigin, SplitRouter, SplitSender,
-    SplitTarget,
+    Config, ConnectedPeerProvider, Network, Receiver, Sender, SplitForwarder, SplitOrigin,
+    SplitRouter, SplitSender, SplitTarget, UnlimitedSender,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Manager, Receiver, Recipients, Sender};
+    use crate::{Address, Ingress, Manager, Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{self, PrivateKey, PublicKey},
         Signer as _,
     };
     use commonware_macros::select;
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{ordered::Map, NZU32};
+    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner, Spawner};
+    use commonware_utils::{hostname, ordered::Map, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
-    use governor::Quota;
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -367,7 +365,7 @@ mod tests {
             let mut msg = vec![0u8; 1024 * 1024 + 1];
             context.fill(&mut msg[..]);
             let result = message_sender
-                .send(Recipients::All, msg.into(), false)
+                .send(Recipients::All, &msg[..], false)
                 .await
                 .unwrap_err();
 
@@ -1012,7 +1010,7 @@ mod tests {
 
     async fn test_bandwidth_between_peers(
         context: &mut deterministic::Context,
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
         sender_bps: Option<usize>,
         receiver_bps: Option<usize>,
         message_size: usize,
@@ -2447,11 +2445,11 @@ mod tests {
 
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
-            let addr1 = SocketAddr::from(([127, 0, 0, 1], 4000));
-            let addr2 = SocketAddr::from(([127, 0, 0, 1], 4001));
+            let addr1: Address = SocketAddr::from(([127, 0, 0, 1], 4000)).into();
+            let addr2: Address = SocketAddr::from(([127, 0, 0, 1], 4001)).into();
 
             let mut manager = oracle.socket_manager();
-            let peers: Map<_, _> = [(pk1.clone(), addr1), (pk2.clone(), addr2)]
+            let peers: Map<_, _> = [(pk1.clone(), addr1.clone()), (pk2.clone(), addr2.clone())]
                 .try_into()
                 .unwrap();
             manager.update(1, peers).await;
@@ -2477,6 +2475,56 @@ mod tests {
             assert_eq!(latest_keys, vec![pk2.clone()]);
             let all_keys: Vec<_> = Vec::from(all);
             assert_eq!(all_keys, vec![pk1, pk2]);
+        });
+    }
+
+    #[test]
+    fn test_socket_manager_with_asymmetric_addresses() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(3),
+                },
+            );
+            network.start();
+
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+
+            // Use asymmetric addresses where ingress (dial) differs from egress (filter)
+            let addr1 = Address::Asymmetric {
+                ingress: Ingress::Socket(SocketAddr::from(([10, 0, 0, 1], 8080))),
+                egress: SocketAddr::from(([192, 168, 1, 1], 9090)),
+            };
+            let addr2 = Address::Asymmetric {
+                ingress: Ingress::Dns {
+                    host: hostname!("node2.example.com"),
+                    port: 8080,
+                },
+                egress: SocketAddr::from(([192, 168, 1, 2], 9090)),
+            };
+
+            let mut manager = oracle.socket_manager();
+            let peers: Map<_, _> = [(pk1.clone(), addr1), (pk2.clone(), addr2)]
+                .try_into()
+                .unwrap();
+            manager.update(1, peers).await;
+
+            // Verify peer set contains expected keys (addresses are ignored by simulated network)
+            let peer_set = manager.peer_set(1).await.expect("peer set missing");
+            let keys: Vec<_> = Vec::from(peer_set);
+            assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
+
+            // Verify subscription works
+            let mut subscription = manager.subscribe().await;
+            let (id, latest, _all) = subscription.next().await.unwrap();
+            assert_eq!(id, 1);
+            let latest_keys: Vec<_> = Vec::from(latest);
+            assert_eq!(latest_keys, vec![pk1, pk2]);
         });
     }
 

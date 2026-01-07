@@ -2,21 +2,13 @@
 //! This includes things like how to produce/verify blocks and how to identify which
 //! participants are active at a given view.
 
-use commonware_cryptography::{
-    bls12381::primitives::{
-        group,
-        sharing::Sharing,
-        variant::{MinSig, Variant},
-    },
-    ed25519::PublicKey,
-    Hasher,
-};
+use crate::Scheme;
+use commonware_cryptography::Hasher;
 
 mod actor;
 pub use actor::Application;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::{Receiver, Sender};
-use commonware_utils::ordered::Set;
 mod ingress;
 
 /// Configuration for the application.
@@ -26,14 +18,11 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream> {
     /// Hashing scheme to use.
     pub hasher: H,
 
-    pub namespace: Vec<u8>,
-    pub identity: Sharing<MinSig>,
-    pub other_public: <MinSig as Variant>::Public,
+    /// Signing scheme for this network.
+    pub this_network: Scheme,
 
-    /// Participants active in consensus.
-    pub participants: Set<PublicKey>,
-
-    pub share: group::Share,
+    /// Certificate verifier for the other network.
+    pub other_network: Scheme,
 
     /// Number of messages from consensus to hold in our backlog
     /// before blocking.

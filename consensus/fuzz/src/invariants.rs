@@ -1,7 +1,10 @@
 use crate::types::{Finalization, Notarization, Nullification, ReplicaState};
+use commonware_consensus::simplex::{
+    elector::Config as Elector, mocks::reporter::Reporter, scheme::Scheme,
+};
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_utils::quorum;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 
 pub fn check(n: u32, replicas: Vec<ReplicaState>) {
@@ -166,13 +169,11 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
     }
 }
 
-pub fn extract<E, P, S>(
-    reporters: Vec<commonware_consensus::simplex::mocks::reporter::Reporter<E, P, S, Sha256Digest>>,
-) -> Vec<ReplicaState>
+pub fn extract<E, S, L>(reporters: Vec<Reporter<E, S, L, Sha256Digest>>) -> Vec<ReplicaState>
 where
-    E: Rng + CryptoRng,
-    P: commonware_cryptography::PublicKey,
-    S: commonware_consensus::simplex::signing_scheme::Scheme,
+    E: CryptoRngCore,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
 {
     reporters
         .iter()

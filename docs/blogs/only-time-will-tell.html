@@ -4,6 +4,8 @@
 <head>
     <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Binding Timelock Encryption: Only Time Will Tell</title>
@@ -11,9 +13,9 @@
     <meta name="author" content="Patrick O'Grady">
     <meta name="keywords" content="commonware, timelock encryption, BTLE, battleware, cryptography, blockchain, temporal privacy, VRF, threshold signatures">
 
-    <link rel="canonical" href="https://commonware.xyz/blogs/only-time-will-tell.html" />
+    <link rel="canonical" href="https://commonware.xyz/blogs/only-time-will-tell" />
 
-    <meta property="og:url" content="https://commonware.xyz/blogs/only-time-will-tell.html" />
+    <meta property="og:url" content="https://commonware.xyz/blogs/only-time-will-tell" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/timelock-decryption.png" />
@@ -25,7 +27,7 @@
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
-    <meta property="twitter:url" content="https://commonware.xyz/blogs/only-time-will-tell.html" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/only-time-will-tell" />
     <meta property="twitter:title" content="Binding Timelock Encryption: Only Time Will Tell" />
     <meta property="twitter:description" content="As your parents insisted when you were growing up, good things come to those who wait. It turns out recent advances in cryptography have proven them right." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/timelock-decryption.png" />
@@ -115,7 +117,7 @@
         <p>The entire implementation is <a href="https://github.com/commonwarexyz/battleware">open source</a> under both an MIT and Apache-2 license. The code is still a bit rough around the edges, but we were able to reach 77% test coverage (on ~11.2k lines of code). Consider it your opportunity to become a contributor.</p>
         <h2>Securing Player Access</h2>
         <p>Instead of trusting our API to provide access to game state, we opted to build a pipeline to provide visitors with authenticated access (like we did with <a href="https://alto.commonware.xyz">alto</a>). The big difference here being that BATTLEWARE players need to verify state and events against consensus outputs (rather than just consensus outputs directly).</p>
-        <p>To accomplish this, we inject state changes and execution events into our <a href="https://docs.rs/commonware-storage/latest/commonware_storage/adb/index.html">ADBs</a>. We then use <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/aggregation/index.html">consensus::aggregation</a> to generate a threshold signature over the computed roots of each ADB. Because execution relies on the output of a VRF not available during verification, we cannot just use the threshold signature emitted by threshold-simplex (unfortunately).</p>
+        <p>To accomplish this, we inject state changes and execution events into our <a href="https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/index.html">ADBs</a>. We then use <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/aggregation/index.html">consensus::aggregation</a> to generate a threshold signature over the computed roots of each ADB. Because execution relies on the output of a VRF not available during verification, we cannot just use the threshold signature emitted by threshold-simplex (unfortunately).</p>
         <div class="image-container">
             <img src="/imgs/threshold-roots.png" alt="MMR state management">
             <div class="image-caption">Figure 5: After execution, the State ADB and Events ADB is updated and once wrapped by a threshold signature are pushed to Exoware.</div>

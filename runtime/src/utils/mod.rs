@@ -1,12 +1,10 @@
 //! Utility functions for interacting with any runtime.
 
 #[cfg(test)]
-use crate::Runner;
-use crate::{Metrics, Spawner};
+use crate::{Runner, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::task::ArcWake;
-use rayon::{ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     any::Any,
     future::Future,
@@ -74,37 +72,6 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
         },
         |s| s.to_string(),
     )
-}
-
-/// A clone-able wrapper around a [rayon]-compatible thread pool.
-pub type ThreadPool = Arc<RThreadPool>;
-
-/// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
-///
-/// # Arguments
-/// - `context`: The runtime context implementing the [Spawner] trait.
-/// - `concurrency`: The number of tasks to execute concurrently in the pool.
-///
-/// # Returns
-/// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot be built.
-pub fn create_pool<S: Spawner + Metrics>(
-    context: S,
-    concurrency: usize,
-) -> Result<ThreadPool, ThreadPoolBuildError> {
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(concurrency)
-        .spawn_handler(move |thread| {
-            // Tasks spawned in a thread pool are expected to run longer than any single
-            // task and thus should be provisioned as a dedicated thread.
-            context
-                .with_label("rayon-thread")
-                .dedicated()
-                .spawn(move |_| async move { thread.run() });
-            Ok(())
-        })
-        .build()?;
-
-    Ok(Arc::new(pool))
 }
 
 /// Async reader–writer lock.
@@ -216,12 +183,33 @@ impl Blocker {
 
 impl ArcWake for Blocker {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        let mut signaled = arc_self.state.lock().unwrap();
-        *signaled = true;
+        // Mark as signaled (and release lock before notifying).
+        {
+            let mut signaled = arc_self.state.lock().unwrap();
+            *signaled = true;
+        }
 
         // Notify a single waiter so the blocked thread re-checks the flag.
         arc_self.cv.notify_one();
     }
+}
+
+/// Validates that a label matches Prometheus metric name format: `[a-zA-Z][a-zA-Z0-9_]*`.
+///
+/// # Panics
+///
+/// Panics if the label is empty, starts with a non-alphabetic character,
+/// or contains characters other than `[a-zA-Z0-9_]`.
+pub fn validate_label(label: &str) {
+    let mut chars = label.chars();
+    assert!(
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic()),
+        "label must start with [a-zA-Z]: {label}"
+    );
+    assert!(
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "label must only contain [a-zA-Z0-9_]: {label}"
+    );
 }
 
 #[cfg(test)]
@@ -254,28 +242,10 @@ pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, tokio, Metrics};
+    use crate::deterministic;
     use commonware_macros::test_traced;
     use futures::task::waker;
-    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    #[test_traced]
-    fn test_create_pool() {
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            // Create a thread pool with 4 threads
-            let pool = create_pool(context.with_label("pool"), 4).unwrap();
-
-            // Create a vector of numbers
-            let v: Vec<_> = (0..10000).collect();
-
-            // Use the thread pool to sum the numbers
-            pool.install(|| {
-                assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
-            });
-        });
-    }
 
     #[test_traced]
     fn test_rwlock() {

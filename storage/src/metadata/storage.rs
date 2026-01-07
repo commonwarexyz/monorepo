@@ -346,7 +346,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
                 let new_value = self.map.get(key).expect("key must exist");
                 if info.length == new_value.encode_size() {
                     // Overwrite existing value
-                    let encoded = new_value.encode();
+                    let encoded = new_value.encode_mut();
                     target.data[info.start..info.start + info.length].copy_from_slice(&encoded);
                     writes.push(target.blob.write_at(encoded, info.start as u64));
                 } else {
@@ -418,16 +418,6 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         self.cursor = target_cursor;
         self.next_version = next_next_version;
         self.sync_rewrites.inc();
-        Ok(())
-    }
-
-    /// Sync outstanding data and close [Metadata].
-    pub async fn close(mut self) -> Result<(), Error> {
-        // Sync and drop blobs
-        self.sync().await?;
-        for wrapper in self.blobs.into_iter() {
-            wrapper.blob.sync().await?;
-        }
         Ok(())
     }
 

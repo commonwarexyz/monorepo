@@ -1,7 +1,7 @@
 use super::Verifier;
 use crate::{
     simplex::{
-        signing_scheme::Scheme,
+        scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
             Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
@@ -9,21 +9,20 @@ use crate::{
     },
     Reporter,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_utils::ordered::{Quorum, Set};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use tracing::warn;
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
-    P: PublicKey,
-    S: Scheme<PublicKey = P>,
-    B: Blocker<PublicKey = P>,
+    S: Scheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
 > {
-    participants: Set<P>,
+    participants: Set<S::PublicKey>,
 
     blocker: B,
     reporter: R,
@@ -49,14 +48,13 @@ pub struct Round<
 }
 
 impl<
-        P: PublicKey,
-        S: Scheme<PublicKey = P>,
-        B: Blocker<PublicKey = P>,
+        S: Scheme<D>,
+        B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
-    > Round<P, S, B, D, R>
+    > Round<S, B, D, R>
 {
-    pub fn new(participants: Set<P>, scheme: S, blocker: B, reporter: R) -> Self {
+    pub fn new(participants: Set<S::PublicKey>, scheme: S, blocker: B, reporter: R) -> Self {
         let quorum = participants.quorum();
         let len = participants.len();
         Self {
@@ -108,7 +106,7 @@ impl<
     }
 
     /// Adds a vote from the network to this round's verifier.
-    pub async fn add_network(&mut self, sender: P, message: Vote<S, D>) -> bool {
+    pub async fn add_network(&mut self, sender: S::PublicKey, message: Vote<S, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
             warn!(?sender, "blocking peer");
@@ -303,7 +301,7 @@ impl<
         Some(proposal)
     }
 
-    pub const fn ready_notarizes(&self) -> bool {
+    pub fn ready_notarizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_notarization() {
             return false;
@@ -311,15 +309,14 @@ impl<
         self.verifier.ready_notarizes()
     }
 
-    pub fn verify_notarizes<E: Rng + CryptoRng>(
+    pub fn verify_notarizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
     ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_notarizes(rng, namespace)
+        self.verifier.verify_notarizes(rng)
     }
 
-    pub const fn ready_nullifies(&self) -> bool {
+    pub fn ready_nullifies(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_nullification() {
             return false;
@@ -327,15 +324,14 @@ impl<
         self.verifier.ready_nullifies()
     }
 
-    pub fn verify_nullifies<E: Rng + CryptoRng>(
+    pub fn verify_nullifies<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
     ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_nullifies(rng, namespace)
+        self.verifier.verify_nullifies(rng)
     }
 
-    pub const fn ready_finalizes(&self) -> bool {
+    pub fn ready_finalizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_finalization() {
             return false;
@@ -343,14 +339,22 @@ impl<
         self.verifier.ready_finalizes()
     }
 
-    pub fn verify_finalizes<E: Rng + CryptoRng>(
+    pub fn verify_finalizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
     ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_finalizes(rng, namespace)
+        self.verifier.verify_finalizes(rng)
     }
 
+    /// Returns true if the leader was active in this round.
+    ///
+    /// We use pending votes to determine activeness because we only verify the first
+    /// `2f+1` votes. If we used verified, we would always consider the slowest `f` peers offline.
+    ///
+    /// This approach does mean, however, that we may consider a peer active that has sent an invalid
+    /// vote (this is fine and preferred to verifying all votes from all peers in each round). Recall,
+    /// the purpose of this mechanism is to minimize the timeout for crashed peers (not some tool to detect
+    /// and skip Byzantine leaders, which is only possible once we detect incorrect behavior and block them for).
     pub fn is_active(&self, leader: u32) -> bool {
         self.pending_votes.has_notarize(leader)
             || self.pending_votes.has_nullify(leader)

@@ -358,8 +358,9 @@ fn test_crash_recovery() {
         // Append data
         journal.append(1, data).await.expect("Failed to append");
 
-        // Close to simulate clean shutdown
-        journal.close().await.expect("Failed to close");
+        // Sync and drop to simulate clean shutdown
+        journal.sync(1).await.expect("Failed to close");
+        drop(journal);
 
         // Re-initialize to simulate restart
         let journal = Journal::init(context.with_label("journal"), cfg)
@@ -382,7 +383,8 @@ fn test_corruption_recovery() {
         // Write valid data
         let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
         journal.append(1, valid_data).await.unwrap();
-        journal.close().await.unwrap();
+        journal.sync(1).await.unwrap();
+        drop(journal);
 
         // Manually corrupt data
         let (blob, size) = context
@@ -447,7 +449,8 @@ fn test_storage_conformance() {
         for i in 0..100 {
             journal.append(1, i).await.unwrap();
         }
-        journal.close().await.unwrap();
+        journal.sync(1).await.unwrap();
+        drop(journal);
 
         // Hash blob contents to verify format
         let (blob, size) = context.open(&partition, &name).await.unwrap();
@@ -582,6 +585,7 @@ pub enum Error {
 - Include `# Examples` sections for public APIs
 - Document `# Safety` for any unsafe code usage
 - Only use characters that can be easily typed. For example, don't use em dashes (—) or arrows (→).
+- Do not describe trait implementations on the trait definition (e.g., "For production runtimes, this does X. For deterministic testing, this does Y."). These comments become stale as implementations change. Document what the trait does, not how specific implementations behave.
 
 ### Naming Conventions
 - **Types**: `PascalCase` (e.g., `PublicKey`, `SignatureSet`)

@@ -1,0 +1,3 @@
+["commonware_runtime::storage::tests::conformance::CodecConformance<Header>"]
+n_cases = 65536
+hash = "541c356728d47b13f1d3ac800926ef3ae2396c82f5d4e043f5c7641c4c22b4b9"

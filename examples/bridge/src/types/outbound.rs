@@ -77,7 +77,7 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode, FixedSize};
     use commonware_consensus::{
-        simplex::{signing_scheme::bls12381_threshold, types::Proposal},
+        simplex::{scheme::bls12381_threshold, types::Proposal},
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
@@ -88,7 +88,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_math::algebra::{CryptoGroup, Random as _};
-    use rand::thread_rng;
+    use commonware_utils::test_rng;
 
     fn new_block() -> BlockFormat<Sha256Digest> {
         BlockFormat::Random(12345678901234567890)
@@ -99,7 +99,7 @@ mod tests {
     }
 
     fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
-        let scalar = group::Scalar::random(&mut thread_rng());
+        let scalar = group::Scalar::random(&mut test_rng());
         let mut proposal_signature = <MinSig as Variant>::Signature::generator();
         proposal_signature *= &scalar;
         let mut seed_signature = <MinSig as Variant>::Signature::generator();
