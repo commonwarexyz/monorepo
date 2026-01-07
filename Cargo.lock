@@ -2444,6 +2444,8 @@ dependencies = [
  "futures",
  "governor",
  "rand 0.8.5",
+ "revm",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -5882,6 +5884,7 @@ dependencies = [
  "revm-primitives",
  "revm-state",
  "serde",
+ "tokio",
 ]
 
 [[package]]

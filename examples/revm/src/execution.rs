@@ -57,7 +57,7 @@ pub struct ExecutionOutcome {
     /// Canonical per-transaction state deltas used to compute `state_root`.
     pub tx_changes: Vec<StateChanges>,
     /// Per-account changes used to persist finalized blocks to QMDB.
-    pub qmdb_changes: QmdbChanges,
+    pub(crate) qmdb_changes: QmdbChanges,
 }
 
 /// Execute a batch of transactions and commit them to the provided DB.

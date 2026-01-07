@@ -7,13 +7,13 @@ use alloy_evm::revm::{
     state::{Account, AccountInfo, Bytecode, EvmState},
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
-use commonware_runtime::{buffer::PoolRef, tokio};
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
+use commonware_runtime::{buffer::PoolRef, tokio, Metrics};
 use commonware_storage::{
     qmdb::store::{Batchable as _, Store},
     translator::EightCap,
 };
-use commonware_utils::{FixedBytes, NZU64, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZU64, NZUsize};
 use futures::lock::Mutex;
 use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
@@ -40,7 +40,7 @@ pub(crate) enum Error {
 
 impl DBErrorMarker for Error {}
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct QmdbConfig {
     pub(crate) partition_prefix: String,
     pub(crate) buffer_pool: PoolRef,
@@ -291,68 +291,76 @@ impl QmdbState {
         }
 
         let mut inner = self.inner.lock().await;
-        let mut accounts_batch = inner.accounts.start_batch();
-        let mut storage_batch = inner.storage.start_batch();
-        let mut code_batch = inner.code.start_batch();
+        let (accounts_ops, storage_ops, code_ops) = {
+            let mut accounts_batch = inner.accounts.start_batch();
+            let mut storage_batch = inner.storage.start_batch();
+            let mut code_batch = inner.code.start_batch();
 
-        for (address, update) in changes.accounts.iter() {
-            let account_key = account_key(*address);
-            let existing = inner.accounts.get(&account_key).await?;
-            let base_generation = existing
-                .as_ref()
-                .map(|record| record.storage_generation)
-                .unwrap_or(0);
+            for (address, update) in changes.accounts.iter() {
+                let account_key = account_key(*address);
+                let existing = inner.accounts.get(&account_key).await?;
+                let base_generation = existing
+                    .as_ref()
+                    .map(|record| record.storage_generation)
+                    .unwrap_or(0);
 
-            let storage_generation = if update.created || update.selfdestructed {
-                base_generation.saturating_add(1)
-            } else {
-                base_generation
-            };
-
-            let record = if update.selfdestructed {
-                AccountRecord::empty(storage_generation)
-            } else {
-                AccountRecord {
-                    exists: true,
-                    nonce: update.nonce,
-                    balance: update.balance,
-                    code_hash: update.code_hash,
-                    storage_generation,
-                }
-            };
-            accounts_batch.update(account_key, record).await?;
-
-            if update.selfdestructed {
-                continue;
-            }
-
-            if let Some(code) = update.code.as_ref() {
-                if !code.is_empty() && update.code_hash != KECCAK_EMPTY {
-                    code_batch
-                        .update(code_key(update.code_hash), code.clone())
-                        .await?;
-                }
-            }
-
-            for (slot, value) in update.storage.iter() {
-                let key = storage_key(*address, storage_generation, *slot);
-                if value.is_zero() {
-                    storage_batch.delete_unchecked(key).await?;
+                let storage_generation = if update.created || update.selfdestructed {
+                    base_generation.saturating_add(1)
                 } else {
-                    storage_batch.update(key, StorageRecord(*value)).await?;
+                    base_generation
+                };
+
+                let record = if update.selfdestructed {
+                    AccountRecord::empty(storage_generation)
+                } else {
+                    AccountRecord {
+                        exists: true,
+                        nonce: update.nonce,
+                        balance: update.balance,
+                        code_hash: update.code_hash,
+                        storage_generation,
+                    }
+                };
+                accounts_batch.update(account_key, record).await?;
+
+                if update.selfdestructed {
+                    continue;
+                }
+
+                if let Some(code) = update.code.as_ref() {
+                    if !code.is_empty() && update.code_hash != KECCAK_EMPTY {
+                        code_batch
+                            .update(code_key(update.code_hash), code.clone())
+                            .await?;
+                    }
+                }
+
+                for (slot, value) in update.storage.iter() {
+                    let key = storage_key(*address, storage_generation, *slot);
+                    if value.is_zero() {
+                        storage_batch.delete_unchecked(key).await?;
+                    } else {
+                        storage_batch.update(key, StorageRecord(*value)).await?;
+                    }
                 }
             }
-        }
+
+            (
+                accounts_batch.into_iter().collect::<Vec<_>>(),
+                storage_batch.into_iter().collect::<Vec<_>>(),
+                code_batch.into_iter().collect::<Vec<_>>(),
+            )
+        };
 
         inner
             .accounts
-            .write_batch(accounts_batch.into_iter())
+            .write_batch(accounts_ops.into_iter())
             .await?;
         inner
             .storage
-            .write_batch(storage_batch.into_iter())
+            .write_batch(storage_ops.into_iter())
             .await?;
-        inner.code.write_batch(code_batch.into_iter()).await?;
+        inner.code.write_batch(code_ops.into_iter()).await?;
         inner.accounts.commit(None).await?;
         inner.storage.commit(None).await?;
         inner.code.commit(None).await?;
@@ -368,18 +376,21 @@ impl QmdbState {
         }
 
         let mut inner = self.inner.lock().await;
-        let mut batch = inner.accounts.start_batch();
-        for (address, balance) in genesis_alloc {
-            let record = AccountRecord {
-                exists: true,
-                nonce: 0,
-                balance,
-                code_hash: KECCAK_EMPTY,
-                storage_generation: 0,
-            };
-            batch.update(account_key(address), record).await?;
-        }
-        inner.accounts.write_batch(batch.into_iter()).await?;
+        let batch_ops = {
+            let mut batch = inner.accounts.start_batch();
+            for (address, balance) in genesis_alloc {
+                let record = AccountRecord {
+                    exists: true,
+                    nonce: 0,
+                    balance,
+                    code_hash: KECCAK_EMPTY,
+                    storage_generation: 0,
+                };
+                batch.update(account_key(address), record).await?;
+            }
+            batch.into_iter().collect::<Vec<_>>()
+        };
+        inner.accounts.write_batch(batch_ops.into_iter()).await?;
         inner.accounts.commit(None).await?;
         Ok(())
     }
@@ -456,6 +467,12 @@ pub(crate) struct QmdbRefDb {
     inner: Arc<alloy_evm::revm::database_interface::async_db::WrapDatabaseAsync<QmdbAsyncDb>>,
 }
 
+impl std::fmt::Debug for QmdbRefDb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QmdbRefDb").finish()
+    }
+}
+
 impl DatabaseRef for QmdbRefDb {
     type Error = Error;
 
@@ -513,11 +530,11 @@ fn account_update_from_evm_account(account: &Account) -> AccountUpdate {
 }
 
 fn account_key(address: Address) -> AccountKey {
-    AccountKey::new(*address.as_fixed_bytes())
+    AccountKey::new(address.into_array())
 }
 
 fn code_key(hash: B256) -> CodeKey {
-    CodeKey::new(*hash.as_fixed_bytes())
+    CodeKey::new(hash.0)
 }
 
 fn storage_key(address: Address, generation: u64, slot: U256) -> StorageKey {

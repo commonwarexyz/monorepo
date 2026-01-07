@@ -15,7 +15,7 @@ workspace = true
 [dependencies]
 
 # EVM execution
-alloy-evm = { version = "=0.25.1", default-features = false, features = ["std", "revm/asyncdb"] }
+alloy-evm = { version = "=0.25.1", default-features = false, features = ["std"] }
 anyhow.workspace = true
 bytes.workspace = true
 clap.workspace = true
@@ -30,6 +30,7 @@ commonware-utils.workspace = true
 futures.workspace = true
 governor.workspace = true
 rand.workspace = true
+revm = { version = "33.1.0", default-features = false, features = ["std", "asyncdb"] }
 thiserror.workspace = true
 
 [[bin]]

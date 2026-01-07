@@ -16,7 +16,7 @@ use crate::{
 };
 use alloy_evm::revm::{primitives::{Address, B256, U256}, Database as _};
 use commonware_cryptography::Committable as _;
-use commonware_runtime::{buffer::PoolRef, tokio};
+use commonware_runtime::{buffer::PoolRef, tokio, Metrics};
 use futures::lock::Mutex;
 use std::{
     collections::{BTreeMap, BTreeSet},
