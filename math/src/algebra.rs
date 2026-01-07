@@ -4,6 +4,7 @@
 //! so that the familiar `+`, `+=`, etc. operators can be used. The traits are also
 //! designed with performant implementations in mind, so implementations try to
 //! use methods which don't require copying unnecessarily.
+use commonware_parallel::Strategy as ParStrategy;
 use core::{
     fmt::Debug,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
@@ -200,7 +201,7 @@ pub trait Space<R>:
     /// that they have the same length.
     ///
     /// For empty slices, the result should be [`Additive::zero`];
-    fn msm(points: &[Self], scalars: &[R], _concurrency: usize) -> Self {
+    fn msm(points: &[Self], scalars: &[R], _strategy: &impl ParStrategy) -> Self {
         msm_naive(points, scalars)
     }
 }
@@ -489,8 +490,12 @@ pub mod test_suites {
         Ok(())
     }
 
-    fn check_msm_eq_naive<R, K: Space<R>>(points: &[K], scalars: &[R], conc: usize) -> TestResult {
-        prop_assert_eq!(msm_naive(points, scalars), K::msm(points, scalars, conc));
+    fn check_msm_eq_naive<R, K: Space<R>>(points: &[K], scalars: &[R]) -> TestResult {
+        use commonware_parallel::Sequential;
+        prop_assert_eq!(
+            msm_naive(points, scalars),
+            K::msm(points, scalars, &Sequential)
+        );
         Ok(())
     }
 
@@ -510,10 +515,9 @@ pub mod test_suites {
                 (
                     prop::collection::vec(k_strat, len),
                     prop::collection::vec(r_strat, len),
-                    1usize..=4,
                 )
             }),
-            |(points, scalars, conc)| check_msm_eq_naive(&points, &scalars, conc),
+            |(points, scalars)| check_msm_eq_naive(&points, &scalars),
         );
     }
 
@@ -588,6 +592,7 @@ pub mod test_suites {
 mod test {
     use super::*;
     use crate::fields::goldilocks::F;
+    use commonware_parallel::Sequential;
     use proptest::prelude::*;
 
     proptest! {
@@ -627,7 +632,7 @@ mod test {
 
         #[test]
         fn test_msm_2(a: [F; 2], b: [F; 2]) {
-            assert_eq!(F::msm(&a, &b, 1), a[0] * b[0] + a[1] * b[1]);
+            assert_eq!(F::msm(&a, &b, &Sequential), a[0] * b[0] + a[1] * b[1]);
         }
     }
 }

@@ -22,6 +22,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage as RuntimeStorage,
 };
@@ -356,7 +357,7 @@ where
                                             )
                                             .await;
                                         if let Some(ack) = response {
-                                            let payload = Message::<V, C::PublicKey>::Ack(ack).encode().freeze();
+                                            let payload = Message::<V, C::PublicKey>::Ack(ack).encode();
                                             if let Err(e) = round_sender
                                                 .send(Recipients::One(sender_pk.clone()), payload, true)
                                                 .await
@@ -457,7 +458,7 @@ where
                             let logs = storage.logs(epoch);
                             let (success, next_round, next_output, next_share) =
                                 if let Some(ps) = player_state.take() {
-                                    match ps.finalize(logs, 1) {
+                                    match ps.finalize(logs, &Sequential) {
                                         Ok((new_output, new_share)) => (
                                             true,
                                             epoch_state.round + 1,
@@ -472,7 +473,7 @@ where
                                         ),
                                     }
                                 } else {
-                                    match observe(round.clone(), logs, 1) {
+                                    match observe(round.clone(), logs, &Sequential) {
                                         Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                         Err(_) => (
                                             false,
@@ -574,9 +575,7 @@ where
             }
 
             // Send to remote player
-            let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg)
-                .encode()
-                .freeze();
+            let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg).encode();
             match sender
                 .send(Recipients::One(player.clone()), payload, true)
                 .await

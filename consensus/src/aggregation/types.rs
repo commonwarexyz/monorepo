@@ -148,7 +148,7 @@ impl<D: Digest> Subject for &Item<D> {
     }
 
     fn message(&self) -> Bytes {
-        self.encode().freeze()
+        self.encode()
     }
 }
 

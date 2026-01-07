@@ -1,6 +1,8 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
+use commonware_parallel::{Rayon, Sequential};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
+use std::num::NonZeroUsize;
 
 fn benchmark_aggregate_verify_same_signer(c: &mut Criterion) {
     let namespace = b"namespace";
@@ -30,10 +32,16 @@ fn benchmark_aggregate_verify_same_signer(c: &mut Criterion) {
                             (public, messages, agg_sig)
                         },
                         |(public, messages, agg_sig)| {
-                            let combined_msg = ops::aggregate::combine_messages::<MinSig, _>(
-                                &messages,
-                                concurrency,
-                            );
+                            let combined_msg = if concurrency > 1 {
+                                let strategy =
+                                    Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                                ops::aggregate::combine_messages::<MinSig, _>(&messages, &strategy)
+                            } else {
+                                ops::aggregate::combine_messages::<MinSig, _>(
+                                    &messages,
+                                    &Sequential,
+                                )
+                            };
                             ops::aggregate::verify_same_signer::<MinSig>(
                                 &public,
                                 &combined_msg,

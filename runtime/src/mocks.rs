@@ -1,18 +1,14 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
 use crate::{Error, Sink as SinkTrait, Stream as StreamTrait};
-use bytes::Bytes;
-use commonware_utils::StableBuf;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::channel::oneshot;
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 /// A mock channel struct that is used internally by Sink and Stream.
 pub struct Channel {
     /// Stores the bytes sent by the sink that are not yet read by the stream.
-    buffer: VecDeque<u8>,
+    buffer: BytesMut,
 
     /// If the stream is waiting to read bytes, the waiter stores the number of
     /// bytes that the stream is waiting for, as well as the oneshot sender that
@@ -30,7 +26,7 @@ impl Channel {
     /// Returns an async-safe Sink/Stream pair that share an underlying buffer of bytes.
     pub fn init() -> (Sink, Stream) {
         let channel = Arc::new(Mutex::new(Self {
-            buffer: VecDeque::new(),
+            buffer: BytesMut::new(),
             waiter: None,
             sink_alive: true,
             stream_alive: true,
@@ -50,8 +46,7 @@ pub struct Sink {
 }
 
 impl SinkTrait for Sink {
-    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), Error> {
-        let msg = msg.into();
+    async fn send(&mut self, buf: impl Buf + Send) -> Result<(), Error> {
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
 
@@ -60,8 +55,7 @@ impl SinkTrait for Sink {
                 return Err(Error::Closed);
             }
 
-            // Add the data to the buffer.
-            channel.buffer.extend(msg.as_ref());
+            channel.buffer.put(buf);
 
             // If there is a waiter and the buffer is large enough,
             // return the waiter (while clearing the waiter field).
@@ -72,8 +66,8 @@ impl SinkTrait for Sink {
                 .is_some_and(|(requested, _)| *requested <= channel.buffer.len())
             {
                 let (requested, os_send) = channel.waiter.take().unwrap();
-                let data: Vec<u8> = channel.buffer.drain(0..requested).collect();
-                (os_send, Bytes::from(data))
+                let data = channel.buffer.copy_to_bytes(requested);
+                (os_send, data)
             } else {
                 return Ok(());
             }
@@ -101,17 +95,16 @@ pub struct Stream {
 }
 
 impl StreamTrait for Stream {
-    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, Error> {
-        let mut buf = buf.into();
+    async fn recv(&mut self, mut buf: impl BufMut + Send) -> Result<(), Error> {
         let os_recv = {
             let mut channel = self.channel.lock().unwrap();
 
             // If the message is fully available in the buffer,
             // drain the value into buf and return.
-            if channel.buffer.len() >= buf.len() {
-                let b: Vec<u8> = channel.buffer.drain(0..buf.len()).collect();
+            if channel.buffer.len() >= buf.remaining_mut() {
+                let b = channel.buffer.copy_to_bytes(buf.remaining_mut());
                 buf.put_slice(&b);
-                return Ok(buf);
+                return Ok(());
             }
 
             // At this point, there is not enough data in the buffer.
@@ -123,16 +116,16 @@ impl StreamTrait for Stream {
             // Otherwise, populate the waiter.
             assert!(channel.waiter.is_none());
             let (os_send, os_recv) = oneshot::channel();
-            channel.waiter = Some((buf.len(), os_send));
+            channel.waiter = Some((buf.remaining_mut(), os_send));
             os_recv
         };
 
         // Wait for the waiter to be resolved.
         // If the oneshot sender was dropped, it means the sink is closed.
         let data = os_recv.await.map_err(|_| Error::Closed)?;
-        assert_eq!(data.len(), buf.len());
+        assert_eq!(data.len(), buf.remaining_mut());
         buf.put_slice(&data);
-        Ok(buf)
+        Ok(())
     }
 }
 
@@ -153,32 +146,35 @@ mod tests {
     #[test]
     fn test_send_recv() {
         let (mut sink, mut stream) = Channel::init();
-        let data = b"hello world".to_vec();
+        let data = b"hello world";
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            sink.send(data.clone()).await.unwrap();
-            let buf = stream.recv(vec![0; data.len()]).await.unwrap();
-            assert_eq!(buf.as_ref(), data);
+            sink.send(data.as_slice()).await.unwrap();
+            let mut buf = vec![0u8; data.len()];
+            stream.recv(&mut buf[..]).await.unwrap();
+            assert_eq!(&buf[..], data);
         });
     }
 
     #[test]
     fn test_send_recv_partial_multiple() {
         let (mut sink, mut stream) = Channel::init();
-        let data = b"hello".to_vec();
-        let data2 = b" world".to_vec();
+        let data = b"hello";
+        let data2 = b" world";
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            sink.send(data).await.unwrap();
-            sink.send(data2).await.unwrap();
-            let buf = stream.recv(vec![0; 5]).await.unwrap();
-            assert_eq!(buf.as_ref(), b"hello");
-            let buf = stream.recv(buf).await.unwrap();
-            assert_eq!(buf.as_ref(), b" worl");
-            let buf = stream.recv(vec![0; 1]).await.unwrap();
-            assert_eq!(buf.as_ref(), b"d");
+            sink.send(data.as_slice()).await.unwrap();
+            sink.send(data2.as_slice()).await.unwrap();
+            let mut buf = [0u8; 5];
+            stream.recv(&mut buf[..]).await.unwrap();
+            assert_eq!(&buf[..], b"hello");
+            stream.recv(&mut buf[..]).await.unwrap();
+            assert_eq!(&buf[..], b" worl");
+            let mut buf = [0u8; 1];
+            stream.recv(&mut buf[..]).await.unwrap();
+            assert_eq!(&buf[..], b"d");
         });
     }
 
@@ -189,12 +185,13 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let (buf, _) = futures::try_join!(stream.recv(vec![0; data.len()]), async {
+            let mut buf = vec![0; data.len()];
+            let (_, _) = futures::try_join!(stream.recv(&mut buf[..]), async {
                 sleep(Duration::from_millis(50));
-                sink.send(data.to_vec()).await
+                sink.send(data.as_slice()).await
             })
             .unwrap();
-            assert_eq!(buf.as_ref(), data);
+            assert_eq!(&buf[..], data);
         });
     }
 
@@ -206,7 +203,8 @@ mod tests {
         executor.start(|context| async move {
             futures::join!(
                 async {
-                    let result = stream.recv(vec![0; 5]).await;
+                    let mut buf = [0u8; 5];
+                    let result = stream.recv(&mut buf[..]).await;
                     assert!(matches!(result, Err(Error::Closed)));
                 },
                 async {
@@ -225,7 +223,8 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let result = stream.recv(vec![0; 5]).await;
+            let mut buf = [0u8; 5];
+            let result = stream.recv(&mut buf[..]).await;
             assert!(matches!(result, Err(Error::Closed)));
         });
     }
@@ -237,12 +236,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Send some bytes
-            assert!(sink.send(b"7 bytes".to_vec()).await.is_ok());
+            assert!(sink.send(b"7 bytes".as_slice()).await.is_ok());
 
             // Spawn a task to initiate recv's where the first one will succeed and then will drop.
             let handle = context.clone().spawn(|_| async move {
-                let _ = stream.recv(vec![0; 5]).await;
-                let _ = stream.recv(vec![0; 5]).await;
+                let mut buf = [0u8; 5];
+                let _ = stream.recv(&mut buf[..]).await;
+                let _ = stream.recv(&mut buf[..]).await;
             });
 
             // Give the async task a moment to start
@@ -253,7 +253,7 @@ mod tests {
             assert!(matches!(handle.await, Err(Error::Closed)));
 
             // Try to send a message. The stream is dropped, so this should fail.
-            let result = sink.send(b"hello world".to_vec()).await;
+            let result = sink.send(b"hello world".as_slice()).await;
             assert!(matches!(result, Err(Error::Closed)));
         });
     }
@@ -265,7 +265,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let result = sink.send(b"hello world".to_vec()).await;
+            let result = sink.send(b"hello world".as_slice()).await;
             assert!(matches!(result, Err(Error::Closed)));
         });
     }
@@ -278,8 +278,9 @@ mod tests {
         // The timeout should return first.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let mut buf = [0u8; 5];
             select! {
-                v = stream.recv(vec![0;5]) => {
+                v = stream.recv(&mut buf[..]) => {
                     panic!("unexpected value: {v:?}");
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {

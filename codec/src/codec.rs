@@ -1,7 +1,7 @@
 //! Core traits for encoding and decoding.
 
 use crate::error::Error;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 /// Trait for types with a known, fixed encoded size.
 ///
@@ -63,6 +63,20 @@ pub trait Read: Sized {
 /// This trait provides the convenience [Encode::encode] method which handles
 /// buffer allocation, writing, and size assertion in one go.
 pub trait Encode: Write + EncodeSize {
+    /// Encodes `self` into a new [Bytes] buffer.
+    ///
+    /// This method calculates the required size using [EncodeSize::encode_size], allocates a
+    /// buffer of that exact capacity, writes the value using [Write::write], and performs a
+    /// sanity check assertion.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `encode_size()` does not return the same number of bytes actually written by
+    /// `write()`
+    fn encode(&self) -> Bytes {
+        self.encode_mut().freeze()
+    }
+
     /// Encodes `self` into a new [BytesMut] buffer.
     ///
     /// This method calculates the required size using [EncodeSize::encode_size], allocates a
@@ -73,7 +87,7 @@ pub trait Encode: Write + EncodeSize {
     ///
     /// Panics if `encode_size()` does not return the same number of bytes actually written by
     /// `write()`
-    fn encode(&self) -> BytesMut {
+    fn encode_mut(&self) -> BytesMut {
         let len = self.encode_size();
         let mut buffer = BytesMut::with_capacity(len);
         self.write(&mut buffer);

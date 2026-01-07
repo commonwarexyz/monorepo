@@ -11,6 +11,7 @@ use commonware_math::{
     algebra::{Additive, CryptoGroup, Field, HashToGroup, Ring, Space},
     poly::Poly,
 };
+use commonware_parallel::Sequential;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -429,7 +430,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::G1Msm { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let _ = G1::msm(&points[..len], &scalars[..len], 1);
+                let _ = G1::msm(&points[..len], &scalars[..len], &Sequential);
             }
         }
 
@@ -448,7 +449,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::G2Msm { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let _ = G2::msm(&points[..len], &scalars[..len], 1);
+                let _ = G2::msm(&points[..len], &scalars[..len], &Sequential);
             }
         }
 

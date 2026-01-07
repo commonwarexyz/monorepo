@@ -259,7 +259,7 @@ pub async fn run(
                                 continue;
                             }
                             let mut successful = sender
-                                .send(Recipients::All, input.clone().into_bytes().into(), false)
+                                .send(Recipients::All, input.as_bytes(), false)
                                 .await
                                 .expect("failed to send message");
                             if !successful.is_empty() {

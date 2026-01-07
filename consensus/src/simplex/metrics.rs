@@ -1,6 +1,19 @@
 use commonware_utils::Array;
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct Peer {
+    pub peer: String,
+}
+
+impl Peer {
+    pub fn new(peer: &impl Array) -> Self {
+        Self {
+            peer: peer.to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum MessageType {
     Notarize,

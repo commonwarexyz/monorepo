@@ -51,12 +51,14 @@ use crate::{
         supervision::Tree,
         Panicker,
     },
-    validate_label, Clock, Error, Execution, Handle, ListenerOf, Panicked, METRICS_PREFIX,
+    validate_label, Clock, Error, Execution, Handle, ListenerOf, Metrics as _, Panicked,
+    Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_macros::select;
+use commonware_parallel::ThreadPool;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
@@ -75,11 +77,13 @@ use prometheus_client::{
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
+use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
+    num::NonZeroUsize,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Weak},
@@ -1058,6 +1062,26 @@ impl crate::Spawner for Context {
     }
 }
 
+impl crate::RayonPoolSpawner for Context {
+    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+        let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
+
+        if rayon::current_thread_index().is_none() {
+            builder = builder.use_current_thread()
+        }
+
+        builder
+            .spawn_handler(move |thread| {
+                self.with_label("rayon_thread")
+                    .dedicated()
+                    .spawn(move |_| async move { thread.run() });
+                Ok(())
+            })
+            .build()
+            .map(Arc::new)
+    }
+}
+
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
         // Ensure the label is well-formatted
@@ -1390,8 +1414,13 @@ impl CryptoRng for Context {}
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
-        self.storage.open(partition, name).await
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        self.storage.open_versioned(partition, name, versions).await
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {

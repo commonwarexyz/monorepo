@@ -8,7 +8,7 @@ use crate::variable::{
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
-    Runner as _,
+    RayonPoolSpawner, Runner as _,
 };
 use commonware_storage::qmdb::{
     any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
@@ -85,18 +85,14 @@ fn bench_variable_init(c: &mut Criterion) {
                             for _ in 0..iters {
                                 match variant {
                                     Variant::AnyUnordered => {
-                                        let pool =
-                                            commonware_runtime::create_pool(ctx.clone(), THREADS)
-                                                .unwrap();
+                                        let pool = ctx.clone().create_pool(THREADS).unwrap();
                                         let db = UVariableDb::init(ctx.clone(), any_cfg(pool))
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                     }
                                     Variant::AnyOrdered => {
-                                        let pool =
-                                            commonware_runtime::create_pool(ctx.clone(), THREADS)
-                                                .unwrap();
+                                        let pool = ctx.clone().create_pool(THREADS).unwrap();
                                         let db = OVariableDb::init(ctx.clone(), any_cfg(pool))
                                             .await
                                             .unwrap();
