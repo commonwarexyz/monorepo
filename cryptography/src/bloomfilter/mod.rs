@@ -13,11 +13,8 @@ use commonware_codec::{
 use commonware_utils::bitmap::BitMap;
 use core::num::{NonZeroU64, NonZeroU8, NonZeroUsize};
 
-/// The length of a half of a [Digest].
-const HALF_DIGEST_LEN: usize = 16;
-
-/// The length of a full [Digest].
-const FULL_DIGEST_LEN: usize = Digest::SIZE;
+/// The length of a [Digest] in bytes.
+const DIGEST_LEN: usize = Digest::SIZE;
 
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///
@@ -31,38 +28,43 @@ pub struct BloomFilter {
 }
 
 impl BloomFilter {
+    const _ASSERT_DIGEST_AT_LEAST_16_BYTES: () = assert!(
+        DIGEST_LEN >= 16,
+        "digest must be at least 128 bits (16 bytes)"
+    );
+
     /// Creates a new [BloomFilter] with `hashers` hash functions and `bits` bits.
+    ///
+    /// The number of bits will be rounded up to the next power of 2.
     pub fn new(hashers: NonZeroU8, bits: NonZeroUsize) -> Self {
+        let bits = bits.get().next_power_of_two();
         Self {
             hashers: hashers.get(),
-            bits: BitMap::zeroes(bits.get() as u64),
+            bits: BitMap::zeroes(bits as u64),
         }
     }
 
     /// Generate `num_hashers` bit indices for a given item.
-    fn indices(&self, item: &[u8], bits: u64) -> impl Iterator<Item = u64> {
-        // Extract two 128-bit hash values from the SHA256 digest of the item
+    fn indices(&self, item: &[u8]) -> impl Iterator<Item = u64> {
+        #[allow(path_statements)]
+        Self::_ASSERT_DIGEST_AT_LEAST_16_BYTES;
+
+        // Extract two 64-bit hash values from the SHA256 digest of the item
         let digest = Sha256::hash(item);
-        let mut h1_bytes = [0u8; HALF_DIGEST_LEN];
-        h1_bytes.copy_from_slice(&digest[0..HALF_DIGEST_LEN]);
-        let h1 = u128::from_be_bytes(h1_bytes);
-        let mut h2_bytes = [0u8; HALF_DIGEST_LEN];
-        h2_bytes.copy_from_slice(&digest[HALF_DIGEST_LEN..FULL_DIGEST_LEN]);
-        let h2 = u128::from_be_bytes(h2_bytes);
+        let h1 = u64::from_be_bytes(digest[0..8].try_into().unwrap());
+        let h2 = u64::from_be_bytes(digest[8..16].try_into().unwrap());
 
         // Generate `hashers` hashes using the Kirsch-Mitzenmacher optimization:
         //
         // `h_i(x) = (h1(x) + i * h2(x)) mod m`
-        let hashers = self.hashers as u128;
-        let bits = bits as u128;
-        (0..hashers)
-            .map(move |hasher| h1.wrapping_add(hasher.wrapping_mul(h2)) % bits)
-            .map(|index| index as u64)
+        let hashers = self.hashers as u64;
+        let mask = self.bits.len() - 1;
+        (0..hashers).map(move |hasher| h1.wrapping_add(hasher.wrapping_mul(h2)) & mask)
     }
 
     /// Inserts an item into the [BloomFilter].
     pub fn insert(&mut self, item: &[u8]) {
-        let indices = self.indices(item, self.bits.len());
+        let indices = self.indices(item);
         for index in indices {
             self.bits.set(index, true);
         }
@@ -72,7 +74,7 @@ impl BloomFilter {
     ///
     /// Returns `true` if the item is probably in the set, and `false` if it is definitely not.
     pub fn contains(&self, item: &[u8]) -> bool {
-        let indices = self.indices(item, self.bits.len());
+        let indices = self.indices(item);
         for index in indices {
             if !self.bits.get(index) {
                 return false;

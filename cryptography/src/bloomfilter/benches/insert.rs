@@ -6,7 +6,7 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 fn benchmark_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("bloomfilter/insert");
 
-    let filter_bits = [1_000, 10_000, 100_000, 1_000_000];
+    let filter_bits = [1 << 10, 1 << 14, 1 << 17, 1 << 20]; // 1024, 16384, 131072, 1048576
     let hashers = [3, 7, 10];
     let item_size = 32;
 
