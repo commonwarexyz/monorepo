@@ -74,7 +74,9 @@ impl Archive {
                     freezer_value_compression: compression,
                     ordinal_partition: "archive_bench_ordinal".into(),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),
-                    write_buffer: NZUsize!(WRITE_BUFFER),
+                    freezer_key_write_buffer: NZUsize!(WRITE_BUFFER),
+                    freezer_value_write_buffer: NZUsize!(WRITE_BUFFER),
+                    ordinal_write_buffer: NZUsize!(WRITE_BUFFER),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
                     codec_config: (RangeCfg::new(..), ()),
                 };
@@ -89,7 +91,8 @@ impl Archive {
                     compression,
                     codec_config: (RangeCfg::new(..), ()),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),
-                    write_buffer: NZUsize!(WRITE_BUFFER),
+                    key_write_buffer: NZUsize!(WRITE_BUFFER),
+                    value_write_buffer: NZUsize!(WRITE_BUFFER),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
                 };
                 Self::Prunable(prunable::Archive::init(ctx, cfg).await.unwrap())

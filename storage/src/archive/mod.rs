@@ -146,7 +146,8 @@ mod tests {
             compression,
             codec_config: (),
             items_per_section: NZU64!(1024),
-            write_buffer: NZUsize!(1024),
+            key_write_buffer: NZUsize!(1024),
+            value_write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
         };
         prunable::Archive::init(context, cfg).await.unwrap()
@@ -169,7 +170,9 @@ mod tests {
             freezer_value_compression: compression,
             ordinal_partition: "test_ordinal".into(),
             items_per_section: NZU64!(1024),
-            write_buffer: NZUsize!(1024 * 1024),
+            freezer_key_write_buffer: NZUsize!(1024 * 1024),
+            freezer_value_write_buffer: NZUsize!(1024 * 1024),
+            ordinal_write_buffer: NZUsize!(1024 * 1024),
             replay_buffer: NZUsize!(1024 * 1024),
             codec_config: (),
         };

@@ -141,7 +141,8 @@
 //!         compression: Some(3),
 //!         codec_config: (),
 //!         items_per_section: NZU64!(1024),
-//!         write_buffer: NZUsize!(1024 * 1024),
+//!         key_write_buffer: NZUsize!(1024 * 1024),
+//!         value_write_buffer: NZUsize!(1024 * 1024),
 //!         replay_buffer: NZUsize!(4096),
 //!     };
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
@@ -188,9 +189,13 @@ pub struct Config<T: Translator, C> {
     /// The number of items per section (the granularity of pruning).
     pub items_per_section: NonZeroU64,
 
-    /// The amount of bytes that can be buffered in a section before being written to a
+    /// The amount of bytes that can be buffered for the key journal before being written to a
     /// [commonware_runtime::Blob].
-    pub write_buffer: NonZeroUsize,
+    pub key_write_buffer: NonZeroUsize,
+
+    /// The amount of bytes that can be buffered for the value journal before being written to a
+    /// [commonware_runtime::Blob].
+    pub value_write_buffer: NonZeroUsize,
 
     /// The buffer size to use when replaying a [commonware_runtime::Blob].
     pub replay_buffer: NonZeroUsize,
@@ -238,7 +243,8 @@ mod tests {
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: Some(3),
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
@@ -268,7 +274,8 @@ mod tests {
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
@@ -302,7 +309,8 @@ mod tests {
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
@@ -343,7 +351,8 @@ mod tests {
                     value_partition: "test_value".into(),
                     codec_config: (),
                     compression: None,
-                    write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                    key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                    value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                     replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                     items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
                 },
@@ -373,7 +382,8 @@ mod tests {
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
@@ -437,7 +447,8 @@ mod tests {
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
@@ -495,7 +506,8 @@ mod tests {
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1), // no mask - each item is its own section
             };
@@ -582,7 +594,8 @@ mod tests {
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
@@ -642,7 +655,8 @@ mod tests {
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };

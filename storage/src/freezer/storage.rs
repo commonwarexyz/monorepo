@@ -638,7 +638,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             index_partition: config.key_partition.clone(),
             value_partition: config.value_partition.clone(),
             index_buffer_pool: config.key_buffer_pool.clone(),
-            write_buffer: config.key_write_buffer,
+            index_write_buffer: config.key_write_buffer,
+            value_write_buffer: config.value_write_buffer,
             compression: config.value_compression,
             codec_config: config.codec_config,
         };

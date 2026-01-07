@@ -50,7 +50,9 @@
 //!         freezer_value_compression: Some(3),
 //!         ordinal_partition: "ordinal".into(),
 //!         items_per_section: NZU64!(1024),
-//!         write_buffer: NZUsize!(1024),
+//!         freezer_key_write_buffer: NZUsize!(1024),
+//!         freezer_value_write_buffer: NZUsize!(1024),
+//!         ordinal_write_buffer: NZUsize!(1024),
 //!         replay_buffer: NZUsize!(1024),
 //!         codec_config: (),
 //!     };
@@ -107,9 +109,17 @@ pub struct Config<C> {
     /// The number of items per section.
     pub items_per_section: NonZeroU64,
 
-    /// The amount of bytes that can be buffered in a section before being written to a
-    /// [commonware_runtime::Blob].
-    pub write_buffer: NonZeroUsize,
+    /// The amount of bytes that can be buffered for the freezer key journal before being
+    /// written to a [commonware_runtime::Blob].
+    pub freezer_key_write_buffer: NonZeroUsize,
+
+    /// The amount of bytes that can be buffered for the freezer value journal before being
+    /// written to a [commonware_runtime::Blob].
+    pub freezer_value_write_buffer: NonZeroUsize,
+
+    /// The amount of bytes that can be buffered for the ordinal journal before being
+    /// written to a [commonware_runtime::Blob].
+    pub ordinal_write_buffer: NonZeroUsize,
 
     /// The buffer size to use when replaying a [commonware_runtime::Blob].
     pub replay_buffer: NonZeroUsize,
@@ -146,7 +156,9 @@ mod tests {
                 freezer_value_compression: Some(3),
                 ordinal_partition: "test_ordinal2".into(),
                 items_per_section: NZU64!(512),
-                write_buffer: NZUsize!(1024),
+                freezer_key_write_buffer: NZUsize!(1024),
+                freezer_value_write_buffer: NZUsize!(1024),
+                ordinal_write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 codec_config: (),
             };

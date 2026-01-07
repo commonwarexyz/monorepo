@@ -189,7 +189,9 @@ where
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
                 codec_config: S::certificate_codec_config_unbounded(),
                 replay_buffer: REPLAY_BUFFER,
-                write_buffer: WRITE_BUFFER,
+                freezer_key_write_buffer: WRITE_BUFFER,
+                freezer_value_write_buffer: WRITE_BUFFER,
+                ordinal_write_buffer: WRITE_BUFFER,
             },
         )
         .await
@@ -227,7 +229,9 @@ where
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
                 codec_config: num_participants,
                 replay_buffer: REPLAY_BUFFER,
-                write_buffer: WRITE_BUFFER,
+                freezer_key_write_buffer: WRITE_BUFFER,
+                freezer_value_write_buffer: WRITE_BUFFER,
+                ordinal_write_buffer: WRITE_BUFFER,
             },
         )
         .await
@@ -267,7 +271,8 @@ where
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
                 buffer_pool: buffer_pool.clone(),
                 replay_buffer: REPLAY_BUFFER,
-                write_buffer: WRITE_BUFFER,
+                key_write_buffer: WRITE_BUFFER,
+                value_write_buffer: WRITE_BUFFER,
                 block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
             },

@@ -10,6 +10,10 @@ hash = "96805f8ed19133a058b7fab313f35eaf0cd085d08c7600010c217d28b9348960"
 n_cases = 65536
 hash = "e681f76832577cad99b881684c56d820f9059d117ed1fef9fa3c7735c2eb24f9"
 
+["commonware_storage::archive::prunable::storage::conformance::CodecConformance<Record<U64>>"]
+n_cases = 65536
+hash = "96805f8ed19133a058b7fab313f35eaf0cd085d08c7600010c217d28b9348960"
+
 ["commonware_storage::bmt::tests::conformance::CodecConformance<Bounds<Sha256Digest>>"]
 n_cases = 65536
 hash = "927da8204f16522162168efcae8ca126b927c96fb08289e805859071647b9333"
@@ -45,6 +49,10 @@ hash = "1a6d7f060e48860493f25a91b92d8a3ce7d6d51c6b15b2483f58ac2edb8d6b8a"
 ["commonware_storage::freezer::storage::conformance::CodecConformance<Record<U64,U64>>"]
 n_cases = 65536
 hash = "b4f2eb51a158d964317fb1714dbe708ffbe6673453dc648eabdd72409fb30440"
+
+["commonware_storage::freezer::storage::conformance::CodecConformance<Record<U64>>"]
+n_cases = 65536
+hash = "1a6d7f060e48860493f25a91b92d8a3ce7d6d51c6b15b2483f58ac2edb8d6b8a"
 
 ["commonware_storage::journal::conformance::FixedJournal"]
 n_cases = 512

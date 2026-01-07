@@ -28,7 +28,8 @@ pub(crate) struct Config {
     pub partition_prefix: String,
     pub prunable_items_per_section: NonZero<u64>,
     pub replay_buffer: NonZeroUsize,
-    pub write_buffer: NonZeroUsize,
+    pub key_write_buffer: NonZeroUsize,
+    pub value_write_buffer: NonZeroUsize,
     pub key_buffer_pool: PoolRef,
 }
 
@@ -197,7 +198,8 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
             compression: None,
             codec_config,
             replay_buffer: self.cfg.replay_buffer,
-            write_buffer: self.cfg.write_buffer,
+            key_write_buffer: self.cfg.key_write_buffer,
+            value_write_buffer: self.cfg.value_write_buffer,
         };
         let archive = prunable::Archive::init(self.context.with_label(name), cfg)
             .await

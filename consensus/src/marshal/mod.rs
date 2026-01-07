@@ -189,7 +189,8 @@ mod tests {
             partition_prefix: format!("validator-{}", validator.clone()),
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
-            write_buffer: NZUsize!(1024),
+            key_write_buffer: NZUsize!(1024),
+            value_write_buffer: NZUsize!(1024),
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 
@@ -255,7 +256,9 @@ mod tests {
                 items_per_section: NZU64!(10),
                 codec_config: S::certificate_codec_config_unbounded(),
                 replay_buffer: config.replay_buffer,
-                write_buffer: config.write_buffer,
+                freezer_key_write_buffer: config.key_write_buffer,
+                freezer_value_write_buffer: config.value_write_buffer,
+                ordinal_write_buffer: config.key_write_buffer,
             },
         )
         .await
@@ -293,7 +296,9 @@ mod tests {
                 items_per_section: NZU64!(10),
                 codec_config: config.block_codec_config,
                 replay_buffer: config.replay_buffer,
-                write_buffer: config.write_buffer,
+                freezer_key_write_buffer: config.key_write_buffer,
+                freezer_value_write_buffer: config.value_write_buffer,
+                ordinal_write_buffer: config.key_write_buffer,
             },
         )
         .await

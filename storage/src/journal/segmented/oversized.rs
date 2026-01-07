@@ -70,8 +70,11 @@ pub struct Config<C> {
     /// Buffer pool for index journal caching.
     pub index_buffer_pool: commonware_runtime::buffer::PoolRef,
 
-    /// Write buffer size for both journals.
-    pub write_buffer: NonZeroUsize,
+    /// Write buffer size for the index journal.
+    pub index_write_buffer: NonZeroUsize,
+
+    /// Write buffer size for the value journal.
+    pub value_write_buffer: NonZeroUsize,
 
     /// Optional compression level for values (using zstd).
     pub compression: Option<u8>,
@@ -101,7 +104,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
         let index_cfg = FixedConfig {
             partition: cfg.index_partition,
             buffer_pool: cfg.index_buffer_pool,
-            write_buffer: cfg.write_buffer,
+            write_buffer: cfg.index_write_buffer,
         };
         let index = FixedJournal::init(context.with_label("index"), index_cfg).await?;
 
@@ -109,7 +112,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
             partition: cfg.value_partition,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
-            write_buffer: cfg.write_buffer,
+            write_buffer: cfg.value_write_buffer,
         };
         let values = Glob::init(context.with_label("values"), value_cfg).await?;
 
@@ -419,7 +422,8 @@ mod tests {
             index_partition: "test_index".to_string(),
             value_partition: "test_values".to_string(),
             index_buffer_pool: PoolRef::new(NZUsize!(64), NZUsize!(8)),
-            write_buffer: NZUsize!(1024),
+            index_write_buffer: NZUsize!(1024),
+            value_write_buffer: NZUsize!(1024),
             compression: None,
             codec_config: (),
         }
@@ -1132,7 +1136,7 @@ mod tests {
                 partition: cfg.value_partition.clone(),
                 compression: cfg.compression,
                 codec_config: (),
-                write_buffer: cfg.write_buffer,
+                write_buffer: cfg.value_write_buffer,
             };
             let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
                 .await

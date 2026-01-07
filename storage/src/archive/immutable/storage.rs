@@ -127,11 +127,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
             context.with_label("freezer"),
             freezer::Config {
                 key_partition: cfg.freezer_key_partition,
-                key_write_buffer: cfg.write_buffer,
+                key_write_buffer: cfg.freezer_key_write_buffer,
                 key_buffer_pool: cfg.freezer_key_buffer_pool,
                 value_partition: cfg.freezer_value_partition,
                 value_compression: cfg.freezer_value_compression,
-                value_write_buffer: cfg.write_buffer,
+                value_write_buffer: cfg.freezer_value_write_buffer,
                 value_target_size: cfg.freezer_value_target_size,
                 table_partition: cfg.freezer_table_partition,
                 table_initial_size: cfg.freezer_table_initial_size,
@@ -167,7 +167,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
             ordinal::Config {
                 partition: cfg.ordinal_partition,
                 items_per_blob: cfg.items_per_section,
-                write_buffer: cfg.write_buffer,
+                write_buffer: cfg.ordinal_write_buffer,
                 replay_buffer: cfg.replay_buffer,
             },
             Some(section_bits),

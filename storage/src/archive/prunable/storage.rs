@@ -149,7 +149,8 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             index_partition: cfg.key_partition,
             value_partition: cfg.value_partition,
             index_buffer_pool: cfg.key_buffer_pool,
-            write_buffer: cfg.write_buffer,
+            index_write_buffer: cfg.key_write_buffer,
+            value_write_buffer: cfg.value_write_buffer,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         };
