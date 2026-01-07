@@ -628,6 +628,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 // 1. Rewind crash: we rewound the data journal but crashed before rewinding offsets
                 // 2. First append crash: we opened the first section blob but crashed before writing to it
                 // In both cases, calculate target position from the first remaining section
+                // SAFETY: data is non-empty (checked above)
                 let first_section = data.oldest_section().unwrap();
                 let target_pos = first_section * items_per_section;
 
@@ -655,7 +656,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // === Handle non-empty data journal case ===
         let (data_oldest_pos, data_size) = {
-            // Data exists -- count items
+            // SAFETY: data is non-empty (empty case returns early above)
             let first_section = data.oldest_section().unwrap();
             let last_section = data.newest_section().unwrap();
 
@@ -756,11 +757,13 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                     (last_section, last_offset, true)
                 } else {
                     // Offsets fully pruned but data has items -- start from first data section
+                    // SAFETY: data is non-empty (checked above)
                     let first_section = data.oldest_section().unwrap();
                     (first_section, 0, false)
                 }
             } else {
                 // Offsets empty -- start from first data section
+                // SAFETY: data is non-empty (checked above)
                 let first_section = data.oldest_section().unwrap();
                 (first_section, 0, false)
             };
