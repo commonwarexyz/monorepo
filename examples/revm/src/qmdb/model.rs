@@ -1,20 +1,30 @@
 //! Value encodings for QMDB.
+//!
+//! Records are encoded with `commonware_codec` and use fixed-size, big-endian
+//! representations for Ethereum integers and hashes.
 
 use alloy_evm::revm::primitives::{B256, KECCAK_EMPTY, U256};
 use alloy_evm::revm::state::AccountInfo;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 
+/// Persisted account data stored in QMDB.
 #[derive(Clone, Debug)]
 pub(crate) struct AccountRecord {
+    /// Whether the account exists.
     pub(crate) exists: bool,
+    /// Account nonce.
     pub(crate) nonce: u64,
+    /// Account balance.
     pub(crate) balance: U256,
+    /// Hash of the account's contract bytecode.
     pub(crate) code_hash: B256,
+    /// Storage generation for invalidating old storage slots on re-creation.
     pub(crate) storage_generation: u64,
 }
 
 impl AccountRecord {
+    /// Returns an empty account marker with the given storage generation.
     pub(crate) const fn empty(storage_generation: u64) -> Self {
         Self {
             exists: false,
@@ -25,6 +35,7 @@ impl AccountRecord {
         }
     }
 
+    /// Converts the record into REVM's account info, if the account exists.
     pub(crate) const fn as_info(&self) -> Option<AccountInfo> {
         if !self.exists {
             return None;
@@ -77,6 +88,7 @@ impl Read for AccountRecord {
     }
 }
 
+/// Persisted storage slot value.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StorageRecord(pub(crate) U256);
 
@@ -100,10 +112,12 @@ impl Read for StorageRecord {
     }
 }
 
+/// Writes a 256-bit integer in big-endian form.
 pub(crate) fn write_u256(value: U256, buf: &mut impl BufMut) {
     buf.put_slice(&value.to_be_bytes::<32>());
 }
 
+/// Reads a 256-bit integer in big-endian form.
 pub(crate) fn read_u256(buf: &mut impl Buf) -> Result<U256, CodecError> {
     if buf.remaining() < 32 {
         return Err(CodecError::EndOfBuffer);
@@ -113,10 +127,12 @@ pub(crate) fn read_u256(buf: &mut impl Buf) -> Result<U256, CodecError> {
     Ok(U256::from_be_bytes(out))
 }
 
+/// Writes a 256-bit hash in big-endian form.
 pub(crate) fn write_b256(value: B256, buf: &mut impl BufMut) {
     buf.put_slice(value.as_slice());
 }
 
+/// Reads a 256-bit hash in big-endian form.
 pub(crate) fn read_b256(buf: &mut impl Buf) -> Result<B256, CodecError> {
     if buf.remaining() < 32 {
         return Err(CodecError::EndOfBuffer);

@@ -1,4 +1,15 @@
 //! QMDB-backed storage adapter for the REVM example.
+//!
+//! This module wires a QMDB-backed key/value model into REVM's database
+//! interfaces. QMDB provides persistence and authenticated structure, while
+//! REVM executes against a synchronous in-memory overlay via `CacheDB`.
+//!
+//! Design at a glance:
+//! - Accounts, storage, and code live in separate QMDB partitions.
+//! - Reads go through `DatabaseAsyncRef` and are bridged into sync REVM calls
+//!   via `WrapDatabaseAsync` (Tokio runtime required).
+//! - Writes are staged in the REVM overlay and applied to QMDB in batches when
+//!   the example decides a block is finalized.
 
 mod adapter;
 mod keys;
@@ -36,6 +47,7 @@ type AccountStore = Db<Context, AccountKey, AccountRecord, EightCap>;
 type StorageStore = Db<Context, StorageKey, StorageRecord, EightCap>;
 type CodeStore = Db<Context, CodeKey, Vec<u8>, EightCap>;
 
+/// Errors surfaced by the QMDB-backed REVM adapter.
 #[derive(Debug, Error)]
 pub(crate) enum Error {
     #[error("qmdb error: {0}")]
@@ -48,13 +60,17 @@ pub(crate) enum Error {
 
 impl DBErrorMarker for Error {}
 
+/// QMDB configuration for the REVM example.
 #[derive(Clone)]
 pub(crate) struct QmdbConfig {
+    /// Prefix used to derive the QMDB partition names.
     pub(crate) partition_prefix: String,
+    /// Buffer pool shared by the underlying QMDB stores.
     pub(crate) buffer_pool: PoolRef,
 }
 
 impl QmdbConfig {
+    /// Creates a new configuration for the example QMDB partitions.
     pub(crate) const fn new(partition_prefix: String, buffer_pool: PoolRef) -> Self {
         Self {
             partition_prefix,
@@ -63,12 +79,15 @@ impl QmdbConfig {
     }
 }
 
+/// Owns QMDB handles and exposes a REVM database view plus persistence hooks.
 #[derive(Clone)]
 pub(crate) struct QmdbState {
+    /// Shared QMDB handles guarded for async access.
     inner: Arc<Mutex<QmdbInner>>,
 }
 
 impl QmdbState {
+    /// Initializes QMDB partitions and populates the genesis allocation.
     pub(crate) async fn init(
         context: Context,
         config: QmdbConfig,
@@ -113,6 +132,10 @@ impl QmdbState {
         Ok(state)
     }
 
+    /// Creates a sync REVM database view backed by the async QMDB adapter.
+    ///
+    /// This uses REVM's `WrapDatabaseAsync` bridge and therefore requires a
+    /// Tokio runtime to be available when called.
     pub(crate) fn database(&self) -> Result<QmdbRefDb, Error> {
         let async_db = QmdbAsyncDb::new(self.inner.clone());
         let wrapped =
@@ -123,6 +146,11 @@ impl QmdbState {
         })
     }
 
+    /// Persists a batch of finalized state changes into QMDB.
+    ///
+    /// The method stages updates with QMDB batch writers and commits once per
+    /// partition, so callers can keep execution strictly in-memory and only
+    /// persist at finalized block boundaries.
     pub(crate) async fn apply_changes(&self, changes: &QmdbChanges) -> Result<(), Error> {
         if changes.accounts.is_empty() {
             return Ok(());
@@ -214,6 +242,7 @@ impl QmdbState {
         Ok(())
     }
 
+    /// Writes genesis balances into the accounts partition.
     async fn bootstrap_genesis(&self, genesis_alloc: Vec<(Address, U256)>) -> Result<(), Error> {
         if genesis_alloc.is_empty() {
             return Ok(());
@@ -246,14 +275,19 @@ impl QmdbState {
     }
 }
 
+/// Execution database type used by the REVM example.
 pub(crate) type RevmDb = CacheDB<QmdbRefDb>;
 
 struct QmdbInner {
+    /// Account metadata keyed by address.
     accounts: Option<AccountStore>,
+    /// Storage slots keyed by address, generation, and slot.
     storage: Option<StorageStore>,
+    /// Contract bytecode keyed by code hash.
     code: Option<CodeStore>,
 }
 
+/// Builds a QMDB store config with example-appropriate defaults.
 const fn store_config<C>(
     partition: String,
     buffer_pool: PoolRef,

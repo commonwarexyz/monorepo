@@ -1,4 +1,9 @@
 //! REVM database adapter backed by QMDB.
+//!
+//! This module exposes an async database interface for QMDB and bridges it
+//! into REVM's synchronous `DatabaseRef` using `WrapDatabaseAsync`. The async
+//! adapter is intentionally thin so the example can rely on QMDB's internal
+//! caching and batching.
 
 use super::keys::{account_key, code_key, storage_key};
 use super::{Error, QmdbInner};
@@ -10,12 +15,14 @@ use alloy_evm::revm::{
 use futures::lock::Mutex;
 use std::sync::Arc;
 
+/// Async QMDB view that implements `DatabaseAsyncRef` for REVM.
 #[derive(Clone)]
 pub(crate) struct QmdbAsyncDb {
     inner: Arc<Mutex<QmdbInner>>,
 }
 
 impl QmdbAsyncDb {
+    /// Wraps shared QMDB state for the async REVM database bridge.
     pub(super) const fn new(inner: Arc<Mutex<QmdbInner>>) -> Self {
         Self { inner }
     }
@@ -86,6 +93,7 @@ impl DatabaseAsyncRef for QmdbAsyncDb {
     }
 }
 
+/// Sync REVM database wrapper for the async QMDB adapter.
 #[derive(Clone)]
 pub(crate) struct QmdbRefDb {
     pub(crate) inner: Arc<WrapDatabaseAsync<QmdbAsyncDb>>,
