@@ -60,7 +60,7 @@ mod iouring;
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
 
-/// Default blob version used when no version is specified.
+/// Default [`Blob`] version used when no version is specified via [`Storage::open`].
 pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
 /// Errors that can occur when interacting with the runtime.

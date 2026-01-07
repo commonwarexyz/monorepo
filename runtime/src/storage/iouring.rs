@@ -20,9 +20,10 @@
 //!
 //! This implementation is only available on Linux systems that support io_uring.
 
+use super::Header;
 use crate::{
     iouring::{self, should_retry},
-    Error, Header,
+    Error,
 };
 use commonware_codec::Encode;
 use commonware_utils::{from_hex, hex, StableBuf};
