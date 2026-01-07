@@ -66,7 +66,7 @@
 //! index journal (selected by `section = index / items_per_section * items_per_section` to minimize
 //! the number of open blobs):
 //!
-//! ```rust
+//! ```text
 //! // Maps index -> position in index journal
 //! indices: BTreeMap<u64, u32>
 //! ```
