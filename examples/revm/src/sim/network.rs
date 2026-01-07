@@ -16,12 +16,12 @@ use std::{
 pub(super) async fn start_network(
     context: &tokio::Context,
     participants: Set<ed25519::PublicKey>,
-) -> simulated::Oracle<ed25519::PublicKey> {
+) -> simulated::Oracle<ed25519::PublicKey, tokio::Context> {
     let base_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
     let (network, oracle) = simulated::Network::new_with_base_addr(
         context.with_label("network"),
         simulated::Config {
-            max_size: MAX_MSG_SIZE,
+            max_size: MAX_MSG_SIZE as u32,
             disconnect_on_block: true,
             tracked_peer_sets: None,
         },
@@ -35,7 +35,7 @@ pub(super) async fn start_network(
 
 /// Connect all peers in a full mesh with fixed links.
 pub(super) async fn connect_all_peers(
-    oracle: &mut simulated::Oracle<ed25519::PublicKey>,
+    oracle: &mut simulated::Oracle<ed25519::PublicKey, tokio::Context>,
     peers: &[ed25519::PublicKey],
 ) -> anyhow::Result<()> {
     for a in peers.iter() {

@@ -11,7 +11,7 @@ use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 use commonware_runtime::{tokio, Runner as _};
 
 type ThresholdScheme =
-    simplex::signing_scheme::bls12381_threshold::Scheme<ed25519::PublicKey, MinSig>;
+    simplex::scheme::bls12381_threshold::Scheme<ed25519::PublicKey, MinSig>;
 
 mod checks;
 mod demo;
@@ -31,6 +31,7 @@ pub(super) const CHANNEL_BACKFILL: u64 = 4;
 pub(super) const BLOCK_CODEC_MAX_TXS: usize = 64;
 pub(super) const BLOCK_CODEC_MAX_CALLDATA: usize = 1024;
 pub(super) const P2P_LINK_LATENCY_MS: u64 = 5;
+pub(super) const SIMPLEX_NAMESPACE: &[u8] = b"_COMMONWARE_REVM_SIMPLEX";
 
 #[derive(Clone, Copy, Debug)]
 /// Configuration for a simulation run.

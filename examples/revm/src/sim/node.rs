@@ -14,11 +14,12 @@ use commonware_broadcast::buffered;
 use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal,
-    types::{Epoch, ViewDelta},
+    simplex::elector::Random,
+    types::{Epoch, FixedEpocher, ViewDelta},
     Reporters,
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
-use commonware_p2p::{simulated, utils::requester};
+use commonware_p2p::simulated;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics as _};
 use commonware_storage::archive::immutable;
 use commonware_utils::{NZUsize, NZU32, NZU64};
@@ -27,7 +28,7 @@ use governor::Quota;
 use std::{sync::Arc, time::Duration};
 
 type Peer = ed25519::PublicKey;
-type ChannelSender = simulated::Sender<Peer>;
+type ChannelSender = simulated::Sender<Peer, tokio::Context>;
 type ChannelReceiver = simulated::Receiver<Peer>;
 
 // This example keeps everything in a single epoch for simplicity. The `Marshaled` wrapper also
@@ -37,14 +38,15 @@ const EPOCH_LENGTH: u64 = u64::MAX;
 #[derive(Clone)]
 struct ConstantSchemeProvider(Arc<ThresholdScheme>);
 
-impl marshal::SchemeProvider for ConstantSchemeProvider {
+impl commonware_cryptography::certificate::Provider for ConstantSchemeProvider {
+    type Scope = Epoch;
     type Scheme = ThresholdScheme;
 
-    fn scheme(&self, _epoch: Epoch) -> Option<Arc<Self::Scheme>> {
+    fn scoped(&self, _epoch: Epoch) -> Option<Arc<Self::Scheme>> {
         Some(self.0.clone())
     }
 
-    fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
+    fn all(&self) -> Option<Arc<Self::Scheme>> {
         Some(self.0.clone())
     }
 }
@@ -76,7 +78,7 @@ struct NodeInit<'a> {
 struct MarshalStart<M> {
     index: usize,
     public_key: Peer,
-    control: simulated::Control<Peer>,
+    control: simulated::Control<Peer, tokio::Context>,
     manager: M,
     scheme: ThresholdScheme,
     buffer_pool: PoolRef,
@@ -89,7 +91,7 @@ struct MarshalStart<M> {
 /// Spawn all nodes (application + consensus) for a simulation run.
 pub(super) async fn start_all_nodes(
     context: &tokio::Context,
-    oracle: &mut simulated::Oracle<ed25519::PublicKey>,
+    oracle: &mut simulated::Oracle<ed25519::PublicKey, tokio::Context>,
     participants: &[ed25519::PublicKey],
     schemes: &[ThresholdScheme],
     demo: &demo::DemoTransfer,
@@ -127,7 +129,7 @@ pub(super) async fn start_all_nodes(
 
 async fn start_node(
     context: &tokio::Context,
-    oracle: &mut simulated::Oracle<Peer>,
+    oracle: &mut simulated::Oracle<Peer, tokio::Context>,
     init: NodeInit<'_>,
 ) -> anyhow::Result<application::NodeHandle> {
     let NodeInit {
@@ -186,11 +188,12 @@ async fn start_node(
     .await?;
 
     // Adapt the application to simplex by delegating full-block dissemination/backfill to marshal.
+    let epocher = FixedEpocher::new(NZU64!(EPOCH_LENGTH));
     let marshaled = Marshaled::new(
         context.with_label(&format!("marshaled_{index}")),
         app,
         marshal_mailbox.clone(),
-        EPOCH_LENGTH,
+        epocher,
     );
 
     let seed_reporter = application::SeedReporter::<MinSig>::new(state.clone());
@@ -206,6 +209,7 @@ async fn start_node(
         context.with_label(&format!("engine_{index}")),
         simplex::Config {
             scheme,
+            elector: Random,
             blocker,
             automaton: marshaled.clone(),
             relay: marshaled,
@@ -213,7 +217,6 @@ async fn start_node(
             partition: format!("revm-{index}"),
             mailbox_size: MAILBOX_SIZE,
             epoch: Epoch::zero(),
-            namespace: b"revm-consensus".to_vec(),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             leader_timeout: Duration::from_millis(50),
@@ -223,7 +226,6 @@ async fn start_node(
             activity_timeout: ViewDelta::new(10),
             skip_timeout: ViewDelta::new(5),
             fetch_concurrent: 16,
-            fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
             buffer_pool,
         },
     );
@@ -233,7 +235,7 @@ async fn start_node(
 }
 
 async fn register_channels(
-    control: &mut simulated::Control<Peer>,
+    control: &mut simulated::Control<Peer, tokio::Context>,
     quota: Quota,
 ) -> anyhow::Result<NodeChannels> {
     let votes = control
@@ -308,12 +310,8 @@ where
         manager,
         blocker: control.clone(),
         mailbox_size: MAILBOX_SIZE,
-        requester_config: requester::Config {
-            me: Some(public_key.clone()),
-            rate_limit: Quota::per_second(NZU32!(10)),
-            initial: Duration::from_millis(200),
-            timeout: Duration::from_millis(200),
-        },
+        initial: Duration::from_millis(200),
+        timeout: Duration::from_millis(200),
         fetch_retry_timeout: Duration::from_millis(100),
         priority_requests: false,
         priority_responses: false,
@@ -345,7 +343,7 @@ where
             freezer_journal_buffer_pool: buffer_pool.clone(),
             ordinal_partition: format!("{partition_prefix}-finalizations-by-height-ordinal"),
             items_per_section: NZU64!(10),
-            codec_config: <ThresholdScheme as commonware_consensus::simplex::signing_scheme::Scheme>::certificate_codec_config_unbounded(),
+            codec_config: <ThresholdScheme as commonware_cryptography::certificate::Scheme>::certificate_codec_config_unbounded(),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
         },
@@ -377,24 +375,23 @@ where
     .await
     .context("init blocks archive")?;
 
-    let (actor, mailbox) = marshal::Actor::init(
+    let epocher = FixedEpocher::new(NZU64!(EPOCH_LENGTH));
+    let (actor, mailbox, _last_processed_height) = marshal::Actor::init(
         ctx.clone(),
         finalizations_by_height,
         finalized_blocks,
         marshal::Config {
-            scheme_provider,
-            epoch_length: EPOCH_LENGTH,
+            provider: scheme_provider,
+            epocher,
             partition_prefix,
             mailbox_size: MAILBOX_SIZE,
             view_retention_timeout: ViewDelta::new(10),
-            namespace: b"revm-marshal".to_vec(),
             prunable_items_per_section: NZU64!(10),
             buffer_pool,
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             block_codec_config,
             max_repair: NZUsize!(16),
-            _marker: std::marker::PhantomData,
         },
     )
     .await;

@@ -205,11 +205,13 @@ impl Committable for Block {
     }
 }
 
-impl commonware_consensus::Block for Block {
-    fn height(&self) -> u64 {
-        self.height
+impl commonware_consensus::Heightable for Block {
+    fn height(&self) -> commonware_consensus::types::Height {
+        commonware_consensus::types::Height::new(self.height)
     }
+}
 
+impl commonware_consensus::Block for Block {
     fn parent(&self) -> Self::Commitment {
         digest_for_block_id(&self.parent)
     }

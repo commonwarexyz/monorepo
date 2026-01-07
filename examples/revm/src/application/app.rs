@@ -16,7 +16,7 @@ use crate::{
 use alloy_evm::revm::primitives::B256;
 use commonware_consensus::{
     marshal::ingress::mailbox::AncestorStream,
-    simplex::{signing_scheme::Scheme, types::Context},
+    simplex::{scheme::Scheme, types::Context},
     Application, VerifyingApplication,
 };
 use commonware_cryptography::Committable as _;
@@ -45,7 +45,7 @@ impl<S> RevmApplication<S> {
 impl<E, S> Application<E> for RevmApplication<S>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme<PublicKey = PublicKey>,
+    S: Scheme<ConsensusDigest> + commonware_cryptography::certificate::Scheme<PublicKey = PublicKey>,
 {
     type SigningScheme = S;
     type Context = Context<ConsensusDigest, PublicKey>;
@@ -109,7 +109,7 @@ where
 impl<E, S> VerifyingApplication<E> for RevmApplication<S>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme<PublicKey = PublicKey>,
+    S: Scheme<ConsensusDigest> + commonware_cryptography::certificate::Scheme<PublicKey = PublicKey>,
 {
     async fn verify(
         &mut self,

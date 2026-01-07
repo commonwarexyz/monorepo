@@ -3,7 +3,7 @@
 //! This example uses the BLS12-381 threshold signing scheme used by threshold-simplex. For
 //! simplicity, we run a dealer-based DKG locally to derive per-node signing shares.
 
-use super::ThresholdScheme;
+use super::{ThresholdScheme, SIMPLEX_NAMESPACE};
 use commonware_consensus::simplex;
 use commonware_cryptography::{
     bls12381::{
@@ -12,6 +12,7 @@ use commonware_cryptography::{
     },
     ed25519, Signer as _,
 };
+use commonware_parallel::Sequential;
 use commonware_utils::{ordered::Set, TryCollect as _};
 use rand::{rngs::StdRng, SeedableRng as _};
 
@@ -42,10 +43,12 @@ pub(super) fn threshold_schemes(
     let mut schemes = Vec::with_capacity(n);
     for pk in participants.iter() {
         let share = shares.get_value(pk).expect("share exists").clone();
-        let scheme = simplex::signing_scheme::bls12381_threshold::Scheme::signer(
+        let scheme = simplex::scheme::bls12381_threshold::Scheme::signer(
+            SIMPLEX_NAMESPACE,
             participants.clone(),
             output.public().clone(),
             share,
+            Sequential,
         )
         .expect("signer should exist");
         schemes.push(scheme);
