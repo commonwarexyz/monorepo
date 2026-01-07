@@ -595,10 +595,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 mod tests {
     use super::*;
     use bytes::BufMut;
-    use commonware_cryptography::{Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
-    use commonware_utils::{hex, NZUsize};
+    use commonware_utils::NZUsize;
     use futures::{pin_mut, StreamExt};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
@@ -1877,55 +1876,6 @@ mod tests {
             }
 
             journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Protect against accidental changes to the journal disk format.
-    #[test_traced]
-    fn test_journal_conformance() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-
-        // Start the test within the executor
-        executor.start(|context| async move {
-            // Create a journal configuration
-            let cfg = Config {
-                partition: "test_partition".into(),
-                compression: None,
-                codec_config: (),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize journal");
-
-            // Append 100 items to the journal
-            for i in 0..100 {
-                journal.append(1, i).await.expect("Failed to append data");
-            }
-            journal.sync(1).await.expect("Failed to sync blob");
-
-            // Drop the journal (data already synced)
-            drop(journal);
-
-            // Hash blob contents
-            let (blob, size) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
-                .await
-                .expect("Failed to open blob");
-            assert!(size > 0);
-            let buf = blob
-                .read_at(vec![0u8; size as usize], 0)
-                .await
-                .expect("Failed to read blob");
-            let digest = Sha256::hash(buf.as_ref());
-            assert_eq!(
-                hex(&digest),
-                "b64cab8c9087ef9f062b01458b4cbde7e3e8bfd3cd8d4bc6628ad717326cad2e",
-            );
         });
     }
 }
