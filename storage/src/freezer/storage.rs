@@ -22,9 +22,6 @@ const RESIZE_THRESHOLD: u64 = 50;
 ///
 /// This can be used to directly access the data for a given
 /// key-value pair (rather than walking the journal chain).
-///
-/// Contains the section, value offset, and value size to enable
-/// random access optimization when fetching values.
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
