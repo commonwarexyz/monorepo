@@ -1,10 +1,9 @@
 //! A prunable key-value store for ordered data.
 //!
-//! Data is stored across two backends: an **index journal** ([crate::journal::segmented::fixed])
-//! for fixed-size index entries and a **value glob** ([crate::journal::segmented::glob::Glob])
-//! for values. The location of written data is stored in-memory by both index and key (via
-//! [crate::index::unordered::Index]) to enable **lookups** for both query patterns over
-//! archived data.
+//! Data is stored across two backends: [crate::journal::segmented::fixed] for fixed-size index entries and
+//! [crate::journal::segmented::glob::Glob] for values (managed by [crate::journal::segmented::oversized]).
+//! The location of written data is stored in-memory by both index and key (via [crate::index::unordered::Index])
+//! to enable efficient lookups (on average).
 //!
 //! _Notably, [Archive] does not make use of compaction nor on-disk indexes (and thus has no read
 //! nor write amplification during normal operation).
@@ -18,7 +17,7 @@
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |12 |13 |14 |15 |16 |17 |18 |19 |20 |21 |22 |23 |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! |       Index(u64)          |  Key(Fixed Size)  |       val_offset(u64)         |val_size(u32)|
+//! |       Index(u64)          |  Key(Fixed Size)  |       val_offset(u64)         | val_size(u32) |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //! ```
 //!
@@ -30,11 +29,6 @@
 //! |         Compressed Data (optional)        |       CRC32(u32)      |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //! ```
-//!
-//! This separation provides:
-//! - **Fast startup replay**: Only reads index journal (no values)
-//! - **Buffer pool locality**: Index journal uses buffer pool for hot entries
-//! - **Direct value reads**: Large values bypass buffer pool (avoids cache pollution)
 //!
 //! # Uniqueness
 //!

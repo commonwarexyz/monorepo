@@ -9,7 +9,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Storage};
 use commonware_utils::Array;
-use futures::{pin_mut, StreamExt};
+use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
@@ -137,7 +137,6 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     ///
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying only the index journal (no values are read).
-    /// Crash recovery is handled automatically by `Oversized`.
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         // Initialize oversized journal
         let oversized_cfg = OversizedConfig {
@@ -400,7 +399,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
 
         // Sync oversized journal (handles both index and values)
         let syncs: Vec<_> = pending.iter().map(|s| self.oversized.sync(*s)).collect();
-        futures::future::try_join_all(syncs).await?;
+        try_join_all(syncs).await?;
 
         self.pending.clear();
         Ok(())
