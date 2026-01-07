@@ -1628,6 +1628,256 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_journal_rewind_many_sections() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+
+            // Create sections 1-10 with data
+            for section in 1u64..=10 {
+                journal.append(section, section as i32).await.unwrap();
+            }
+            journal.sync_all().await.unwrap();
+
+            // Verify all sections exist
+            for section in 1u64..=10 {
+                let size = journal.size(section).await.unwrap();
+                assert!(size > 0, "section {section} should have data");
+            }
+
+            // Rewind to section 5 (should remove sections 6-10)
+            journal.rewind(5, journal.size(5).await.unwrap()).await.unwrap();
+
+            // Verify sections 1-5 still exist with correct data
+            for section in 1u64..=5 {
+                let size = journal.size(section).await.unwrap();
+                assert!(size > 0, "section {section} should still have data");
+            }
+
+            // Verify sections 6-10 are removed (size should be 0)
+            for section in 6u64..=10 {
+                let size = journal.size(section).await.unwrap();
+                assert_eq!(size, 0, "section {section} should be removed");
+            }
+
+            // Verify data integrity via replay
+            {
+                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                pin_mut!(stream);
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, _, _, item) = result.unwrap();
+                    items.push((section, item));
+                }
+                assert_eq!(items.len(), 5);
+                for (i, (section, item)) in items.iter().enumerate() {
+                    assert_eq!(*section, (i + 1) as u64);
+                    assert_eq!(*item, (i + 1) as i32);
+                }
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_rewind_partial_truncation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+
+            // Append 5 items and record sizes after each
+            let mut sizes = Vec::new();
+            for i in 0..5 {
+                journal.append(1, i as i32).await.unwrap();
+                journal.sync(1).await.unwrap();
+                sizes.push(journal.size(1).await.unwrap());
+            }
+
+            // Rewind to keep only first 3 items
+            let target_size = sizes[2];
+            journal.rewind(1, target_size).await.unwrap();
+
+            // Verify size is correct
+            let new_size = journal.size(1).await.unwrap();
+            assert_eq!(new_size, target_size);
+
+            // Verify first 3 items via replay
+            {
+                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                pin_mut!(stream);
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (_, _, _, item) = result.unwrap();
+                    items.push(item);
+                }
+                assert_eq!(items.len(), 3);
+                for (i, item) in items.iter().enumerate() {
+                    assert_eq!(*item, i as i32);
+                }
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_rewind_nonexistent_target() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+
+            // Create sections 5, 6, 7 (skip 1-4)
+            for section in 5u64..=7 {
+                journal.append(section, section as i32).await.unwrap();
+            }
+            journal.sync_all().await.unwrap();
+
+            // Rewind to section 3 (doesn't exist)
+            journal.rewind(3, 0).await.unwrap();
+
+            // Verify sections 5, 6, 7 are removed
+            for section in 5u64..=7 {
+                let size = journal.size(section).await.unwrap();
+                assert_eq!(size, 0, "section {section} should be removed");
+            }
+
+            // Verify replay returns nothing
+            {
+                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                pin_mut!(stream);
+                let items: Vec<_> = stream.collect().await;
+                assert!(items.is_empty());
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_rewind_persistence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Create sections 1-5 with data
+            let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+            for section in 1u64..=5 {
+                journal.append(section, section as i32).await.unwrap();
+            }
+            journal.sync_all().await.unwrap();
+
+            // Rewind to section 2
+            let size = journal.size(2).await.unwrap();
+            journal.rewind(2, size).await.unwrap();
+            journal.sync_all().await.unwrap();
+            drop(journal);
+
+            // Re-init and verify only sections 1-2 exist
+            let journal = Journal::<_, i32>::init(context.clone(), cfg.clone()).await.unwrap();
+
+            // Verify sections 1-2 have data
+            for section in 1u64..=2 {
+                let size = journal.size(section).await.unwrap();
+                assert!(size > 0, "section {section} should have data after restart");
+            }
+
+            // Verify sections 3-5 are gone
+            for section in 3u64..=5 {
+                let size = journal.size(section).await.unwrap();
+                assert_eq!(size, 0, "section {section} should be gone after restart");
+            }
+
+            // Verify data integrity via replay
+            {
+                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                pin_mut!(stream);
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, _, _, item) = result.unwrap();
+                    items.push((section, item));
+                }
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], (1, 1));
+                assert_eq!(items[1], (2, 2));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_rewind_to_zero_removes_all_newer() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+
+            // Create sections 1, 2, 3
+            for section in 1u64..=3 {
+                journal.append(section, section as i32).await.unwrap();
+            }
+            journal.sync_all().await.unwrap();
+
+            // Rewind section 1 to size 0
+            journal.rewind(1, 0).await.unwrap();
+
+            // Verify section 1 exists but is empty
+            let size = journal.size(1).await.unwrap();
+            assert_eq!(size, 0, "section 1 should be empty");
+
+            // Verify sections 2, 3 are completely removed
+            for section in 2u64..=3 {
+                let size = journal.size(section).await.unwrap();
+                assert_eq!(size, 0, "section {section} should be removed");
+            }
+
+            // Verify replay returns nothing
+            {
+                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                pin_mut!(stream);
+                let items: Vec<_> = stream.collect().await;
+                assert!(items.is_empty());
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// Protect against accidental changes to the journal disk format.
     #[test_traced]
     fn test_journal_conformance() {

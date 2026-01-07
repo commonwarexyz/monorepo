@@ -176,7 +176,7 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
                     section,
                     index_size, "partial entry detected, rewinding to 0"
                 );
-                self.values.rewind(section, 0).await?;
+                self.values.rewind_section(section, 0).await?;
                 continue;
             }
 
@@ -190,7 +190,7 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
                 let valid_size = valid_count * chunk_size;
                 debug!(section, entry_count, valid_count, "rewinding journals");
                 self.index.rewind_section(section, valid_size).await?;
-                self.values.rewind(section, glob_target).await?;
+                self.values.rewind_section(section, glob_target).await?;
             }
         }
 
@@ -320,7 +320,7 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
     ) -> Result<(), Error> {
         try_join(
             self.index.rewind_section(section, index_size),
-            self.values.rewind(section, value_size),
+            self.values.rewind_section(section, value_size),
         )
         .await
         .map(|_| ())

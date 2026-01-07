@@ -186,7 +186,7 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
     /// Rewind a section to a specific size (for crash recovery).
     ///
     /// Truncates the section to the given size and discards any buffered data.
-    pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
+    pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.manager.rewind_section(section, size).await
     }
 
@@ -391,7 +391,7 @@ mod tests {
             // Rewind to after the third value
             let (third_offset, third_size) = locations[2];
             let rewind_size = third_offset + u64::from(third_size);
-            glob.rewind(1, rewind_size).await.expect("Failed to rewind");
+            glob.rewind_section(1, rewind_size).await.expect("Failed to rewind");
 
             // First three values should still be readable
             for (i, (offset, size)) in locations.iter().take(3).enumerate() {
