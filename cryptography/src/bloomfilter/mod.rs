@@ -46,6 +46,7 @@ impl BloomFilter {
 
     /// Creates a new [BloomFilter] with optimal parameters for the expected number
     /// of items and desired false positive rate.
+    #[cfg(feature = "std")]
     pub fn with_rate(expected_items: usize, false_positive_rate: f64) -> Self {
         let bits = Self::optimal_bits(expected_items, false_positive_rate);
         let hashers = Self::optimal_hashers(expected_items, bits);
@@ -98,6 +99,7 @@ impl BloomFilter {
     ///
     /// This approximates the false positive rate as `f^k` where `f` is the fill ratio
     /// (proportion of bits set to 1) and `k` is the number of hash functions.
+    #[cfg(feature = "std")]
     pub fn estimated_false_positive_rate(&self) -> f64 {
         let fill_ratio = self.bits.count_ones() as f64 / self.bits.len() as f64;
         fill_ratio.powi(self.hashers as i32)
@@ -107,6 +109,7 @@ impl BloomFilter {
     ///
     /// Uses the formula `n = -(m/k) * ln(1 - x/m)` where `m` is the number of bits,
     /// `k` is the number of hash functions, and `x` is the number of bits set to 1.
+    #[cfg(feature = "std")]
     pub fn estimated_count(&self) -> f64 {
         let m = self.bits.len() as f64;
         let x = self.bits.count_ones() as f64;
@@ -121,6 +124,7 @@ impl BloomFilter {
     ///
     /// Uses the formula `k = (m/n) * ln(2)` where `m` is the number of bits and `n` is
     /// the expected number of items.
+    #[cfg(feature = "std")]
     pub fn optimal_hashers(expected_items: usize, bits: usize) -> u8 {
         let k = (bits as f64 / expected_items as f64) * core::f64::consts::LN_2;
         (k.round() as u8).clamp(1, 255)
@@ -130,6 +134,7 @@ impl BloomFilter {
     ///
     /// Uses the formula `m = -n * ln(p) / (ln(2))^2` where `n` is the expected number
     /// of items and `p` is the desired false positive rate.
+    #[cfg(feature = "std")]
     pub fn optimal_bits(expected_items: usize, false_positive_rate: f64) -> usize {
         let ln2_sq = core::f64::consts::LN_2 * core::f64::consts::LN_2;
         let m = -(expected_items as f64) * false_positive_rate.ln() / ln2_sq;
