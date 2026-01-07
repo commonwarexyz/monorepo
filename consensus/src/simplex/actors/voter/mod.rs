@@ -1054,7 +1054,6 @@ mod tests {
         let namespace = b"proposal_conflicts_certificate_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
             let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
@@ -1065,7 +1064,6 @@ mod tests {
             );
             network.start();
 
-            // Get participants
             let Fixture {
                 participants,
                 schemes,
@@ -2508,6 +2506,205 @@ mod tests {
         );
         no_recertification_after_replay::<_, _, RoundRobin>(ed25519::fixture);
         no_recertification_after_replay::<_, _, RoundRobin>(secp256r1::fixture);
+    }
+
+    /// Test that in-flight certification requests are cancelled when finalization occurs.
+    ///
+    /// 1. Use a very long certify latency to ensure certification is in-flight.
+    /// 2. Send a notarization to trigger certification.
+    /// 3. Send a finalization for the same view before certification completes.
+    /// 4. Verify that no Certified message is sent to the resolver.
+    fn certification_cancelled_on_finalization<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: ElectorConfig<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let me = participants[0].clone();
+            let elector = L::default();
+            let reporter_config = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (2_000.0, 0.0), // 2 seconds
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (actor, application) = mocks::application::Application::new(
+                context.with_label("application"),
+                application_cfg,
+            );
+            actor.start();
+
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "cert_cancel_test".to_string(),
+                epoch: Epoch::new(333),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_secs(5),
+                notarization_timeout: Duration::from_secs(5),
+                nullify_retry: Duration::from_secs(5),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
+
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
+            let resolver = resolver::Mailbox::new(resolver_sender);
+
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1024);
+            let batcher = batcher::Mailbox::new(batcher_sender);
+
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            actor.start(batcher, resolver, vote_sender, certificate_sender);
+
+            // Wait for initial batcher notification
+            if let batcher::Message::Update { active, .. } = batcher_receiver.next().await.unwrap()
+            {
+                active.send(true).unwrap();
+            }
+
+            // Send a notarization for view 5 to trigger certification
+            let view5 = View::new(5);
+            let digest5 = Sha256::hash(b"payload_to_certify");
+            let proposal5 =
+                Proposal::new(Round::new(Epoch::new(333), view5), View::new(0), digest5);
+
+            // Broadcast payload
+            let contents = (proposal5.round, Sha256::hash(b"genesis"), 42u64).encode();
+            relay.broadcast(&me, (digest5, contents)).await;
+
+            // Send proposal to verify
+            mailbox.proposal(proposal5.clone()).await;
+
+            // Send notarization
+            let (_, notarization) = build_notarization(&schemes, &proposal5, quorum);
+            mailbox
+                .recovered(Certificate::Notarization(notarization))
+                .await;
+
+            // Wait for certification to start (it will be slow due to latency)
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Send finalization for view 5 before certification completes
+            let (_, finalization) = build_finalization(&schemes, &proposal5, quorum);
+            mailbox
+                .recovered(Certificate::Finalization(finalization))
+                .await;
+
+            // Wait for finalization to be processed
+            loop {
+                if let batcher::Message::Update {
+                    finalized, active, ..
+                } = batcher_receiver.next().await.unwrap()
+                {
+                    active.send(true).unwrap();
+                    if finalized >= view5 {
+                        break;
+                    }
+                }
+            }
+
+            // Wait for resolver finalization message (skip other certificates)
+            loop {
+                let msg = resolver_receiver
+                    .next()
+                    .await
+                    .expect("expected resolver msg");
+                match msg {
+                    MailboxMessage::Certificate(Certificate::Finalization(f)) => {
+                        assert_eq!(f.view(), view5);
+                        break;
+                    }
+                    MailboxMessage::Certificate(_) => continue,
+                    MailboxMessage::Certified { .. } => {
+                        panic!("unexpected Certified message before finalization processed")
+                    }
+                }
+            }
+
+            // Wait longer than certify_latency (2s) to verify certification was cancelled.
+            // If certification wasn't cancelled, it would complete and send a Certified message.
+            let certified_received = select! {
+                msg = resolver_receiver.next() => {
+                    matches!(msg, Some(MailboxMessage::Certified { .. }))
+                },
+                _ = context.sleep(Duration::from_secs(4)) => {
+                    false
+                },
+            };
+
+            assert!(
+                !certified_received,
+                "Certified message should NOT have been sent - certification should be cancelled"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_certification_cancelled_on_finalization() {
+        certification_cancelled_on_finalization::<_, _, Random>(
+            bls12381_threshold::fixture::<MinPk, _>,
+        );
+        certification_cancelled_on_finalization::<_, _, Random>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        certification_cancelled_on_finalization::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        certification_cancelled_on_finalization::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        certification_cancelled_on_finalization::<_, _, RoundRobin>(ed25519::fixture);
+        certification_cancelled_on_finalization::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     /// Tests certification after: timeout -> receive notarization -> certify.
