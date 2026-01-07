@@ -44,6 +44,17 @@ impl BloomFilter {
         }
     }
 
+    /// Creates a new [BloomFilter] with optimal parameters for the expected number
+    /// of items and desired false positive rate.
+    pub fn with_rate(expected_items: usize, false_positive_rate: f64) -> Self {
+        let bits = Self::optimal_bits(expected_items, false_positive_rate);
+        let hashers = Self::optimal_hashers(expected_items, bits);
+        Self {
+            hashers,
+            bits: BitMap::zeroes(bits as u64),
+        }
+    }
+
     /// Generate `num_hashers` bit indices for a given item.
     fn indices(&self, item: &[u8]) -> impl Iterator<Item = u64> {
         #[allow(path_statements)]
@@ -81,6 +92,48 @@ impl BloomFilter {
             }
         }
         true
+    }
+
+    /// Estimates the current false positive probability.
+    ///
+    /// This approximates the false positive rate as `f^k` where `f` is the fill ratio
+    /// (proportion of bits set to 1) and `k` is the number of hash functions.
+    pub fn estimated_false_positive_rate(&self) -> f64 {
+        let fill_ratio = self.bits.count_ones() as f64 / self.bits.len() as f64;
+        fill_ratio.powi(self.hashers as i32)
+    }
+
+    /// Estimates the number of items that have been inserted.
+    ///
+    /// Uses the formula `n = -(m/k) * ln(1 - x/m)` where `m` is the number of bits,
+    /// `k` is the number of hash functions, and `x` is the number of bits set to 1.
+    pub fn estimated_count(&self) -> f64 {
+        let m = self.bits.len() as f64;
+        let x = self.bits.count_ones() as f64;
+        let k = self.hashers as f64;
+        if x >= m {
+            return f64::INFINITY;
+        }
+        -(m / k) * (1.0 - x / m).ln()
+    }
+
+    /// Calculates the optimal number of hash functions for a given capacity and bit count.
+    ///
+    /// Uses the formula `k = (m/n) * ln(2)` where `m` is the number of bits and `n` is
+    /// the expected number of items.
+    pub fn optimal_hashers(expected_items: usize, bits: usize) -> u8 {
+        let k = (bits as f64 / expected_items as f64) * core::f64::consts::LN_2;
+        (k.round() as u8).clamp(1, 255)
+    }
+
+    /// Calculates the optimal number of bits for a given capacity and false positive rate.
+    ///
+    /// Uses the formula `m = -n * ln(p) / (ln(2))^2` where `n` is the expected number
+    /// of items and `p` is the desired false positive rate.
+    pub fn optimal_bits(expected_items: usize, false_positive_rate: f64) -> usize {
+        let ln2_sq = core::f64::consts::LN_2 * core::f64::consts::LN_2;
+        let m = -(expected_items as f64) * false_positive_rate.ln() / ln2_sq;
+        (m.ceil() as usize).next_power_of_two()
     }
 }
 
@@ -262,6 +315,88 @@ mod tests {
                 "bitmap length doesn't match config"
             ))
         ));
+    }
+
+    #[test]
+    fn test_statistics() {
+        let mut bf = BloomFilter::new(NZU8!(7), NZUsize!(1024));
+
+        // Empty filter should have 0 estimated count and FP rate
+        assert_eq!(bf.estimated_count(), 0.0);
+        assert_eq!(bf.estimated_false_positive_rate(), 0.0);
+
+        // Insert some items
+        for i in 0..100usize {
+            bf.insert(&i.to_be_bytes());
+        }
+
+        // Estimated count should be reasonably close to 100
+        let estimated = bf.estimated_count();
+        assert!(estimated > 50.0 && estimated < 200.0);
+
+        // FP rate should be non-zero after insertions
+        assert!(bf.estimated_false_positive_rate() > 0.0);
+        assert!(bf.estimated_false_positive_rate() < 1.0);
+    }
+
+    #[test]
+    fn test_with_rate() {
+        // Create a filter for 1000 items with 1% false positive rate
+        let mut bf = BloomFilter::with_rate(1000, 0.01);
+
+        // Insert 1000 items
+        for i in 0..1000usize {
+            bf.insert(&i.to_be_bytes());
+        }
+
+        // All inserted items should be found
+        for i in 0..1000usize {
+            assert!(bf.contains(&i.to_be_bytes()));
+        }
+
+        // Count false positives on non-inserted items
+        let mut false_positives = 0;
+        for i in 1000..2000usize {
+            if bf.contains(&i.to_be_bytes()) {
+                false_positives += 1;
+            }
+        }
+
+        // With 1% target FP rate, we expect around 10 false positives out of 1000
+        // Allow some variance (should be well under 5%)
+        assert!(false_positives < 50);
+    }
+
+    #[test]
+    fn test_optimal_hashers() {
+        // For 1000 items in 10000 bits, optimal k = (10000/1000) * ln(2) = 6.93 -> 7
+        let k = BloomFilter::optimal_hashers(1000, 10000);
+        assert_eq!(k, 7);
+
+        // For 100 items in 1000 bits, optimal k = (1000/100) * ln(2) = 6.93 -> 7
+        let k = BloomFilter::optimal_hashers(100, 1000);
+        assert_eq!(k, 7);
+
+        // Edge case: very few bits per item
+        let k = BloomFilter::optimal_hashers(1000, 100);
+        assert!(k >= 1);
+    }
+
+    #[test]
+    fn test_optimal_bits() {
+        // For 1000 items with 1% FP rate
+        // Formula: m = -n * ln(p) / (ln(2))^2 = -1000 * ln(0.01) / 0.4804 = 9585
+        // Rounded to next power of 2 = 16384
+        let bits = BloomFilter::optimal_bits(1000, 0.01);
+        assert_eq!(bits, 16384);
+        assert!(bits.is_power_of_two());
+
+        // For 10000 items with 0.001% FP rate (need significantly more bits)
+        // Formula: m = -10000 * ln(0.00001) / 0.4804 = 239627
+        // Rounded to next power of 2 = 262144
+        let bits_lower_fp = BloomFilter::optimal_bits(10000, 0.00001);
+        assert_eq!(bits_lower_fp, 262144);
+        assert!(bits_lower_fp.is_power_of_two());
     }
 
     #[cfg(feature = "arbitrary")]
