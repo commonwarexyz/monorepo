@@ -135,8 +135,8 @@
 //!     // Create an archive
 //!     let cfg = Config {
 //!         translator: FourCap,
-//!         index_partition: "demo_index".into(),
-//!         index_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!         key_partition: "demo_index".into(),
+//!         key_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
 //!         value_partition: "demo_value".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
@@ -170,11 +170,11 @@ pub struct Config<T: Translator, C> {
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
 
-    /// The partition to use for the index journal (stores index+key metadata).
-    pub index_partition: String,
+    /// The partition to use for the key journal (stores index+key metadata).
+    pub key_partition: String,
 
-    /// The buffer pool to use for the index journal.
-    pub index_buffer_pool: PoolRef,
+    /// The buffer pool to use for the key journal.
+    pub key_buffer_pool: PoolRef,
 
     /// The partition to use for the value blob (stores values).
     pub value_partition: String,
@@ -233,8 +233,8 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                index_partition: "test_index".into(),
-                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_index".into(),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: Some(3),
@@ -263,8 +263,8 @@ mod tests {
             // Index journal replay succeeds (no compression), but value reads will fail.
             let cfg = Config {
                 translator: FourCap,
-                index_partition: "test_index".into(),
-                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_index".into(),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -297,8 +297,8 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                index_partition: "test_index".into(),
-                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_index".into(),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -338,8 +338,8 @@ mod tests {
                 context,
                 Config {
                     translator: FourCap,
-                    index_partition: "test_index".into(),
-                    index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    key_partition: "test_index".into(),
+                    key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     value_partition: "test_value".into(),
                     codec_config: (),
                     compression: None,
@@ -368,8 +368,8 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                index_partition: "test_index".into(),
-                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_index".into(),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -432,8 +432,8 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                index_partition: "test_index".into(),
-                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_index".into(),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -490,8 +490,8 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                index_partition: "test_index".into(),
-                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_index".into(),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -577,8 +577,8 @@ mod tests {
             let items_per_section = 256u64;
             let cfg = Config {
                 translator: TwoCap,
-                index_partition: "test_index".into(),
-                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_index".into(),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -637,8 +637,8 @@ mod tests {
             // Reinitialize the archive
             let cfg = Config {
                 translator: TwoCap,
-                index_partition: "test_index".into(),
-                index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_index".into(),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,

@@ -29,7 +29,7 @@ pub(crate) struct Config {
     pub prunable_items_per_section: NonZero<u64>,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
-    pub index_buffer_pool: PoolRef,
+    pub key_buffer_pool: PoolRef,
 }
 
 /// Prunable archives for a single epoch.
@@ -190,8 +190,8 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
         let start = Instant::now();
         let cfg = prunable::Config {
             translator: TwoCap,
-            index_partition: format!("{}-cache-{epoch}-{name}-index", self.cfg.partition_prefix),
-            index_buffer_pool: self.cfg.index_buffer_pool.clone(),
+            key_partition: format!("{}-cache-{epoch}-{name}-key", self.cfg.partition_prefix),
+            key_buffer_pool: self.cfg.key_buffer_pool.clone(),
             value_partition: format!("{}-cache-{epoch}-{name}-value", self.cfg.partition_prefix),
             items_per_section: self.cfg.prunable_items_per_section,
             compression: None,

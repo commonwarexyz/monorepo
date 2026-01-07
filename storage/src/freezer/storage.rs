@@ -635,11 +635,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Initialize oversized journal (handles crash recovery)
         let oversized_cfg = OversizedConfig {
-            index_partition: config.key_index_partition.clone(),
-            value_partition: config.value_journal_partition.clone(),
-            index_buffer_pool: config.key_index_buffer_pool.clone(),
-            write_buffer: config.key_index_write_buffer,
-            compression: config.value_journal_compression,
+            index_partition: config.key_partition.clone(),
+            value_partition: config.value_partition.clone(),
+            index_buffer_pool: config.key_buffer_pool.clone(),
+            write_buffer: config.key_write_buffer,
+            compression: config.value_compression,
             codec_config: config.codec_config,
         };
         let mut oversized: Oversized<E, Record<K>, V> =
@@ -786,7 +786,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
             oversized,
-            blob_target_size: config.value_journal_target_size,
+            blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             modified_sections: BTreeSet::new(),

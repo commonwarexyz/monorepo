@@ -159,13 +159,13 @@
 //! executor.start(|context| async move {
 //!     // Create a freezer
 //!     let cfg = Config {
-//!         key_index_partition: "freezer_key_index".into(),
-//!         key_index_write_buffer: NZUsize!(1024 * 1024), // 1MB
-//!         key_index_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-//!         value_journal_partition: "freezer_value_journal".into(),
-//!         value_journal_compression: Some(3),
-//!         value_journal_write_buffer: NZUsize!(1024 * 1024), // 1MB
-//!         value_journal_target_size: 100 * 1024 * 1024, // 100MB
+//!         key_partition: "freezer_key_index".into(),
+//!         key_write_buffer: NZUsize!(1024 * 1024), // 1MB
+//!         key_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!         value_partition: "freezer_value_journal".into(),
+//!         value_compression: Some(3),
+//!         value_write_buffer: NZUsize!(1024 * 1024), // 1MB
+//!         value_target_size: 100 * 1024 * 1024, // 100MB
 //!         table_partition: "freezer_table".into(),
 //!         table_initial_size: 65_536, // ~3MB initial table size
 //!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
@@ -219,25 +219,25 @@ pub enum Error {
 #[derive(Clone)]
 pub struct Config<C> {
     /// The [commonware_runtime::Storage] partition for the key index journal.
-    pub key_index_partition: String,
+    pub key_partition: String,
 
     /// The size of the write buffer for the key index journal.
-    pub key_index_write_buffer: NonZeroUsize,
+    pub key_write_buffer: NonZeroUsize,
 
     /// The buffer pool for the key index journal.
-    pub key_index_buffer_pool: PoolRef,
+    pub key_buffer_pool: PoolRef,
 
     /// The [commonware_runtime::Storage] partition for the value journal.
-    pub value_journal_partition: String,
+    pub value_partition: String,
 
     /// The compression level for the value journal.
-    pub value_journal_compression: Option<u8>,
+    pub value_compression: Option<u8>,
 
     /// The size of the write buffer for the value journal.
-    pub value_journal_write_buffer: NonZeroUsize,
+    pub value_write_buffer: NonZeroUsize,
 
     /// The target size of each value journal section before creating a new one.
-    pub value_journal_target_size: u64,
+    pub value_target_size: u64,
 
     /// The [commonware_runtime::Storage] partition to use for storing the table.
     pub table_partition: String,
@@ -269,7 +269,7 @@ mod tests {
     use rand::{Rng, RngCore};
 
     const DEFAULT_WRITE_BUFFER: usize = 1024;
-    const DEFAULT_VALUE_JOURNAL_TARGET_SIZE: u64 = 10 * 1024 * 1024;
+    const DEFAULT_VALUE_TARGET_SIZE: u64 = 10 * 1024 * 1024;
     const DEFAULT_TABLE_INITIAL_SIZE: u32 = 256;
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
     const DEFAULT_TABLE_RESIZE_CHUNK_SIZE: u32 = 128; // force multiple chunks
@@ -291,13 +291,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: compression,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: DEFAULT_VALUE_JOURNAL_TARGET_SIZE,
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: compression,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -361,13 +361,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: None,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: DEFAULT_VALUE_JOURNAL_TARGET_SIZE,
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -414,13 +414,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer with a very small table to force collisions
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: None,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: DEFAULT_VALUE_JOURNAL_TARGET_SIZE,
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: 4, // Very small to force collisions
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -477,13 +477,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: None,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: DEFAULT_VALUE_JOURNAL_TARGET_SIZE,
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -549,13 +549,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: None,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: DEFAULT_VALUE_JOURNAL_TARGET_SIZE,
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -650,13 +650,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: None,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: DEFAULT_VALUE_JOURNAL_TARGET_SIZE,
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -711,13 +711,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: None,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: DEFAULT_VALUE_JOURNAL_TARGET_SIZE,
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -771,13 +771,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: None,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: DEFAULT_VALUE_JOURNAL_TARGET_SIZE,
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -837,13 +837,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: None,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: DEFAULT_VALUE_JOURNAL_TARGET_SIZE,
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -914,13 +914,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: None,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: DEFAULT_VALUE_JOURNAL_TARGET_SIZE,
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: 2, // Very small initial size to force multiple resizes
                 table_resize_frequency: 2, // Resize after 2 items per entry
@@ -985,13 +985,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: None,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: DEFAULT_VALUE_JOURNAL_TARGET_SIZE,
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
@@ -1055,13 +1055,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: None,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: DEFAULT_VALUE_JOURNAL_TARGET_SIZE,
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
@@ -1119,13 +1119,13 @@ mod tests {
         executor.start(|mut context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: None,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: 128, // Force multiple journal sections
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: 128, // Force multiple journal sections
                 table_partition: "test_table".into(),
                 table_initial_size: 8,     // Small table to force collisions
                 table_resize_frequency: 2, // Force resize frequently
@@ -1275,13 +1275,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_index_partition: "test_key_index".into(),
-                key_index_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_journal_partition: "test_value_journal".into(),
-                value_journal_compression: None,
-                value_journal_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_journal_target_size: DEFAULT_VALUE_JOURNAL_TARGET_SIZE,
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,

@@ -146,9 +146,9 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         // Initialize oversized journal (handles crash recovery)
         let oversized_cfg = OversizedConfig {
-            index_partition: cfg.index_partition,
+            index_partition: cfg.key_partition,
             value_partition: cfg.value_partition,
-            index_buffer_pool: cfg.index_buffer_pool,
+            index_buffer_pool: cfg.key_buffer_pool,
             write_buffer: cfg.write_buffer,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
