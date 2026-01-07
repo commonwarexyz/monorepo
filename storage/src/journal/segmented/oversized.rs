@@ -1341,6 +1341,7 @@ mod tests {
             assert!(oversized.get(1, 2).await.is_err());
 
             // Append new entries - should work despite orphan data in glob
+            let mut new_locations = Vec::new();
             for i in 10..13u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
@@ -1351,6 +1352,7 @@ mod tests {
 
                 // New entries start at position 2 (after the 2 valid entries)
                 assert_eq!(position, (i - 10 + 2) as u32);
+                new_locations.push((position, offset, size, i));
 
                 // Verify we can read the new entry
                 let retrieved = oversized.get(1, position).await.expect("Failed to get");
@@ -1362,6 +1364,49 @@ mod tests {
                     .expect("Failed to get value");
                 assert_eq!(retrieved_value, value);
             }
+
+            // Sync and restart again to verify persistence with orphan data
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Reinitialize after adding data on top of orphan glob data
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg)
+                    .await
+                    .expect("Failed to reinit after append");
+
+            // Read all valid entries in the index
+            // First 2 entries from original data
+            for i in 0..2u8 {
+                let (position, offset, size) = locations[i as usize];
+                let entry = oversized.get(1, position).await.expect("Failed to get");
+                assert_eq!(entry.id, i as u64);
+
+                let value = oversized
+                    .get_value(1, offset, size)
+                    .await
+                    .expect("Failed to get value");
+                assert_eq!(value, [i; 16]);
+            }
+
+            // New entries added after recovery
+            for (position, offset, size, expected_id) in &new_locations {
+                let entry = oversized
+                    .get(1, *position)
+                    .await
+                    .expect("Failed to get new entry after restart");
+                assert_eq!(entry.id, *expected_id as u64);
+
+                let value = oversized
+                    .get_value(1, *offset, *size)
+                    .await
+                    .expect("Failed to get new value after restart");
+                assert_eq!(value, [*expected_id; 16]);
+            }
+
+            // Verify total entry count: 2 original + 3 new = 5
+            assert!(oversized.get(1, 4).await.is_ok());
+            assert!(oversized.get(1, 5).await.is_err());
 
             oversized.destroy().await.expect("Failed to destroy");
         });
