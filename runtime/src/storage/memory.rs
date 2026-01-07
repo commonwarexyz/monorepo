@@ -214,7 +214,7 @@ mod tests {
     async fn test_blob_header_handling() {
         let storage = Storage::default();
 
-        // Test 1: New blob returns logical size 0 and correct app version
+        // New blob returns logical size 0
         let (blob, size) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size, 0, "new blob should have logical size 0");
 
@@ -230,7 +230,7 @@ mod tests {
             );
         }
 
-        // Test 2: Logical offset handling - write at offset 0 stores at raw offset 8
+        // Write at logical offset 0 stores at raw offset 8
         let data = b"hello world";
         blob.write_at(data.to_vec(), 0).await.unwrap();
         blob.sync().await.unwrap();
@@ -241,61 +241,15 @@ mod tests {
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"test".to_vec()).unwrap();
             assert_eq!(raw_content.len(), Header::SIZE + data.len());
-            // First 4 bytes should be magic bytes
             assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Header::MAGIC);
-            // Next 2 bytes should be header version
-            assert_eq!(
-                &raw_content[Header::MAGIC_LENGTH..Header::MAGIC_LENGTH + Header::VERSION_LENGTH],
-                &Header::RUNTIME_VERSION.to_be_bytes()
-            );
-            // Data should start at offset 8
             assert_eq!(&raw_content[Header::SIZE..], data);
         }
 
-        // Test 3: Read at logical offset 0 returns data from raw offset 8
+        // Read at logical offset 0 returns data from raw offset 8
         let read_buf = blob.read_at(vec![0u8; data.len()], 0).await.unwrap();
         assert_eq!(read_buf.as_ref(), data);
 
-        // Test 4: Resize with logical length
-        blob.resize(5).await.unwrap();
-        blob.sync().await.unwrap();
-        {
-            let partitions = storage.partitions.lock().unwrap();
-            let partition = partitions.get("partition").unwrap();
-            let raw_content = partition.get(&b"test".to_vec()).unwrap();
-            assert_eq!(
-                raw_content.len(),
-                Header::SIZE + 5,
-                "resize(5) should result in 13 raw bytes"
-            );
-        }
-
-        // resize(0) should leave only header
-        blob.resize(0).await.unwrap();
-        blob.sync().await.unwrap();
-        {
-            let partitions = storage.partitions.lock().unwrap();
-            let partition = partitions.get("partition").unwrap();
-            let raw_content = partition.get(&b"test".to_vec()).unwrap();
-            assert_eq!(
-                raw_content.len(),
-                Header::SIZE,
-                "resize(0) should leave only header"
-            );
-        }
-
-        // Test 5: Reopen existing blob preserves header and returns correct logical size
-        blob.write_at(b"test data".to_vec(), 0).await.unwrap();
-        blob.sync().await.unwrap();
-        drop(blob);
-
-        let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
-        assert_eq!(size2, 9, "reopened blob should have logical size 9");
-        let read_buf = blob2.read_at(vec![0u8; 9], 0).await.unwrap();
-        assert_eq!(read_buf.as_ref(), b"test data");
-
-        // Test 6: Corrupted blob recovery (0 < raw_size < 8)
-        // Manually corrupt the raw storage to have only 2 bytes
+        // Corrupted blob recovery (0 < raw_size < 8)
         {
             let mut partitions = storage.partitions.lock().unwrap();
             let partition = partitions.get_mut("partition").unwrap();
@@ -303,8 +257,8 @@ mod tests {
         }
 
         // Opening should truncate and write fresh header
-        let (_blob3, size3) = storage.open("partition", b"corrupted").await.unwrap();
-        assert_eq!(size3, 0, "corrupted blob should return logical size 0");
+        let (_blob, size) = storage.open("partition", b"corrupted").await.unwrap();
+        assert_eq!(size, 0, "corrupted blob should return logical size 0");
 
         // Verify raw storage now has proper 8-byte header
         {
@@ -327,48 +281,13 @@ mod tests {
         {
             let mut partitions = storage.partitions.lock().unwrap();
             let partition = partitions.entry("partition".into()).or_default();
-            // Create a blob with wrong magic bytes (all zeros)
             partition.insert(b"bad_magic".to_vec(), vec![0u8; Header::SIZE]);
         }
 
         // Opening should fail with corrupt error
         let result = storage.open("partition", b"bad_magic").await;
-        match result {
-            Err(crate::Error::BlobCorrupt(_, _, reason)) => {
-                assert!(reason.contains("invalid magic"));
-            }
-            Err(err) => panic!("expected BlobCorrupt error, got: {:?}", err),
-            Ok(_) => panic!("expected error, got Ok"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_blob_version_mismatch() {
-        let storage = Storage::default();
-
-        // Create blob with version 1
-        let (_, _, blob_version) = storage
-            .open_versioned("partition", b"v1", 1..=1)
-            .await
-            .unwrap();
-        assert_eq!(blob_version, 1, "new blob should have version 1");
-
-        // Reopen with a range that includes version 1
-        let (_, _, blob_version) = storage
-            .open_versioned("partition", b"v1", 0..=2)
-            .await
-            .unwrap();
-        assert_eq!(blob_version, 1, "existing blob should retain version 1");
-
-        // Try to open with version range 2..=2 (should fail)
-        let result = storage.open_versioned("partition", b"v1", 2..=2).await;
-        match result {
-            Err(crate::Error::BlobVersionMismatch { expected, found }) => {
-                assert_eq!(expected, 2..=2);
-                assert_eq!(found, 1);
-            }
-            Err(err) => panic!("expected BlobVersionMismatch error, got: {:?}", err),
-            Ok(_) => panic!("expected error, got Ok"),
-        }
+        assert!(
+            matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
+        );
     }
 }

@@ -367,51 +367,17 @@ mod tests {
             maximum_buffer_size: 1024 * 1024,
         });
 
-        // Create the partition directory
+        // Create the partition directory and a file with invalid magic bytes
         let partition_path = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_path).unwrap();
-
-        // Manually create a file with invalid magic bytes
         let bad_magic_path = partition_path.join(hex(b"bad_magic"));
         std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE]).unwrap();
 
         // Opening should fail with corrupt error
         let result = storage.open("partition", b"bad_magic").await;
-        match result {
-            Err(crate::Error::BlobCorrupt(_, _, reason)) => {
-                assert!(reason.contains("invalid magic"));
-            }
-            Err(err) => panic!("expected BlobCorrupt error, got: {:?}", err),
-            Ok(_) => panic!("expected error, got Ok"),
-        }
-
-        let _ = std::fs::remove_dir_all(&storage_directory);
-    }
-
-    #[tokio::test]
-    async fn test_blob_version_mismatch() {
-        let mut rng = rand::rngs::StdRng::from_entropy();
-        let storage_directory =
-            env::temp_dir().join(format!("storage_tokio_version_{}", rng.gen::<u64>()));
-        let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
-        let storage = Storage::new(config);
-
-        // Create blob with version 1
-        storage
-            .open_versioned("partition", b"v1", 1..=1)
-            .await
-            .unwrap();
-
-        // Try to open with version range 2..=2
-        let result = storage.open_versioned("partition", b"v1", 2..=2).await;
-        match result {
-            Err(crate::Error::BlobVersionMismatch { expected, found }) => {
-                assert_eq!(expected, 2..=2);
-                assert_eq!(found, 1);
-            }
-            Err(err) => panic!("expected BlobVersionMismatch error, got: {:?}", err),
-            Ok(_) => panic!("expected error, got Ok"),
-        }
+        assert!(
+            matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
+        );
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

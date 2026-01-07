@@ -285,6 +285,7 @@ pub(crate) mod tests {
         test_overlapping_writes(&storage).await;
         test_resize_then_open(&storage).await;
         test_partition_name_validation(&storage).await;
+        test_blob_version_mismatch(&storage).await;
     }
 
     /// Test opening a blob, writing to it, and reading back the data.
@@ -690,5 +691,41 @@ pub(crate) mod tests {
                 "Invalid partition name '{invalid}' should be rejected by scan"
             );
         }
+    }
+
+    /// Test that opening a blob with an incompatible version range returns an error.
+    async fn test_blob_version_mismatch<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        // Create a blob with version 1
+        let (blob, _, version) = storage
+            .open_versioned("test_version_mismatch", b"blob", 1..=1)
+            .await
+            .unwrap();
+        assert_eq!(version, 1);
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        // Reopen with a range that includes version 1
+        let (_, _, version) = storage
+            .open_versioned("test_version_mismatch", b"blob", 0..=2)
+            .await
+            .unwrap();
+        assert_eq!(version, 1);
+
+        // Try to open with version range that excludes version 1
+        let result = storage
+            .open_versioned("test_version_mismatch", b"blob", 2..=3)
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(crate::Error::BlobVersionMismatch { expected, found })
+                if expected == (2..=3) && found == 1
+            ),
+            "Expected BlobVersionMismatch error"
+        );
     }
 }
