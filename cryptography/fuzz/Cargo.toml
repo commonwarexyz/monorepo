@@ -20,7 +20,6 @@ ed25519-zebra.workspace = true
 libfuzzer-sys.workspace = true
 p256 = { workspace = true, features = ["ecdsa"] }
 rand.workspace = true
-rayon.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
 
