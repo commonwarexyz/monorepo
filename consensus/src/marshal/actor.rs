@@ -20,7 +20,6 @@ use crate::{
     Block, Reporter,
 };
 use commonware_broadcast::Broadcaster;
-use commonware_utils::Subscribable;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
@@ -42,7 +41,7 @@ use commonware_utils::{
     channels::fallible::OneshotExt,
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
-    Acknowledgement, BoxedError,
+    Acknowledgement, BoxedError, Subscribable,
 };
 use futures::{
     channel::{mpsc, oneshot},

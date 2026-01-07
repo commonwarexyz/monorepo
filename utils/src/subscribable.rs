@@ -27,4 +27,3 @@ pub trait Subscribable: Clone + Send + 'static {
         key: Self::Key,
     ) -> impl Future<Output = oneshot::Receiver<Self::Value>> + Send;
 }
-
