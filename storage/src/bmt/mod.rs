@@ -2683,6 +2683,57 @@ mod tests {
             .is_err());
     }
 
+    #[test]
+    fn test_multi_proof_single_leaf_tree() {
+        // Edge case: tree with exactly one leaf
+        let digest = Sha256::hash(b"only_leaf");
+
+        // Build single-leaf tree
+        let mut builder = Builder::<Sha256>::new(1);
+        builder.add(&digest);
+        let tree = builder.build();
+        let root = tree.root();
+        let mut hasher = Sha256::default();
+
+        // Generate multi-proof for the only leaf
+        let multi_proof = tree.multi_proof(&[0]).unwrap();
+
+        // Single leaf tree: leaf_count should be 1
+        assert_eq!(multi_proof.leaf_count, 1);
+
+        // Single leaf tree: no siblings needed (leaf is the root after position hashing)
+        assert!(
+            multi_proof.siblings.is_empty(),
+            "Single leaf tree should have no siblings"
+        );
+
+        // Verify the proof
+        let elements = [(digest, 0u32)];
+        assert!(
+            multi_proof.verify(&mut hasher, &elements, &root).is_ok(),
+            "Single leaf multi-proof verification failed"
+        );
+
+        // Verify with wrong digest fails
+        let wrong_digest = Sha256::hash(b"wrong");
+        let wrong_elements = [(wrong_digest, 0u32)];
+        assert!(
+            multi_proof
+                .verify(&mut hasher, &wrong_elements, &root)
+                .is_err(),
+            "Should fail with wrong digest"
+        );
+
+        // Verify with wrong position fails
+        let wrong_position_elements = [(digest, 1u32)];
+        assert!(
+            multi_proof
+                .verify(&mut hasher, &wrong_position_elements, &root)
+                .is_err(),
+            "Should fail with invalid position"
+        );
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
