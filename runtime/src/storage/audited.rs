@@ -18,22 +18,33 @@ impl<S: crate::Storage> Storage<S> {
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
         self.auditor.event(b"open", |hasher| {
             hasher.update(partition.as_bytes());
             hasher.update(name);
+            hasher.update(&versions.start().to_be_bytes());
+            hasher.update(&versions.end().to_be_bytes());
         });
-        self.inner.open(partition, name).await.map(|(blob, len)| {
-            (
-                Blob {
-                    auditor: self.auditor.clone(),
-                    inner: blob,
-                    partition: partition.into(),
-                    name: name.to_vec(),
-                },
-                len,
-            )
-        })
+        self.inner
+            .open_versioned(partition, name, versions)
+            .await
+            .map(|(blob, len, blob_version)| {
+                (
+                    Blob {
+                        auditor: self.auditor.clone(),
+                        inner: blob,
+                        partition: partition.into(),
+                        name: name.to_vec(),
+                    },
+                    len,
+                    blob_version,
+                )
+            })
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
