@@ -354,12 +354,15 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
         self.index.rewind(section, index_size).await?;
 
         // Derive value size from last entry
-        let value_size = self.index.last(section).await?.map_or(0, |entry| {
-            let (offset, size) = entry.value_location();
-            offset
-                .checked_add(u64::from(size))
-                .expect("value location overflow")
-        });
+        let value_size = match self.index.last(section).await? {
+            Some(entry) => {
+                let (offset, size) = entry.value_location();
+                offset
+                    .checked_add(u64::from(size))
+                    .ok_or(Error::OffsetOverflow)?
+            }
+            None => 0,
+        };
 
         // Rewind values (this also removes sections after `section`)
         self.values.rewind(section, value_size).await
@@ -374,12 +377,15 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
         self.index.rewind_section(section, index_size).await?;
 
         // Derive value size from last entry
-        let value_size = self.index.last(section).await?.map_or(0, |entry| {
-            let (offset, size) = entry.value_location();
-            offset
-                .checked_add(u64::from(size))
-                .expect("value location overflow")
-        });
+        let value_size = match self.index.last(section).await? {
+            Some(entry) => {
+                let (offset, size) = entry.value_location();
+                offset
+                    .checked_add(u64::from(size))
+                    .ok_or(Error::OffsetOverflow)?
+            }
+            None => 0,
+        };
 
         // Rewind values
         self.values.rewind_section(section, value_size).await
@@ -397,9 +403,9 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
         match self.index.last(section).await {
             Ok(Some(entry)) => {
                 let (offset, size) = entry.value_location();
-                Ok(offset
+                offset
                     .checked_add(u64::from(size))
-                    .expect("value location overflow"))
+                    .ok_or(Error::OffsetOverflow)
             }
             Ok(None) => Ok(0),
             Err(Error::SectionOutOfRange(_)) => Ok(0),
@@ -2547,6 +2553,62 @@ mod tests {
             // Section 2 should still be valid
             let entry = oversized.get(2, 0).await.expect("Failed to get section 2");
             assert_eq!(entry.id, 10);
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_get_value_size_equals_crc_size() {
+        // Tests the boundary condition where size = 4 (just CRC, no data).
+        // This should fail because there's no actual data to decode.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), test_cfg())
+                    .await
+                    .expect("Failed to init");
+
+            let value: TestValue = [42; 16];
+            let entry = TestEntry::new(1, 0, 0);
+            let (_, offset, _) = oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(1).await.expect("Failed to sync");
+
+            // Size = 4 (exactly CRC_SIZE) means 0 bytes of actual data
+            // This should fail with ChecksumMismatch or decode error
+            let result = oversized.get_value(1, offset, 4).await;
+            assert!(result.is_err());
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_get_value_size_just_over_crc() {
+        // Tests size = 5 (CRC + 1 byte of data).
+        // This should fail because the data is too short to decode.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), test_cfg())
+                    .await
+                    .expect("Failed to init");
+
+            let value: TestValue = [42; 16];
+            let entry = TestEntry::new(1, 0, 0);
+            let (_, offset, _) = oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(1).await.expect("Failed to sync");
+
+            // Size = 5 means 1 byte of actual data (after stripping CRC)
+            // This should fail with checksum mismatch since we're reading wrong bytes
+            let result = oversized.get_value(1, offset, 5).await;
+            assert!(result.is_err());
 
             oversized.destroy().await.expect("Failed to destroy");
         });
