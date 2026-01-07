@@ -215,3 +215,10 @@ path = "fuzz_targets/proof_store.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cache_operations"
+path = "fuzz_targets/cache_operations.rs"
+test = false
+doc = false
+bench = false
