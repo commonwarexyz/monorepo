@@ -332,7 +332,7 @@ mod tests {
 
         // Estimated count should be reasonably close to 100
         let estimated = bf.estimated_count();
-        assert!(estimated > 50.0 && estimated < 200.0);
+        assert!(estimated > 75.0 && estimated < 125.0);
 
         // FP rate should be non-zero after insertions
         assert!(bf.estimated_false_positive_rate() > 0.0);
@@ -363,8 +363,8 @@ mod tests {
         }
 
         // With 1% target FP rate, we expect around 10 false positives out of 1000
-        // Allow some variance (should be well under 5%)
-        assert!(false_positives < 50);
+        // Allow some variance (should be well under 2%)
+        assert!(false_positives < 20);
     }
 
     #[test]
