@@ -92,33 +92,33 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
     /// The returned size is the total bytes written (compressed_data + crc32).
     /// Both should be stored in the index entry for later retrieval.
     pub async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u64), Error> {
-        // Encode and optionally compress
-        let encoded = value.encode();
-        let compressed = if let Some(level) = self.compression {
-            compress(&encoded, level as i32).map_err(|_| Error::CompressionFailed)?
+        // Encode and optionally compress, then append checksum
+        let buf = if let Some(level) = self.compression {
+            // Compressed: encode first, then compress, then append checksum
+            let encoded = value.encode();
+            let mut compressed =
+                compress(&encoded, level as i32).map_err(|_| Error::CompressionFailed)?;
+            let checksum = crc32fast::hash(&compressed);
+            compressed.reserve(4);
+            compressed.put_u32(checksum);
+            compressed
         } else {
-            encoded.into()
+            // Uncompressed: pre-allocate exact size to avoid copying
+            let entry_size = value.encode_size() + 4;
+            let mut buf = Vec::with_capacity(entry_size);
+            value.write(&mut buf);
+            let checksum = crc32fast::hash(&buf);
+            buf.put_u32(checksum);
+            buf
         };
 
-        // Total entry size: compressed data + 4 bytes checksum
-        let entry_size = compressed.len() + 4;
-        let entry_size_u64 = entry_size as u64;
-
-        // Get or create blob for this section
+        // Write to blob
+        let entry_size = buf.len() as u64;
         let writer = self.manager.get_or_create(section).await?;
+        let offset = writer.size().await;
+        writer.write_at(buf, offset).await.map_err(Error::Runtime)?;
 
-        // Get current size - this is where we'll write
-        let byte_offset = writer.size().await;
-
-        // Pre-allocate buffer with exact size: compressed data + checksum
-        let mut buf = Vec::with_capacity(entry_size);
-        buf.extend_from_slice(&compressed);
-        buf.put_u32(crc32fast::hash(&compressed));
-
-        // Write via buffered writer (handles batching internally)
-        writer.write_at(buf, byte_offset).await?;
-
-        Ok((byte_offset, entry_size_u64))
+        Ok((offset, entry_size))
     }
 
     /// Read value at offset with known size (from index entry).

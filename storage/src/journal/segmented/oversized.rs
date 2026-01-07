@@ -226,9 +226,9 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
         Ok(())
     }
 
-    /// Append entry + value atomically (glob first, then index).
+    /// Append entry + value atomically.
     ///
-    /// The entry's value location is automatically set after the value is written.
+    /// Writes value to glob first, then writes index entry with the value location.
     ///
     /// Returns `(position, offset, size)` where:
     /// - `position`: Position in the index journal
