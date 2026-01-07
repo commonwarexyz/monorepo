@@ -8,19 +8,24 @@ use commonware_cryptography::ed25519;
 use commonware_p2p::{simulated, Manager as _};
 use commonware_runtime::{tokio, Metrics as _};
 use commonware_utils::ordered::Set;
-use std::time::Duration;
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    time::Duration,
+};
 
 pub(super) async fn start_network(
     context: &tokio::Context,
     participants: Set<ed25519::PublicKey>,
 ) -> simulated::Oracle<ed25519::PublicKey> {
-    let (network, oracle) = simulated::Network::new(
+    let base_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    let (network, oracle) = simulated::Network::new_with_base_addr(
         context.with_label("network"),
         simulated::Config {
             max_size: MAX_MSG_SIZE,
             disconnect_on_block: true,
             tracked_peer_sets: None,
         },
+        base_addr,
     );
     network.start();
 
