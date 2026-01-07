@@ -30,7 +30,7 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8_192);
 pub type Key = FixedBytes<64>;
 pub type Val = Vec<u8>;
 
-/// Size of values in bytes (64KB).
+/// Size of values in bytes (64KB, representative of block data).
 const VALUE_SIZE: usize = 65536;
 
 /// Archive variant to benchmark.
@@ -70,7 +70,7 @@ impl Archive {
                     freezer_key_partition: "archive_bench_key".into(),
                     freezer_key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     freezer_value_partition: "archive_bench_value".into(),
-                    freezer_value_target_size: 1024 * 1024 * 10, // 10MB
+                    freezer_value_target_size: 1024 * 1024 * 10, // 10MB (smaller than production for faster benchmarks)
                     freezer_value_compression: compression,
                     ordinal_partition: "archive_bench_ordinal".into(),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),

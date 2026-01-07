@@ -1,6 +1,6 @@
-//! Segmented journal for oversized values with crash recovery.
+//! Segmented journal for oversized values.
 //!
-//! This module combines a fixed-size index journal with a glob (value storage) to handle
+//! This module combines [super::fixed::Journal] with [super::glob::Glob] to handle
 //! entries that reference variable-length "oversized" values. It provides coordinated
 //! operations and built-in crash recovery.
 //!
@@ -48,14 +48,14 @@ use tracing::{debug, warn};
 ///
 /// Implementations must provide access to the value location for crash recovery validation,
 /// and a way to set the location when appending.
-pub trait OversizedEntry: CodecFixed<Cfg = ()> + Clone {
+pub trait OversizedRecord: CodecFixed<Cfg = ()> + Clone {
     /// Returns `(value_offset, value_size)` for crash recovery validation.
-    fn value_location(&self) -> (u64, u64);
+    fn value_location(&self) -> (u64, u32);
 
     /// Returns a new entry with the value location set.
     ///
     /// Called during `append` after the value is written to glob storage.
-    fn with_location(self, offset: u64, size: u64) -> Self;
+    fn with_location(self, offset: u64, size: u32) -> Self;
 }
 
 /// Configuration for oversized journal.
@@ -87,13 +87,13 @@ pub struct Config<C> {
 ///
 /// Combines a fixed-size index journal with glob storage for variable-length values.
 /// Provides coordinated operations and crash recovery.
-pub struct Oversized<E: Storage + Metrics, I: OversizedEntry, V: Codec> {
-    index: FixedJournal<E, I>,
-    values: Glob<E, V>,
+pub struct Oversized<E: Storage + Metrics, I: OversizedRecord, V: Codec> {
+    pub(crate) index: FixedJournal<E, I>,
+    pub(crate) values: Glob<E, V>,
     _phantom: PhantomData<I>,
 }
 
-impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
+impl<E: Storage + Metrics, I: OversizedRecord, V: Codec> Oversized<E, I, V> {
     /// Initialize with crash recovery validation.
     ///
     /// Validates each index entry's glob reference during replay. Invalid entries
@@ -163,7 +163,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
             match self.index.get(section, last_pos).await {
                 Ok(entry) => {
                     let (value_offset, value_size) = entry.value_location();
-                    let entry_end = value_offset + value_size;
+                    let entry_end = value_offset + u64::from(value_size);
 
                     if entry_end <= glob_size {
                         // Last entry valid - all entries in this section are valid
@@ -181,7 +181,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
                         match self.index.get(section, pos).await {
                             Ok(entry) => {
                                 let (offset, size) = entry.value_location();
-                                if offset + size <= glob_size {
+                                if offset + u64::from(size) <= glob_size {
                                     valid_count = pos + 1;
                                     break;
                                 }
@@ -210,7 +210,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
                         match self.index.get(section, pos).await {
                             Ok(entry) => {
                                 let (offset, size) = entry.value_location();
-                                if offset + size <= glob_size {
+                                if offset + u64::from(size) <= glob_size {
                                     valid_count = pos + 1;
                                     break;
                                 }
@@ -229,7 +229,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
         Ok(())
     }
 
-    /// Append entry + value atomically.
+    /// Append entry + value.
     ///
     /// Writes value to glob first, then writes index entry with the value location.
     ///
@@ -242,7 +242,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
         section: u64,
         entry: I,
         value: &V,
-    ) -> Result<(u64, u64, u64), Error> {
+    ) -> Result<(u64, u64, u32), Error> {
         // Write value first (glob). This will typically write to an in-memory
         // buffer and return quickly (only blocks when the buffer is full).
         let (offset, size) = self.values.append(section, value).await?;
@@ -259,10 +259,15 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
         self.index.get(section, position).await
     }
 
+    /// Get the last entry for a section, if any.
+    pub async fn last(&self, section: u64) -> Result<Option<I>, Error> {
+        self.index.last(section).await
+    }
+
     /// Get value using offset/size from entry.
     ///
     /// The offset should be the byte offset from `append()` or from the entry's `value_location()`.
-    pub async fn get_value(&self, section: u64, offset: u64, size: u64) -> Result<V, Error> {
+    pub async fn get_value(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
         self.values.get(section, offset, size).await
     }
 
@@ -356,8 +361,8 @@ mod tests {
     use commonware_utils::NZUsize;
 
     /// Convert offset + size to byte end position (for truncation tests).
-    fn byte_end(offset: u64, size: u64) -> u64 {
-        offset + size
+    fn byte_end(offset: u64, size: u32) -> u64 {
+        offset + u64::from(size)
     }
 
     /// Test index entry that stores a u64 id and references a value.
@@ -365,11 +370,11 @@ mod tests {
     struct TestEntry {
         id: u64,
         value_offset: u64,
-        value_size: u64,
+        value_size: u32,
     }
 
     impl TestEntry {
-        fn new(id: u64, value_offset: u64, value_size: u64) -> Self {
+        fn new(id: u64, value_offset: u64, value_size: u32) -> Self {
             Self {
                 id,
                 value_offset,
@@ -392,7 +397,7 @@ mod tests {
         fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             let id = u64::read(buf)?;
             let value_offset = u64::read(buf)?;
-            let value_size = u64::read(buf)?;
+            let value_size = u32::read(buf)?;
             Ok(Self {
                 id,
                 value_offset,
@@ -402,15 +407,15 @@ mod tests {
     }
 
     impl FixedSize for TestEntry {
-        const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE;
+        const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
     }
 
-    impl OversizedEntry for TestEntry {
-        fn value_location(&self) -> (u64, u64) {
+    impl OversizedRecord for TestEntry {
+        fn value_location(&self) -> (u64, u32) {
             (self.value_offset, self.value_size)
         }
 
-        fn with_location(mut self, offset: u64, size: u64) -> Self {
+        fn with_location(mut self, offset: u64, size: u32) -> Self {
             self.value_offset = offset;
             self.value_size = size;
             self
@@ -1311,7 +1316,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             // Keep only first 2 index entries
-            let chunk_size = (TestEntry::SIZE + 4) as u64; // entry + CRC32
+            let chunk_size = (TestEntry::SIZE + u32::SIZE) as u64; // entry + CRC32
             blob.resize(2 * chunk_size)
                 .await
                 .expect("Failed to truncate");

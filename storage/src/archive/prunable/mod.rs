@@ -3,7 +3,7 @@
 //! Data is stored across two backends: an **index journal** ([crate::journal::segmented::fixed])
 //! for fixed-size index entries and a **value glob** ([crate::journal::segmented::glob::Glob])
 //! for values. The location of written data is stored in-memory by both index and key (via
-//! [crate::index::unordered::Index]) to enable **single-read lookups** for both query patterns over
+//! [crate::index::unordered::Index]) to enable **lookups** for both query patterns over
 //! archived data.
 //!
 //! _Notably, [Archive] does not make use of compaction nor on-disk indexes (and thus has no read
@@ -15,11 +15,11 @@
 //!
 //! **Index Journal (segmented/fixed)** - Fixed-size entries for fast startup replay:
 //! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |12 |13 |14 |15 |16 |17 |18 |19 |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! |          Index(u64)           |  Key(Fixed Size)  |val_offset(u32)|val_size(u32)|
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |12 |13 |14 |15 |16 |17 |18 |19 |20 |21 |22 |23 |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! |       Index(u64)          |  Key(Fixed Size)  |       val_offset(u64)         |val_size(u32)|
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //! ```
 //!
 //! **Value Blob** - Raw values with CRC32 checksums (direct reads, no buffer pool):
@@ -33,7 +33,7 @@
 //!
 //! This separation provides:
 //! - **Fast startup replay**: Only reads index journal (no values)
-//! - **Efficient key lookups**: Key comparison without reading values
+//! - **Buffer pool locality**: Index journal uses buffer pool for hot entries
 //! - **Direct value reads**: Large values bypass buffer pool (avoids cache pollution)
 //!
 //! # Uniqueness
@@ -78,10 +78,10 @@
 //! ## Memory Overhead
 //!
 //! [Archive] uses two maps to enable lookups by both index and key. The memory used to track each
-//! index item is `8 + 4` (where `8` is the index and `4` is the position in the index journal).
+//! index item is `8 + 8` (where `8` is the index and `8` is the position in the index journal).
 //! The memory used to track each key item is `~translated(key).len() + 16` bytes (where `16` is the
 //! size of the `Record` struct). This means that an [Archive] employing a [Translator] that uses
-//! the first `8` bytes of a key will use `~36` bytes to index each key.
+//! the first `8` bytes of a key will use `~40` bytes to index each key.
 //!
 //! # Pruning
 //!

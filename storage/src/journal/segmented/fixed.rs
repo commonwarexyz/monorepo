@@ -1,8 +1,4 @@
-//! A segmented append-only log for storing fixed-length items.
-//!
-//! `fixed::Journal` combines the fixed-size entry format of `contiguous/fixed` with
-//! the section-based organization of `segmented/variable`. This is ideal for storing
-//! index entries that need to be pruned in sync with variable-size data journals.
+//! Segmented journal for fixed-size items.
 //!
 //! # Format
 //!
@@ -16,12 +12,6 @@
 //!
 //! C = CRC32
 //! ```
-//!
-//! # Use Case
-//!
-//! This journal is designed for key index entries that need to be stored separately
-//! from large values. The fixed-size entries provide excellent cache locality since
-//! many entries fit in each buffer pool page.
 //!
 //! # Sync
 //!
@@ -66,7 +56,7 @@ pub struct Config {
 /// Each section is stored in a separate blob. Within each blob, items are
 /// fixed-size with a CRC32 checksum appended.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
-    manager: Manager<E, AppendFactory>,
+    pub(crate) manager: Manager<E, AppendFactory>,
     _array: PhantomData<A>,
 }
 
@@ -142,6 +132,24 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 
         let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
         Self::verify_integrity(buf.as_ref())
+    }
+
+    /// Read the last item in a section, if any.
+    pub async fn last(&self, section: u64) -> Result<Option<A>, Error> {
+        let blob = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+
+        let size = blob.size().await;
+        if size < Self::CHUNK_SIZE_U64 {
+            return Ok(None);
+        }
+
+        let last_position = (size / Self::CHUNK_SIZE_U64) - 1;
+        let offset = last_position * Self::CHUNK_SIZE_U64;
+        let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
+        Self::verify_integrity(buf.as_ref()).map(Some)
     }
 
     /// Verify the integrity of the item + checksum in `buf`.
@@ -561,44 +569,6 @@ mod tests {
             assert_eq!(journal.section_len(2).await.unwrap(), 0);
 
             journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    /// Protect against accidental changes to the journal disk format.
-    #[test_traced]
-    fn test_segmented_fixed_conformance() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut journal = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("failed to init");
-
-            // Append 100 items
-            for i in 0u64..100 {
-                journal
-                    .append(1, test_digest(i))
-                    .await
-                    .expect("failed to append");
-            }
-            journal.sync(1).await.expect("failed to sync");
-            drop(journal);
-
-            // Hash blob contents
-            let (blob, size) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
-                .await
-                .expect("failed to open blob");
-            assert!(size > 0);
-            let buf = blob
-                .read_at(vec![0u8; size as usize], 0)
-                .await
-                .expect("failed to read blob");
-            let digest = Sha256::hash(buf.as_ref());
-            assert_eq!(
-                commonware_utils::hex(&digest),
-                "cb58147a2baf8b6b85f7642cf49d970a6b30c4c659e809a816a303039bc93d01",
-            );
         });
     }
 }

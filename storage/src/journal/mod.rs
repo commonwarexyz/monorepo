@@ -55,6 +55,8 @@ pub enum Error {
     CompressionFailed,
     #[error("decompression failed")]
     DecompressionFailed,
+    #[error("value too large (> u32::MAX)")]
+    ValueTooLarge,
     #[error("corruption detected: {0}")]
     Corruption(String),
     #[error("invalid configuration: {0}")]

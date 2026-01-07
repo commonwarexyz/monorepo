@@ -15,7 +15,7 @@
 //! # Format
 //!
 //! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [commonware_runtime::Blob])
-//! that maps keys to locations and a [crate::journal::segmented::glob::Glob] that stores key-value data.
+//! that maps keys to locations and a [crate::journal::segmented::oversized::Oversized] that stores key-value data.
 //!
 //! ```text
 //! +-----------------------------------------------------------------+
@@ -147,6 +147,9 @@
 //!   collision chain traversal, making caching beneficial.
 //! - **Value Journal**: No buffer pool caching. Values are typically large and accessed once,
 //!   so caching would pollute the cache without benefit.
+//!
+//! This strategy is optimized for random access patterns with a bias towards recently written data
+//! (which will be served from the buffer pool).
 //!
 //! # Example
 //!

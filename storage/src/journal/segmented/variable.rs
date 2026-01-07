@@ -88,7 +88,7 @@
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt, Write as CodecWrite};
+use commonware_codec::{varint::UInt, Codec, EncodeSize, FixedSize, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
     buffer::{Append, PoolRef, Read},
     Blob, Error as RError, Metrics, Storage,
@@ -125,7 +125,7 @@ const MIN_ITEM_SIZE: usize = 5;
 
 /// Implementation of `Journal` storage.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
-    manager: Manager<E, AppendFactory>,
+    pub(crate) manager: Manager<E, AppendFactory>,
 
     /// Compression level (if enabled).
     compression: Option<u8>,
@@ -166,7 +166,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         cfg: &V::Cfg,
         blob: &Append<E::Blob>,
         offset: u64,
-    ) -> Result<(u64, u64, V), Error> {
+    ) -> Result<(u64, u32, V), Error> {
         // Read varint size (max 5 bytes for u32)
         let mut hasher = crc32fast::Hasher::new();
         let varint_buf = blob.read_at(vec![0; MIN_ITEM_SIZE], offset).await?;
@@ -177,10 +177,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let offset = offset + varint_len as u64;
 
         // Read remaining
-        let buf_size = size + 4;
+        let buf_size = size.checked_add(u32::SIZE).ok_or(Error::OffsetOverflow)?;
         let buf = blob.read_at(vec![0u8; buf_size], offset).await?;
         let buf = buf.as_ref();
-        let next_offset = offset + buf_size as u64;
+        let next_offset = offset
+            .checked_add(buf_size as u64)
+            .ok_or(Error::OffsetOverflow)?;
 
         // Read item
         let item = &buf[..size];
@@ -203,7 +205,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         };
 
         // Return item
-        Ok((next_offset, size as u64, item))
+        Ok((next_offset, size as u32, item))
     }
 
     /// Helper function to read an item from a [Read].
@@ -212,7 +214,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         offset: u64,
         cfg: &V::Cfg,
         compressed: bool,
-    ) -> Result<(u64, u64, u64, V), Error> {
+    ) -> Result<(u64, u64, u32, V), Error> {
         // If we're not at the right position, seek to it
         if reader.position() != offset {
             reader.seek_to(offset).map_err(Error::Runtime)?;
@@ -231,7 +233,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         hasher.update(&varint_buf[..varint_len]);
 
         // Read remaining data+checksum (we already have some bytes from the varint read)
-        let buf_size = size + 4;
+        let buf_size = size.checked_add(u32::SIZE).ok_or(Error::OffsetOverflow)?;
         let already_read = MIN_ITEM_SIZE - varint_len;
         let mut buf = vec![0u8; buf_size];
         buf[..already_read].copy_from_slice(&varint_buf[varint_len..]);
@@ -264,7 +266,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Calculate next offset
         let next_offset = reader.position();
-        Ok((next_offset, next_offset, size as u64, item))
+        Ok((next_offset, next_offset, size as u32, item))
     }
 
     /// Returns an ordered stream of all items in the journal starting with the item at the given
@@ -284,7 +286,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         start_section: u64,
         mut offset: u64,
         buffer: NonZeroUsize,
-    ) -> Result<impl Stream<Item = Result<(u64, u64, u64, V), Error>> + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, u64, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
         let codec_config = self.codec_config.clone();
         let compressed = self.compression.is_some();
@@ -424,7 +426,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// to the `Blob` will be considered corrupted (as the trailing bytes will fail
     /// the checksum verification). It is recommended to call `replay` before calling
     /// `append` to prevent this.
-    pub async fn append(&mut self, section: u64, item: V) -> Result<(u64, u64), Error> {
+    pub async fn append(&mut self, section: u64, item: V) -> Result<(u64, u32), Error> {
         // Create buffer with item data
         let (buf, item_len) = if let Some(compression) = self.compression {
             // Compressed: encode first, then compress
@@ -474,7 +476,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Append item to blob
         blob.append(buf).await?;
         trace!(blob = section, offset, "appended item");
-        Ok((offset, item_len as u64))
+        Ok((offset, item_len as u32))
     }
 
     /// Retrieves an item from `Journal` at a given `section` and `offset`.
@@ -581,16 +583,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Removes any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
         self.manager.destroy().await
-    }
-
-    /// Returns a reference to the underlying blobs map.
-    ///
-    /// This is primarily intended for conformance testing where raw access
-    /// to blob data is needed.
-    pub const fn blobs(
-        &self,
-    ) -> &std::collections::BTreeMap<u64, commonware_runtime::buffer::Append<E::Blob>> {
-        self.manager.blobs()
     }
 }
 

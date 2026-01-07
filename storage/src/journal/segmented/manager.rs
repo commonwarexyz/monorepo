@@ -334,12 +334,4 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             None => Ok(0),
         }
     }
-
-    /// Returns a reference to the underlying blobs map.
-    ///
-    /// This is primarily intended for conformance testing where raw access
-    /// to blob data is needed.
-    pub const fn blobs(&self) -> &BTreeMap<u64, F::Buffer> {
-        &self.blobs
-    }
 }

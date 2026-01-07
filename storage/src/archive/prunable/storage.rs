@@ -2,9 +2,7 @@ use super::{Config, Translator};
 use crate::{
     archive::{Error, Identifier},
     index::{unordered::Index, Unordered},
-    journal::segmented::oversized::{
-        Config as OversizedConfig, Oversized, OversizedEntry as OversizedEntryTrait,
-    },
+    journal::segmented::oversized::{Config as OversizedConfig, Oversized, OversizedRecord},
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};
@@ -16,10 +14,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
-/// Index entry stored in the segmented/fixed index journal.
-///
-/// All fields are fixed size, enabling fast startup replay without
-/// reading values from the value journal.
+/// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]
 struct Record<K: Array> {
     /// The index for this entry.
@@ -29,12 +24,12 @@ struct Record<K: Array> {
     /// Byte offset in value journal (same section).
     value_offset: u64,
     /// Size of value data in the value journal.
-    value_size: u64,
+    value_size: u32,
 }
 
 impl<K: Array> Record<K> {
     /// Create a new [Record].
-    const fn new(index: u64, key: K, value_offset: u64, value_size: u64) -> Self {
+    const fn new(index: u64, key: K, value_offset: u64, value_size: u32) -> Self {
         Self {
             index,
             key,
@@ -60,7 +55,7 @@ impl<K: Array> Read for Record<K> {
         let index = u64::read(buf)?;
         let key = K::read(buf)?;
         let value_offset = u64::read(buf)?;
-        let value_size = u64::read(buf)?;
+        let value_size = u32::read(buf)?;
         Ok(Self {
             index,
             key,
@@ -72,15 +67,15 @@ impl<K: Array> Read for Record<K> {
 
 impl<K: Array> FixedSize for Record<K> {
     // index + key + value_offset + value_size
-    const SIZE: usize = u64::SIZE + K::SIZE + u64::SIZE + u64::SIZE;
+    const SIZE: usize = u64::SIZE + K::SIZE + u64::SIZE + u32::SIZE;
 }
 
-impl<K: Array> OversizedEntryTrait for Record<K> {
-    fn value_location(&self) -> (u64, u64) {
+impl<K: Array> OversizedRecord for Record<K> {
+    fn value_location(&self) -> (u64, u32) {
         (self.value_offset, self.value_size)
     }
 
-    fn with_location(mut self, offset: u64, size: u64) -> Self {
+    fn with_location(mut self, offset: u64, size: u32) -> Self {
         self.value_offset = offset;
         self.value_size = size;
         self
@@ -97,7 +92,7 @@ where
             index: u64::arbitrary(u)?,
             key: K::arbitrary(u)?,
             value_offset: u64::arbitrary(u)?,
-            value_size: u64::arbitrary(u)?,
+            value_size: u32::arbitrary(u)?,
         })
     }
 }
@@ -144,7 +139,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     /// by replaying only the index journal (no values are read).
     /// Crash recovery is handled automatically by `Oversized`.
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
-        // Initialize oversized journal (handles crash recovery)
+        // Initialize oversized journal
         let oversized_cfg = OversizedConfig {
             index_partition: cfg.key_partition,
             value_partition: cfg.value_partition,
@@ -401,9 +396,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
     async fn sync(&mut self) -> Result<(), Error> {
         // Collect pending sections and update metrics
         let pending: Vec<u64> = self.pending.iter().copied().collect();
-        for _ in &pending {
-            self.syncs.inc();
-        }
+        self.syncs.inc_by(pending.len() as u64);
 
         // Sync oversized journal (handles both index and values)
         let syncs: Vec<_> = pending.iter().map(|s| self.oversized.sync(*s)).collect();
