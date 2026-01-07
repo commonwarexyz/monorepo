@@ -164,7 +164,7 @@ impl<H: Hasher> Tree<H> {
     ///
     /// This is a single-element multi-proof, which includes the minimal siblings
     /// needed to reconstruct the root.
-    pub fn proof(&self, position: u32) -> Result<MultiProof<H>, Error> {
+    pub fn proof(&self, position: u32) -> Result<Proof<H>, Error> {
         self.multi_proof(&[position])
     }
 
@@ -240,7 +240,7 @@ impl<H: Hasher> Tree<H> {
     /// are deduplicated.
     ///
     /// Positions are sorted internally; duplicate positions will return an error.
-    pub fn multi_proof(&self, positions: &[u32]) -> Result<MultiProof<H>, Error> {
+    pub fn multi_proof(&self, positions: &[u32]) -> Result<Proof<H>, Error> {
         // Handle empty positions first - can't prove zero elements
         if positions.is_empty() {
             return Err(Error::NoLeaves);
@@ -263,7 +263,7 @@ impl<H: Hasher> Tree<H> {
             .map(|&(level, index)| self.levels[level][index])
             .collect();
 
-        Ok(MultiProof {
+        Ok(Proof {
             leaf_count,
             siblings,
         })
@@ -516,7 +516,7 @@ impl<H: Hasher> EncodeSize for RangeProof<H> {
 /// for each leaf because sibling nodes that are shared between multiple paths
 /// are deduplicated.
 #[derive(Clone, Debug, Eq)]
-pub struct MultiProof<H: Hasher> {
+pub struct Proof<H: Hasher> {
     /// The total number of leaves in the tree.
     pub leaf_count: u32,
     /// The deduplicated sibling digests required to verify all elements,
@@ -524,7 +524,7 @@ pub struct MultiProof<H: Hasher> {
     pub siblings: Vec<H::Digest>,
 }
 
-impl<H: Hasher> PartialEq for MultiProof<H>
+impl<H: Hasher> PartialEq for Proof<H>
 where
     H::Digest: PartialEq,
 {
@@ -533,7 +533,7 @@ where
     }
 }
 
-impl<H: Hasher> Default for MultiProof<H> {
+impl<H: Hasher> Default for Proof<H> {
     fn default() -> Self {
         Self {
             leaf_count: 0,
@@ -542,14 +542,14 @@ impl<H: Hasher> Default for MultiProof<H> {
     }
 }
 
-impl<H: Hasher> Write for MultiProof<H> {
+impl<H: Hasher> Write for Proof<H> {
     fn write(&self, writer: &mut impl BufMut) {
         self.leaf_count.write(writer);
         self.siblings.write(writer);
     }
 }
 
-impl<H: Hasher> Read for MultiProof<H> {
+impl<H: Hasher> Read for Proof<H> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -569,14 +569,14 @@ impl<H: Hasher> Read for MultiProof<H> {
     }
 }
 
-impl<H: Hasher> EncodeSize for MultiProof<H> {
+impl<H: Hasher> EncodeSize for Proof<H> {
     fn encode_size(&self) -> usize {
         self.leaf_count.encode_size() + self.siblings.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<H: Hasher> arbitrary::Arbitrary<'_> for MultiProof<H>
+impl<H: Hasher> arbitrary::Arbitrary<'_> for Proof<H>
 where
     H::Digest: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -649,7 +649,7 @@ fn siblings_required_for_multi_proof(
     Ok(sibling_positions)
 }
 
-impl<H: Hasher> MultiProof<H> {
+impl<H: Hasher> Proof<H> {
     /// Verifies that the given `elements` at their respective positions are included
     /// in a Binary Merkle Tree with `root`.
     ///
@@ -686,41 +686,45 @@ impl<H: Hasher> MultiProof<H> {
             return Err(Error::UnalignedProof);
         }
 
-        // Compute position-hashed leaf digests and build initial available nodes.
+        // Group siblings by level for efficient per-level access.
+        let levels_count = levels_in_tree(self.leaf_count);
+        let mut siblings_by_level: Vec<BTreeMap<usize, H::Digest>> =
+            (0..levels_count).map(|_| BTreeMap::new()).collect();
+        for (&(level, index), digest) in sibling_positions.iter().zip(self.siblings.iter()) {
+            siblings_by_level[level].insert(index, *digest);
+        }
+
+        // Compute position-hashed leaf digests to build initial level.
         // Position bounds and duplicates were already validated by siblings_required_for_multi_proof.
-        let mut available: BTreeMap<(usize, usize), H::Digest> = BTreeMap::new();
+        let mut current: BTreeMap<usize, H::Digest> = BTreeMap::new();
         for (leaf, position) in elements {
             hasher.update(&position.to_be_bytes());
             hasher.update(leaf);
-            available.insert((0, *position as usize), hasher.finalize());
-        }
-
-        // Add siblings to available
-        for (&pos, digest) in sibling_positions.iter().zip(self.siblings.iter()) {
-            available.insert(pos, *digest);
+            current.insert(*position as usize, hasher.finalize());
         }
 
         // Compute tree level by level.
         // IMPORTANT: We only check parents of nodes we have, not all possible parents.
         // This ensures O(elements * levels) complexity instead of O(leaf_count * levels),
         // preventing DoS attacks with maliciously large leaf_count values.
-        let levels_count = levels_in_tree(self.leaf_count);
         let mut level_size = self.leaf_count as usize;
         for level in 0..levels_count - 1 {
-            // Collect parent indices of nodes we have at this level
-            let candidate_parents: BTreeSet<usize> = available
-                .keys()
-                .filter(|(l, _)| *l == level)
-                .map(|(_, idx)| idx / 2)
-                .collect();
+            // Add siblings for this level
+            current.extend(siblings_by_level[level].iter().map(|(&k, &v)| (k, v)));
 
+            // Compute unique parent indices from current level nodes
+            let candidate_parents: BTreeSet<usize> =
+                current.keys().map(|idx| idx / 2).collect();
+
+            // Compute parent digests
+            let mut next: BTreeMap<usize, H::Digest> = BTreeMap::new();
             for parent_idx in candidate_parents {
                 let left_child_idx = parent_idx * 2;
                 let right_child_idx = parent_idx * 2 + 1;
 
-                let left_digest = available.get(&(level, left_child_idx));
+                let left_digest = current.get(&left_child_idx);
                 let right_digest = if right_child_idx < level_size {
-                    available.get(&(level, right_child_idx))
+                    current.get(&right_child_idx)
                 } else {
                     // Odd-sized level: duplicate left child
                     left_digest
@@ -729,17 +733,16 @@ impl<H: Hasher> MultiProof<H> {
                 if let (Some(left), Some(right)) = (left_digest, right_digest) {
                     hasher.update(left);
                     hasher.update(right);
-                    available.insert((level + 1, parent_idx), hasher.finalize());
+                    next.insert(parent_idx, hasher.finalize());
                 }
             }
 
+            current = next;
             level_size = level_size.div_ceil(2);
         }
 
-        // Get the computed root (should be at top level, index 0)
-        let computed = available
-            .get(&(levels_count - 1, 0))
-            .ok_or(Error::UnalignedProof)?;
+        // Get the computed root (should be at index 0)
+        let computed = current.get(&0).ok_or(Error::UnalignedProof)?;
 
         if computed == root {
             Ok(())
@@ -782,7 +785,7 @@ mod tests {
 
             // Serialize and deserialize the proof
             let mut serialized = proof.encode();
-            let deserialized = MultiProof::<Sha256>::decode(&mut serialized).unwrap();
+            let deserialized = Proof::<Sha256>::decode(&mut serialized).unwrap();
             assert!(
                 deserialized.verify(&mut hasher, &elements, &root).is_ok(),
                 "deserialize fail for size={n} leaf={i}"
@@ -1182,7 +1185,7 @@ mod tests {
 
         // Truncate one byte.
         serialized.truncate(serialized.len() - 1);
-        assert!(MultiProof::<Sha256>::decode(&mut serialized).is_err());
+        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
     }
 
     #[test]
@@ -1204,7 +1207,7 @@ mod tests {
 
         // Append an extra byte.
         serialized.extend_from_slice(&[0u8]);
-        assert!(MultiProof::<Sha256>::decode(&mut serialized).is_err());
+        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
     }
 
     #[test]
@@ -2305,7 +2308,7 @@ mod tests {
 
         // Serialize and deserialize
         let mut serialized = multi_proof.encode();
-        let deserialized = MultiProof::<Sha256>::decode(&mut serialized).unwrap();
+        let deserialized = Proof::<Sha256>::decode(&mut serialized).unwrap();
 
         assert_eq!(multi_proof, deserialized);
 
@@ -2338,7 +2341,7 @@ mod tests {
         serialized.truncate(serialized.len() - 1);
 
         // Should fail to deserialize
-        assert!(MultiProof::<Sha256>::decode(&mut serialized).is_err());
+        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
     }
 
     #[test]
@@ -2362,7 +2365,7 @@ mod tests {
         serialized.extend_from_slice(&[0u8]);
 
         // Should fail to deserialize
-        assert!(MultiProof::<Sha256>::decode(&mut serialized).is_err());
+        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
     }
 
     #[test]
@@ -2371,7 +2374,7 @@ mod tests {
         serialized.extend_from_slice(&u32::MAX.encode());
         serialized.extend_from_slice(&1usize.encode());
 
-        let err = MultiProof::<Sha256>::decode(serialized.as_slice()).unwrap_err();
+        let err = Proof::<Sha256>::decode(serialized.as_slice()).unwrap_err();
         assert!(matches!(err, commonware_codec::Error::InvalidLength(_)));
     }
 
@@ -2483,7 +2486,7 @@ mod tests {
     fn test_multi_proof_default_verify() {
         // Default (empty) proof should only verify against empty tree
         let mut hasher = Sha256::default();
-        let default_proof = MultiProof::<Sha256>::default();
+        let default_proof = Proof::<Sha256>::default();
 
         // Empty elements against default proof
         let empty_elements: &[(Digest, u32)] = &[];
@@ -2555,6 +2558,194 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_multi_proof_malicious_leaf_count_zero() {
+        // Attacker sets leaf_count = 0 but provides siblings
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+        let mut hasher = Sha256::default();
+
+        // Generate valid proof and tamper with leaf_count
+        let positions = [0, 3];
+        let mut multi_proof = tree.multi_proof(&positions).unwrap();
+        multi_proof.leaf_count = 0;
+
+        let elements: Vec<(Digest, u32)> = positions
+            .iter()
+            .map(|&p| (digests[p as usize], p))
+            .collect();
+
+        // Should fail - leaf_count=0 but we have elements
+        assert!(multi_proof.verify(&mut hasher, &elements, &root).is_err());
+    }
+
+    #[test]
+    fn test_multi_proof_malicious_leaf_count_larger() {
+        // Attacker inflates leaf_count to claim proof is for larger tree
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+        let mut hasher = Sha256::default();
+
+        // Generate valid proof and inflate leaf_count
+        let positions = [0, 3];
+        let mut multi_proof = tree.multi_proof(&positions).unwrap();
+        let original_leaf_count = multi_proof.leaf_count;
+        multi_proof.leaf_count = 1000;
+
+        let elements: Vec<(Digest, u32)> = positions
+            .iter()
+            .map(|&p| (digests[p as usize], p))
+            .collect();
+
+        // Should fail - inflated leaf_count changes required siblings
+        assert!(
+            multi_proof.verify(&mut hasher, &elements, &root).is_err(),
+            "Should reject proof with inflated leaf_count ({} -> {})",
+            original_leaf_count,
+            multi_proof.leaf_count
+        );
+    }
+
+    #[test]
+    fn test_multi_proof_malicious_leaf_count_smaller() {
+        // Attacker deflates leaf_count to claim proof is for smaller tree
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+        let mut hasher = Sha256::default();
+
+        // Generate valid proof and deflate leaf_count
+        let positions = [0, 3];
+        let mut multi_proof = tree.multi_proof(&positions).unwrap();
+        multi_proof.leaf_count = 4; // Smaller than actual tree
+
+        let elements: Vec<(Digest, u32)> = positions
+            .iter()
+            .map(|&p| (digests[p as usize], p))
+            .collect();
+
+        // Should fail - deflated leaf_count changes tree structure
+        assert!(
+            multi_proof.verify(&mut hasher, &elements, &root).is_err(),
+            "Should reject proof with deflated leaf_count"
+        );
+    }
+
+    #[test]
+    fn test_multi_proof_mismatched_element_count() {
+        // Provide more or fewer elements than the proof was generated for
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+        let mut hasher = Sha256::default();
+
+        // Generate proof for 2 positions
+        let positions = [0, 3];
+        let multi_proof = tree.multi_proof(&positions).unwrap();
+
+        // Try to verify with only 1 element (too few)
+        let too_few = [(digests[0], 0u32)];
+        assert!(
+            multi_proof.verify(&mut hasher, &too_few, &root).is_err(),
+            "Should reject when fewer elements provided than proof was generated for"
+        );
+
+        // Try to verify with 3 elements (too many)
+        let too_many = [(digests[0], 0u32), (digests[3], 3), (digests[5], 5)];
+        assert!(
+            multi_proof.verify(&mut hasher, &too_many, &root).is_err(),
+            "Should reject when more elements provided than proof was generated for"
+        );
+    }
+
+    #[test]
+    fn test_multi_proof_swapped_siblings() {
+        // Swap the order of siblings in the proof
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+        let mut hasher = Sha256::default();
+
+        // Generate valid proof with multiple siblings
+        let positions = [0, 5];
+        let mut multi_proof = tree.multi_proof(&positions).unwrap();
+
+        // Ensure we have at least 2 siblings to swap
+        if multi_proof.siblings.len() >= 2 {
+            // Swap first two siblings
+            multi_proof.siblings.swap(0, 1);
+
+            let elements: Vec<(Digest, u32)> = positions
+                .iter()
+                .map(|&p| (digests[p as usize], p))
+                .collect();
+
+            assert!(
+                multi_proof.verify(&mut hasher, &elements, &root).is_err(),
+                "Should reject proof with swapped siblings"
+            );
+        }
+    }
+
+    #[test]
+    fn test_multi_proof_dos_large_leaf_count() {
+        // Attacker sets massive leaf_count trying to cause DoS via memory allocation
+        // The verify function should NOT allocate proportional to leaf_count
+        let digests: Vec<Digest> = (0..4u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+        let mut hasher = Sha256::default();
+
+        // Generate valid proof
+        let positions = [0, 2];
+        let mut multi_proof = tree.multi_proof(&positions).unwrap();
+
+        // Set massive leaf_count (attacker trying to exhaust memory)
+        multi_proof.leaf_count = u32::MAX;
+
+        let elements: Vec<(Digest, u32)> = positions
+            .iter()
+            .map(|&p| (digests[p as usize], p))
+            .collect();
+
+        // This should fail quickly without allocating massive memory
+        // The function is O(elements * levels), not O(leaf_count)
+        let result = multi_proof.verify(&mut hasher, &elements, &root);
+        assert!(result.is_err(), "Should reject malicious large leaf_count");
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
@@ -2564,7 +2755,7 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<RangeProof<Sha256>>,
             CodecConformance<Bounds<Sha256Digest>>,
-            CodecConformance<MultiProof<Sha256>>,
+            CodecConformance<Proof<Sha256>>,
         }
     }
 }
