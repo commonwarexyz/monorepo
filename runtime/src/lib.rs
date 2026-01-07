@@ -577,12 +577,8 @@ pub trait Storage: Clone + Send + Sync + 'static {
     ///
     /// # Versions
     ///
-    /// Each blob has an associated blob version stored in its header.
-    /// `versions` specifies the range of acceptable blob versions for an opened blob.
-    /// If the blob already exists and its version is not in `versions`, returns
+    /// Blobs are versioned. If the blob's version is not in `versions`, returns
     /// [Error::BlobVersionMismatch].
-    /// If the blob does not exist, it is created with the blob version set to the last
-    /// value in `versions`.
     ///
     /// # Returns
     ///
@@ -623,13 +619,6 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// When a blob is dropped, any unsynced changes may be discarded. Implementations
 /// may attempt to sync during drop but errors will go unhandled. Call `sync`
 /// before dropping to ensure all changes are durably persisted.
-///
-/// # Header
-///
-/// All blobs have an 8-byte header at the start containing magic bytes and version
-/// information. The header is read on open (for existing blobs) or written (for new
-/// blobs). All I/O operations use logical offsets that start after the header; the
-/// header offset is handled internally.
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
     /// Read from the blob at the given offset.
