@@ -5,7 +5,7 @@
 
 extern crate alloc;
 
-use super::read_ordered_map;
+use crate::types::read_ordered_map;
 use crate::{
     codec::{EncodeSize, Read, Write},
     error::Error,
