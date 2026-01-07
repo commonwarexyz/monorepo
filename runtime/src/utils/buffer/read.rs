@@ -11,8 +11,6 @@ use std::num::NonZeroUsize;
 /// use commonware_utils::NZUsize;
 /// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic};
 ///
-/// const BLOB_VERSION: u16 = 0;
-///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
 ///     // Open a blob and add some data (e.g., a journal file)

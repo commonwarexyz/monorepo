@@ -1156,7 +1156,7 @@ mod tests {
             let partition = "test_partition";
             let name = b"test_blob";
 
-            // Open a new blob and verify returned version
+            // Open a new blob
             let (blob, size) = context
                 .open(partition, name)
                 .await

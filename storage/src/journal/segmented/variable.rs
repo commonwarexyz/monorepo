@@ -793,7 +793,7 @@ mod tests {
     use bytes::BufMut;
     use commonware_cryptography::{Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, Error as RError, Header, Runner, Storage};
     use commonware_utils::{NZUsize, StableBuf};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::registry::Metric;
@@ -1901,7 +1901,7 @@ mod tests {
             _name: &[u8],
             _versions: std::ops::RangeInclusive<u16>,
         ) -> Result<(MockBlob, u64, u16), RError> {
-            Ok((MockBlob {}, self.len, 0))
+            Ok((MockBlob {}, self.len, Header::DEFAULT_APPLICATION_VERSION))
         }
 
         async fn remove(&self, _partition: &str, _name: Option<&[u8]>) -> Result<(), RError> {
