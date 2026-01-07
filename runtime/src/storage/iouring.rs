@@ -582,4 +582,39 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
+
+    #[tokio::test]
+    async fn test_blob_version_mismatch() {
+        let (storage, storage_directory) = create_test_storage();
+
+        // Create blob with version 1
+        let (_, _, app_version) = storage
+            .open_versioned("partition", b"v1", 1..=1)
+            .await
+            .unwrap();
+        assert_eq!(app_version, 1, "new blob should have version 1");
+
+        // Reopen with a range that includes version 1
+        let (_, _, app_version) = storage
+            .open_versioned("partition", b"v1", 0..=2)
+            .await
+            .unwrap();
+        assert_eq!(app_version, 1, "existing blob should retain version 1");
+
+        // Try to open with version range 2..=2 (should fail)
+        let result = storage.open_versioned("partition", b"v1", 2..=2).await;
+        match result {
+            Err(crate::Error::BlobApplicationVersionMismatch { expected, found }) => {
+                assert_eq!(expected, 2..=2);
+                assert_eq!(found, 1);
+            }
+            Err(err) => panic!(
+                "expected BlobApplicationVersionMismatch error, got: {:?}",
+                err
+            ),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
 }

@@ -889,6 +889,22 @@ mod tests {
     }
 
     #[test]
+    fn test_header_validate_header_version_mismatch() {
+        let mut bytes: [u8; Header::SIZE] = Header::new(0).encode().as_ref().try_into().unwrap();
+        bytes[4] = 0xFF;
+        bytes[5] = 0xFF;
+        let header: Header = Header::decode(bytes.as_slice()).unwrap();
+        let result = header.validate(&(0..=0));
+        match result {
+            Err(Error::BlobHeaderVersionMismatch { expected, found }) => {
+                assert_eq!(expected, Header::HEADER_VERSION);
+                assert_eq!(found, 0xFFFF);
+            }
+            _ => panic!("expected BlobHeaderVersionMismatch error"),
+        }
+    }
+
+    #[test]
     fn test_header_bytes_round_trip() {
         // Test round-trip with default version
         let original = Header::new(0);
