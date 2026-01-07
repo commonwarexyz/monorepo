@@ -1517,4 +1517,125 @@ mod tests {
             oversized.destroy().await.expect("Failed to destroy");
         });
     }
+
+    #[test_traced]
+    fn test_recovery_crash_during_rewind_index_ahead() {
+        // Simulates crash where index was rewound but glob wasn't
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            let mut locations = Vec::new();
+            for i in 0..5u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                let loc = oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                locations.push(loc);
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Simulate crash during rewind: truncate index to 2 entries but leave glob intact
+            // This simulates: rewind(index) succeeded, crash before rewind(glob)
+            let (blob, _) = context
+                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            let chunk_size = (TestEntry::SIZE + u32::SIZE) as u64;
+            blob.resize(2 * chunk_size)
+                .await
+                .expect("Failed to truncate");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Reinitialize - recovery should succeed (glob has orphan data)
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to reinit");
+
+            // First 2 entries should be valid
+            for i in 0..2u8 {
+                let entry = oversized.get(1, i as u64).await.expect("Failed to get");
+                assert_eq!(entry.id, i as u64);
+            }
+
+            // Entries 2-4 should be gone (index was truncated)
+            assert!(oversized.get(1, 2).await.is_err());
+
+            // Should be able to append new entries
+            let (pos, _, _) = oversized
+                .append(1, TestEntry::new(100, 0, 0), &[100u8; 16])
+                .await
+                .expect("Failed to append");
+            assert_eq!(pos, 2);
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_crash_during_rewind_glob_ahead() {
+        // Simulates crash where glob was rewound but index wasn't
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            let mut locations = Vec::new();
+            for i in 0..5u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                let loc = oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                locations.push(loc);
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Simulate crash during rewind: truncate glob to 2 entries but leave index intact
+            // This simulates: rewind(glob) succeeded, crash before rewind(index)
+            let (blob, _) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            let keep_size = byte_end(locations[1].1, locations[1].2);
+            blob.resize(keep_size).await.expect("Failed to truncate");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Reinitialize - recovery should detect index entries pointing beyond glob
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to reinit");
+
+            // First 2 entries should be valid (index rewound to match glob)
+            for i in 0..2u8 {
+                let entry = oversized.get(1, i as u64).await.expect("Failed to get");
+                assert_eq!(entry.id, i as u64);
+            }
+
+            // Entries 2-4 should be gone (index rewound during recovery)
+            assert!(oversized.get(1, 2).await.is_err());
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
 }
