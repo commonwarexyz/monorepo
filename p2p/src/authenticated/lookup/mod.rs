@@ -1687,6 +1687,8 @@ mod tests {
                 }
             }
         }
+
+        assert_no_rate_limiting(&context);
     }
 
     #[test_traced]
@@ -1876,6 +1878,8 @@ mod tests {
                 received.insert(sender);
             }
         }
+
+        assert_no_rate_limiting(&context);
     }
 
     #[test_traced]
