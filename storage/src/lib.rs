@@ -16,7 +16,6 @@ pub mod mmr;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        pub mod align;
         pub mod qmdb;
         pub mod archive;
         mod bitmap;

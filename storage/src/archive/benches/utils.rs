@@ -1,5 +1,6 @@
 //! Helpers shared by the Archive benchmarks.
 
+use commonware_codec::config::RangeCfg;
 use commonware_runtime::{buffer::PoolRef, tokio::Context};
 use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
@@ -25,9 +26,12 @@ const PAGE_SIZE: NonZeroUsize = NZUsize!(16_384);
 /// The number of pages to cache in the buffer pool.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
-/// Fixed-length key and value types (small values for baseline).
+/// Key type (fixed-length) and value type (variable-length for large values).
 pub type Key = FixedBytes<64>;
-pub type Val = FixedBytes<32>;
+pub type Val = Vec<u8>;
+
+/// Size of values in bytes (64KB).
+const VALUE_SIZE: usize = 65536;
 
 /// Archive variant to benchmark.
 #[derive(Debug, Clone, Copy)]
@@ -72,7 +76,7 @@ impl Archive {
                     items_per_section: NZU64!(ITEMS_PER_SECTION),
                     write_buffer: NZUsize!(WRITE_BUFFER),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
-                    codec_config: (),
+                    codec_config: (RangeCfg::new(..), ()),
                 };
                 Self::Immutable(immutable::Archive::init(ctx, cfg).await.unwrap())
             }
@@ -83,7 +87,7 @@ impl Archive {
                     index_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     value_partition: "archive_bench_value".into(),
                     compression,
-                    codec_config: (),
+                    codec_config: (RangeCfg::new(..), ()),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),
                     write_buffer: NZUsize!(WRITE_BUFFER),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
@@ -185,15 +189,16 @@ impl ArchiveTrait for Archive {
 pub async fn append_random(archive: &mut Archive, count: u64) -> Vec<Key> {
     let mut rng = StdRng::seed_from_u64(0);
     let mut key_buf = [0u8; 64];
-    let mut val_buf = [0u8; 32];
 
     let mut keys = Vec::with_capacity(count as usize);
     for i in 0..count {
         rng.fill_bytes(&mut key_buf);
         let key = Key::new(key_buf);
         keys.push(key.clone());
+
+        let mut val_buf = vec![0u8; VALUE_SIZE];
         rng.fill_bytes(&mut val_buf);
-        archive.put(i, key, Val::new(val_buf)).await.unwrap();
+        archive.put(i, key, val_buf).await.unwrap();
     }
     archive.sync().await.unwrap();
     keys

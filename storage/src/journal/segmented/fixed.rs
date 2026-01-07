@@ -101,14 +101,14 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     /// Append a new item to the journal in the given section.
     ///
     /// Returns the position of the item within the section (0-indexed).
-    pub async fn append(&mut self, section: u64, item: A) -> Result<u32, Error> {
+    pub async fn append(&mut self, section: u64, item: A) -> Result<u64, Error> {
         let blob = self.manager.get_or_create(section).await?;
 
         let size = blob.size().await;
         if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
             return Err(Error::InvalidBlobSize(section, size));
         }
-        let position = (size / Self::CHUNK_SIZE_U64) as u32;
+        let position = size / Self::CHUNK_SIZE_U64;
 
         let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
         let encoded = item.encode();
@@ -129,15 +129,15 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     /// - [Error::AlreadyPrunedToSection] if the section has been pruned.
     /// - [Error::SectionOutOfRange] if the section doesn't exist.
     /// - [Error::ItemOutOfRange] if the position is beyond the blob size.
-    pub async fn get(&self, section: u64, position: u32) -> Result<A, Error> {
+    pub async fn get(&self, section: u64, position: u64) -> Result<A, Error> {
         let blob = self
             .manager
             .get(section)?
             .ok_or(Error::SectionOutOfRange(section))?;
 
-        let offset = position as u64 * Self::CHUNK_SIZE_U64;
+        let offset = position * Self::CHUNK_SIZE_U64;
         if offset + Self::CHUNK_SIZE_U64 > blob.size().await {
-            return Err(Error::ItemOutOfRange(position as u64));
+            return Err(Error::ItemOutOfRange(position));
         }
 
         let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
@@ -166,7 +166,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         &self,
         start_section: u64,
         buffer: NonZeroUsize,
-    ) -> Result<impl Stream<Item = Result<(u64, u32, A), Error>> + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, u64, A), Error>> + '_, Error> {
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
             let size = blob.size().await;
@@ -185,7 +185,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
                             return None;
                         }
 
-                        let position = (offset / Self::CHUNK_SIZE_U64) as u32;
+                        let position = offset / Self::CHUNK_SIZE_U64;
                         match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
                             Ok(()) => {
                                 let next_offset = offset + Self::CHUNK_SIZE_U64;
@@ -261,9 +261,9 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     }
 
     /// Returns the number of items in the given section.
-    pub async fn section_len(&self, section: u64) -> Result<u32, Error> {
+    pub async fn section_len(&self, section: u64) -> Result<u64, Error> {
         let size = self.manager.size(section).await?;
-        Ok((size / Self::CHUNK_SIZE_U64) as u32)
+        Ok(size / Self::CHUNK_SIZE_U64)
     }
 
     /// Returns the byte size of the given section.
@@ -411,12 +411,12 @@ mod tests {
             assert_eq!(items.len(), 20);
             for (i, item) in items.iter().enumerate().take(10) {
                 assert_eq!(item.0, 1);
-                assert_eq!(item.1, i as u32);
+                assert_eq!(item.1, i as u64);
                 assert_eq!(item.2, test_digest(i as u64));
             }
             for (i, item) in items.iter().enumerate().skip(10).take(10) {
                 assert_eq!(item.0, 2);
-                assert_eq!(item.1, (i - 10) as u32);
+                assert_eq!(item.1, (i - 10) as u64);
                 assert_eq!(item.2, test_digest(i as u64));
             }
 
@@ -531,7 +531,7 @@ mod tests {
                 .expect("failed to re-init");
 
             for i in 0u64..5 {
-                let item = journal.get(1, i as u32).await.expect("failed to get");
+                let item = journal.get(1, i).await.expect("failed to get");
                 assert_eq!(item, test_digest(i));
             }
 

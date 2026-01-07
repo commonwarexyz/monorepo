@@ -123,7 +123,7 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
 
     /// Index mapping positions to byte offsets within the data journal.
     /// The section can be calculated from the position using items_per_section.
-    pub(crate) offsets: fixed::Journal<E, u32>,
+    pub(crate) offsets: fixed::Journal<E, u64>,
 
     /// The number of items per section.
     ///
@@ -597,7 +597,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Returns `(oldest_retained_pos, size)` for the contiguous journal.
     async fn align_journals(
         data: &mut variable::Journal<E, V>,
-        offsets: &mut fixed::Journal<E, u32>,
+        offsets: &mut fixed::Journal<E, u64>,
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
         // === Handle empty data journal case ===
@@ -737,7 +737,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// - Panics if `offsets_size` >= `data.size()`
     async fn add_missing_offsets(
         data: &variable::Journal<E, V>,
-        offsets: &mut fixed::Journal<E, u32>,
+        offsets: &mut fixed::Journal<E, u64>,
         offsets_size: u64,
         items_per_section: u64,
     ) -> Result<(), Error> {

@@ -33,15 +33,6 @@
 //! number of open `Blobs`, they can group data into fewer `sections` and/or prune unused
 //! `sections`.
 //!
-//! # Offset Alignment
-//!
-//! In practice, `Journal` users won't store `u64::MAX` bytes of data in a given `section` (the max
-//! `Offset` provided by `Blob`). To reduce the memory usage for tracking offsets within `Journal`,
-//! offsets are thus `u32` (4 bytes) and aligned to 16 bytes. This means that the maximum size of
-//! any `section` is `u32::MAX * 17 = ~70GB` bytes (the last offset item can store up to `u32::MAX`
-//! bytes). If more data is written to a `section` past this max, an `OffsetOverflow` error is
-//! returned.
-//!
 //! # Sync
 //!
 //! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
@@ -127,25 +118,10 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
-pub(crate) const ITEM_ALIGNMENT: u64 = 16;
-
 /// Minimum size of any item: 1 byte varint (size=0) + 0 bytes data + 4 bytes checksum.
 /// This is also the max varint size for u32, so we can always read this many bytes
 /// at the start of an item to get the complete varint.
 const MIN_ITEM_SIZE: usize = 5;
-
-/// Computes the next offset for an item using the underlying `u64`
-/// offset of `Blob`.
-#[inline]
-fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
-    let overage = offset % ITEM_ALIGNMENT;
-    if overage != 0 {
-        offset += ITEM_ALIGNMENT - overage;
-    }
-    let offset = offset / ITEM_ALIGNMENT;
-    let aligned_offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
-    Ok(aligned_offset)
-}
 
 /// Implementation of `Journal` storage.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
@@ -189,27 +165,22 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         compressed: bool,
         cfg: &V::Cfg,
         blob: &Append<E::Blob>,
-        offset: u32,
-    ) -> Result<(u32, u32, V), Error> {
+        offset: u64,
+    ) -> Result<(u64, u64, V), Error> {
         // Read varint size (max 5 bytes for u32)
         let mut hasher = crc32fast::Hasher::new();
-        let offset = offset as u64 * ITEM_ALIGNMENT;
         let varint_buf = blob.read_at(vec![0; MIN_ITEM_SIZE], offset).await?;
         let mut varint = varint_buf.as_ref();
         let size = UInt::<u32>::read(&mut varint).map_err(Error::Codec)?.0 as usize;
         let varint_len = MIN_ITEM_SIZE - varint.remaining();
         hasher.update(&varint_buf.as_ref()[..varint_len]);
-        let offset = offset
-            .checked_add(varint_len as u64)
-            .ok_or(Error::OffsetOverflow)?;
+        let offset = offset + varint_len as u64;
 
         // Read remaining
-        let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
+        let buf_size = size + 4;
         let buf = blob.read_at(vec![0u8; buf_size], offset).await?;
         let buf = buf.as_ref();
-        let offset = offset
-            .checked_add(buf_size as u64)
-            .ok_or(Error::OffsetOverflow)?;
+        let next_offset = offset + buf_size as u64;
 
         // Read item
         let item = &buf[..size];
@@ -222,9 +193,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
 
-        // Compute next offset
-        let aligned_offset = compute_next_offset(offset)?;
-
         // If compression is enabled, decompress the item
         let item = if compressed {
             let decompressed =
@@ -235,22 +203,19 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         };
 
         // Return item
-        Ok((aligned_offset, size as u32, item))
+        Ok((next_offset, size as u64, item))
     }
 
     /// Helper function to read an item from a [Read].
     async fn read_buffered(
         reader: &mut Read<Append<E::Blob>>,
-        offset: u32,
+        offset: u64,
         cfg: &V::Cfg,
         compressed: bool,
-    ) -> Result<(u32, u64, u32, V), Error> {
-        // Calculate absolute file offset from the item offset
-        let file_offset = offset as u64 * ITEM_ALIGNMENT;
-
+    ) -> Result<(u64, u64, u64, V), Error> {
         // If we're not at the right position, seek to it
-        if reader.position() != file_offset {
-            reader.seek_to(file_offset).map_err(Error::Runtime)?;
+        if reader.position() != offset {
+            reader.seek_to(offset).map_err(Error::Runtime)?;
         }
 
         // Read varint size (max 5 bytes for u32, and min item size is 5 bytes)
@@ -266,7 +231,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         hasher.update(&varint_buf[..varint_len]);
 
         // Read remaining data+checksum (we already have some bytes from the varint read)
-        let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
+        let buf_size = size + 4;
         let already_read = MIN_ITEM_SIZE - varint_len;
         let mut buf = vec![0u8; buf_size];
         buf[..already_read].copy_from_slice(&varint_buf[varint_len..]);
@@ -298,9 +263,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         };
 
         // Calculate next offset
-        let current_pos = reader.position();
-        let aligned_offset = compute_next_offset(current_pos)?;
-        Ok((aligned_offset, current_pos, size as u32, item))
+        let next_offset = reader.position();
+        Ok((next_offset, next_offset, size as u64, item))
     }
 
     /// Returns an ordered stream of all items in the journal starting with the item at the given
@@ -318,20 +282,18 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     pub async fn replay(
         &self,
         start_section: u64,
-        mut offset: u32,
+        mut offset: u64,
         buffer: NonZeroUsize,
-    ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, u64, u64, V), Error>> + '_, Error> {
         // Collect all blobs to replay
         let codec_config = self.codec_config.clone();
         let compressed = self.compression.is_some();
         let mut blobs = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
             let blob_size = blob.size().await;
-            let max_offset = compute_next_offset(blob_size)?;
             blobs.push((
                 section,
                 blob.clone(),
-                max_offset,
                 blob_size,
                 codec_config.clone(),
                 compressed,
@@ -341,11 +303,11 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Replay all blobs in order and stream items as they are read (to avoid occupying too much
         // memory with buffered data)
         Ok(stream::iter(blobs).flat_map(
-            move |(section, blob, max_offset, blob_size, codec_config, compressed)| {
+            move |(section, blob, blob_size, codec_config, compressed)| {
                 // Created buffered reader
                 let mut reader = Read::new(blob, blob_size, buffer);
                 if section == start_section && offset != 0 {
-                    if let Err(err) = reader.seek_to(offset as u64 * ITEM_ALIGNMENT) {
+                    if let Err(err) = reader.seek_to(offset) {
                         warn!(section, offset, ?err, "failed to seek to offset");
                         // Return early with the error to terminate the entire stream
                         return stream::once(async move { Err(err.into()) }).left_stream();
@@ -356,95 +318,97 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
                 // Read over the blob
                 stream::unfold(
-                        (section, reader, offset, 0u64, codec_config, compressed),
-                        move |(
-                            section,
-                            mut reader,
-                            offset,
-                            valid_size,
-                            codec_config,
-                            compressed,
-                        )| async move {
-                            // Check if we are at the end of the blob
-                            if offset >= max_offset {
-                                return None;
-                            }
+                    (
+                        section,
+                        reader,
+                        offset,
+                        0u64,
+                        blob_size,
+                        codec_config,
+                        compressed,
+                    ),
+                    move |(
+                        section,
+                        mut reader,
+                        offset,
+                        valid_size,
+                        blob_size,
+                        codec_config,
+                        compressed,
+                    )| async move {
+                        // Check if we are at the end of the blob
+                        if offset >= blob_size {
+                            return None;
+                        }
 
-                            // Read an item from the buffer
-                            match Self::read_buffered(
-                                &mut reader,
-                                offset,
-                                &codec_config,
-                                compressed,
-                            )
+                        // Read an item from the buffer
+                        match Self::read_buffered(&mut reader, offset, &codec_config, compressed)
                             .await
-                            {
-                                Ok((next_offset, next_valid_size, size, item)) => {
-                                    trace!(blob = section, cursor = offset, "replayed item");
-                                    Some((
-                                        Ok((section, offset, size, item)),
-                                        (
-                                            section,
-                                            reader,
-                                            next_offset,
-                                            next_valid_size,
-                                            codec_config,
-                                            compressed,
-                                        ),
-                                    ))
-                                }
-                                Err(Error::ChecksumMismatch(expected, found)) => {
-                                    // If we encounter corruption, we prune to the last valid item. This
-                                    // can happen during an unclean file close (where pending data is not
-                                    // fully synced to disk).
-                                    warn!(
-                                        blob = section,
-                                        bad_offset = offset,
-                                        new_size = valid_size,
-                                        expected,
-                                        found,
-                                        "corruption detected: truncating"
-                                    );
-                                    reader.resize(valid_size).await.ok()?;
-                                    None
-                                }
-                                Err(Error::Runtime(RError::BlobInsufficientLength)) => {
-                                    // If we encounter trailing bytes, we prune to the last
-                                    // valid item. This can happen during an unclean file close (where
-                                    // pending data is not fully synced to disk).
-                                    warn!(
-                                        blob = section,
-                                        bad_offset = offset,
-                                        new_size = valid_size,
-                                        "trailing bytes detected: truncating"
-                                    );
-                                    reader.resize(valid_size).await.ok()?;
-                                    None
-                                }
-                                Err(err) => {
-                                    // If we encounter an unexpected error, return it without attempting
-                                    // to fix anything.
-                                    warn!(
-                                        blob = section,
-                                        cursor = offset,
-                                        ?err,
-                                        "unexpected error"
-                                    );
-                                    Some((
-                                        Err(err),
-                                        (
-                                            section,
-                                            reader,
-                                            offset,
-                                            valid_size,
-                                            codec_config,
-                                            compressed,
-                                        ),
-                                    ))
-                                }
+                        {
+                            Ok((next_offset, next_valid_size, size, item)) => {
+                                trace!(blob = section, cursor = offset, "replayed item");
+                                Some((
+                                    Ok((section, offset, size, item)),
+                                    (
+                                        section,
+                                        reader,
+                                        next_offset,
+                                        next_valid_size,
+                                        blob_size,
+                                        codec_config,
+                                        compressed,
+                                    ),
+                                ))
                             }
-                        },
-                    ).right_stream()
+                            Err(Error::ChecksumMismatch(expected, found)) => {
+                                // If we encounter corruption, we prune to the last valid item. This
+                                // can happen during an unclean file close (where pending data is not
+                                // fully synced to disk).
+                                warn!(
+                                    blob = section,
+                                    bad_offset = offset,
+                                    new_size = valid_size,
+                                    expected,
+                                    found,
+                                    "corruption detected: truncating"
+                                );
+                                reader.resize(valid_size).await.ok()?;
+                                None
+                            }
+                            Err(Error::Runtime(RError::BlobInsufficientLength)) => {
+                                // If we encounter trailing bytes, we prune to the last
+                                // valid item. This can happen during an unclean file close (where
+                                // pending data is not fully synced to disk).
+                                warn!(
+                                    blob = section,
+                                    bad_offset = offset,
+                                    new_size = valid_size,
+                                    "trailing bytes detected: truncating"
+                                );
+                                reader.resize(valid_size).await.ok()?;
+                                None
+                            }
+                            Err(err) => {
+                                // If we encounter an unexpected error, return it without attempting
+                                // to fix anything.
+                                warn!(blob = section, cursor = offset, ?err, "unexpected error");
+                                Some((
+                                    Err(err),
+                                    (
+                                        section,
+                                        reader,
+                                        offset,
+                                        valid_size,
+                                        blob_size,
+                                        codec_config,
+                                        compressed,
+                                    ),
+                                ))
+                            }
+                        }
+                    },
+                )
+                .right_stream()
             },
         ))
     }
@@ -460,7 +424,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// to the `Blob` will be considered corrupted (as the trailing bytes will fail
     /// the checksum verification). It is recommended to call `replay` before calling
     /// `append` to prevent this.
-    pub async fn append(&mut self, section: u64, item: V) -> Result<(u32, u32), Error> {
+    pub async fn append(&mut self, section: u64, item: V) -> Result<(u64, u64), Error> {
         // Create item
         let encoded = item.encode();
         let encoded = if let Some(compression) = self.compression {
@@ -471,7 +435,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Ensure item is not too large
         let item_len = encoded.len();
-        let item_len = match item_len.try_into() {
+        let item_len: u32 = match item_len.try_into() {
             Ok(len) => len,
             Err(_) => return Err(Error::ItemTooLarge(item_len)),
         };
@@ -481,34 +445,25 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Get or create blob
         let blob = self.manager.get_or_create(section).await?;
 
-        // Calculate alignment
-        let cursor = blob.size().await;
-        let offset = compute_next_offset(cursor)?;
-        let aligned_cursor = offset as u64 * ITEM_ALIGNMENT;
-        let padding = (aligned_cursor - cursor) as usize;
+        // Get current position - this is where we'll write
+        let offset = blob.size().await;
 
         // Populate buffer
-        let mut buf = Vec::with_capacity(padding + entry_len);
-
-        // Add padding bytes if necessary
-        if padding > 0 {
-            buf.resize(padding, 0);
-        }
+        let mut buf = Vec::with_capacity(entry_len);
 
         // Add entry data
-        let entry_start = buf.len();
         UInt(item_len).write(&mut buf);
         buf.put_slice(&encoded);
 
-        // Calculate checksum only for the entry data (without padding)
-        let checksum = crc32fast::hash(&buf[entry_start..]);
+        // Calculate checksum for the entry data
+        let checksum = crc32fast::hash(&buf);
         buf.put_u32(checksum);
-        assert_eq!(buf[entry_start..].len(), entry_len);
+        assert_eq!(buf.len(), entry_len);
 
         // Append item to blob
         blob.append(buf).await?;
         trace!(blob = section, offset, "appended item");
-        Ok((offset, item_len))
+        Ok((offset, item_len as u64))
     }
 
     /// Retrieves an item from `Journal` at a given `section` and `offset`.
@@ -521,7 +476,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///  - An invalid `offset` for a given section (that is, an offset that doesn't correspond to a
     ///    previously appended item) will result in an error, with the specific type being
     ///    undefined.
-    pub async fn get(&self, section: u64, offset: u32) -> Result<V, Error> {
+    pub async fn get(&self, section: u64, offset: u64) -> Result<V, Error> {
         let blob = self
             .manager
             .get(section)?
@@ -547,10 +502,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// * This operation is not guaranteed to survive restarts until sync is called.
     /// * This operation is not atomic, but it will always leave the journal in a consistent state
     ///   in the event of failure since blobs are always removed in reverse order of section.
-    pub async fn rewind_to_offset(&mut self, section: u64, offset: u32) -> Result<(), Error> {
-        self.manager
-            .rewind(section, offset as u64 * ITEM_ALIGNMENT)
-            .await
+    pub async fn rewind_to_offset(&mut self, section: u64, offset: u64) -> Result<(), Error> {
+        self.manager.rewind(section, offset).await
     }
 
     /// Rewinds the journal to the given `section` and `size`.
@@ -636,10 +589,9 @@ mod tests {
     use bytes::BufMut;
     use commonware_cryptography::{Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
-    use commonware_utils::{hex, NZUsize, StableBuf};
+    use commonware_runtime::{deterministic, Runner};
+    use commonware_utils::{hex, NZUsize};
     use futures::{pin_mut, StreamExt};
-    use prometheus_client::registry::Metric;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -1315,7 +1267,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_handling_unaligned_truncated_data() {
+    fn test_journal_truncation_recovery() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
@@ -1338,7 +1290,7 @@ mod tests {
             // Append 1 item to the first index
             journal.append(1, 1).await.expect("Failed to append data");
 
-            // Append multiple items to the second index (with unaligned values)
+            // Append multiple items to the second section
             let data_items = vec![(2u64, 2), (2u64, 3), (2u64, 4)];
             for (index, data) in &data_items {
                 journal
@@ -1395,12 +1347,12 @@ mod tests {
 
             // Confirm blob is expected length
             // entry = 1 (varint for 4) + 4 (data) + 4 (checksum) = 9 bytes
-            // Item 2 ends at position 16 + 9 = 25
+            // Item 2 ends at position 9 + 9 = 18
             let (_, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_size, 25);
+            assert_eq!(blob_size, 18);
 
             // Attempt to replay journal after truncation
             let mut journal = Journal::init(context.clone(), cfg.clone())
@@ -1433,24 +1385,24 @@ mod tests {
             assert_eq!(items[2].1, data_items[1].1);
 
             // Append a new item to truncated partition
-            journal.append(2, 5).await.expect("Failed to append data");
+            let (offset, _) = journal.append(2, 5).await.expect("Failed to append data");
             journal.sync(2).await.expect("Failed to sync blob");
 
             // Get the new item
-            let item = journal.get(2, 2).await.expect("Failed to get item");
+            let item = journal.get(2, offset).await.expect("Failed to get item");
             assert_eq!(item, 5);
 
             // Drop the journal (data already synced)
             drop(journal);
 
             // Confirm blob is expected length
-            // Items 1 and 2 at positions 0 and 16, item 3 (value 5) at position 32
-            // Item 3 = 1 (varint) + 4 (data) + 4 (checksum) = 9 bytes, ends at 41
+            // Items 1 and 2 at positions 0 and 9, item 3 (value 5) at position 18
+            // Item 3 = 1 (varint) + 4 (data) + 4 (checksum) = 9 bytes, ends at 27
             let (_, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_size, 41);
+            assert_eq!(blob_size, 27);
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context.clone(), cfg.clone())
@@ -1459,138 +1411,6 @@ mod tests {
 
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u32)>::new();
-            {
-                let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
-                    .await
-                    .expect("unable to setup replay");
-                pin_mut!(stream);
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {err}"),
-                    }
-                }
-            }
-
-            // Verify that only non-corrupted items were replayed
-            assert_eq!(items.len(), 4);
-            assert_eq!(items[0].0, 1);
-            assert_eq!(items[0].1, 1);
-            assert_eq!(items[1].0, data_items[0].0);
-            assert_eq!(items[1].1, data_items[0].1);
-            assert_eq!(items[2].0, data_items[1].0);
-            assert_eq!(items[2].1, data_items[1].1);
-            assert_eq!(items[3].0, 2);
-            assert_eq!(items[3].1, 5);
-        });
-    }
-
-    #[test_traced]
-    fn test_journal_handling_aligned_truncated_data() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-
-        // Start the test within the executor
-        executor.start(|context| async move {
-            // Create a journal configuration
-            let cfg = Config {
-                partition: "test_partition".into(),
-                compression: None,
-                codec_config: (),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize journal");
-
-            // Append 1 item to the first index
-            journal.append(1, 1).await.expect("Failed to append data");
-
-            // Append multiple items to the second index (with unaligned values)
-            let data_items = vec![(2u64, 2), (2u64, 3), (2u64, 4)];
-            for (index, data) in &data_items {
-                journal
-                    .append(*index, *data)
-                    .await
-                    .expect("Failed to append data");
-                journal.sync(*index).await.expect("Failed to sync blob");
-            }
-
-            // Sync all sections and drop the journal
-            journal.sync_all().await.expect("Failed to sync");
-            drop(journal);
-
-            // Manually corrupt the end of the second blob
-            let (blob, blob_size) = context
-                .open(&cfg.partition, &2u64.to_be_bytes())
-                .await
-                .expect("Failed to open blob");
-            blob.resize(blob_size - 4)
-                .await
-                .expect("Failed to corrupt blob");
-            blob.sync().await.expect("Failed to sync blob");
-
-            // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
-
-            // Attempt to replay the journal
-            let mut items = Vec::<(u64, u64)>::new();
-            {
-                let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
-                    .await
-                    .expect("unable to setup replay");
-                pin_mut!(stream);
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {err}"),
-                    }
-                }
-            }
-
-            // Verify that only non-corrupted items were replayed
-            assert_eq!(items.len(), 3);
-            assert_eq!(items[0].0, 1);
-            assert_eq!(items[0].1, 1);
-            assert_eq!(items[1].0, data_items[0].0);
-            assert_eq!(items[1].1, data_items[0].1);
-            assert_eq!(items[2].0, data_items[1].0);
-            assert_eq!(items[2].1, data_items[1].1);
-
-            // Append a new item to the truncated partition
-            journal.append(2, 5).await.expect("Failed to append data");
-            journal.sync(2).await.expect("Failed to sync blob");
-
-            // Get the new item
-            let item = journal.get(2, 2).await.expect("Failed to get item");
-            assert_eq!(item, 5);
-
-            // Drop the journal (data already synced)
-            drop(journal);
-
-            // Confirm blob is expected length
-            // entry = 1 (varint for 8) + 8 (u64 data) + 4 (checksum) = 13 bytes
-            // Items at positions 0, 16, 32; item 3 ends at 32 + 13 = 45
-            let (_, blob_size) = context
-                .open(&cfg.partition, &2u64.to_be_bytes())
-                .await
-                .expect("Failed to open blob");
-            assert_eq!(blob_size, 45);
-
-            // Attempt to replay journal after truncation
-            let journal = Journal::init(context, cfg)
-                .await
-                .expect("Failed to re-initialize journal");
-
-            // Attempt to replay the journal
-            let mut items = Vec::<(u64, u64)>::new();
             {
                 let stream = journal
                     .replay(0, 0, NZUsize!(1024))
@@ -1684,131 +1504,6 @@ mod tests {
                     Err(err) => panic!("Failed to read item: {err}"),
                 }
             }
-        });
-    }
-
-    // Define `MockBlob` that returns an offset length that should overflow
-    #[derive(Clone)]
-    struct MockBlob {}
-
-    impl Blob for MockBlob {
-        async fn read_at(
-            &self,
-            buf: impl Into<StableBuf> + Send,
-            _offset: u64,
-        ) -> Result<StableBuf, RError> {
-            Ok(buf.into())
-        }
-
-        async fn write_at(
-            &self,
-            _buf: impl Into<StableBuf> + Send,
-            _offset: u64,
-        ) -> Result<(), RError> {
-            Ok(())
-        }
-
-        async fn resize(&self, _len: u64) -> Result<(), RError> {
-            Ok(())
-        }
-
-        async fn sync(&self) -> Result<(), RError> {
-            Ok(())
-        }
-    }
-
-    // Define `MockStorage` that returns `MockBlob`
-    #[derive(Clone)]
-    struct MockStorage {
-        len: u64,
-    }
-
-    impl Storage for MockStorage {
-        type Blob = MockBlob;
-
-        async fn open(&self, _partition: &str, _name: &[u8]) -> Result<(MockBlob, u64), RError> {
-            Ok((MockBlob {}, self.len))
-        }
-
-        async fn remove(&self, _partition: &str, _name: Option<&[u8]>) -> Result<(), RError> {
-            Ok(())
-        }
-
-        async fn scan(&self, _partition: &str) -> Result<Vec<Vec<u8>>, RError> {
-            Ok(vec![])
-        }
-    }
-
-    impl Metrics for MockStorage {
-        fn with_label(&self, _: &str) -> Self {
-            self.clone()
-        }
-
-        fn label(&self) -> String {
-            String::new()
-        }
-
-        fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
-
-        fn encode(&self) -> String {
-            String::new()
-        }
-    }
-
-    // Define the `INDEX_ALIGNMENT` again explicitly to ensure we catch any accidental
-    // changes to the value
-    const INDEX_ALIGNMENT: u64 = 16;
-
-    #[test_traced]
-    fn test_journal_large_offset() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            // Create journal
-            let cfg = Config {
-                partition: "partition".to_string(),
-                compression: None,
-                codec_config: (),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-            let context = MockStorage {
-                len: u32::MAX as u64 * INDEX_ALIGNMENT, // can store up to u32::Max at the last offset
-            };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
-
-            // Append data
-            let data = 1;
-            let (result, _) = journal
-                .append(1, data)
-                .await
-                .expect("Failed to append data");
-            assert_eq!(result, u32::MAX);
-        });
-    }
-
-    #[test_traced]
-    fn test_journal_offset_overflow() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            // Create journal
-            let cfg = Config {
-                partition: "partition".to_string(),
-                compression: None,
-                codec_config: (),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-            let context = MockStorage {
-                len: u32::MAX as u64 * INDEX_ALIGNMENT + 1,
-            };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
-
-            // Append data
-            let data = 1;
-            let result = journal.append(1, data).await;
-            assert!(matches!(result, Err(Error::OffsetOverflow)));
         });
     }
 
@@ -1966,7 +1661,7 @@ mod tests {
             let digest = Sha256::hash(buf.as_ref());
             assert_eq!(
                 hex(&digest),
-                "f55bf27a59118603466fcf6a507ab012eea4cb2d6bdd06ce8f515513729af847",
+                "b64cab8c9087ef9f062b01458b4cbde7e3e8bfd3cd8d4bc6628ad717326cad2e",
             );
         });
     }

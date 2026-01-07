@@ -37,7 +37,7 @@ use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
     glob::{Config as GlobConfig, Glob},
 };
-use crate::{align, journal::Error};
+use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed};
 use commonware_runtime::{Metrics, Storage};
 use futures::{future::join, stream::Stream};
@@ -50,14 +50,12 @@ use tracing::{debug, warn};
 /// and a way to set the location when appending.
 pub trait OversizedEntry: CodecFixed<Cfg = ()> + Clone {
     /// Returns `(value_offset, value_size)` for crash recovery validation.
-    ///
-    /// Offsets are aligned (see `glob::ENTRY_ALIGNMENT`) so u32 can address ~16TB per section.
-    fn value_location(&self) -> (u32, u32);
+    fn value_location(&self) -> (u64, u64);
 
     /// Returns a new entry with the value location set.
     ///
     /// Called during `append` after the value is written to glob storage.
-    fn with_location(self, offset: u32, size: u32) -> Self;
+    fn with_location(self, offset: u64, size: u64) -> Self;
 }
 
 /// Configuration for oversized journal.
@@ -158,12 +156,11 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
             let entry_count = index_size / chunk_size;
 
             // Check the LAST entry
-            let last_pos = (entry_count - 1) as u32;
+            let last_pos = entry_count - 1;
             match self.index.get(section, last_pos).await {
                 Ok(entry) => {
-                    let (aligned_offset, value_size) = entry.value_location();
-                    let byte_offset = align::from_aligned(aligned_offset);
-                    let entry_end = byte_offset + value_size as u64;
+                    let (value_offset, value_size) = entry.value_location();
+                    let entry_end = value_offset + value_size;
 
                     if entry_end <= glob_size {
                         // Last entry valid - all entries in this section are valid
@@ -176,13 +173,12 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
                         last_pos, glob_size, entry_end, "invalid entry: glob truncated"
                     );
 
-                    let mut valid_count: u32 = 0;
+                    let mut valid_count: u64 = 0;
                     for pos in (0..last_pos).rev() {
                         match self.index.get(section, pos).await {
                             Ok(entry) => {
-                                let (aligned_off, size) = entry.value_location();
-                                let byte_off = align::from_aligned(aligned_off);
-                                if byte_off + size as u64 <= glob_size {
+                                let (offset, size) = entry.value_location();
+                                if offset + size <= glob_size {
                                     valid_count = pos + 1;
                                     break;
                                 }
@@ -195,7 +191,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
                     }
 
                     // Rewind to last valid entry
-                    let valid_size = valid_count as u64 * chunk_size;
+                    let valid_size = valid_count * chunk_size;
                     debug!(section, index_size, valid_size, "rewinding index journal");
                     self.index.rewind_section(section, valid_size).await?;
                 }
@@ -206,13 +202,12 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
                         last_pos, "corrupted last entry, scanning backwards"
                     );
 
-                    let mut valid_count: u32 = 0;
+                    let mut valid_count: u64 = 0;
                     for pos in (0..last_pos).rev() {
                         match self.index.get(section, pos).await {
                             Ok(entry) => {
-                                let (aligned_off, size) = entry.value_location();
-                                let byte_off = align::from_aligned(aligned_off);
-                                if byte_off + size as u64 <= glob_size {
+                                let (offset, size) = entry.value_location();
+                                if offset + size <= glob_size {
                                     valid_count = pos + 1;
                                     break;
                                 }
@@ -221,7 +216,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
                         }
                     }
 
-                    let valid_size = valid_count as u64 * chunk_size;
+                    let valid_size = valid_count * chunk_size;
                     debug!(section, index_size, valid_size, "rewinding index journal");
                     self.index.rewind_section(section, valid_size).await?;
                 }
@@ -237,14 +232,14 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
     ///
     /// Returns `(position, offset, size)` where:
     /// - `position`: Position in the index journal
-    /// - `offset`: Aligned offset in glob (multiply by `ENTRY_ALIGNMENT` for byte offset)
+    /// - `offset`: Byte offset in glob
     /// - `size`: Size of value in glob (including checksum)
     pub async fn append(
         &mut self,
         section: u64,
         entry: I,
         value: &V,
-    ) -> Result<(u32, u32, u32), Error> {
+    ) -> Result<(u64, u64, u64), Error> {
         // Write value first (glob)
         let (offset, size) = self.values.append(section, value).await?;
 
@@ -256,14 +251,14 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
     }
 
     /// Get entry at position (index entry only, not value).
-    pub async fn get(&self, section: u64, position: u32) -> Result<I, Error> {
+    pub async fn get(&self, section: u64, position: u64) -> Result<I, Error> {
         self.index.get(section, position).await
     }
 
     /// Get value using offset/size from entry.
     ///
-    /// The offset should be the aligned offset from `append()` or from the entry's `value_location()`.
-    pub async fn get_value(&self, section: u64, offset: u32, size: u32) -> Result<V, Error> {
+    /// The offset should be the byte offset from `append()` or from the entry's `value_location()`.
+    pub async fn get_value(&self, section: u64, offset: u64, size: u64) -> Result<V, Error> {
         self.values.get(section, offset, size).await
     }
 
@@ -274,7 +269,7 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
         &self,
         start_section: u64,
         buffer: NonZeroUsize,
-    ) -> Result<impl Stream<Item = Result<(u64, u32, I), Error>> + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, u64, I), Error>> + '_, Error> {
         self.index.replay(start_section, buffer).await
     }
 
@@ -356,21 +351,21 @@ mod tests {
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
     use commonware_utils::NZUsize;
 
-    /// Convert aligned offset + size to byte end position (for truncation tests).
-    fn byte_end(aligned_offset: u32, size: u32) -> u64 {
-        align::from_aligned(aligned_offset) + size as u64
+    /// Convert offset + size to byte end position (for truncation tests).
+    fn byte_end(offset: u64, size: u64) -> u64 {
+        offset + size
     }
 
     /// Test index entry that stores a u64 id and references a value.
     #[derive(Debug, Clone, PartialEq)]
     struct TestEntry {
         id: u64,
-        value_offset: u32,
-        value_size: u32,
+        value_offset: u64,
+        value_size: u64,
     }
 
     impl TestEntry {
-        fn new(id: u64, value_offset: u32, value_size: u32) -> Self {
+        fn new(id: u64, value_offset: u64, value_size: u64) -> Self {
             Self {
                 id,
                 value_offset,
@@ -392,8 +387,8 @@ mod tests {
 
         fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             let id = u64::read(buf)?;
-            let value_offset = u32::read(buf)?;
-            let value_size = u32::read(buf)?;
+            let value_offset = u64::read(buf)?;
+            let value_size = u64::read(buf)?;
             Ok(Self {
                 id,
                 value_offset,
@@ -403,15 +398,15 @@ mod tests {
     }
 
     impl FixedSize for TestEntry {
-        const SIZE: usize = u64::SIZE + u32::SIZE + u32::SIZE;
+        const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE;
     }
 
     impl OversizedEntry for TestEntry {
-        fn value_location(&self) -> (u32, u32) {
+        fn value_location(&self) -> (u64, u64) {
             (self.value_offset, self.value_size)
         }
 
-        fn with_location(mut self, offset: u32, size: u32) -> Self {
+        fn with_location(mut self, offset: u64, size: u64) -> Self {
             self.value_offset = offset;
             self.value_size = size;
             self
@@ -835,7 +830,7 @@ mod tests {
 
             // First 4 entries should be valid
             for i in 0..4u8 {
-                let entry = oversized.get(1, i as u32).await.expect("Failed to get");
+                let entry = oversized.get(1, i as u64).await.expect("Failed to get");
                 assert_eq!(entry.id, i as u64);
             }
 
@@ -882,7 +877,7 @@ mod tests {
             for section in 1u64..=3 {
                 for i in 0..10u8 {
                     let entry = oversized
-                        .get(section, i as u32)
+                        .get(section, i as u64)
                         .await
                         .expect("Failed to get");
                     assert_eq!(entry.id, section * 100 + i as u64);
@@ -1096,7 +1091,7 @@ mod tests {
             // Verify new entries at positions 2, 3, 4, 5, 6
             for i in 0..5u8 {
                 let entry = oversized
-                    .get(1, 2 + i as u32)
+                    .get(1, 2 + i as u64)
                     .await
                     .expect("Failed to get new entry");
                 assert_eq!(entry.id, (10 + i) as u64);
@@ -1266,7 +1261,7 @@ mod tests {
 
             // First 3 entries should be valid
             for i in 0..3u8 {
-                let entry = oversized.get(1, i as u32).await.expect("Failed to get");
+                let entry = oversized.get(1, i as u64).await.expect("Failed to get");
                 assert_eq!(entry.id, i as u64);
             }
 
@@ -1351,7 +1346,7 @@ mod tests {
                     .expect("Failed to append after recovery");
 
                 // New entries start at position 2 (after the 2 valid entries)
-                assert_eq!(position, (i - 10 + 2) as u32);
+                assert_eq!(position, (i - 10 + 2) as u64);
                 new_locations.push((position, offset, size, i));
 
                 // Verify we can read the new entry

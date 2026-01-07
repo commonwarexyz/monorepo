@@ -18,24 +18,16 @@
 //! - **Compressed Data**: zstd compressed (if enabled) or raw codec output
 //! - **CRC32**: 4-byte checksum of the compressed data
 //!
-//! # Offset Alignment
-//!
-//! To allow large sections while keeping offsets as `u32`, entries are written at
-//! 16-byte aligned positions. This means:
-//! - Stored offset = byte_offset / 16
-//! - Max section size = u32::MAX * 16 = ~64GB
-//!
 //! # Read Flow
 //!
 //! 1. Get `(offset, size)` from index entry
-//! 2. Convert aligned offset to byte offset: byte_offset = offset * 16
-//! 3. Read `size` bytes directly from blob at byte_offset
-//! 4. Last 4 bytes are CRC32, verify it
-//! 5. Decompress remaining bytes if compression enabled
-//! 6. Decode value
+//! 2. Read `size` bytes directly from blob at byte offset
+//! 3. Last 4 bytes are CRC32, verify it
+//! 4. Decompress remaining bytes if compression enabled
+//! 5. Decode value
 
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
-use crate::{align, journal::Error};
+use crate::journal::Error;
 use bytes::BufMut;
 use commonware_codec::Codec;
 use commonware_runtime::{Blob as _, Error as RError, Metrics, Storage};
@@ -94,12 +86,12 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
         })
     }
 
-    /// Append value to section, returns (aligned_offset, size).
+    /// Append value to section, returns (offset, size).
     ///
-    /// The returned offset is aligned (multiply by `ALIGNMENT` to get byte offset).
+    /// The returned offset is the byte offset where the entry was written.
     /// The returned size is the total bytes written (compressed_data + crc32).
     /// Both should be stored in the index entry for later retrieval.
-    pub async fn append(&mut self, section: u64, value: &V) -> Result<(u32, u32), Error> {
+    pub async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u64), Error> {
         // Encode and optionally compress
         let encoded = value.encode();
         let compressed = if let Some(level) = self.compression {
@@ -109,29 +101,14 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
         };
 
         // Total entry size: compressed data + 4 bytes checksum
-        let entry_size = compressed
-            .len()
-            .checked_add(4)
-            .ok_or(Error::OffsetOverflow)?;
-        let entry_size_u32: u32 = entry_size
-            .try_into()
-            .map_err(|_| Error::ItemTooLarge(entry_size))?;
+        let entry_size = compressed.len() + 4;
+        let entry_size_u64 = entry_size as u64;
 
         // Get or create blob for this section
         let writer = self.manager.get_or_create(section).await?;
 
-        // Get current size and add padding to align
-        let current_size = writer.size().await;
-        let padding = align::padding_for(current_size);
-        if padding > 0 {
-            writer
-                .write_at(vec![0u8; padding as usize], current_size)
-                .await?;
-        }
-
-        // Now we're at an aligned position
-        let byte_offset = current_size + padding;
-        let aligned_offset = align::to_aligned(byte_offset)?;
+        // Get current size - this is where we'll write
+        let byte_offset = writer.size().await;
 
         // Pre-allocate buffer with exact size: compressed data + checksum
         let mut buf = Vec::with_capacity(entry_size);
@@ -141,25 +118,23 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
         // Write via buffered writer (handles batching internally)
         writer.write_at(buf, byte_offset).await?;
 
-        Ok((aligned_offset, entry_size_u32))
+        Ok((byte_offset, entry_size_u64))
     }
 
-    /// Read value at aligned offset with known size (from index entry).
+    /// Read value at offset with known size (from index entry).
     ///
-    /// The offset should be the aligned offset returned by `append()`.
+    /// The offset should be the byte offset returned by `append()`.
     /// Reads directly from blob without any caching.
-    pub async fn get(&self, section: u64, aligned_offset: u32, size: u32) -> Result<V, Error> {
+    pub async fn get(&self, section: u64, offset: u64, size: u64) -> Result<V, Error> {
         let writer = self
             .manager
             .get(section)?
             .ok_or(Error::SectionOutOfRange(section))?;
 
-        // Convert aligned offset back to byte offset
-        let byte_offset = align::from_aligned(aligned_offset);
         let size_usize = size as usize;
 
         // Read via buffered writer (handles read-through for buffered data)
-        let buf = writer.read_at(vec![0u8; size_usize], byte_offset).await?;
+        let buf = writer.read_at(vec![0u8; size_usize], offset).await?;
         let buf = buf.as_ref();
 
         // Entry format: [compressed_data] [crc32 (4 bytes)]
@@ -378,9 +353,8 @@ mod tests {
 
             // Corrupt the data by writing directly to the underlying blob
             let writer = glob.manager.blobs().get(&1).unwrap();
-            let byte_offset = align::from_aligned(offset);
             writer
-                .write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], byte_offset)
+                .write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], offset)
                 .await
                 .expect("Failed to corrupt");
             writer.sync().await.expect("Failed to sync");
@@ -413,7 +387,7 @@ mod tests {
 
             // Rewind to after the third value
             let (third_offset, third_size) = locations[2];
-            let rewind_size = align::from_aligned(third_offset) + third_size as u64;
+            let rewind_size = third_offset + third_size;
             glob.rewind(1, rewind_size).await.expect("Failed to rewind");
 
             // First three values should still be readable
@@ -492,7 +466,7 @@ mod tests {
             let digest = Sha256::hash(buf.as_ref());
             assert_eq!(
                 commonware_utils::hex(&digest),
-                "065889f68eb9322354e96aec23d4f1d344e886473575a39b5cc42fd20a7996e4",
+                "04d5efc9c8ccc4232747e65774426a619a74052a35643e7b94470f8af7230c77",
             );
         });
     }
