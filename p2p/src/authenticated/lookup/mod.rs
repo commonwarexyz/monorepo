@@ -1789,8 +1789,12 @@ mod tests {
             }
         }
 
-        // Shutdown all peers simultaneously
-        for idx in 0..n {
+        // Shutdown all peers except peer 0 simultaneously.
+        //
+        // We keep peer 0 alive to exercise the case where multiple
+        // peers churn at once.
+        let restart_peers: Vec<usize> = (1..n).collect();
+        for &idx in &restart_peers {
             if let Some(handle) = handles[idx].take() {
                 handle.abort();
             }
@@ -1815,8 +1819,15 @@ mod tests {
             })
             .collect();
 
-        // Restart all peers with new ports
-        for idx in 0..n {
+        // Update oracle on peer 0 (the only running peer)
+        oracles[0]
+            .as_mut()
+            .unwrap()
+            .update(1, updated_peer_set.clone().try_into().unwrap())
+            .await;
+
+        // Restart all shutdown peers with new ports
+        for &idx in &restart_peers {
             let peer_context = context.with_label(&format!("peer_{idx}_restarted"));
             let config = Config::test(
                 peers[idx].clone(),
