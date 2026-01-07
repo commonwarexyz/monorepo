@@ -110,10 +110,10 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         }
         let position = size / Self::CHUNK_SIZE_U64;
 
+        // Pre-allocate exact size and write directly to avoid copying
         let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
-        let encoded = item.encode();
-        let checksum = crc32fast::hash(&encoded);
-        buf.extend_from_slice(&encoded);
+        item.write(&mut buf);
+        let checksum = crc32fast::hash(&buf);
         buf.put_u32(checksum);
 
         blob.append(buf).await?;

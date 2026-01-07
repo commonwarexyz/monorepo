@@ -425,40 +425,51 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// the checksum verification). It is recommended to call `replay` before calling
     /// `append` to prevent this.
     pub async fn append(&mut self, section: u64, item: V) -> Result<(u64, u64), Error> {
-        // Create item
-        let encoded = item.encode();
-        let encoded = if let Some(compression) = self.compression {
-            compress(&encoded, compression as i32).map_err(|_| Error::CompressionFailed)?
-        } else {
-            encoded.into()
-        };
+        // Create buffer with item data
+        let (buf, item_len) = if let Some(compression) = self.compression {
+            // Compressed: encode first, then compress
+            let encoded = item.encode();
+            let compressed =
+                compress(&encoded, compression as i32).map_err(|_| Error::CompressionFailed)?;
+            let item_len = compressed.len();
+            let item_len_u32: u32 = match item_len.try_into() {
+                Ok(len) => len,
+                Err(_) => return Err(Error::ItemTooLarge(item_len)),
+            };
+            let size_len = UInt(item_len_u32).encode_size();
+            let entry_len = size_len + item_len + 4;
 
-        // Ensure item is not too large
-        let item_len = encoded.len();
-        let item_len: u32 = match item_len.try_into() {
-            Ok(len) => len,
-            Err(_) => return Err(Error::ItemTooLarge(item_len)),
+            let mut buf = Vec::with_capacity(entry_len);
+            UInt(item_len_u32).write(&mut buf);
+            buf.put_slice(&compressed);
+            let checksum = crc32fast::hash(&buf);
+            buf.put_u32(checksum);
+
+            (buf, item_len)
+        } else {
+            // Uncompressed: pre-allocate exact size to avoid copying
+            let item_len = item.encode_size();
+            let item_len_u32: u32 = match item_len.try_into() {
+                Ok(len) => len,
+                Err(_) => return Err(Error::ItemTooLarge(item_len)),
+            };
+            let size_len = UInt(item_len_u32).encode_size();
+            let entry_len = size_len + item_len + 4;
+
+            let mut buf = Vec::with_capacity(entry_len);
+            UInt(item_len_u32).write(&mut buf);
+            item.write(&mut buf);
+            let checksum = crc32fast::hash(&buf);
+            buf.put_u32(checksum);
+
+            (buf, item_len)
         };
-        let size_len = UInt(item_len).encode_size();
-        let entry_len = size_len + item_len as usize + 4;
 
         // Get or create blob
         let blob = self.manager.get_or_create(section).await?;
 
         // Get current position - this is where we'll write
         let offset = blob.size().await;
-
-        // Populate buffer
-        let mut buf = Vec::with_capacity(entry_len);
-
-        // Add entry data
-        UInt(item_len).write(&mut buf);
-        buf.put_slice(&encoded);
-
-        // Calculate checksum for the entry data
-        let checksum = crc32fast::hash(&buf);
-        buf.put_u32(checksum);
-        assert_eq!(buf.len(), entry_len);
 
         // Append item to blob
         blob.append(buf).await?;
