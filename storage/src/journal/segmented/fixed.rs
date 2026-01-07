@@ -125,8 +125,13 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
             .get(section)?
             .ok_or(Error::SectionOutOfRange(section))?;
 
-        let offset = position * Self::CHUNK_SIZE_U64;
-        if offset + Self::CHUNK_SIZE_U64 > blob.size().await {
+        let offset = position
+            .checked_mul(Self::CHUNK_SIZE_U64)
+            .ok_or(Error::ItemOutOfRange(position))?;
+        let end = offset
+            .checked_add(Self::CHUNK_SIZE_U64)
+            .ok_or(Error::ItemOutOfRange(position))?;
+        if end > blob.size().await {
             return Err(Error::ItemOutOfRange(position));
         }
 

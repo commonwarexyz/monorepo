@@ -287,9 +287,14 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 
-        // Remove any sections beyond the given section
-        let sections_to_remove: Vec<u64> =
-            self.blobs.range((section + 1)..).map(|(&s, _)| s).collect();
+        // Remove sections in descending order (newest first) to maintain a contiguous record
+        // if a crash occurs during rewind.
+        let sections_to_remove: Vec<u64> = self
+            .blobs
+            .range((section + 1)..)
+            .rev()
+            .map(|(&s, _)| s)
+            .collect();
 
         for s in sections_to_remove {
             // Remove the underlying blob from storage

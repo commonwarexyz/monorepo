@@ -168,6 +168,7 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
                     index_size, "partial entry detected, rewinding to 0"
                 );
                 self.index.rewind_section(section, 0).await?;
+                self.values.rewind(section, 0).await?;
                 continue;
             }
 
@@ -195,6 +196,10 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
                     let valid_size = valid_count * chunk_size;
                     debug!(section, index_size, valid_size, "rewinding index journal");
                     self.index.rewind_section(section, valid_size).await?;
+
+                    // Trim glob to remove any trailing bytes beyond the last valid entry
+                    let glob_target = self.compute_glob_size(section, valid_count).await;
+                    self.values.rewind(section, glob_target).await?;
                 }
                 Err(_) => {
                     // Last entry corrupted - need to scan backwards
@@ -209,6 +214,10 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
                     let valid_size = valid_count * chunk_size;
                     debug!(section, index_size, valid_size, "rewinding index journal");
                     self.index.rewind_section(section, valid_size).await?;
+
+                    // Trim glob to remove any trailing bytes beyond the last valid entry
+                    let glob_target = self.compute_glob_size(section, valid_count).await;
+                    self.values.rewind(section, glob_target).await?;
                 }
             }
         }
@@ -230,6 +239,20 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
             }
         }
         0
+    }
+
+    /// Compute the target glob size based on valid entry count.
+    ///
+    /// Returns 0 if no valid entries, otherwise returns the end of the last valid entry's value.
+    async fn compute_glob_size(&self, section: u64, valid_count: u64) -> u64 {
+        if valid_count == 0 {
+            return 0;
+        }
+        let last_pos = valid_count - 1;
+        self.index.get(section, last_pos).await.map_or(0, |entry| {
+            let (offset, size) = entry.value_location();
+            offset.saturating_add(u64::from(size))
+        })
     }
 
     /// Append entry + value.
