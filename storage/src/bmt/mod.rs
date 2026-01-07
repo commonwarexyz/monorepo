@@ -673,9 +673,11 @@ impl<H: Hasher> Read for MultiProof<H> {
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let leaf_count = u32::read(reader)?;
-        // Maximum siblings is bounded by MAX_LEVELS * leaf_count (though in practice much less)
-        let siblings =
-            Vec::<H::Digest>::read_range(reader, ..=MAX_LEVELS * (leaf_count as usize + 1))?;
+        // A binary tree with n leaves has at most n-1 internal nodes, so total nodes = 2n-1.
+        // The maximum siblings needed is bounded by the total non-leaf nodes, which is < n.
+        // We use 2*n as a safe upper bound to allow for any valid proof structure.
+        let max_siblings = 2usize.saturating_mul(leaf_count as usize);
+        let siblings = Vec::<H::Digest>::read_range(reader, ..=max_siblings)?;
         Ok(Self {
             leaf_count,
             siblings,
@@ -778,15 +780,23 @@ fn siblings_required_for_multi_proof(
     let proven_positions: BTreeSet<(usize, usize)> =
         positions.iter().map(|&p| (0, p as usize)).collect();
 
-    // Start with leaf positions and propagate upward
+    // Start with leaf positions and propagate upward.
+    // IMPORTANT: We only check parents of nodes we have, not all possible parents.
+    // This ensures O(positions * levels) complexity instead of O(leaf_count * levels),
+    // preventing DoS attacks with maliciously large leaf_count values.
     let mut available = proven_positions;
     let mut level_size = leaf_count as usize;
 
     for level in 0..levels_count - 1 {
-        let mut next_available = BTreeSet::new();
-        let parent_level_size = level_size.div_ceil(2);
+        // Collect parent indices of nodes we have at this level
+        let candidate_parents: BTreeSet<usize> = available
+            .iter()
+            .filter(|(l, _)| *l == level)
+            .map(|(_, idx)| idx / 2)
+            .collect();
 
-        for parent_idx in 0..parent_level_size {
+        let mut next_available = BTreeSet::new();
+        for parent_idx in candidate_parents {
             let left_child = (level, parent_idx * 2);
             let right_child_idx = parent_idx * 2 + 1;
             let right_child = (level, right_child_idx);
@@ -806,7 +816,7 @@ fn siblings_required_for_multi_proof(
         }
 
         available.extend(next_available);
-        level_size = parent_level_size;
+        level_size = level_size.div_ceil(2);
     }
 
     // Filter out siblings that we can compute
@@ -878,13 +888,21 @@ impl<H: Hasher> MultiProof<H> {
             available.insert(*pos, *digest);
         }
 
-        // Compute tree level by level
+        // Compute tree level by level.
+        // IMPORTANT: We only check parents of nodes we have, not all possible parents.
+        // This ensures O(elements * levels) complexity instead of O(leaf_count * levels),
+        // preventing DoS attacks with maliciously large leaf_count values.
         let levels_count = levels_in_tree(self.leaf_count);
         let mut level_size = self.leaf_count as usize;
         for level in 0..levels_count - 1 {
-            let parent_level_size = level_size.div_ceil(2);
+            // Collect parent indices of nodes we have at this level
+            let candidate_parents: BTreeSet<usize> = available
+                .keys()
+                .filter(|(l, _)| *l == level)
+                .map(|(_, idx)| idx / 2)
+                .collect();
 
-            for parent_idx in 0..parent_level_size {
+            for parent_idx in candidate_parents {
                 let left_child_idx = parent_idx * 2;
                 let right_child_idx = parent_idx * 2 + 1;
 
@@ -903,7 +921,7 @@ impl<H: Hasher> MultiProof<H> {
                 }
             }
 
-            level_size = parent_level_size;
+            level_size = level_size.div_ceil(2);
         }
 
         // Get the computed root (should be at top level, index 0)
