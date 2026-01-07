@@ -1899,8 +1899,9 @@ mod tests {
             &self,
             _partition: &str,
             _name: &[u8],
-            _versions: std::ops::RangeInclusive<u16>,
+            versions: std::ops::RangeInclusive<u16>,
         ) -> Result<(MockBlob, u64, u16), RError> {
+            assert!(versions.contains(&Header::DEFAULT_APPLICATION_VERSION));
             Ok((MockBlob {}, self.len, Header::DEFAULT_APPLICATION_VERSION))
         }
 
