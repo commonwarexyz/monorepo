@@ -5,10 +5,10 @@
 
 extern crate alloc;
 
-use crate::types::read_ordered_map;
 use crate::{
     codec::{EncodeSize, Read, Write},
     error::Error,
+    types::read_ordered_map,
     RangeCfg,
 };
 use alloc::collections::BTreeMap;
