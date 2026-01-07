@@ -181,11 +181,17 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
                 .find_last_valid_entry(section, entry_count, glob_size)
                 .await;
 
-            // Rewind if any entries are invalid
+            // Rewind index if any entries are invalid
             if valid_count < entry_count {
                 let valid_size = valid_count * chunk_size;
-                debug!(section, entry_count, valid_count, "rewinding journals");
+                debug!(section, entry_count, valid_count, "rewinding index");
                 self.index.rewind_section(section, valid_size).await?;
+            }
+
+            // Truncate glob trailing garbage (can occur when value was written but
+            // index entry wasn't, or when index was truncated but glob wasn't)
+            if glob_size > glob_target {
+                debug!(section, glob_size, glob_target, "truncating glob trailing garbage");
                 self.values.rewind_section(section, glob_target).await?;
             }
         }
@@ -2267,6 +2273,93 @@ mod tests {
             // Verify only sections 1, 3, 5 exist (orphans removed)
             assert_eq!(oversized.oldest_section(), Some(1));
             assert_eq!(oversized.newest_section(), Some(5));
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_glob_trailing_garbage_truncated() {
+        // Tests the bug fix: when value is written to glob but index entry isn't
+        // (crash after value write, before index write), recovery should truncate
+        // the glob trailing garbage so subsequent appends start at correct offset.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            // Append 2 entries
+            let mut locations = Vec::new();
+            for i in 0..2u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                let loc = oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                locations.push(loc);
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+
+            // Record where next entry SHOULD start (end of entry 1)
+            let expected_next_offset = byte_end(locations[1].1, locations[1].2);
+            drop(oversized);
+
+            // Simulate crash: write garbage to glob (simulating partial value write)
+            let (blob, size) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            assert_eq!(size, expected_next_offset);
+
+            // Write 100 bytes of garbage (simulating partial/failed value write)
+            let garbage = vec![0xDE; 100];
+            blob.write_at(garbage, size).await.expect("Failed to write garbage");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Verify glob now has trailing garbage
+            let (blob, new_size) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            assert_eq!(new_size, expected_next_offset + 100);
+            drop(blob);
+
+            // Reinitialize - should truncate the trailing garbage
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to reinit");
+
+            // First 2 entries should still be valid
+            for i in 0..2u8 {
+                let entry = oversized.get(1, i as u64).await.expect("Failed to get");
+                assert_eq!(entry.id, i as u64);
+            }
+
+            // Append new entry - should start at expected_next_offset, NOT at garbage end
+            let new_value: TestValue = [99; 16];
+            let new_entry = TestEntry::new(99, 0, 0);
+            let (pos, offset, _size) = oversized
+                .append(1, new_entry, &new_value)
+                .await
+                .expect("Failed to append after recovery");
+
+            // Verify position is 2 (after the 2 existing entries)
+            assert_eq!(pos, 2);
+
+            // Verify offset is at expected_next_offset (garbage was truncated)
+            assert_eq!(offset, expected_next_offset);
+
+            // Verify we can read the new entry
+            let retrieved = oversized.get(1, 2).await.expect("Failed to get new entry");
+            assert_eq!(retrieved.id, 99);
 
             oversized.destroy().await.expect("Failed to destroy");
         });
