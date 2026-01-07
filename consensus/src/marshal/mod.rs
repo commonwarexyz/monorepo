@@ -113,7 +113,7 @@ mod tests {
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-        Automaton, Heightable, CertifiableAutomaton, Reporter, VerifyingApplication,
+        Automaton, CertifiableAutomaton, Heightable, Reporter, VerifyingApplication,
     };
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
