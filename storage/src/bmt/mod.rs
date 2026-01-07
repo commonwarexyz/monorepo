@@ -807,13 +807,6 @@ impl<H: Hasher> MultiProof<H> {
             return Err(Error::UnalignedProof);
         }
 
-        // Build position-to-digest map for siblings
-        let sibling_map: BTreeMap<(usize, usize), H::Digest> = sibling_positions
-            .iter()
-            .zip(self.siblings.iter())
-            .map(|(&pos, digest)| (pos, *digest))
-            .collect();
-
         // Compute position-hashed leaf digests and build initial available nodes
         let mut available: BTreeMap<(usize, usize), H::Digest> = BTreeMap::new();
         for (leaf, position) in elements {
@@ -826,8 +819,8 @@ impl<H: Hasher> MultiProof<H> {
         }
 
         // Add siblings to available
-        for (pos, digest) in &sibling_map {
-            available.insert(*pos, *digest);
+        for (&pos, digest) in sibling_positions.iter().zip(self.siblings.iter()) {
+            available.insert(pos, *digest);
         }
 
         // Compute tree level by level.
