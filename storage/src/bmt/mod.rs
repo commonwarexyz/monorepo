@@ -728,102 +728,44 @@ fn siblings_required_for_multi_proof(
         return Err(Error::NoLeaves);
     }
 
-    // Validate positions and check for duplicates
-    if let Some(&pos) = positions.iter().find(|&&p| p >= leaf_count) {
-        return Err(Error::InvalidPosition(pos));
+    // Validate positions and check for duplicates.
+    let mut current = BTreeSet::new();
+    for &pos in positions {
+        if pos >= leaf_count {
+            return Err(Error::InvalidPosition(pos));
+        }
+        if !current.insert(pos as usize) {
+            return Err(Error::DuplicatePosition(pos));
+        }
     }
-    positions
-        .iter()
-        .try_fold(BTreeSet::new(), |mut set, &pos| {
-            if set.insert(pos) {
-                Ok(set)
-            } else {
-                Err(Error::DuplicatePosition(pos))
-            }
-        })?;
 
-    // Collect all sibling positions needed
+    // Track positions we can compute at each level and record missing siblings.
+    // This keeps the work proportional to the number of positions, not the tree size.
     let mut sibling_positions = BTreeSet::new();
     let levels_count = levels_in_tree(leaf_count);
-
-    for &pos in positions {
-        let mut index = pos as usize;
-        let mut current_level_size = leaf_count as usize;
-
-        for level in 0..levels_count - 1 {
-            // Determine sibling index
+    let mut level_size = leaf_count as usize;
+    for level in 0..levels_count - 1 {
+        for &index in &current {
             let sibling_index = if index.is_multiple_of(2) {
-                // Left child, sibling is to the right
-                if index + 1 < current_level_size {
+                if index + 1 < level_size {
                     index + 1
                 } else {
-                    // No right sibling (odd-sized level), duplicate of self
                     index
                 }
             } else {
-                // Right child, sibling is to the left
                 index - 1
             };
 
-            // Only add sibling if it's not one of our proven leaves at level 0
-            // or not a node we'll compute from our proven leaves
-            sibling_positions.insert((level, sibling_index));
-
-            // Move to parent
-            index /= 2;
-            current_level_size = current_level_size.div_ceil(2);
-        }
-    }
-
-    // Remove positions that correspond to proven leaves or nodes we can compute
-    // A node can be computed if both its children are available (either proven or computable)
-    let proven_positions: BTreeSet<(usize, usize)> =
-        positions.iter().map(|&p| (0, p as usize)).collect();
-
-    // Start with leaf positions and propagate upward.
-    // IMPORTANT: We only check parents of nodes we have, not all possible parents.
-    // This ensures O(positions * levels) complexity instead of O(leaf_count * levels),
-    // preventing DoS attacks with maliciously large leaf_count values.
-    let mut available = proven_positions;
-    let mut level_size = leaf_count as usize;
-
-    for level in 0..levels_count - 1 {
-        // Collect parent indices of nodes we have at this level
-        let candidate_parents: BTreeSet<usize> = available
-            .iter()
-            .filter(|(l, _)| *l == level)
-            .map(|(_, idx)| idx / 2)
-            .collect();
-
-        let mut next_available = BTreeSet::new();
-        for parent_idx in candidate_parents {
-            let left_child = (level, parent_idx * 2);
-            let right_child_idx = parent_idx * 2 + 1;
-            let right_child = (level, right_child_idx);
-
-            // Check if we can compute this parent
-            let have_left = available.contains(&left_child);
-            let have_right = if right_child_idx < level_size {
-                available.contains(&right_child)
-            } else {
-                // Odd-sized level: right child is duplicate of left
-                have_left
-            };
-
-            if have_left && have_right {
-                next_available.insert((level + 1, parent_idx));
+            if sibling_index != index && !current.contains(&sibling_index) {
+                sibling_positions.insert((level, sibling_index));
             }
         }
 
-        available.extend(next_available);
+        current = current.iter().map(|idx| idx / 2).collect();
         level_size = level_size.div_ceil(2);
     }
 
-    // Filter out siblings that we can compute
-    let needed: BTreeSet<(usize, usize)> =
-        sibling_positions.difference(&available).copied().collect();
-
-    Ok(needed)
+    Ok(sibling_positions)
 }
 
 impl<H: Hasher> MultiProof<H> {
