@@ -617,7 +617,7 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// - Bytes 6-7: Application Version (u16)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
-    magic: [u8; 4],
+    magic: [u8; Self::MAGIC_LENGTH],
     header_version: u16,
     application_version: u16,
 }
