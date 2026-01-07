@@ -281,7 +281,7 @@ const NO_NEXT_POSITION: u64 = u64::MAX;
 /// The `next` pointer uses sentinel values (u64::MAX, u64::MAX) to indicate
 /// "no next entry" instead of Option, ensuring fixed-size encoding.
 #[derive(Debug, Clone, PartialEq)]
-struct KeyEntry<K: Array> {
+struct Record<K: Array> {
     /// The key for this entry.
     key: K,
     /// Pointer to next entry in collision chain (section, position in key index).
@@ -294,8 +294,8 @@ struct KeyEntry<K: Array> {
     value_size: u64,
 }
 
-impl<K: Array> KeyEntry<K> {
-    /// Create a new [KeyEntry].
+impl<K: Array> Record<K> {
+    /// Create a new [Record].
     fn new(key: K, next: Option<(u64, u64)>, value_offset: u64, value_size: u64) -> Self {
         let (next_section, next_position) = next.unwrap_or((NO_NEXT_SECTION, NO_NEXT_POSITION));
         Self {
@@ -317,7 +317,7 @@ impl<K: Array> KeyEntry<K> {
     }
 }
 
-impl<K: Array> CodecWrite for KeyEntry<K> {
+impl<K: Array> CodecWrite for Record<K> {
     fn write(&self, buf: &mut impl BufMut) {
         self.key.write(buf);
         self.next_section.write(buf);
@@ -327,7 +327,7 @@ impl<K: Array> CodecWrite for KeyEntry<K> {
     }
 }
 
-impl<K: Array> Read for KeyEntry<K> {
+impl<K: Array> Read for Record<K> {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let key = K::read(buf)?;
@@ -346,12 +346,12 @@ impl<K: Array> Read for KeyEntry<K> {
     }
 }
 
-impl<K: Array> FixedSize for KeyEntry<K> {
+impl<K: Array> FixedSize for Record<K> {
     // key + next_section + next_position + value_offset + value_size
     const SIZE: usize = K::SIZE + u64::SIZE + u64::SIZE + u64::SIZE + u64::SIZE;
 }
 
-impl<K: Array> OversizedEntryTrait for KeyEntry<K> {
+impl<K: Array> OversizedEntryTrait for Record<K> {
     fn value_location(&self) -> (u64, u64) {
         (self.value_offset, self.value_size)
     }
@@ -364,7 +364,7 @@ impl<K: Array> OversizedEntryTrait for KeyEntry<K> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Array> arbitrary::Arbitrary<'_> for KeyEntry<K>
+impl<K: Array> arbitrary::Arbitrary<'_> for Record<K>
 where
     K: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -395,7 +395,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     table: E::Blob,
 
     // Combined key index + value storage with crash recovery
-    oversized: Oversized<E, KeyEntry<K>, V>,
+    oversized: Oversized<E, Record<K>, V>,
 
     // Target size for value blob sections
     blob_target_size: u64,
@@ -642,7 +642,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             compression: config.value_journal_compression,
             codec_config: config.codec_config,
         };
-        let mut oversized: Oversized<E, KeyEntry<K>, V> =
+        let mut oversized: Oversized<E, Record<K>, V> =
             Oversized::init(context.with_label("oversized"), oversized_cfg).await?;
 
         // Open table blob
@@ -854,7 +854,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let head = Self::read_latest_entry(&entry1, &entry2);
 
         // Create key entry with pointer to previous head (value location set by oversized.append)
-        let key_entry = KeyEntry::new(
+        let key_entry = Record::new(
             key,
             head.map(|(section, position, _)| (section, position)),
             0,
@@ -1202,6 +1202,6 @@ mod conformance {
         CodecConformance<Cursor>,
         CodecConformance<Checkpoint>,
         CodecConformance<Entry>,
-        CodecConformance<KeyEntry<U64>>
+        CodecConformance<Record<U64>>
     }
 }

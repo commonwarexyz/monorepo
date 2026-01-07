@@ -240,7 +240,8 @@ impl<E: Storage + Metrics, I: OversizedEntry, V: Codec> Oversized<E, I, V> {
         entry: I,
         value: &V,
     ) -> Result<(u64, u64, u64), Error> {
-        // Write value first (glob)
+        // Write value first (glob). This will typically write to an in-memory
+        // buffer and return quickly (only blocks when the buffer is full).
         let (offset, size) = self.values.append(section, value).await?;
 
         // Update entry with actual location and write to index

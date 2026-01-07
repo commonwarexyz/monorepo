@@ -175,13 +175,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "cache_operations"
-path = "fuzz_targets/cache_operations.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "qmdb_immutable"
 path = "fuzz_targets/qmdb_immutable.rs"
 test = false

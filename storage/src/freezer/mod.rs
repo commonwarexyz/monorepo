@@ -8,6 +8,10 @@
 //! low latency access to recently added data (regardless of how much data has been stored) at the expense
 //! of a logarithmic increase in latency for old data (increasing with the number of items stored).
 //!
+//! _The use of two separate journals (index and value) does not hurt performance for recent queries
+//! because index entries are cached in the buffer pool when written. Lookups for recently written
+//! data will be served from memory._
+//!
 //! # Format
 //!
 //! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [commonware_runtime::Blob])

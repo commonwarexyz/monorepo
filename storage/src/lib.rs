@@ -21,7 +21,6 @@ cfg_if::cfg_if! {
         mod bitmap;
         pub use bitmap::{BitMap as AuthenticatedBitMap, CleanBitMap as CleanAuthenticatedBitMap, DirtyBitMap as DirtyAuthenticatedBitMap};
         pub mod bmt;
-        pub mod cache;
         pub mod freezer;
         pub mod index;
         pub mod journal;

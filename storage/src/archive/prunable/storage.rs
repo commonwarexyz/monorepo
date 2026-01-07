@@ -21,7 +21,7 @@ use tracing::debug;
 /// All fields are fixed size, enabling fast startup replay without
 /// reading values from the value journal.
 #[derive(Debug, Clone, PartialEq)]
-struct IndexEntry<K: Array> {
+struct Record<K: Array> {
     /// The index for this entry.
     index: u64,
     /// The key for this entry.
@@ -32,8 +32,8 @@ struct IndexEntry<K: Array> {
     value_size: u64,
 }
 
-impl<K: Array> IndexEntry<K> {
-    /// Create a new [IndexEntry].
+impl<K: Array> Record<K> {
+    /// Create a new [Record].
     const fn new(index: u64, key: K, value_offset: u64, value_size: u64) -> Self {
         Self {
             index,
@@ -44,7 +44,7 @@ impl<K: Array> IndexEntry<K> {
     }
 }
 
-impl<K: Array> Write for IndexEntry<K> {
+impl<K: Array> Write for Record<K> {
     fn write(&self, buf: &mut impl BufMut) {
         self.index.write(buf);
         self.key.write(buf);
@@ -53,7 +53,7 @@ impl<K: Array> Write for IndexEntry<K> {
     }
 }
 
-impl<K: Array> Read for IndexEntry<K> {
+impl<K: Array> Read for Record<K> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -70,12 +70,12 @@ impl<K: Array> Read for IndexEntry<K> {
     }
 }
 
-impl<K: Array> FixedSize for IndexEntry<K> {
+impl<K: Array> FixedSize for Record<K> {
     // index + key + value_offset + value_size
     const SIZE: usize = u64::SIZE + K::SIZE + u64::SIZE + u64::SIZE;
 }
 
-impl<K: Array> OversizedEntryTrait for IndexEntry<K> {
+impl<K: Array> OversizedEntryTrait for Record<K> {
     fn value_location(&self) -> (u64, u64) {
         (self.value_offset, self.value_size)
     }
@@ -88,7 +88,7 @@ impl<K: Array> OversizedEntryTrait for IndexEntry<K> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Array> arbitrary::Arbitrary<'_> for IndexEntry<K>
+impl<K: Array> arbitrary::Arbitrary<'_> for Record<K>
 where
     K: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -103,21 +103,11 @@ where
 }
 
 /// Implementation of `Archive` storage.
-///
-/// Uses [`Oversized`] to combine:
-/// - **index journal**: Fixed-size entries containing (index, key, value_offset, value_size)
-/// - **glob**: Raw blob storage for values (no size prefix, CRC32 checksums)
-///
-/// This separation provides:
-/// - Fast startup replay (only reads index journal, no values)
-/// - Efficient key lookups (key comparison without reading values)
-/// - Direct value reads bypass buffer pool (avoids cache pollution)
-/// - Automatic crash recovery (validates index entries against glob sizes)
 pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     items_per_section: u64,
 
     /// Combined index + value storage with crash recovery.
-    oversized: Oversized<E, IndexEntry<K>, V>,
+    oversized: Oversized<E, Record<K>, V>,
 
     pending: BTreeSet<u64>,
 
@@ -163,7 +153,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         };
-        let oversized: Oversized<E, IndexEntry<K>, V> =
+        let oversized: Oversized<E, Record<K>, V> =
             Oversized::init(context.with_label("oversized"), oversized_cfg).await?;
 
         // Initialize keys and replay index journal (no values read!)
@@ -371,7 +361,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
 
         // Write value and index entry atomically (glob first, then index)
         let section = self.section(index);
-        let entry = IndexEntry::new(index, key.clone(), 0, 0);
+        let entry = Record::new(index, key.clone(), 0, 0);
         let (position, _, _) = self.oversized.append(section, entry, &data).await?;
 
         // Store index location
@@ -454,6 +444,6 @@ mod conformance {
     use commonware_utils::sequence::U64;
 
     commonware_conformance::conformance_tests! {
-        CodecConformance<IndexEntry<U64>>
+        CodecConformance<Record<U64>>
     }
 }
