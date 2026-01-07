@@ -127,8 +127,8 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     /// Maps translated key representation to its corresponding index.
     keys: Index<T, u64>,
 
-    /// Maps index to (position in index journal, value_offset, value_size).
-    indices: BTreeMap<u64, (u32, u32, u32)>,
+    /// Maps index to position in index journal.
+    indices: BTreeMap<u64, u32>,
 
     /// Interval tracking for gap detection.
     intervals: RMap,
@@ -177,11 +177,8 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             while let Some(result) = stream.next().await {
                 let (_section, position, entry) = result?;
 
-                // Store index location (position in index journal, value_offset, value_size)
-                indices.insert(
-                    entry.index,
-                    (position, entry.value_offset, entry.value_size),
-                );
+                // Store index location (position in index journal)
+                indices.insert(entry.index, position);
 
                 // Store index in keys
                 keys.insert(&entry.key, entry.index);
@@ -242,13 +239,17 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         self.gets.inc();
 
         // Get index location
-        let (_, value_offset, value_size) = match self.indices.get(&index) {
-            Some(loc) => *loc,
+        let position = match self.indices.get(&index) {
+            Some(pos) => *pos,
             None => return Ok(None),
         };
 
-        // Fetch value directly from blob storage (bypasses buffer pool)
+        // Fetch index entry to get value location
         let section = self.section(index);
+        let entry = self.oversized.get(section, position).await?;
+        let (value_offset, value_size) = entry.value_location();
+
+        // Fetch value directly from blob storage (bypasses buffer pool)
         let value = self
             .oversized
             .get_value(section, value_offset, value_size)
@@ -270,16 +271,16 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             }
 
             // Get index location
-            let (position, value_offset, value_size) =
-                *self.indices.get(index).ok_or(Error::RecordCorrupted)?;
+            let position = *self.indices.get(index).ok_or(Error::RecordCorrupted)?;
 
             // Fetch index entry from index journal to verify key
             let section = self.section(*index);
             let entry = self.oversized.get(section, position).await?;
 
-            // Get key from entry
+            // Verify key matches
             if entry.key.as_ref() == key.as_ref() {
                 // Fetch value directly from blob storage (bypasses buffer pool)
+                let (value_offset, value_size) = entry.value_location();
                 let value = self
                     .oversized
                     .get_value(section, value_offset, value_size)
@@ -371,12 +372,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
         // Write value and index entry atomically (glob first, then index)
         let section = self.section(index);
         let entry = IndexEntry::new(index, key.clone(), 0, 0);
-        let (position, value_offset, value_size) =
-            self.oversized.append(section, entry, &data).await?;
+        let (position, _, _) = self.oversized.append(section, entry, &data).await?;
 
         // Store index location
-        self.indices
-            .insert(index, (position, value_offset, value_size));
+        self.indices.insert(index, position);
 
         // Store interval
         self.intervals.insert(index);

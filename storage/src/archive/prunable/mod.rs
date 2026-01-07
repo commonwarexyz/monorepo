@@ -62,15 +62,13 @@
 //! _To avoid random memory reads in the common case, the in-memory index directly stores the first
 //! item in the linked list instead of a pointer to the first item._
 //!
-//! `index` is the key to the map used to serve lookups by `index` that stores the location of data
-//! in a given `Glob` (selected by `section = index & section_mask` to minimize the number of open
-//! [crate::journal::segmented::glob::Glob]s):
+//! `index` is the key to the map used to serve lookups by `index` that stores the position in the
+//! index journal (selected by `section = index / items_per_section * items_per_section` to minimize
+//! the number of open blobs):
 //!
 //! ```rust
-//! struct Location {
-//!     offset: u32,
-//!     len: u32,
-//! }
+//! // Maps index -> position in index journal
+//! indices: BTreeMap<u64, u32>
 //! ```
 //!
 //! _If the [Translator] provided by the caller does not uniformly distribute keys across the key
@@ -80,10 +78,10 @@
 //! ## Memory Overhead
 //!
 //! [Archive] uses two maps to enable lookups by both index and key. The memory used to track each
-//! index item is `8 + 4 + 4` (where `8` is the index, `4` is the offset, and `4` is the length).
+//! index item is `8 + 4` (where `8` is the index and `4` is the position in the index journal).
 //! The memory used to track each key item is `~translated(key).len() + 16` bytes (where `16` is the
 //! size of the `Record` struct). This means that an [Archive] employing a [Translator] that uses
-//! the first `8` bytes of a key will use `~40` bytes to index each key.
+//! the first `8` bytes of a key will use `~36` bytes to index each key.
 //!
 //! # Pruning
 //!
@@ -99,12 +97,12 @@
 //! stored that overlaps (same translated value) with a pruned key, the pruned key is removed from
 //! the in-memory index.
 //!
-//! # Single Operation Reads
+//! # Read Path
 //!
-//! To enable single operation reads (i.e. reading all of an item in a single call to
-//! [commonware_runtime::Blob]), [Archive] caches the length of each item in its in-memory index.
-//! While it increases the footprint per key stored, the benefit of only ever performing a single
-//! operation to read a key (when there are no conflicts) is worth the tradeoff.
+//! All reads (by index or key) first read the index entry from the index journal to get the
+//! value location (offset and size), then read the value from the value blob. The index journal
+//! uses a buffer pool for caching, so hot entries are served from memory. Values are read directly
+//! from disk without caching to avoid polluting the buffer pool with large values.
 //!
 //! # Compression
 //!
