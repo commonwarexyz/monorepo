@@ -1443,11 +1443,13 @@ dependencies = [
 name = "commonware-runtime"
 version = "0.0.64"
 dependencies = [
+ "arbitrary",
  "async-lock",
  "axum",
  "bytes",
  "cfg-if",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-macros",
  "commonware-parallel",
  "commonware-utils",

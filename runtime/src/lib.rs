@@ -23,6 +23,7 @@
 )]
 
 use bytes::{Buf, BufMut};
+use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
 use commonware_utils::StableBuf;
@@ -653,22 +654,28 @@ impl Header {
         }
     }
 
-    /// Parses a header from bytes (big-endian format).
-    pub fn from_bytes(bytes: [u8; Self::SIZE]) -> Self {
-        Self {
-            magic: bytes[..4].try_into().unwrap(),
-            header_version: u16::from_be_bytes(bytes[4..6].try_into().unwrap()),
-            application_version: u16::from_be_bytes(bytes[6..8].try_into().unwrap()),
-        }
+    /// Returns true if a blob is missing a valid header (new or corrupted).
+    pub const fn missing(raw_len: u64) -> bool {
+        raw_len < Self::SIZE_U64
     }
 
-    /// Serializes the header to bytes (big-endian format).
-    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
-        let mut bytes = [0u8; Self::SIZE];
-        bytes[..4].copy_from_slice(&self.magic);
-        bytes[4..6].copy_from_slice(&self.header_version.to_be_bytes());
-        bytes[6..8].copy_from_slice(&self.application_version.to_be_bytes());
-        bytes
+    /// Creates a header for a new blob using the latest version from the range.
+    /// Returns (header, app_version).
+    pub const fn for_new_blob(versions: &std::ops::RangeInclusive<u16>) -> (Self, u16) {
+        let app_version = *versions.end();
+        (Self::new(app_version), app_version)
+    }
+
+    /// Validates an existing header and computes the logical size.
+    /// Returns (app_version, logical_len) on success.
+    pub fn from_existing(
+        raw_bytes: [u8; Self::SIZE],
+        raw_len: u64,
+        versions: &std::ops::RangeInclusive<u16>,
+    ) -> Result<(u16, u64), Error> {
+        let header: Self = Self::decode(raw_bytes.as_slice()).map_err(|_| Error::ReadFailed)?;
+        header.validate(versions)?;
+        Ok((header.application_version, raw_len - Self::SIZE_U64))
     }
 
     /// Validates the magic bytes, header version, and application version.
@@ -690,6 +697,43 @@ impl Header {
             });
         }
         Ok(())
+    }
+}
+
+impl FixedSize for Header {
+    const SIZE: usize = Self::SIZE;
+}
+
+impl CodecWrite for Header {
+    fn write(&self, buf: &mut impl BufMut) {
+        buf.put_slice(&self.magic);
+        buf.put_u16(self.header_version);
+        buf.put_u16(self.application_version);
+    }
+}
+
+impl CodecRead for Header {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        if buf.remaining() < Self::SIZE {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut magic = [0u8; Self::MAGIC_LENGTH];
+        buf.copy_to_slice(&mut magic);
+        let header_version = buf.get_u16();
+        let application_version = buf.get_u16();
+        Ok(Self {
+            magic,
+            header_version,
+            application_version,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Header {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self::new(u.arbitrary()?))
     }
 }
 
@@ -747,6 +791,7 @@ mod tests {
     use super::*;
     use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;
+    use commonware_codec::Encode;
     use commonware_macros::{select, test_collect_traces};
     use commonware_utils::NZUsize;
     use futures::{
@@ -780,7 +825,7 @@ mod tests {
         );
 
         // Verify byte serialization
-        let bytes = header.to_bytes();
+        let bytes = header.encode();
         assert_eq!(&bytes[..4], &Header::MAGIC);
         assert_eq!(&bytes[4..6], &Header::HEADER_VERSION.to_be_bytes());
         assert_eq!(
@@ -789,7 +834,7 @@ mod tests {
         );
 
         // Verify round-trip
-        let parsed = Header::from_bytes(bytes);
+        let parsed: Header = Header::decode(bytes.as_ref()).unwrap();
         assert_eq!(parsed, header);
     }
 
@@ -803,7 +848,7 @@ mod tests {
 
     #[test]
     fn test_header_validate_magic_wrong_bytes() {
-        let header = Header::from_bytes([0u8; Header::SIZE]);
+        let header: Header = Header::decode([0u8; Header::SIZE].as_slice()).unwrap();
         let result = header
             .validate(&(Header::DEFAULT_APPLICATION_VERSION..=Header::DEFAULT_APPLICATION_VERSION));
         match result {
@@ -813,9 +858,13 @@ mod tests {
             _ => panic!("expected BlobMagicMismatch error"),
         }
 
-        let mut bytes = Header::new(Header::DEFAULT_APPLICATION_VERSION).to_bytes();
+        let mut bytes: [u8; Header::SIZE] = Header::new(Header::DEFAULT_APPLICATION_VERSION)
+            .encode()
+            .as_ref()
+            .try_into()
+            .unwrap();
         bytes[0] = b'X'; // Corrupt first byte
-        let header = Header::from_bytes(bytes);
+        let header: Header = Header::decode(bytes.as_slice()).unwrap();
         let result = header
             .validate(&(Header::DEFAULT_APPLICATION_VERSION..=Header::DEFAULT_APPLICATION_VERSION));
         match result {
@@ -843,27 +892,27 @@ mod tests {
     fn test_header_bytes_round_trip() {
         // Test round-trip with default version
         let original = Header::new(0);
-        let bytes = original.to_bytes();
-        let restored = Header::from_bytes(bytes);
+        let bytes = original.encode();
+        let restored: Header = Header::decode(bytes.as_ref()).unwrap();
         assert_eq!(original, restored);
 
         // Test round-trip with non-zero version
         let original = Header::new(42);
-        let bytes = original.to_bytes();
-        let restored = Header::from_bytes(bytes);
+        let bytes = original.encode();
+        let restored: Header = Header::decode(bytes.as_ref()).unwrap();
         assert_eq!(original, restored);
         assert_eq!(restored.application_version, 42);
 
         // Test round-trip with max version
         let original = Header::new(u16::MAX);
-        let bytes = original.to_bytes();
-        let restored = Header::from_bytes(bytes);
+        let bytes = original.encode();
+        let restored: Header = Header::decode(bytes.as_ref()).unwrap();
         assert_eq!(original, restored);
         assert_eq!(restored.application_version, u16::MAX);
 
         // Verify byte layout explicitly
         let header = Header::new(0x1234);
-        let bytes = header.to_bytes();
+        let bytes = header.encode();
         assert_eq!(&bytes[..4], &Header::MAGIC);
         assert_eq!(&bytes[4..6], &Header::HEADER_VERSION.to_be_bytes());
         assert_eq!(&bytes[6..8], &0x1234u16.to_be_bytes());
@@ -3126,5 +3175,15 @@ mod tests {
                 assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
             });
         });
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::Header;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Header>
+        }
     }
 }

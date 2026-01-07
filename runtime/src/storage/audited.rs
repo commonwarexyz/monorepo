@@ -27,6 +27,8 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         self.auditor.event(b"open", |hasher| {
             hasher.update(partition.as_bytes());
             hasher.update(name);
+            hasher.update(&versions.start().to_be_bytes());
+            hasher.update(&versions.end().to_be_bytes());
         });
         self.inner
             .open_versioned(partition, name, versions)

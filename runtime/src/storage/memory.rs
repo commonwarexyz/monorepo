@@ -1,4 +1,5 @@
 use crate::Header;
+use commonware_codec::Encode;
 use commonware_utils::{hex, StableBuf};
 use std::{
     collections::BTreeMap,
@@ -36,21 +37,17 @@ impl crate::Storage for Storage {
         let content = partition_entry.entry(name.into()).or_default();
 
         let raw_len = content.len() as u64;
-        let (app_version, logical_len) = if raw_len < Header::SIZE_U64 {
+        let (app_version, logical_len) = if Header::missing(raw_len) {
             // New or corrupted blob - truncate and write default header with latest version
-            let app_version = *versions.end();
-            let header = Header::new(app_version);
+            let (header, app_version) = Header::for_new_blob(&versions);
             content.clear();
-            content.extend_from_slice(&header.to_bytes());
+            content.extend_from_slice(&header.encode());
             (app_version, 0)
         } else {
             // Existing blob - read and validate header
             let mut header_bytes = [0u8; Header::SIZE];
             header_bytes.copy_from_slice(&content[..Header::SIZE]);
-            let header = Header::from_bytes(header_bytes);
-            header.validate(&versions)?;
-
-            (header.application_version, raw_len - Header::SIZE_U64)
+            Header::from_existing(header_bytes, raw_len, &versions)?
         };
 
         Ok((

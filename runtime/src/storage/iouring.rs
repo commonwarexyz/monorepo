@@ -24,6 +24,7 @@ use crate::{
     iouring::{self, should_retry},
     Error, Header,
 };
+use commonware_codec::Encode;
 use commonware_utils::{from_hex, hex, StableBuf};
 use futures::{
     channel::{mpsc, oneshot},
@@ -134,15 +135,14 @@ impl crate::Storage for Storage {
 
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
-        let (app_version, logical_len) = if raw_len < Header::SIZE_U64 {
+        let (app_version, logical_len) = if Header::missing(raw_len) {
             // New (or corrupted) blob - truncate and write header with latest version
-            let app_version = *versions.end();
-            let header = Header::new(app_version);
+            let (header, app_version) = Header::for_new_blob(&versions);
             file.set_len(Header::SIZE_U64)
                 .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e))?;
             file.seek(SeekFrom::Start(0))
                 .map_err(|_| Error::WriteFailed)?;
-            file.write_all(&header.to_bytes())
+            file.write_all(&header.encode())
                 .map_err(|_| Error::WriteFailed)?;
             file.sync_all()
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
@@ -163,10 +163,7 @@ impl crate::Storage for Storage {
             let mut header_bytes = [0u8; Header::SIZE];
             file.read_exact(&mut header_bytes)
                 .map_err(|_| Error::ReadFailed)?;
-            let header = Header::from_bytes(header_bytes);
-            header.validate(&versions)?;
-
-            (header.application_version, raw_len - Header::SIZE_U64)
+            Header::from_existing(header_bytes, raw_len, &versions)?
         };
 
         let blob = Blob::new(partition.into(), name, file, self.io_sender.clone());

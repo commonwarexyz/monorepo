@@ -1,4 +1,5 @@
 use crate::{Error, Header};
+use commonware_codec::Encode;
 use commonware_utils::{from_hex, hex};
 #[cfg(unix)]
 use std::path::Path;
@@ -138,14 +139,13 @@ impl crate::Storage for Storage {
 
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
-        let (app_version, logical_size) = if len < Header::SIZE_U64 {
+        let (app_version, logical_size) = if Header::missing(len) {
             // New or corrupted blob - truncate and write header with latest version
-            let app_version = *versions.end();
-            let header = Header::new(app_version);
+            let (header, app_version) = Header::for_new_blob(&versions);
             file.set_len(Header::SIZE_U64)
                 .await
                 .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e))?;
-            file.write_all(&header.to_bytes())
+            file.write_all(&header.encode())
                 .await
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
             file.sync_all()
@@ -158,10 +158,7 @@ impl crate::Storage for Storage {
             file.read_exact(&mut header_bytes)
                 .await
                 .map_err(|_| Error::ReadFailed)?;
-            let header = Header::from_bytes(header_bytes);
-            header.validate(&versions)?;
-
-            (header.application_version, len - Header::SIZE_U64)
+            Header::from_existing(header_bytes, len, &versions)?
         };
 
         #[cfg(unix)]
