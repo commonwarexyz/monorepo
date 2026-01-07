@@ -46,6 +46,10 @@ impl BloomFilter {
 
     /// Creates a new [BloomFilter] with optimal parameters for the expected number
     /// of items and desired false positive rate.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `false_positive_rate` is not between 0.0 and 1.0 (exclusive).
     #[cfg(feature = "std")]
     pub fn with_rate(expected_items: usize, false_positive_rate: f64) -> Self {
         let bits = Self::optimal_bits(expected_items, false_positive_rate);
@@ -134,8 +138,13 @@ impl BloomFilter {
     ///
     /// Uses the formula `m = -n * ln(p) / (ln(2))^2` where `n` is the expected number
     /// of items and `p` is the desired false positive rate.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `false_positive_rate` is not between 0.0 and 1.0 (exclusive).
     #[cfg(feature = "std")]
     pub fn optimal_bits(expected_items: usize, false_positive_rate: f64) -> usize {
+        assert!(false_positive_rate > 0.0 && false_positive_rate < 1.0);
         let ln2_sq = core::f64::consts::LN_2 * core::f64::consts::LN_2;
         let m = -(expected_items as f64) * false_positive_rate.ln() / ln2_sq;
         (m.ceil() as usize).next_power_of_two()
