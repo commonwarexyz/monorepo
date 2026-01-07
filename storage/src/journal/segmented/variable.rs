@@ -174,7 +174,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let size = UInt::<u32>::read(&mut varint).map_err(Error::Codec)?.0 as usize;
         let varint_len = MIN_ITEM_SIZE - varint.remaining();
         hasher.update(&varint_buf.as_ref()[..varint_len]);
-        let offset = offset + varint_len as u64;
+        let offset = offset
+            .checked_add(varint_len as u64)
+            .ok_or(Error::OffsetOverflow)?;
 
         // Read remaining
         let buf_size = size.checked_add(u32::SIZE).ok_or(Error::OffsetOverflow)?;
@@ -439,7 +441,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 Err(_) => return Err(Error::ItemTooLarge(item_len)),
             };
             let size_len = UInt(item_len_u32).encode_size();
-            let entry_len = size_len + item_len + 4;
+            let entry_len = size_len
+                .checked_add(item_len)
+                .and_then(|v| v.checked_add(4))
+                .ok_or(Error::OffsetOverflow)?;
 
             let mut buf = Vec::with_capacity(entry_len);
             UInt(item_len_u32).write(&mut buf);
@@ -456,7 +461,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 Err(_) => return Err(Error::ItemTooLarge(item_len)),
             };
             let size_len = UInt(item_len_u32).encode_size();
-            let entry_len = size_len + item_len + 4;
+            let entry_len = size_len
+                .checked_add(item_len)
+                .and_then(|v| v.checked_add(4))
+                .ok_or(Error::OffsetOverflow)?;
 
             let mut buf = Vec::with_capacity(entry_len);
             UInt(item_len_u32).write(&mut buf);
