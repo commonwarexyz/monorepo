@@ -1793,7 +1793,9 @@ mod tests {
                 let result = oversized.get_value(1, offset, size).await;
                 assert!(matches!(
                     result,
-                    Err(Error::Runtime(commonware_runtime::Error::BlobInsufficientLength))
+                    Err(Error::Runtime(
+                        commonware_runtime::Error::BlobInsufficientLength
+                    ))
                 ));
             }
 
