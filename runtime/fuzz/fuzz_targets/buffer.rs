@@ -87,7 +87,7 @@ enum FuzzOperation {
 fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let (blob, initial_size, _) = context
+        let (blob, initial_size) = context
             .open("test_partition", SHARED_BLOB)
             .await
             .expect("cannot open context");
@@ -113,7 +113,7 @@ fn fuzz(input: FuzzInput) {
                     let blob_size = blob_size as u64;
                     let buffer_size = (buffer_size as usize).clamp(1, MAX_SIZE);
 
-                    let (blob, size, _) = context
+                    let (blob, size) = context
                         .open("test_partition", b"read_blob")
                         .await
                         .expect("cannot open context");
@@ -134,7 +134,7 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let capacity = (capacity as usize).clamp(1, MAX_SIZE);
 
-                    let (blob, _, _) = context
+                    let (blob, _) = context
                         .open("test_partition", b"write_blob")
                         .await
                         .expect("cannot open context");
@@ -152,7 +152,7 @@ fn fuzz(input: FuzzInput) {
                     let pool_page_size = NZUsize!((pool_page_size as usize).clamp(1, MAX_SIZE));
                     let pool_capacity = NZUsize!((pool_capacity as usize).clamp(1, MAX_SIZE));
 
-                    let (blob, _, _) = context
+                    let (blob, _) = context
                         .open("test_partition", b"append_blob")
                         .await
                         .expect("cannot open write blob");

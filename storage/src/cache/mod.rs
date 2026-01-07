@@ -219,7 +219,7 @@ mod tests {
 
             // Corrupt the value
             let section = (index / DEFAULT_ITEMS_PER_BLOB) * DEFAULT_ITEMS_PER_BLOB;
-            let (blob, _, _) = context
+            let (blob, _) = context
                 .open("test_partition", &section.to_be_bytes())
                 .await
                 .unwrap();

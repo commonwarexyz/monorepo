@@ -188,7 +188,7 @@ mod tests {
         let storage = Storage::new(inner, &mut registry);
 
         // Open a blob
-        let (blob, _, _) = storage.open("partition", b"test_blob").await.unwrap();
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Verify that the open_blobs metric is incremented
         let open_blobs = storage.metrics.open_blobs.get();
@@ -244,8 +244,8 @@ mod tests {
         let storage = Storage::new(inner, &mut registry);
 
         // Open multiple blobs
-        let (blob1, _, _) = storage.open("partition", b"blob1").await.unwrap();
-        let (blob2, _, _) = storage.open("partition", b"blob2").await.unwrap();
+        let (blob1, _) = storage.open("partition", b"blob1").await.unwrap();
+        let (blob2, _) = storage.open("partition", b"blob2").await.unwrap();
 
         // Verify that the open_blobs metric is incremented correctly
         let open_blobs = storage.metrics.open_blobs.get();
@@ -285,7 +285,7 @@ mod tests {
         let storage = Storage::new(inner, &mut registry);
 
         // Open a blob
-        let (blob, _, _) = storage.open("partition", b"test_blob").await.unwrap();
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Verify that the open_blobs metric is incremented
         assert_eq!(

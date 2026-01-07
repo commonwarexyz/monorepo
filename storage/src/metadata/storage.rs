@@ -79,8 +79,8 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
     /// Initialize a new [Metadata] instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Open dedicated blobs
-        let (left_blob, left_len, _) = context.open(&cfg.partition, BLOB_NAMES[0]).await?;
-        let (right_blob, right_len, _) = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
+        let (left_blob, left_len) = context.open(&cfg.partition, BLOB_NAMES[0]).await?;
+        let (right_blob, right_len) = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
 
         // Find latest blob (check which includes a hash of the other)
         let (left_map, left_wrapper) =

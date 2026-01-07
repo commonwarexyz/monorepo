@@ -217,9 +217,8 @@ mod tests {
         let storage = Storage::default();
 
         // Test 1: New blob returns logical size 0 and correct app version
-        let (blob, size, app_version) = storage.open("partition", b"test").await.unwrap();
+        let (blob, size) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size, 0, "new blob should have logical size 0");
-        assert_eq!(app_version, Header::DEFAULT_APPLICATION_VERSION);
 
         // Verify raw storage has 8 bytes (header only)
         {
@@ -292,9 +291,8 @@ mod tests {
         blob.sync().await.unwrap();
         drop(blob);
 
-        let (blob2, size2, app_version2) = storage.open("partition", b"test").await.unwrap();
+        let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size2, 9, "reopened blob should have logical size 9");
-        assert_eq!(app_version2, Header::DEFAULT_APPLICATION_VERSION);
         let read_buf = blob2.read_at(vec![0u8; 9], 0).await.unwrap();
         assert_eq!(read_buf.as_ref(), b"test data");
 
@@ -307,9 +305,8 @@ mod tests {
         }
 
         // Opening should truncate and write fresh header
-        let (_blob3, size3, app_version3) = storage.open("partition", b"corrupted").await.unwrap();
+        let (_blob3, size3) = storage.open("partition", b"corrupted").await.unwrap();
         assert_eq!(size3, 0, "corrupted blob should return logical size 0");
-        assert_eq!(app_version3, Header::DEFAULT_APPLICATION_VERSION);
 
         // Verify raw storage now has proper 8-byte header
         {

@@ -336,7 +336,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         // Start the test within the executor
         executor.start(|context| async move {
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -355,7 +355,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         // Start the test within the executor
         executor.start(|context| async move {
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -375,7 +375,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Make sure blob has expected size when reopened.
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -390,7 +390,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         // Start the test within the executor
         executor.start(|context| async move {
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -485,7 +485,7 @@ mod tests {
     fn test_append_blob_tracks_physical_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -524,7 +524,7 @@ mod tests {
             assert_eq!(blob.buffer.read().await.1, 250);
 
             // Close and reopen.
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to reopen blob");

@@ -120,7 +120,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
         // Open all blobs and check for partial records
         for name in stored_blobs {
-            let (blob, mut len, _) = context.open(&config.partition, &name).await?;
+            let (blob, mut len) = context.open(&config.partition, &name).await?;
             let index = match name.try_into() {
                 Ok(index) => u64::from_be_bytes(index),
                 Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
@@ -255,7 +255,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let items_per_blob = self.config.items_per_blob.get();
         let section = index / items_per_blob;
         if let Entry::Vacant(entry) = self.blobs.entry(section) {
-            let (blob, len, _) = self
+            let (blob, len) = self
                 .context
                 .open(&self.config.partition, &section.to_be_bytes())
                 .await?;

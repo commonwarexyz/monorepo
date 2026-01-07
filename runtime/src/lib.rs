@@ -546,17 +546,25 @@ pub trait Storage: Clone + Send + Sync + 'static {
     type Blob: Blob;
 
     /// [Storage::open_versioned] with [Header::DEFAULT_APPLICATION_VERSION] as the only value
-    /// in the version range.
+    /// in the versions range. The application version is omitted from the return value as it
+    /// is always [Header::DEFAULT_APPLICATION_VERSION].
     fn open(
         &self,
         partition: &str,
         name: &[u8],
-    ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send {
-        self.open_versioned(
-            partition,
-            name,
-            Header::DEFAULT_APPLICATION_VERSION..=Header::DEFAULT_APPLICATION_VERSION,
-        )
+    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
+        let partition = partition.to_string();
+        let name = name.to_vec();
+        async move {
+            let (blob, size, _) = self
+                .open_versioned(
+                    &partition,
+                    &name,
+                    Header::DEFAULT_APPLICATION_VERSION..=Header::DEFAULT_APPLICATION_VERSION,
+                )
+                .await?;
+            Ok((blob, size))
+        }
     }
 
     /// Open an existing blob in a given partition or create a new one, returning
@@ -1149,12 +1157,11 @@ mod tests {
             let name = b"test_blob";
 
             // Open a new blob and verify returned version
-            let (blob, size, app_version) = context
+            let (blob, size) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
             assert_eq!(size, 0, "new blob should have size 0");
-            assert_eq!(app_version, Header::DEFAULT_APPLICATION_VERSION);
 
             // Write data to the blob
             let data = b"Hello, Storage!";
@@ -1182,17 +1189,12 @@ mod tests {
                 .expect("Failed to scan partition");
             assert!(blobs.contains(&name.to_vec()));
 
-            // Reopen the blob and verify version persists
-            let (blob, len, app_version) = context
+            // Reopen the blob
+            let (blob, len) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to reopen blob");
             assert_eq!(len, data.len() as u64);
-            assert_eq!(
-                app_version,
-                Header::DEFAULT_APPLICATION_VERSION,
-                "reopened blob should have same app version"
-            );
 
             // Read data part of message back
             let read = blob
@@ -1238,7 +1240,7 @@ mod tests {
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let (blob, _, _) = context
+            let (blob, _) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -1294,7 +1296,7 @@ mod tests {
             let name = b"test_blob_resize";
 
             // Open and write to a new blob
-            let (blob, _, _) = context
+            let (blob, _) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -1306,7 +1308,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after write");
 
             // Re-open and check length
-            let (blob, len, _) = context.open(partition, name).await.unwrap();
+            let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
 
             // Resize to extend the file
@@ -1317,7 +1319,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after resize");
 
             // Re-open and check length again
-            let (blob, len, _) = context.open(partition, name).await.unwrap();
+            let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, new_len);
 
             // Read original data
@@ -1336,7 +1338,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // Reopen to check truncation
-            let (blob, size, _) = context.open(partition, name).await.unwrap();
+            let (blob, size) = context.open(partition, name).await.unwrap();
             assert_eq!(size, data.len() as u64);
 
             // Read truncated data
@@ -1358,7 +1360,7 @@ mod tests {
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
-                let (blob, _, _) = context
+                let (blob, _) = context
                     .open(partition, name)
                     .await
                     .expect("Failed to open blob");
@@ -1377,7 +1379,7 @@ mod tests {
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
-                let (blob, len, _) = context
+                let (blob, len) = context
                     .open(partition, name)
                     .await
                     .expect("Failed to open blob");
@@ -1403,7 +1405,7 @@ mod tests {
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let (blob, _, _) = context
+            let (blob, _) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -1433,7 +1435,7 @@ mod tests {
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let (blob, _, _) = context
+            let (blob, _) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");

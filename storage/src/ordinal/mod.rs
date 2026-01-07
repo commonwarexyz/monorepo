@@ -518,7 +518,7 @@ mod tests {
 
             // Corrupt the data
             {
-                let (blob, _, _) = context
+                let (blob, _) = context
                     .open("test_ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
@@ -645,7 +645,7 @@ mod tests {
 
             // Corrupt by writing partial record (only value, no CRC)
             {
-                let (blob, _, _) = context
+                let (blob, _) = context
                     .open("test_ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
@@ -712,7 +712,7 @@ mod tests {
 
             // Corrupt the value portion of a record
             {
-                let (blob, _, _) = context
+                let (blob, _) = context
                     .open("test_ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
@@ -771,7 +771,7 @@ mod tests {
             // Corrupt CRCs in different blobs
             {
                 // Corrupt CRC in first blob
-                let (blob, _, _) = context
+                let (blob, _) = context
                     .open("test_ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
@@ -779,7 +779,7 @@ mod tests {
                 blob.sync().await.unwrap();
 
                 // Corrupt value in second blob (which will invalidate CRC)
-                let (blob, _, _) = context
+                let (blob, _) = context
                     .open("test_ordinal", &1u64.to_be_bytes())
                     .await
                     .unwrap();
@@ -843,7 +843,7 @@ mod tests {
 
             // Add extra bytes at the end of blob
             {
-                let (blob, size, _) = context
+                let (blob, size) = context
                     .open("test_ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
@@ -900,7 +900,7 @@ mod tests {
 
             // Create blob with zero-filled space
             {
-                let (blob, _, _) = context
+                let (blob, _) = context
                     .open("test_ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
@@ -1951,7 +1951,7 @@ mod tests {
 
             // Corrupt record at index 2
             {
-                let (blob, _, _) = context
+                let (blob, _) = context
                     .open("test_ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();

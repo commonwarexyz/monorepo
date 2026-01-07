@@ -147,8 +147,8 @@ mod tests {
         let storage2 = AuditedStorage::new(inner2, auditor2.clone());
 
         // Perform a sequence of operations on both storages simultaneously
-        let (blob1, _, _) = storage1.open("partition", b"test_blob").await.unwrap();
-        let (blob2, _, _) = storage2.open("partition", b"test_blob").await.unwrap();
+        let (blob1, _) = storage1.open("partition", b"test_blob").await.unwrap();
+        let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
 
         // Write data to the blobs
         blob1.write_at(b"hello world".to_vec(), 0).await.unwrap();

@@ -455,7 +455,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Populate a blob with 11 consecutive pages of data.
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");

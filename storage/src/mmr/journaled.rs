@@ -1137,7 +1137,7 @@ mod tests {
             // 497. Simulate a partial write by corrupting the last parent's checksum by truncating
             // the last blob by a single byte.
             let partition: String = "journal_partition".into();
-            let (blob, len, _) = context
+            let (blob, len) = context
                 .open(&partition, &71u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -1170,7 +1170,7 @@ mod tests {
                 .remove(&partition, Some(&71u64.to_be_bytes()))
                 .await
                 .expect("Failed to remove blob");
-            let (blob, len, _) = context
+            let (blob, len) = context
                 .open(&partition, &70u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");

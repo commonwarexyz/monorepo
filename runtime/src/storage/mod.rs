@@ -55,7 +55,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, len, _) = storage.open("partition", b"test_blob").await.unwrap();
+        let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
 
         blob.write_at(Vec::from("hello world"), 0).await.unwrap();
@@ -115,7 +115,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, _, _) = storage.open("partition", b"test_blob").await.unwrap();
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Initialize blob with data of sufficient length first
         blob.write_at(b"concurrent write".to_vec(), 0)
@@ -153,7 +153,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, _, _) = storage.open("partition", b"large_blob").await.unwrap();
+        let (blob, _) = storage.open("partition", b"large_blob").await.unwrap();
 
         let large_data = vec![42u8; 10 * 1024 * 1024]; // 10 MB
         blob.write_at(large_data.clone(), 0).await.unwrap();
@@ -169,7 +169,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, _, _) = storage
+        let (blob, _) = storage
             .open("test_overwrite_data", b"test_blob")
             .await
             .unwrap();
@@ -196,7 +196,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, _, _) = storage
+        let (blob, _) = storage
             .open("test_read_beyond_written_data", b"test_blob")
             .await
             .unwrap();
@@ -219,7 +219,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, _, _) = storage
+        let (blob, _) = storage
             .open("test_write_at_large_offset", b"test_blob")
             .await
             .unwrap();
@@ -244,7 +244,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, _, _) = storage
+        let (blob, _) = storage
             .open("test_append_data", b"test_blob")
             .await
             .unwrap();
@@ -266,7 +266,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, _, _) = storage.open("partition", b"test_blob").await.unwrap();
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Write data at different offsets
         blob.write_at(b"first".to_vec(), 0).await.unwrap();
@@ -286,7 +286,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, _, _) = storage
+        let (blob, _) = storage
             .open("test_large_data_in_chunks", b"large_blob")
             .await
             .unwrap();
@@ -316,7 +316,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, _, _) = storage
+        let (blob, _) = storage
             .open("test_read_empty_blob", b"empty_blob")
             .await
             .unwrap();
@@ -334,7 +334,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, _, _) = storage
+        let (blob, _) = storage
             .open("test_overlapping_writes", b"test_blob")
             .await
             .unwrap();
@@ -358,7 +358,7 @@ pub(crate) mod tests {
         S::Blob: Send + Sync,
     {
         {
-            let (blob, _, _) = storage
+            let (blob, _) = storage
                 .open("test_resize_then_open", b"test_blob")
                 .await
                 .unwrap();
@@ -374,7 +374,7 @@ pub(crate) mod tests {
         }
 
         // Reopen the blob
-        let (blob, len, _) = storage
+        let (blob, len) = storage
             .open("test_resize_then_open", b"test_blob")
             .await
             .unwrap();

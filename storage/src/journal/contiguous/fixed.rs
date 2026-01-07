@@ -160,7 +160,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
             Err(err) => return Err(Error::Runtime(err)),
         };
         for name in stored_blobs {
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open(&cfg.partition, &name)
                 .await
                 .map_err(Error::Runtime)?;
@@ -190,7 +190,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
             }
         } else {
             debug!("no blobs found");
-            let (blob, size, _) = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
+            let (blob, size) = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
             assert_eq!(size, 0);
             blobs.insert(0, (blob, size));
         }
@@ -222,7 +222,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
             );
             blobs.insert(tail_index, (tail, tail_size));
             tail_index += 1;
-            (tail, tail_size, _) = context
+            (tail, tail_size) = context
                 .open(&cfg.partition, &tail_index.to_be_bytes())
                 .await?;
             assert_eq!(tail_size, 0);
@@ -355,7 +355,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
             // Create a new empty blob.
             let next_blob_index = self.tail_index + 1;
             debug!(blob = next_blob_index, "creating next blob");
-            let (next_blob, size, _) = self
+            let (next_blob, size) = self
                 .context
                 .open(&self.cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
@@ -971,7 +971,7 @@ mod tests {
             // Corrupt one of the checksums and make sure it's detected.
             let checksum_offset = Digest::SIZE as u64
                 + (ITEMS_PER_BLOB.get() / 2) * (Digest::SIZE + u32::SIZE) as u64;
-            let (blob, _, _) = context
+            let (blob, _) = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -1051,7 +1051,7 @@ mod tests {
             assert!(buffer.contains("tracked 101"));
 
             // Manually truncate a non-tail blob to make sure it's detected during initialization.
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -1100,7 +1100,7 @@ mod tests {
 
             // Truncate the tail blob by one byte, which should result in the 3rd item being
             // trimmed.
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -1124,7 +1124,7 @@ mod tests {
             assert_eq!(journal.size(), item_count - 2);
 
             // Corrupt the last item, ensuring last blob is trimmed to empty state.
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -1236,7 +1236,7 @@ mod tests {
             drop(journal);
 
             // Manually truncate most recent blob to simulate a partial write.
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -1294,7 +1294,7 @@ mod tests {
             drop(journal);
 
             // Manually truncate most recent blob to simulate a partial write.
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -1344,7 +1344,7 @@ mod tests {
             // Manually extend the blob by an amount at least some multiple of the chunk size to
             // simulate a failure where the file was extended, but no bytes were written due to
             // failure.
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -1519,7 +1519,7 @@ mod tests {
             drop(journal);
 
             // Hash blob contents
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
@@ -1534,7 +1534,7 @@ mod tests {
                 "ed2ea67208cde2ee8c16cca5aa4f369f55b1402258c6b7760e5baf134e38944a",
             );
             blob.sync().await.expect("Failed to sync blob");
-            let (blob, size, _) = context
+            let (blob, size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");

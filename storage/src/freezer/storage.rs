@@ -567,7 +567,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let mut journal = Journal::init(context.with_label("journal"), journal_config).await?;
 
         // Open table blob
-        let (table, table_len, _) = context
+        let (table, table_len) = context
             .open(&config.table_partition, TABLE_BLOB_NAME)
             .await?;
 

@@ -16,8 +16,7 @@ use std::num::NonZeroUsize;
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
 ///     // Open a blob and add some data (e.g., a journal file)
-///     let (blob, size, blob_version) = context.open("my_partition", b"my_data").await.expect("unable to open blob");
-///     assert_eq!(blob_version, BLOB_VERSION);
+///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to open blob");
 ///     let data = b"Hello, world! This is a test.".to_vec();
 ///     let size = data.len() as u64;
 ///     blob.write_at(data, 0).await.expect("unable to write data");
