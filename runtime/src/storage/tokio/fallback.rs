@@ -1,4 +1,5 @@
-use crate::{Error, Header};
+use super::Header;
+use crate::Error;
 use commonware_utils::{hex, StableBuf};
 use std::{io::SeekFrom, sync::Arc};
 use tokio::{

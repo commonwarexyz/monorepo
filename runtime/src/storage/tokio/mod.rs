@@ -1,4 +1,5 @@
-use crate::{Error, Header};
+use super::Header;
+use crate::Error;
 use commonware_codec::Encode;
 use commonware_utils::{from_hex, hex};
 #[cfg(unix)]
@@ -139,9 +140,9 @@ impl crate::Storage for Storage {
 
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
-        let (app_version, logical_size) = if Header::missing(len) {
+        let (blob_version, logical_size) = if Header::missing(len) {
             // New or corrupted blob - truncate and write header with latest version
-            let (header, app_version) = Header::for_new_blob(&versions);
+            let (header, blob_version) = Header::new(&versions);
             file.set_len(Header::SIZE_U64)
                 .await
                 .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e))?;
@@ -151,14 +152,14 @@ impl crate::Storage for Storage {
             file.sync_all()
                 .await
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
-            (app_version, 0)
+            (blob_version, 0)
         } else {
             // Existing blob - read and validate header
             let mut header_bytes = [0u8; Header::SIZE];
             file.read_exact(&mut header_bytes)
                 .await
                 .map_err(|_| Error::ReadFailed)?;
-            Header::from_existing(header_bytes, len, &versions)?
+            Header::from(header_bytes, len, &versions, partition, name)?
         };
 
         #[cfg(unix)]
@@ -170,7 +171,7 @@ impl crate::Storage for Storage {
             Ok((
                 Self::Blob::new(partition.into(), name, file),
                 logical_size,
-                app_version,
+                blob_version,
             ))
         }
         #[cfg(not(unix))]
@@ -179,7 +180,7 @@ impl crate::Storage for Storage {
             Ok((
                 Self::Blob::new(partition.into(), name, file),
                 logical_size,
-                app_version,
+                blob_version,
             ))
         }
     }
@@ -245,8 +246,8 @@ impl crate::Storage for Storage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{storage::tests::run_storage_tests, Blob, Header, Storage as _};
+    use super::{Header, *};
+    use crate::{storage::tests::run_storage_tests, Blob, Storage as _};
     use rand::{Rng as _, SeedableRng};
     use std::env;
 
@@ -295,7 +296,7 @@ mod tests {
         // Header version (bytes 4-5) and App version (bytes 6-7)
         assert_eq!(
             &raw_content[Header::MAGIC_LENGTH..Header::MAGIC_LENGTH + Header::VERSION_LENGTH],
-            &Header::HEADER_VERSION.to_be_bytes()
+            &Header::RUNTIME_VERSION.to_be_bytes()
         );
         // Data should start at offset 8
         assert_eq!(&raw_content[Header::SIZE..], data);
@@ -374,13 +375,13 @@ mod tests {
         let bad_magic_path = partition_path.join(hex(b"bad_magic"));
         std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE]).unwrap();
 
-        // Opening should fail with magic mismatch error
+        // Opening should fail with corrupt error
         let result = storage.open("partition", b"bad_magic").await;
         match result {
-            Err(crate::Error::BlobMagicMismatch { found }) => {
-                assert_eq!(found, [0u8; Header::MAGIC_LENGTH]);
+            Err(crate::Error::BlobCorrupt(_, _, reason)) => {
+                assert!(reason.contains("invalid magic"));
             }
-            Err(err) => panic!("expected BlobMagicMismatch error, got: {:?}", err),
+            Err(err) => panic!("expected BlobCorrupt error, got: {:?}", err),
             Ok(_) => panic!("expected error, got Ok"),
         }
 
@@ -404,14 +405,11 @@ mod tests {
         // Try to open with version range 2..=2
         let result = storage.open_versioned("partition", b"v1", 2..=2).await;
         match result {
-            Err(crate::Error::BlobApplicationVersionMismatch { expected, found }) => {
+            Err(crate::Error::BlobVersionMismatch { expected, found }) => {
                 assert_eq!(expected, 2..=2);
                 assert_eq!(found, 1);
             }
-            Err(err) => panic!(
-                "expected BlobApplicationVersionMismatch error, got: {:?}",
-                err
-            ),
+            Err(err) => panic!("expected BlobVersionMismatch error, got: {:?}", err),
             Ok(_) => panic!("expected error, got Ok"),
         }
 

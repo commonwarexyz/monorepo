@@ -23,7 +23,6 @@
 )]
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
 use commonware_utils::StableBuf;
@@ -60,6 +59,9 @@ mod iouring;
 
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
+
+/// Default blob version used when no version is specified.
+pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
 /// Errors that can occur when interacting with the runtime.
 #[derive(Error, Debug)]
@@ -102,12 +104,10 @@ pub enum Error {
     BlobSyncFailed(String, String, IoError),
     #[error("blob insufficient length")]
     BlobInsufficientLength,
-    #[error("blob magic mismatch: expected {:?}, found {found:?}", Header::MAGIC)]
-    BlobMagicMismatch { found: [u8; Header::MAGIC_LENGTH] },
-    #[error("blob header version mismatch: expected {expected}, found {found}")]
-    BlobHeaderVersionMismatch { expected: u16, found: u16 },
-    #[error("blob application version mismatch: expected one of {expected:?}, found {found}")]
-    BlobApplicationVersionMismatch {
+    #[error("blob corrupt: {0}/{1} reason: {2}")]
+    BlobCorrupt(String, String, String),
+    #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
+    BlobVersionMismatch {
         expected: std::ops::RangeInclusive<u16>,
         found: u16,
     },
@@ -546,9 +546,8 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// The readable/writeable storage buffer that can be opened by this Storage.
     type Blob: Blob;
 
-    /// [Storage::open_versioned] with [Header::DEFAULT_APPLICATION_VERSION] as the only value
-    /// in the versions range. The application version is omitted from the return value as it
-    /// is always [Header::DEFAULT_APPLICATION_VERSION].
+    /// [Storage::open_versioned] with the default blob version (0) as the only value
+    /// in the versions range. The blob version is omitted from the return value.
     fn open(
         &self,
         partition: &str,
@@ -561,7 +560,7 @@ pub trait Storage: Clone + Send + Sync + 'static {
                 .open_versioned(
                     &partition,
                     &name,
-                    Header::DEFAULT_APPLICATION_VERSION..=Header::DEFAULT_APPLICATION_VERSION,
+                    DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION,
                 )
                 .await?;
             Ok((blob, size))
@@ -578,16 +577,16 @@ pub trait Storage: Clone + Send + Sync + 'static {
     ///
     /// # Versions
     ///
-    /// The blob's [Header] contains an application version.
-    /// `versions` specifies the range of acceptable application versions for an opened blob.
+    /// Each blob has an associated blob version stored in its header.
+    /// `versions` specifies the range of acceptable blob versions for an opened blob.
     /// If the blob already exists and its version is not in `versions`, returns
-    /// [Error::BlobApplicationVersionMismatch].
-    /// If the blob does not exist, it is created with the application version set to the last
+    /// [Error::BlobVersionMismatch].
+    /// If the blob does not exist, it is created with the blob version set to the last
     /// value in `versions`.
     ///
     /// # Returns
     ///
-    /// A tuple of (blob, logical_size, application_version).
+    /// A tuple of (blob, logical_size, blob_version).
     fn open_versioned(
         &self,
         partition: &str,
@@ -610,133 +609,6 @@ pub trait Storage: Clone + Send + Sync + 'static {
     fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
 }
 
-/// Fixed-size header at the start of each [Blob].
-///
-/// On-disk layout (8 bytes, big-endian):
-/// - Bytes 0-3: [Header::MAGIC]
-/// - Bytes 4-5: Header Version (u16)
-/// - Bytes 6-7: Application Version (u16)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Header {
-    magic: [u8; Self::MAGIC_LENGTH],
-    header_version: u16,
-    application_version: u16,
-}
-
-impl Header {
-    /// Size of the header in bytes.
-    pub const SIZE: usize = 8;
-
-    /// Size of the header as u64 for offset calculations.
-    pub const SIZE_U64: u64 = Self::SIZE as u64;
-
-    /// Length of magic bytes.
-    pub const MAGIC_LENGTH: usize = 4;
-
-    /// Length of version fields.
-    pub const VERSION_LENGTH: usize = 2;
-
-    /// Magic bytes identifying a valid commonware blob.
-    pub const MAGIC: [u8; Self::MAGIC_LENGTH] = *b"CWIC"; // Commonware Is CWIC
-
-    /// The current version of the header format.
-    pub const HEADER_VERSION: u16 = 0;
-
-    /// Default application version used in [Storage::open].
-    pub const DEFAULT_APPLICATION_VERSION: u16 = 0;
-
-    /// Creates a new header with the given application version.
-    pub const fn new(app_version: u16) -> Self {
-        Self {
-            magic: Self::MAGIC,
-            header_version: Self::HEADER_VERSION,
-            application_version: app_version,
-        }
-    }
-
-    /// Returns true if a blob is missing a valid header (new or corrupted).
-    pub const fn missing(raw_len: u64) -> bool {
-        raw_len < Self::SIZE_U64
-    }
-
-    /// Creates a header for a new blob using the latest version from the range.
-    /// Returns (header, app_version).
-    pub const fn for_new_blob(versions: &std::ops::RangeInclusive<u16>) -> (Self, u16) {
-        let app_version = *versions.end();
-        (Self::new(app_version), app_version)
-    }
-
-    /// Validates an existing header and computes the logical size.
-    /// Returns (app_version, logical_len) on success.
-    pub fn from_existing(
-        raw_bytes: [u8; Self::SIZE],
-        raw_len: u64,
-        versions: &std::ops::RangeInclusive<u16>,
-    ) -> Result<(u16, u64), Error> {
-        let header: Self = Self::decode(raw_bytes.as_slice()).map_err(|_| Error::ReadFailed)?;
-        header.validate(versions)?;
-        Ok((header.application_version, raw_len - Self::SIZE_U64))
-    }
-
-    /// Validates the magic bytes, header version, and application version.
-    /// `app_versions` is the range of acceptable application versions.
-    pub fn validate(&self, app_versions: &std::ops::RangeInclusive<u16>) -> Result<(), Error> {
-        if self.magic != Self::MAGIC {
-            return Err(Error::BlobMagicMismatch { found: self.magic });
-        }
-        if self.header_version != Self::HEADER_VERSION {
-            return Err(Error::BlobHeaderVersionMismatch {
-                expected: Self::HEADER_VERSION,
-                found: self.header_version,
-            });
-        }
-        if !app_versions.contains(&self.application_version) {
-            return Err(Error::BlobApplicationVersionMismatch {
-                expected: app_versions.clone(),
-                found: self.application_version,
-            });
-        }
-        Ok(())
-    }
-}
-
-impl FixedSize for Header {
-    const SIZE: usize = Self::SIZE;
-}
-
-impl CodecWrite for Header {
-    fn write(&self, buf: &mut impl BufMut) {
-        buf.put_slice(&self.magic);
-        buf.put_u16(self.header_version);
-        buf.put_u16(self.application_version);
-    }
-}
-
-impl CodecRead for Header {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        if buf.remaining() < Self::SIZE {
-            return Err(commonware_codec::Error::EndOfBuffer);
-        }
-        let mut magic = [0u8; Self::MAGIC_LENGTH];
-        buf.copy_to_slice(&mut magic);
-        let header_version = buf.get_u16();
-        let application_version = buf.get_u16();
-        Ok(Self {
-            magic,
-            header_version,
-            application_version,
-        })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for Header {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self::new(u.arbitrary()?))
-    }
-}
-
 /// Interface to read and write to a blob.
 ///
 /// To support blob implementations that enable concurrent reads and
@@ -754,9 +626,10 @@ impl arbitrary::Arbitrary<'_> for Header {
 ///
 /// # Header
 ///
-/// All blobs have a [`Header`] at the start. The header is read on open
-/// (for existing blobs) or written (for new blobs). All I/O operations use logical
-/// offsets that start after the header; the header offset is handled internally.
+/// All blobs have an 8-byte header at the start containing magic bytes and version
+/// information. The header is read on open (for existing blobs) or written (for new
+/// blobs). All I/O operations use logical offsets that start after the header; the
+/// header offset is handled internally.
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
     /// Read from the blob at the given offset.
@@ -791,7 +664,6 @@ mod tests {
     use super::*;
     use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;
-    use commonware_codec::Encode;
     use commonware_macros::{select, test_collect_traces};
     use commonware_utils::NZUsize;
     use futures::{
@@ -814,125 +686,6 @@ mod tests {
     };
     use tracing::{error, Level};
     use utils::reschedule;
-
-    #[test]
-    fn test_header_fields() {
-        let header = Header::new(Header::DEFAULT_APPLICATION_VERSION);
-        assert_eq!(header.header_version, Header::HEADER_VERSION);
-        assert_eq!(
-            header.application_version,
-            Header::DEFAULT_APPLICATION_VERSION
-        );
-
-        // Verify byte serialization
-        let bytes = header.encode();
-        assert_eq!(&bytes[..4], &Header::MAGIC);
-        assert_eq!(&bytes[4..6], &Header::HEADER_VERSION.to_be_bytes());
-        assert_eq!(
-            &bytes[6..8],
-            &Header::DEFAULT_APPLICATION_VERSION.to_be_bytes()
-        );
-
-        // Verify round-trip
-        let parsed: Header = Header::decode(bytes.as_ref()).unwrap();
-        assert_eq!(parsed, header);
-    }
-
-    #[test]
-    fn test_header_validate_success() {
-        let header = Header::new(Header::DEFAULT_APPLICATION_VERSION);
-        assert!(header
-            .validate(&(Header::DEFAULT_APPLICATION_VERSION..=Header::DEFAULT_APPLICATION_VERSION))
-            .is_ok());
-    }
-
-    #[test]
-    fn test_header_validate_magic_wrong_bytes() {
-        let header: Header = Header::decode([0u8; Header::SIZE].as_slice()).unwrap();
-        let result = header
-            .validate(&(Header::DEFAULT_APPLICATION_VERSION..=Header::DEFAULT_APPLICATION_VERSION));
-        match result {
-            Err(Error::BlobMagicMismatch { found }) => {
-                assert_eq!(found, [0u8; 4]);
-            }
-            _ => panic!("expected BlobMagicMismatch error"),
-        }
-
-        let mut bytes: [u8; Header::SIZE] = Header::new(Header::DEFAULT_APPLICATION_VERSION)
-            .encode()
-            .as_ref()
-            .try_into()
-            .unwrap();
-        bytes[0] = b'X'; // Corrupt first byte
-        let header: Header = Header::decode(bytes.as_slice()).unwrap();
-        let result = header
-            .validate(&(Header::DEFAULT_APPLICATION_VERSION..=Header::DEFAULT_APPLICATION_VERSION));
-        match result {
-            Err(Error::BlobMagicMismatch { found }) => {
-                assert_eq!(found[0], b'X');
-            }
-            _ => panic!("expected BlobMagicMismatch error"),
-        }
-    }
-
-    #[test]
-    fn test_header_validate_app_version_mismatch() {
-        let header = Header::new(5);
-        let result = header.validate(&(10..=20));
-        match result {
-            Err(Error::BlobApplicationVersionMismatch { expected, found }) => {
-                assert_eq!(expected, 10..=20);
-                assert_eq!(found, 5);
-            }
-            _ => panic!("expected BlobApplicationVersionMismatch error"),
-        }
-    }
-
-    #[test]
-    fn test_header_validate_header_version_mismatch() {
-        let mut bytes: [u8; Header::SIZE] = Header::new(0).encode().as_ref().try_into().unwrap();
-        bytes[4] = 0xFF;
-        bytes[5] = 0xFF;
-        let header: Header = Header::decode(bytes.as_slice()).unwrap();
-        let result = header.validate(&(0..=0));
-        match result {
-            Err(Error::BlobHeaderVersionMismatch { expected, found }) => {
-                assert_eq!(expected, Header::HEADER_VERSION);
-                assert_eq!(found, 0xFFFF);
-            }
-            _ => panic!("expected BlobHeaderVersionMismatch error"),
-        }
-    }
-
-    #[test]
-    fn test_header_bytes_round_trip() {
-        // Test round-trip with default version
-        let original = Header::new(0);
-        let bytes = original.encode();
-        let restored: Header = Header::decode(bytes.as_ref()).unwrap();
-        assert_eq!(original, restored);
-
-        // Test round-trip with non-zero version
-        let original = Header::new(42);
-        let bytes = original.encode();
-        let restored: Header = Header::decode(bytes.as_ref()).unwrap();
-        assert_eq!(original, restored);
-        assert_eq!(restored.application_version, 42);
-
-        // Test round-trip with max version
-        let original = Header::new(u16::MAX);
-        let bytes = original.encode();
-        let restored: Header = Header::decode(bytes.as_ref()).unwrap();
-        assert_eq!(original, restored);
-        assert_eq!(restored.application_version, u16::MAX);
-
-        // Verify byte layout explicitly
-        let header = Header::new(0x1234);
-        let bytes = header.encode();
-        assert_eq!(&bytes[..4], &Header::MAGIC);
-        assert_eq!(&bytes[4..6], &Header::HEADER_VERSION.to_be_bytes());
-        assert_eq!(&bytes[6..8], &0x1234u16.to_be_bytes());
-    }
 
     fn test_error_future<R: Runner>(runner: R) {
         async fn error_future() -> Result<&'static str, &'static str> {
@@ -3191,15 +2944,5 @@ mod tests {
                 assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
             });
         });
-    }
-
-    #[cfg(feature = "arbitrary")]
-    mod conformance {
-        use super::Header;
-        use commonware_codec::conformance::CodecConformance;
-
-        commonware_conformance::conformance_tests! {
-            CodecConformance<Header>
-        }
     }
 }

@@ -33,7 +33,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         self.inner
             .open_versioned(partition, name, versions)
             .await
-            .map(|(blob, len, app_version)| {
+            .map(|(blob, len, blob_version)| {
                 (
                     Blob {
                         auditor: self.auditor.clone(),
@@ -42,7 +42,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
                         name: name.to_vec(),
                     },
                     len,
-                    app_version,
+                    blob_version,
                 )
             })
     }

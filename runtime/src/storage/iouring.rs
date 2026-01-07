@@ -135,9 +135,9 @@ impl crate::Storage for Storage {
 
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
-        let (app_version, logical_len) = if Header::missing(raw_len) {
+        let (blob_version, logical_len) = if Header::missing(raw_len) {
             // New (or corrupted) blob - truncate and write header with latest version
-            let (header, app_version) = Header::for_new_blob(&versions);
+            let (header, blob_version) = Header::new(&versions);
             file.set_len(Header::SIZE_U64)
                 .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e))?;
             file.seek(SeekFrom::Start(0))
@@ -155,7 +155,7 @@ impl crate::Storage for Storage {
                 }
             }
 
-            (app_version, 0)
+            (blob_version, 0)
         } else {
             // Existing blob - read and validate header
             file.seek(SeekFrom::Start(0))
@@ -163,11 +163,11 @@ impl crate::Storage for Storage {
             let mut header_bytes = [0u8; Header::SIZE];
             file.read_exact(&mut header_bytes)
                 .map_err(|_| Error::ReadFailed)?;
-            Header::from_existing(header_bytes, raw_len, &versions)?
+            Header::from(header_bytes, raw_len, &versions, partition, name)?
         };
 
         let blob = Blob::new(partition.into(), name, file, self.io_sender.clone());
-        Ok((blob, logical_len, app_version))
+        Ok((blob, logical_len, blob_version))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -436,8 +436,8 @@ impl crate::Blob for Blob {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{storage::tests::run_storage_tests, Blob, Header, Storage as _};
+    use super::{Header, *};
+    use crate::{storage::tests::run_storage_tests, Blob, Storage as _};
     use rand::{Rng as _, SeedableRng as _};
     use std::env;
 
@@ -496,7 +496,7 @@ mod tests {
         // Header version (bytes 4-5) and App version (bytes 6-7)
         assert_eq!(
             &raw_content[Header::MAGIC_LENGTH..Header::MAGIC_LENGTH + Header::VERSION_LENGTH],
-            &Header::HEADER_VERSION.to_be_bytes()
+            &Header::RUNTIME_VERSION.to_be_bytes()
         );
         // Data should start at offset 8
         assert_eq!(&raw_content[Header::SIZE..], data);
@@ -570,13 +570,13 @@ mod tests {
         let bad_magic_path = partition_path.join(hex(b"bad_magic"));
         std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE]).unwrap();
 
-        // Opening should fail with magic mismatch error
+        // Opening should fail with corrupt error
         let result = storage.open("partition", b"bad_magic").await;
         match result {
-            Err(crate::Error::BlobMagicMismatch { found }) => {
-                assert_eq!(found, [0u8; Header::MAGIC_LENGTH]);
+            Err(crate::Error::BlobCorrupt(_, _, reason)) => {
+                assert!(reason.contains("invalid magic"));
             }
-            Err(err) => panic!("expected BlobMagicMismatch error, got: {:?}", err),
+            Err(err) => panic!("expected BlobCorrupt error, got: {:?}", err),
             Ok(_) => panic!("expected error, got Ok"),
         }
 
@@ -588,30 +588,27 @@ mod tests {
         let (storage, storage_directory) = create_test_storage();
 
         // Create blob with version 1
-        let (_, _, app_version) = storage
+        let (_, _, blob_version) = storage
             .open_versioned("partition", b"v1", 1..=1)
             .await
             .unwrap();
-        assert_eq!(app_version, 1, "new blob should have version 1");
+        assert_eq!(blob_version, 1, "new blob should have version 1");
 
         // Reopen with a range that includes version 1
-        let (_, _, app_version) = storage
+        let (_, _, blob_version) = storage
             .open_versioned("partition", b"v1", 0..=2)
             .await
             .unwrap();
-        assert_eq!(app_version, 1, "existing blob should retain version 1");
+        assert_eq!(blob_version, 1, "existing blob should retain version 1");
 
         // Try to open with version range 2..=2 (should fail)
         let result = storage.open_versioned("partition", b"v1", 2..=2).await;
         match result {
-            Err(crate::Error::BlobApplicationVersionMismatch { expected, found }) => {
+            Err(crate::Error::BlobVersionMismatch { expected, found }) => {
                 assert_eq!(expected, 2..=2);
                 assert_eq!(found, 1);
             }
-            Err(err) => panic!(
-                "expected BlobApplicationVersionMismatch error, got: {:?}",
-                err
-            ),
+            Err(err) => panic!("expected BlobVersionMismatch error, got: {:?}", err),
             Ok(_) => panic!("expected error, got Ok"),
         }
 

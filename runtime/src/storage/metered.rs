@@ -84,7 +84,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         versions: RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), Error> {
         self.metrics.open_blobs.inc();
-        let (inner, len, app_version) =
+        let (inner, len, blob_version) =
             self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             Blob {
@@ -92,7 +92,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
                 metrics: Arc::new(MetricsHandle(self.metrics.clone())),
             },
             len,
-            app_version,
+            blob_version,
         ))
     }
 
