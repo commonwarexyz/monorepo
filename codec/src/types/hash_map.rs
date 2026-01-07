@@ -3,10 +3,10 @@
 //! For portability and consistency between architectures,
 //! the size of the map must fit within a [u32].
 
-use crate::types::read_ordered_map;
 use crate::{
     codec::{EncodeSize, Read, Write},
     error::Error,
+    types::read_ordered_map,
     RangeCfg,
 };
 use bytes::{Buf, BufMut};
@@ -361,4 +361,3 @@ mod tests {
         }
     }
 }
-
