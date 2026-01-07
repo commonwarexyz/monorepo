@@ -231,13 +231,13 @@ where
 {
     type Blob = <C as crate::Storage>::Blob;
 
-    fn open(
+    fn open_versioned(
         &self,
         partition: &str,
         name: &[u8],
         versions: RangeInclusive<u16>,
     ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send {
-        self.as_present().open(partition, name, versions)
+        self.as_present().open_versioned(partition, name, versions)
     }
 
     fn remove(

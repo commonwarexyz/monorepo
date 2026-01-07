@@ -407,9 +407,6 @@ mod tests {
 
     const PAGE_SIZE: usize = 1024;
 
-    /// Default version range for tests
-    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
-
     #[test_traced]
     fn test_pool_basic() {
         let mut pool: Pool = Pool::new(10);
@@ -459,7 +456,7 @@ mod tests {
         executor.start(|context| async move {
             // Populate a blob with 11 consecutive pages of data.
             let (blob, size, _) = context
-                .open("test", "blob".as_bytes(), TEST_VERSIONS)
+                .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
             assert_eq!(size, 0);

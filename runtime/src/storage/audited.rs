@@ -18,7 +18,7 @@ impl<S: crate::Storage> Storage<S> {
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 
-    async fn open(
+    async fn open_versioned(
         &self,
         partition: &str,
         name: &[u8],
@@ -29,7 +29,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
             hasher.update(name);
         });
         self.inner
-            .open(partition, name, versions)
+            .open_versioned(partition, name, versions)
             .await
             .map(|(blob, len, app_version)| {
                 (
@@ -123,9 +123,6 @@ mod tests {
     };
     use std::sync::Arc;
 
-    /// Default version range for tests
-    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
-
     #[tokio::test]
     async fn test_audited_storage() {
         let inner = MemStorage::default();
@@ -150,14 +147,8 @@ mod tests {
         let storage2 = AuditedStorage::new(inner2, auditor2.clone());
 
         // Perform a sequence of operations on both storages simultaneously
-        let (blob1, _, _) = storage1
-            .open("partition", b"test_blob", TEST_VERSIONS)
-            .await
-            .unwrap();
-        let (blob2, _, _) = storage2
-            .open("partition", b"test_blob", TEST_VERSIONS)
-            .await
-            .unwrap();
+        let (blob1, _, _) = storage1.open("partition", b"test_blob").await.unwrap();
+        let (blob2, _, _) = storage2.open("partition", b"test_blob").await.unwrap();
 
         // Write data to the blobs
         blob1.write_at(b"hello world".to_vec(), 0).await.unwrap();

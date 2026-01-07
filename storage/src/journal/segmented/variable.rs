@@ -114,9 +114,6 @@ use std::{
 use tracing::{debug, trace, warn};
 use zstd::{bulk::compress, decode_all};
 
-/// Current version of the variable journal blob format.
-pub(crate) const BLOB_VERSION: std::ops::RangeInclusive<u16> = 0..=0;
-
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
 pub struct Config<C> {
@@ -191,7 +188,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Err(err) => return Err(Error::Runtime(err)),
         };
         for name in stored_blobs {
-            let (blob, size, _) = context.open(&cfg.partition, &name, BLOB_VERSION).await?;
+            let (blob, size, _) = context.open(&cfg.partition, &name).await?;
             let hex_name = hex(&name);
             let section = match name.try_into() {
                 Ok(section) => u64::from_be_bytes(section),
@@ -536,10 +533,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
                 let name = section.to_be_bytes();
-                let (blob, size, _) = self
-                    .context
-                    .open(&self.cfg.partition, &name, BLOB_VERSION)
-                    .await?;
+                let (blob, size, _) = self.context.open(&self.cfg.partition, &name).await?;
                 let blob = Append::new(
                     blob,
                     size,
@@ -1230,7 +1224,7 @@ mod tests {
             // Manually create a blob with an invalid name (not 8 bytes)
             let invalid_blob_name = b"invalid"; // Less than 8 bytes
             let (blob, _, _) = context
-                .open(&cfg.partition, invalid_blob_name, TEST_VERSIONS)
+                .open(&cfg.partition, invalid_blob_name)
                 .await
                 .expect("Failed to create blob with invalid name");
             blob.sync().await.expect("Failed to sync blob");
@@ -1263,7 +1257,7 @@ mod tests {
             let section = 1u64;
             let blob_name = section.to_be_bytes();
             let (blob, _, _) = context
-                .open(&cfg.partition, &blob_name, TEST_VERSIONS)
+                .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
 
@@ -1318,7 +1312,7 @@ mod tests {
             let section = 1u64;
             let blob_name = section.to_be_bytes();
             let (blob, _, _) = context
-                .open(&cfg.partition, &blob_name, TEST_VERSIONS)
+                .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
 
@@ -1375,7 +1369,7 @@ mod tests {
             let section = 1u64;
             let blob_name = section.to_be_bytes();
             let (blob, _, _) = context
-                .open(&cfg.partition, &blob_name, TEST_VERSIONS)
+                .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
 
@@ -1437,7 +1431,7 @@ mod tests {
             let section = 1u64;
             let blob_name = section.to_be_bytes();
             let (blob, _, _) = context
-                .open(&cfg.partition, &blob_name, TEST_VERSIONS)
+                .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
 
@@ -1482,7 +1476,7 @@ mod tests {
 
             // Confirm blob is expected length
             let (_, blob_size, _) = context
-                .open(&cfg.partition, &section.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &section.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             assert_eq!(blob_size, 0);
@@ -1529,7 +1523,7 @@ mod tests {
 
             // Manually corrupt the end of the second blob
             let (blob, blob_size, _) = context
-                .open(&cfg.partition, &2u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(blob_size - 4)
@@ -1572,7 +1566,7 @@ mod tests {
             // entry = 1 (varint for 4) + 4 (data) + 4 (checksum) = 9 bytes
             // Item 2 ends at position 16 + 9 = 25
             let (_, blob_size, _) = context
-                .open(&cfg.partition, &2u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             assert_eq!(blob_size, 25);
@@ -1622,7 +1616,7 @@ mod tests {
             // Items 1 and 2 at positions 0 and 16, item 3 (value 5) at position 32
             // Item 3 = 1 (varint) + 4 (data) + 4 (checksum) = 9 bytes, ends at 41
             let (_, blob_size, _) = context
-                .open(&cfg.partition, &2u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             assert_eq!(blob_size, 41);
@@ -1701,7 +1695,7 @@ mod tests {
 
             // Manually corrupt the end of the second blob
             let (blob, blob_size, _) = context
-                .open(&cfg.partition, &2u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(blob_size - 4)
@@ -1754,7 +1748,7 @@ mod tests {
             // entry = 1 (varint for 8) + 8 (u64 data) + 4 (checksum) = 13 bytes
             // Items at positions 0, 16, 32; item 3 ends at 32 + 13 = 45
             let (_, blob_size, _) = context
-                .open(&cfg.partition, &2u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             assert_eq!(blob_size, 45);
@@ -1833,7 +1827,7 @@ mod tests {
 
             // Manually add extra data to the end of the second blob
             let (blob, blob_size, _) = context
-                .open(&cfg.partition, &2u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.write_at(vec![0u8; 16], blob_size)
@@ -1861,8 +1855,6 @@ mod tests {
             }
         });
     }
-
-    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
 
     // Define `MockBlob` that returns an offset length that should overflow
     #[derive(Clone)]
@@ -1903,13 +1895,13 @@ mod tests {
     impl Storage for MockStorage {
         type Blob = MockBlob;
 
-        async fn open(
+        async fn open_versioned(
             &self,
             _partition: &str,
             _name: &[u8],
             _versions: std::ops::RangeInclusive<u16>,
         ) -> Result<(MockBlob, u64, u16), RError> {
-            Ok((MockBlob {}, self.len, *TEST_VERSIONS.end()))
+            Ok((MockBlob {}, self.len, 0))
         }
 
         async fn remove(&self, _partition: &str, _name: Option<&[u8]>) -> Result<(), RError> {
@@ -2137,7 +2129,7 @@ mod tests {
 
             // Hash blob contents
             let (blob, size, _) = context
-                .open(&cfg.partition, &1u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             assert!(size > 0);

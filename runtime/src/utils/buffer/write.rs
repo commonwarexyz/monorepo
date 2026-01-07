@@ -14,7 +14,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
 ///     // Open a blob for writing
-///     let (blob, size, _) = context.open("my_partition", b"my_data", 0..=0).await.expect("unable to open blob");
+///     let (blob, size, _) = context.open("my_partition", b"my_data").await.expect("unable to open blob");
 ///     assert_eq!(size, 0);
 ///
 ///     // Create a buffered writer with 16-byte buffer
@@ -28,7 +28,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///     blob.sync().await.expect("sync failed");
 ///
 ///     // Read back the data to verify
-///     let (blob, size, _) = context.open("my_partition", b"my_data", 0..=0).await.expect("unable to reopen blob");
+///     let (blob, size, _) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
 ///     let mut reader = Read::new(blob, size, NZUsize!(8));
 ///     let mut buf = vec![0u8; size as usize];
 ///     reader.read_exact(&mut buf, size as usize).await.expect("read failed");

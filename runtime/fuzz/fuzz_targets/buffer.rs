@@ -12,9 +12,6 @@ const MAX_SIZE: usize = 1024 * 1024;
 const SHARED_BLOB: &[u8] = b"buffer_blob";
 const MAX_OPERATIONS: usize = 50;
 
-/// Default version range for fuzz tests (application version 0).
-const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
-
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     seed: u64,
@@ -91,7 +88,7 @@ fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let (blob, initial_size, _) = context
-            .open("test_partition", SHARED_BLOB, TEST_VERSIONS)
+            .open("test_partition", SHARED_BLOB)
             .await
             .expect("cannot open context");
 
@@ -117,7 +114,7 @@ fn fuzz(input: FuzzInput) {
                     let buffer_size = (buffer_size as usize).clamp(1, MAX_SIZE);
 
                     let (blob, size, _) = context
-                        .open("test_partition", b"read_blob", TEST_VERSIONS)
+                        .open("test_partition", b"read_blob")
                         .await
                         .expect("cannot open context");
 
@@ -138,7 +135,7 @@ fn fuzz(input: FuzzInput) {
                     let capacity = (capacity as usize).clamp(1, MAX_SIZE);
 
                     let (blob, _, _) = context
-                        .open("test_partition", b"write_blob", TEST_VERSIONS)
+                        .open("test_partition", b"write_blob")
                         .await
                         .expect("cannot open context");
 
@@ -156,7 +153,7 @@ fn fuzz(input: FuzzInput) {
                     let pool_capacity = NZUsize!((pool_capacity as usize).clamp(1, MAX_SIZE));
 
                     let (blob, _, _) = context
-                        .open("test_partition", b"append_blob", TEST_VERSIONS)
+                        .open("test_partition", b"append_blob")
                         .await
                         .expect("cannot open write blob");
 

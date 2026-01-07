@@ -255,7 +255,6 @@ mod tests {
     const DEFAULT_TABLE_REPLAY_BUFFER: usize = 64 * 1024; // 64KB
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -704,10 +703,7 @@ mod tests {
 
             // Corrupt the table by writing partial entry
             {
-                let (blob, _, _) = context
-                    .open(&cfg.table_partition, b"table", TEST_VERSIONS)
-                    .await
-                    .unwrap();
+                let (blob, _, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Write incomplete table entry (only 10 bytes instead of 24)
                 blob.write_at(vec![0xFF; 10], 0).await.unwrap();
                 blob.sync().await.unwrap();
@@ -767,10 +763,7 @@ mod tests {
 
             // Corrupt the CRC in the index entry
             {
-                let (blob, _, _) = context
-                    .open(&cfg.table_partition, b"table", TEST_VERSIONS)
-                    .await
-                    .unwrap();
+                let (blob, _, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Read the first entry
                 let entry_data = blob.read_at(vec![0u8; 24], 0).await.unwrap();
                 let mut corrupted = entry_data.as_ref().to_vec();
@@ -834,10 +827,7 @@ mod tests {
 
             // Add extra bytes to the table blob
             {
-                let (blob, size, _) = context
-                    .open(&cfg.table_partition, b"table", TEST_VERSIONS)
-                    .await
-                    .unwrap();
+                let (blob, size, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Append garbage data
                 blob.write_at(hex!("0xdeadbeef").to_vec(), size)
                     .await

@@ -13,9 +13,6 @@ use tracing::{debug, warn};
 /// The names of the two blobs that store metadata.
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 
-/// Current version of the metadata blob format.
-const BLOB_VERSION: std::ops::RangeInclusive<u16> = 0..=0;
-
 /// Information about a value in a [Wrapper].
 struct Info {
     start: usize,
@@ -82,12 +79,8 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
     /// Initialize a new [Metadata] instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Open dedicated blobs
-        let (left_blob, left_len, _) = context
-            .open(&cfg.partition, BLOB_NAMES[0], BLOB_VERSION)
-            .await?;
-        let (right_blob, right_len, _) = context
-            .open(&cfg.partition, BLOB_NAMES[1], BLOB_VERSION)
-            .await?;
+        let (left_blob, left_len, _) = context.open(&cfg.partition, BLOB_NAMES[0]).await?;
+        let (right_blob, right_len, _) = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
 
         // Find latest blob (check which includes a hash of the other)
         let (left_map, left_wrapper) =

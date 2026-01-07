@@ -218,11 +218,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
 
     // Create the tail blob with the correct size to reflect the position
     let (tail_blob, tail_actual_size, _) = context
-        .open(
-            &cfg.partition,
-            &tail_index.to_be_bytes(),
-            fixed::BLOB_VERSION,
-        )
+        .open(&cfg.partition, &tail_index.to_be_bytes())
         .await?;
     assert_eq!(
         tail_actual_size, 0,

@@ -1414,13 +1414,13 @@ impl CryptoRng for Context {}
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;
 
-    async fn open(
+    async fn open_versioned(
         &self,
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        self.storage.open(partition, name, versions).await
+        self.storage.open_versioned(partition, name, versions).await
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -1448,9 +1448,6 @@ mod tests {
     #[cfg(feature = "external")]
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use futures::{channel::oneshot, task::noop_waker};
-
-    /// Default version range for tests
-    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
@@ -1567,7 +1564,7 @@ mod tests {
 
         // Run some tasks, sync storage, and recover the runtime
         let (state, checkpoint) = executor1.start_and_recover(|context| async move {
-            let (blob, _, _) = context.open(partition, name, TEST_VERSIONS).await.unwrap();
+            let (blob, _, _) = context.open(partition, name).await.unwrap();
             blob.write_at(Vec::from(data), 0).await.unwrap();
             blob.sync().await.unwrap();
             context.auditor().state()
@@ -1579,7 +1576,7 @@ mod tests {
         // Check that synced storage persists after recovery
         let executor = Runner::from(checkpoint);
         executor.start(|context| async move {
-            let (blob, len, _) = context.open(partition, name, TEST_VERSIONS).await.unwrap();
+            let (blob, len, _) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
             let read = blob.read_at(vec![0; data.len()], 0).await.unwrap();
             assert_eq!(read.as_ref(), data);
@@ -1613,7 +1610,7 @@ mod tests {
         // Run some tasks without syncing storage
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let context = context.clone();
-            let (blob, _, _) = context.open(partition, name, TEST_VERSIONS).await.unwrap();
+            let (blob, _, _) = context.open(partition, name).await.unwrap();
             blob.write_at(data, 0).await.unwrap();
         });
 
@@ -1622,7 +1619,7 @@ mod tests {
 
         // Check that unsynced storage does not persist after recovery
         executor.start(|context| async move {
-            let (_, len, _) = context.open(partition, name, TEST_VERSIONS).await.unwrap();
+            let (_, len, _) = context.open(partition, name).await.unwrap();
             assert_eq!(len, 0);
         });
     }

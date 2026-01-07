@@ -165,9 +165,6 @@ impl FixedSize for Checkpoint {
 /// Name of the table blob.
 const TABLE_BLOB_NAME: &[u8] = b"table";
 
-/// Current version of the freezer blob format.
-const BLOB_VERSION: std::ops::RangeInclusive<u16> = 0..=0;
-
 /// Single table entry stored in the table blob.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -571,7 +568,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Open table blob
         let (table, table_len, _) = context
-            .open(&config.table_partition, TABLE_BLOB_NAME, BLOB_VERSION)
+            .open(&config.table_partition, TABLE_BLOB_NAME)
             .await?;
 
         // Determine checkpoint based on initialization scenario

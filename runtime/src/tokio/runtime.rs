@@ -684,13 +684,13 @@ impl CryptoRng for Context {}
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;
 
-    async fn open(
+    async fn open_versioned(
         &self,
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        self.storage.open(partition, name, versions).await
+        self.storage.open_versioned(partition, name, versions).await
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {

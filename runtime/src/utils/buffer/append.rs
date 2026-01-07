@@ -329,9 +329,6 @@ mod tests {
     const PAGE_SIZE: usize = 1024;
     const BUFFER_SIZE: usize = PAGE_SIZE * 2;
 
-    /// Default version range for tests
-    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
-
     #[test_traced]
     #[should_panic(expected = "not implemented")]
     fn test_append_blob_write_panics() {
@@ -340,7 +337,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             let (blob, size, _) = context
-                .open("test", "blob".as_bytes(), TEST_VERSIONS)
+                .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
             let pool_ref = PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(10));
@@ -359,7 +356,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             let (blob, size, _) = context
-                .open("test", "blob".as_bytes(), TEST_VERSIONS)
+                .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
             assert_eq!(size, 0);
@@ -379,7 +376,7 @@ mod tests {
 
             // Make sure blob has expected size when reopened.
             let (blob, size, _) = context
-                .open("test", "blob".as_bytes(), TEST_VERSIONS)
+                .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
             assert_eq!(size, 11 * PAGE_SIZE as u64);
@@ -394,7 +391,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             let (blob, size, _) = context
-                .open("test", "blob".as_bytes(), TEST_VERSIONS)
+                .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
             assert_eq!(size, 0);
@@ -489,7 +486,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (blob, size, _) = context
-                .open("test", "blob".as_bytes(), TEST_VERSIONS)
+                .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
 
@@ -528,7 +525,7 @@ mod tests {
 
             // Close and reopen.
             let (blob, size, _) = context
-                .open("test", "blob".as_bytes(), TEST_VERSIONS)
+                .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to reopen blob");
 

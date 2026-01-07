@@ -26,9 +26,6 @@ pub fn validate_partition_name(partition: &str) -> Result<(), crate::Error> {
 pub(crate) mod tests {
     use crate::{Blob, Storage};
 
-    /// Default version range for tests
-    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
-
     /// Runs the full suite of tests on the provided storage implementation.
     pub(crate) async fn run_storage_tests<S>(storage: S)
     where
@@ -58,10 +55,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, len, _) = storage
-            .open("partition", b"test_blob", TEST_VERSIONS)
-            .await
-            .unwrap();
+        let (blob, len, _) = storage.open("partition", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
 
         blob.write_at(Vec::from("hello world"), 0).await.unwrap();
@@ -80,10 +74,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        storage
-            .open("partition", b"test_blob", TEST_VERSIONS)
-            .await
-            .unwrap();
+        storage.open("partition", b"test_blob").await.unwrap();
         storage
             .remove("partition", Some(b"test_blob"))
             .await
@@ -99,14 +90,8 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        storage
-            .open("partition", b"blob1", TEST_VERSIONS)
-            .await
-            .unwrap();
-        storage
-            .open("partition", b"blob2", TEST_VERSIONS)
-            .await
-            .unwrap();
+        storage.open("partition", b"blob1").await.unwrap();
+        storage.open("partition", b"blob2").await.unwrap();
 
         let blobs = storage.scan("partition").await.unwrap();
         assert_eq!(
@@ -130,10 +115,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, _, _) = storage
-            .open("partition", b"test_blob", TEST_VERSIONS)
-            .await
-            .unwrap();
+        let (blob, _, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Initialize blob with data of sufficient length first
         blob.write_at(b"concurrent write".to_vec(), 0)
@@ -171,10 +153,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, _, _) = storage
-            .open("partition", b"large_blob", TEST_VERSIONS)
-            .await
-            .unwrap();
+        let (blob, _, _) = storage.open("partition", b"large_blob").await.unwrap();
 
         let large_data = vec![42u8; 10 * 1024 * 1024]; // 10 MB
         blob.write_at(large_data.clone(), 0).await.unwrap();
@@ -191,7 +170,7 @@ pub(crate) mod tests {
         S::Blob: Send + Sync,
     {
         let (blob, _, _) = storage
-            .open("test_overwrite_data", b"test_blob", TEST_VERSIONS)
+            .open("test_overwrite_data", b"test_blob")
             .await
             .unwrap();
 
@@ -218,7 +197,7 @@ pub(crate) mod tests {
         S::Blob: Send + Sync,
     {
         let (blob, _, _) = storage
-            .open("test_read_beyond_written_data", b"test_blob", TEST_VERSIONS)
+            .open("test_read_beyond_written_data", b"test_blob")
             .await
             .unwrap();
 
@@ -241,7 +220,7 @@ pub(crate) mod tests {
         S::Blob: Send + Sync,
     {
         let (blob, _, _) = storage
-            .open("test_write_at_large_offset", b"test_blob", TEST_VERSIONS)
+            .open("test_write_at_large_offset", b"test_blob")
             .await
             .unwrap();
 
@@ -266,7 +245,7 @@ pub(crate) mod tests {
         S::Blob: Send + Sync,
     {
         let (blob, _, _) = storage
-            .open("test_append_data", b"test_blob", TEST_VERSIONS)
+            .open("test_append_data", b"test_blob")
             .await
             .unwrap();
 
@@ -287,10 +266,7 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let (blob, _, _) = storage
-            .open("partition", b"test_blob", TEST_VERSIONS)
-            .await
-            .unwrap();
+        let (blob, _, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Write data at different offsets
         blob.write_at(b"first".to_vec(), 0).await.unwrap();
@@ -311,7 +287,7 @@ pub(crate) mod tests {
         S::Blob: Send + Sync,
     {
         let (blob, _, _) = storage
-            .open("test_large_data_in_chunks", b"large_blob", TEST_VERSIONS)
+            .open("test_large_data_in_chunks", b"large_blob")
             .await
             .unwrap();
 
@@ -341,7 +317,7 @@ pub(crate) mod tests {
         S::Blob: Send + Sync,
     {
         let (blob, _, _) = storage
-            .open("test_read_empty_blob", b"empty_blob", TEST_VERSIONS)
+            .open("test_read_empty_blob", b"empty_blob")
             .await
             .unwrap();
 
@@ -359,7 +335,7 @@ pub(crate) mod tests {
         S::Blob: Send + Sync,
     {
         let (blob, _, _) = storage
-            .open("test_overlapping_writes", b"test_blob", TEST_VERSIONS)
+            .open("test_overlapping_writes", b"test_blob")
             .await
             .unwrap();
 
@@ -383,7 +359,7 @@ pub(crate) mod tests {
     {
         {
             let (blob, _, _) = storage
-                .open("test_resize_then_open", b"test_blob", TEST_VERSIONS)
+                .open("test_resize_then_open", b"test_blob")
                 .await
                 .unwrap();
 
@@ -399,7 +375,7 @@ pub(crate) mod tests {
 
         // Reopen the blob
         let (blob, len, _) = storage
-            .open("test_resize_then_open", b"test_blob", TEST_VERSIONS)
+            .open("test_resize_then_open", b"test_blob")
             .await
             .unwrap();
         assert_eq!(len, 5, "Blob length after resize is incorrect");
@@ -425,7 +401,7 @@ pub(crate) mod tests {
         ] {
             assert!(
                 !matches!(
-                    storage.open(valid, b"blob", TEST_VERSIONS).await,
+                    storage.open(valid, b"blob").await,
                     Err(crate::Error::PartitionNameInvalid(_))
                 ),
                 "Valid partition name '{valid}' should be accepted by open"
@@ -456,7 +432,7 @@ pub(crate) mod tests {
         ] {
             assert!(
                 matches!(
-                    storage.open(invalid, b"blob", TEST_VERSIONS).await,
+                    storage.open(invalid, b"blob").await,
                     Err(crate::Error::PartitionNameInvalid(_))
                 ),
                 "Invalid partition name '{invalid}' should be rejected by open"

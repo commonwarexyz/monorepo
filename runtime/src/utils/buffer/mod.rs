@@ -18,19 +18,13 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_utils::NZUsize;
 
-    /// Default version range for tests
-    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
-
     #[test_traced]
     fn test_read_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test basic buffered reading functionality with sequential reads
             let data = b"Hello, world! This is a test.";
-            let (blob, size, _) = context
-                .open("partition", b"test", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
             blob.write_at(data.to_vec(), 0).await.unwrap();
             let size = data.len() as u64;
@@ -69,10 +63,7 @@ mod tests {
         executor.start(|context| async move {
             // Test reading data that spans multiple buffer refills
             let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-            let (blob, size, _) = context
-                .open("partition", b"test", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
             blob.write_at(data.to_vec(), 0).await.unwrap();
             let size = data.len() as u64;
@@ -105,10 +96,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-            let (blob, size, _) = context
-                .open("partition", b"test", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
             blob.write_at(data.to_vec(), 0).await.unwrap();
             let size = data.len() as u64;
@@ -142,10 +130,7 @@ mod tests {
         executor.start(|context| async move {
             // Test reader behavior with known blob size limits
             let data = b"This is a test with known size limitations.";
-            let (blob, size, _) = context
-                .open("partition", b"test", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
             blob.write_at(data.to_vec(), 0).await.unwrap();
             let size = data.len() as u64;
@@ -189,10 +174,7 @@ mod tests {
             // Test reading large amounts of data in chunks
             let data_size = 1024 * 256; // 256KB of data
             let data = vec![0x42; data_size];
-            let (blob, size, _) = context
-                .open("partition", b"test", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
             blob.write_at(data.clone(), 0).await.unwrap();
             let size = data.len() as u64;
@@ -240,10 +222,7 @@ mod tests {
             let data_size = buffer_size * 5 / 2; // 2.5 buffers
             let data = vec![0x37; data_size];
 
-            let (blob, size, _) = context
-                .open("partition", b"test", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
             blob.write_at(data.clone(), 0).await.unwrap();
             let size = data.len() as u64;
@@ -278,10 +257,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a memory blob with some test data
             let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-            let (blob, size, _) = context
-                .open("partition", b"test", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
             blob.write_at(data.to_vec(), 0).await.unwrap();
             let size = data.len() as u64;
@@ -333,10 +309,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a memory blob with longer data
             let data = vec![0x41; 1000]; // 1000 'A' characters
-            let (blob, size, _) = context
-                .open("partition", b"test", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
             blob.write_at(data.clone(), 0).await.unwrap();
             let size = data.len() as u64;
@@ -373,10 +346,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a memory blob with some test data
             let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-            let (blob, size, _) = context
-                .open("partition", b"test", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
             blob.write_at(data.to_vec(), 0).await.unwrap();
             let data_len = data.len() as u64;
@@ -389,10 +359,7 @@ mod tests {
             reader.resize(resize_len).await.unwrap();
 
             // Reopen to check truncation
-            let (blob, size, _) = context
-                .open("partition", b"test", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, resize_len, "Blob should be resized to half size");
 
             // Create a new buffer and read to verify truncation
@@ -415,10 +382,7 @@ mod tests {
             new_reader.resize(data_len * 2).await.unwrap();
 
             // Reopen to check resize
-            let (blob, new_size, _) = context
-                .open("partition", b"test", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, new_size, _) = context.open("partition", b"test").await.unwrap();
             assert_eq!(new_size, data_len * 2);
 
             // Create a new buffer and read to verify resize
@@ -443,10 +407,7 @@ mod tests {
             // Create a memory blob with some test data
             let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
             let data_len = data.len() as u64;
-            let (blob, size, _) = context
-                .open("partition", b"test", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
             blob.write_at(data.to_vec(), 0).await.unwrap();
 
@@ -457,10 +418,7 @@ mod tests {
             reader.resize(0).await.unwrap();
 
             // Reopen to check truncation
-            let (blob, size, _) = context
-                .open("partition", b"test", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0, "Blob should be resized to zero");
 
             // Create a new buffer and try to read (should fail)
@@ -478,10 +436,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test basic buffered write and sync functionality
-            let (blob, size, _) = context
-                .open("partition", b"write_basic", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"write_basic").await.unwrap();
             assert_eq!(size, 0);
 
             let writer = Write::new(blob.clone(), size, NZUsize!(8));
@@ -491,10 +446,7 @@ mod tests {
             assert_eq!(writer.size().await, 5);
 
             // Verify data was written correctly
-            let (blob, size, _) = context
-                .open("partition", b"write_basic", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"write_basic").await.unwrap();
             assert_eq!(size, 5);
             let mut reader = Read::new(blob, size, NZUsize!(8));
             let mut buf = [0u8; 5];
@@ -508,10 +460,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test writes that cause buffer flushes due to capacity limits
-            let (blob, size, _) = context
-                .open("partition", b"write_multi", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 0);
 
             let writer = Write::new(blob.clone(), size, NZUsize!(4));
@@ -522,10 +471,7 @@ mod tests {
             writer.sync().await.unwrap();
 
             // Verify the final result
-            let (blob, size, _) = context
-                .open("partition", b"write_multi", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 7);
             let mut reader = Read::new(blob, size, NZUsize!(4));
             let mut buf = [0u8; 7];
@@ -539,10 +485,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test writing data larger than buffer capacity (direct write)
-            let (blob, size, _) = context
-                .open("partition", b"write_large", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"write_large").await.unwrap();
             assert_eq!(size, 0);
 
             let writer = Write::new(blob.clone(), size, NZUsize!(4));
@@ -557,10 +500,7 @@ mod tests {
             assert_eq!(writer.size().await, 26);
 
             // Verify the complete data
-            let (blob, size, _) = context
-                .open("partition", b"write_large", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"write_large").await.unwrap();
             assert_eq!(size, 26);
             let mut reader = Read::new(blob, size, NZUsize!(4));
             let mut buf = [0u8; 26];
@@ -574,10 +514,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test sequential appends that exceed buffer capacity
-            let (blob, size, _) = context
-                .open("partition", b"append_buf", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"append_buf").await.unwrap();
             let writer = Write::new(blob.clone(), size, NZUsize!(10));
 
             // Write data that fits in buffer
@@ -590,10 +527,7 @@ mod tests {
             assert_eq!(writer.size().await, 11);
 
             // Verify the complete result
-            let (blob, size, _) = context
-                .open("partition", b"append_buf", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"append_buf").await.unwrap();
             assert_eq!(size, 11);
             let mut reader = Read::new(blob, size, NZUsize!(10));
             let mut buf = vec![0u8; 11];
@@ -607,10 +541,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test overwriting data within the buffer and extending it
-            let (blob, size, _) = context
-                .open("partition", b"middle_buf", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"middle_buf").await.unwrap();
             let writer = Write::new(blob.clone(), size, NZUsize!(20));
 
             // Initial write
@@ -623,10 +554,7 @@ mod tests {
             writer.sync().await.unwrap();
 
             // Verify overwrite result
-            let (blob, size, _) = context
-                .open("partition", b"middle_buf", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"middle_buf").await.unwrap();
             assert_eq!(size, 10);
             let mut reader = Read::new(blob, size, NZUsize!(10));
             let mut buf = vec![0u8; 10];
@@ -641,10 +569,7 @@ mod tests {
             writer.sync().await.unwrap();
 
             // Verify final result
-            let (blob, size, _) = context
-                .open("partition", b"middle_buf", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"middle_buf").await.unwrap();
             assert_eq!(size, 20);
             let mut reader = Read::new(blob, size, NZUsize!(20));
             let mut buf = vec![0u8; 20];
@@ -658,10 +583,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test writing at offsets before the current buffer position
-            let (blob, size, _) = context
-                .open("partition", b"before_buf", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"before_buf").await.unwrap();
             let writer = Write::new(blob.clone(), size, NZUsize!(10));
 
             // Write data at a later offset first
@@ -674,10 +596,7 @@ mod tests {
             writer.sync().await.unwrap();
 
             // Verify data placement with gap
-            let (blob, size, _) = context
-                .open("partition", b"before_buf", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"before_buf").await.unwrap();
             assert_eq!(size, 20);
             let mut reader = Read::new(blob, size, NZUsize!(20));
             let mut buf = vec![0u8; 20];
@@ -694,10 +613,7 @@ mod tests {
             assert_eq!(writer.size().await, 20);
 
             // Verify gap is filled
-            let (blob, size, _) = context
-                .open("partition", b"before_buf", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"before_buf").await.unwrap();
             assert_eq!(size, 20);
             let mut reader = Read::new(blob, size, NZUsize!(20));
             let mut buf = vec![0u8; 20];
@@ -712,10 +628,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test blob resize functionality and subsequent writes
-            let (blob, size, _) = context
-                .open("partition", b"resize_write", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"resize_write").await.unwrap();
             let writer = Write::new(blob, size, NZUsize!(10));
 
             // Write initial data
@@ -724,10 +637,8 @@ mod tests {
             writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 11);
 
-            let (blob_check, size_check, _) = context
-                .open("partition", b"resize_write", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob_check, size_check, _) =
+                context.open("partition", b"resize_write").await.unwrap();
             assert_eq!(size_check, 11);
             drop(blob_check);
 
@@ -737,10 +648,7 @@ mod tests {
             writer.sync().await.unwrap();
 
             // Verify resize
-            let (blob, size, _) = context
-                .open("partition", b"resize_write", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"resize_write").await.unwrap();
             assert_eq!(size, 5);
             let mut reader = Read::new(blob, size, NZUsize!(5));
             let mut buf = vec![0u8; 5];
@@ -753,10 +661,7 @@ mod tests {
             writer.sync().await.unwrap();
 
             // Verify overwrite
-            let (blob, size, _) = context
-                .open("partition", b"resize_write", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"resize_write").await.unwrap();
             assert_eq!(size, 5);
             let mut reader = Read::new(blob, size, NZUsize!(5));
             let mut buf = vec![0u8; 5];
@@ -769,10 +674,7 @@ mod tests {
             writer.sync().await.unwrap();
 
             // Verify resize
-            let (blob, size, _) = context
-                .open("partition", b"resize_write", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"resize_write").await.unwrap();
             assert_eq!(size, 10);
             let mut reader = Read::new(blob, size, NZUsize!(10));
             let mut buf = vec![0u8; 10];
@@ -781,10 +683,7 @@ mod tests {
             assert_eq!(&buf[5..10], [0u8; 5]);
 
             // Test resize to zero
-            let (blob_zero, size, _) = context
-                .open("partition", b"resize_zero", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob_zero, size, _) = context.open("partition", b"resize_zero").await.unwrap();
             let writer_zero = Write::new(blob_zero.clone(), size, NZUsize!(10));
             writer_zero
                 .write_at(b"some data".to_vec(), 0)
@@ -799,10 +698,7 @@ mod tests {
             assert_eq!(writer_zero.size().await, 0);
 
             // Ensure the blob is empty
-            let (_, size_z, _) = context
-                .open("partition", b"resize_zero", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (_, size_z, _) = context.open("partition", b"resize_zero").await.unwrap();
             assert_eq!(size_z, 0);
         });
     }
@@ -812,10 +708,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test reading through writer's read_at method (buffer + blob reads)
-            let (blob, size, _) = context
-                .open("partition", b"read_at_writer", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"read_at_writer").await.unwrap();
             let writer = Write::new(blob.clone(), size, NZUsize!(10));
 
             // Write data that stays in buffer
@@ -866,10 +759,8 @@ mod tests {
             // Verify complete content by reopening
             writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 30);
-            let (final_blob, final_size, _) = context
-                .open("partition", b"read_at_writer", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (final_blob, final_size, _) =
+                context.open("partition", b"read_at_writer").await.unwrap();
             assert_eq!(final_size, 30);
             let mut final_reader = Read::new(final_blob, final_size, NZUsize!(30));
             let mut full_content = vec![0u8; 30];
@@ -886,10 +777,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test writes that cannot be merged into buffer (non-contiguous/too large)
-            let (blob, size, _) = context
-                .open("partition", b"write_straddle", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"write_straddle").await.unwrap();
             let writer = Write::new(blob.clone(), size, NZUsize!(10));
 
             // Fill buffer completely
@@ -903,10 +791,8 @@ mod tests {
             assert_eq!(writer.size().await, 18);
 
             // Verify data with gap
-            let (blob_check, size_check, _) = context
-                .open("partition", b"write_straddle", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob_check, size_check, _) =
+                context.open("partition", b"write_straddle").await.unwrap();
             assert_eq!(size_check, 18);
             let mut reader = Read::new(blob_check, size_check, NZUsize!(20));
             let mut buf = vec![0u8; 18];
@@ -918,10 +804,7 @@ mod tests {
             assert_eq!(buf, expected);
 
             // Test write that exceeds buffer capacity
-            let (blob2, size, _) = context
-                .open("partition", b"write_straddle2", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob2, size, _) = context.open("partition", b"write_straddle2").await.unwrap();
             let writer2 = Write::new(blob2.clone(), size, NZUsize!(10));
             writer2.write_at(b"0123456789".to_vec(), 0).await.unwrap();
             assert_eq!(writer2.size().await, 10);
@@ -933,10 +816,8 @@ mod tests {
             assert_eq!(writer2.size().await, 17);
 
             // Verify overwrite result
-            let (blob_check2, size_check2, _) = context
-                .open("partition", b"write_straddle2", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob_check2, size_check2, _) =
+                context.open("partition", b"write_straddle2").await.unwrap();
             assert_eq!(size_check2, 17);
             let mut reader2 = Read::new(blob_check2, size_check2, NZUsize!(20));
             let mut buf2 = vec![0u8; 17];
@@ -950,10 +831,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test that closing writer flushes and persists buffered data
-            let (blob_orig, size, _) = context
-                .open("partition", b"write_close", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob_orig, size, _) = context.open("partition", b"write_close").await.unwrap();
             let writer = Write::new(blob_orig.clone(), size, NZUsize!(8));
             writer.write_at(b"pending".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 7);
@@ -962,10 +840,8 @@ mod tests {
             writer.sync().await.unwrap();
 
             // Verify data persistence
-            let (blob_check, size_check, _) = context
-                .open("partition", b"write_close", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob_check, size_check, _) =
+                context.open("partition", b"write_close").await.unwrap();
             assert_eq!(size_check, 7);
             let mut reader = Read::new(blob_check, size_check, NZUsize!(8));
             let mut buf = [0u8; 7];
@@ -980,7 +856,7 @@ mod tests {
         executor.start(|context| async move {
             // Test direct writes when data exceeds buffer capacity
             let (blob, size, _) = context
-                .open("partition", b"write_direct_size", TEST_VERSIONS)
+                .open("partition", b"write_direct_size")
                 .await
                 .unwrap();
             let writer = Write::new(blob.clone(), size, NZUsize!(5));
@@ -995,7 +871,7 @@ mod tests {
 
             // Verify direct write worked
             let (blob_check, size_check, _) = context
-                .open("partition", b"write_direct_size", TEST_VERSIONS)
+                .open("partition", b"write_direct_size")
                 .await
                 .unwrap();
             assert_eq!(size_check, 10);
@@ -1017,7 +893,7 @@ mod tests {
 
             // Verify final state
             let (blob_check2, size_check2, _) = context
-                .open("partition", b"write_direct_size", TEST_VERSIONS)
+                .open("partition", b"write_direct_size")
                 .await
                 .unwrap();
             assert_eq!(size_check2, 13);
@@ -1034,7 +910,7 @@ mod tests {
         executor.start(|context| async move {
             // Test complex buffer operations: overwrite and extend within capacity
             let (blob, size, _) = context
-                .open("partition", b"overwrite_extend_buf", TEST_VERSIONS)
+                .open("partition", b"overwrite_extend_buf")
                 .await
                 .unwrap();
             let writer = Write::new(blob.clone(), size, NZUsize!(15));
@@ -1056,7 +932,7 @@ mod tests {
 
             // Verify persisted result
             let (blob_check, size_check, _) = context
-                .open("partition", b"overwrite_extend_buf", TEST_VERSIONS)
+                .open("partition", b"overwrite_extend_buf")
                 .await
                 .unwrap();
             assert_eq!(size_check, 15);
@@ -1072,10 +948,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test writing at the current logical end of the blob
-            let (blob, size, _) = context
-                .open("partition", b"write_end", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob, size, _) = context.open("partition", b"write_end").await.unwrap();
             let writer = Write::new(blob.clone(), size, NZUsize!(20));
 
             // Write initial data
@@ -1092,10 +965,8 @@ mod tests {
             writer.sync().await.unwrap();
 
             // Verify complete result
-            let (blob_check, size_check, _) = context
-                .open("partition", b"write_end", TEST_VERSIONS)
-                .await
-                .unwrap();
+            let (blob_check, size_check, _) =
+                context.open("partition", b"write_end").await.unwrap();
             assert_eq!(size_check, 13);
             let mut reader = Read::new(blob_check, size_check, NZUsize!(13));
             let mut buf = vec![0u8; 13];
@@ -1110,11 +981,7 @@ mod tests {
         executor.start(|context| async move {
             // Test multiple appends using writer.size()
             let (blob, size, _) = context
-                .open(
-                    "partition",
-                    b"write_multiple_appends_at_size",
-                    TEST_VERSIONS,
-                )
+                .open("partition", b"write_multiple_appends_at_size")
                 .await
                 .unwrap();
             let writer = Write::new(blob.clone(), size, NZUsize!(5)); // Small buffer
@@ -1145,11 +1012,7 @@ mod tests {
 
             // Verify final content
             let (blob_check, size_check, _) = context
-                .open(
-                    "partition",
-                    b"write_multiple_appends_at_size",
-                    TEST_VERSIONS,
-                )
+                .open("partition", b"write_multiple_appends_at_size")
                 .await
                 .unwrap();
             assert_eq!(size_check, 9);
@@ -1166,11 +1029,7 @@ mod tests {
         executor.start(|context| async move {
             // Test writing non-contiguously, then appending at the new size
             let (blob, size, _) = context
-                .open(
-                    "partition",
-                    b"write_non_contiguous_then_append",
-                    TEST_VERSIONS,
-                )
+                .open("partition", b"write_non_contiguous_then_append")
                 .await
                 .unwrap();
             let writer = Write::new(blob.clone(), size, NZUsize!(10));
@@ -1197,11 +1056,7 @@ mod tests {
 
             // Verify final content
             let (blob_check, size_check, _) = context
-                .open(
-                    "partition",
-                    b"write_non_contiguous_then_append",
-                    TEST_VERSIONS,
-                )
+                .open("partition", b"write_non_contiguous_then_append")
                 .await
                 .unwrap();
             assert_eq!(size_check, 35);
@@ -1223,7 +1078,7 @@ mod tests {
         executor.start(|context| async move {
             // Test truncating, then appending at the new size
             let (blob, size, _) = context
-                .open("partition", b"resize_then_append_at_size", TEST_VERSIONS)
+                .open("partition", b"resize_then_append_at_size")
                 .await
                 .unwrap();
             let writer = Write::new(blob.clone(), size, NZUsize!(10));
@@ -1258,7 +1113,7 @@ mod tests {
 
             // Verify final content
             let (blob_check, size_check, _) = context
-                .open("partition", b"resize_then_append_at_size", TEST_VERSIONS)
+                .open("partition", b"resize_then_append_at_size")
                 .await
                 .unwrap();
             assert_eq!(size_check, 10);

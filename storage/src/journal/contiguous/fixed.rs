@@ -80,9 +80,6 @@ use std::{
 };
 use tracing::{debug, trace, warn};
 
-/// Current version of the fixed journal blob format.
-pub(crate) const BLOB_VERSION: std::ops::RangeInclusive<u16> = 0..=0;
-
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
 pub struct Config {
@@ -164,7 +161,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         };
         for name in stored_blobs {
             let (blob, size, _) = context
-                .open(&cfg.partition, &name, BLOB_VERSION)
+                .open(&cfg.partition, &name)
                 .await
                 .map_err(Error::Runtime)?;
             let index = match name.try_into() {
@@ -193,9 +190,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
             }
         } else {
             debug!("no blobs found");
-            let (blob, size, _) = context
-                .open(&cfg.partition, &0u64.to_be_bytes(), BLOB_VERSION)
-                .await?;
+            let (blob, size, _) = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
             assert_eq!(size, 0);
             blobs.insert(0, (blob, size));
         }
@@ -228,7 +223,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
             blobs.insert(tail_index, (tail, tail_size));
             tail_index += 1;
             (tail, tail_size, _) = context
-                .open(&cfg.partition, &tail_index.to_be_bytes(), BLOB_VERSION)
+                .open(&cfg.partition, &tail_index.to_be_bytes())
                 .await?;
             assert_eq!(tail_size, 0);
             tracked.inc();
@@ -362,11 +357,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
             debug!(blob = next_blob_index, "creating next blob");
             let (next_blob, size, _) = self
                 .context
-                .open(
-                    &self.cfg.partition,
-                    &next_blob_index.to_be_bytes(),
-                    BLOB_VERSION,
-                )
+                .open(&self.cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
             assert_eq!(size, 0);
             let next_blob = Append::new(
@@ -730,8 +721,6 @@ mod tests {
         }
     }
 
-    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
-
     #[test_traced]
     fn test_fixed_journal_append_and_prune() {
         // Initialize the deterministic context
@@ -983,7 +972,7 @@ mod tests {
             let checksum_offset = Digest::SIZE as u64
                 + (ITEMS_PER_BLOB.get() / 2) * (Digest::SIZE + u32::SIZE) as u64;
             let (blob, _, _) = context
-                .open(&cfg.partition, &40u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             // Write incorrect checksum
@@ -1063,7 +1052,7 @@ mod tests {
 
             // Manually truncate a non-tail blob to make sure it's detected during initialization.
             let (blob, size, _) = context
-                .open(&cfg.partition, &40u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
@@ -1112,7 +1101,7 @@ mod tests {
             // Truncate the tail blob by one byte, which should result in the 3rd item being
             // trimmed.
             let (blob, size, _) = context
-                .open(&cfg.partition, &1u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
@@ -1136,7 +1125,7 @@ mod tests {
 
             // Corrupt the last item, ensuring last blob is trimmed to empty state.
             let (blob, size, _) = context
-                .open(&cfg.partition, &1u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
@@ -1248,7 +1237,7 @@ mod tests {
 
             // Manually truncate most recent blob to simulate a partial write.
             let (blob, size, _) = context
-                .open(&cfg.partition, &1u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             // truncate the most recent blob by 1 byte which corrupts the most recent item
@@ -1306,7 +1295,7 @@ mod tests {
 
             // Manually truncate most recent blob to simulate a partial write.
             let (blob, size, _) = context
-                .open(&cfg.partition, &0u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             // Truncate the most recent blob by 1 byte which corrupts the one appended item
@@ -1356,7 +1345,7 @@ mod tests {
             // simulate a failure where the file was extended, but no bytes were written due to
             // failure.
             let (blob, size, _) = context
-                .open(&cfg.partition, &0u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.write_at(vec![0u8; Digest::SIZE * 3 - 1], size)
@@ -1531,7 +1520,7 @@ mod tests {
 
             // Hash blob contents
             let (blob, size, _) = context
-                .open(&cfg.partition, &0u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             assert!(size > 0);
@@ -1546,7 +1535,7 @@ mod tests {
             );
             blob.sync().await.expect("Failed to sync blob");
             let (blob, size, _) = context
-                .open(&cfg.partition, &1u64.to_be_bytes(), TEST_VERSIONS)
+                .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             assert!(size > 0);

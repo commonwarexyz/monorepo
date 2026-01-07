@@ -545,6 +545,20 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// The readable/writeable storage buffer that can be opened by this Storage.
     type Blob: Blob;
 
+    /// [Storage::open_versioned] with [Header::DEFAULT_APPLICATION_VERSION] as the only value
+    /// in the version range.
+    fn open(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send {
+        self.open_versioned(
+            partition,
+            name,
+            Header::DEFAULT_APPLICATION_VERSION..=Header::DEFAULT_APPLICATION_VERSION,
+        )
+    }
+
     /// Open an existing blob in a given partition or create a new one, returning
     /// the blob and its length.
     ///
@@ -565,7 +579,7 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// # Returns
     ///
     /// A tuple of (blob, logical_size, application_version).
-    fn open(
+    fn open_versioned(
         &self,
         partition: &str,
         name: &[u8],
@@ -618,6 +632,9 @@ impl Header {
 
     /// The current version of the header format.
     pub const HEADER_VERSION: u16 = 0;
+
+    /// Default application version used in [Storage::open].
+    pub const DEFAULT_APPLICATION_VERSION: u16 = 0;
 
     /// Creates a new header with the given application version.
     pub const fn new(app_version: u16) -> Self {
@@ -745,20 +762,23 @@ mod tests {
     use tracing::{error, Level};
     use utils::reschedule;
 
-    /// Default version range for tests
-    const TEST_VERSIONS: std::ops::RangeInclusive<u16> = 0..=0;
-
     #[test]
     fn test_header_fields() {
-        let header = Header::new(*TEST_VERSIONS.end());
+        let header = Header::new(Header::DEFAULT_APPLICATION_VERSION);
         assert_eq!(header.header_version, Header::HEADER_VERSION);
-        assert_eq!(header.application_version, *TEST_VERSIONS.end());
+        assert_eq!(
+            header.application_version,
+            Header::DEFAULT_APPLICATION_VERSION
+        );
 
         // Verify byte serialization
         let bytes = header.to_bytes();
         assert_eq!(&bytes[..4], &Header::MAGIC);
         assert_eq!(&bytes[4..6], &Header::HEADER_VERSION.to_be_bytes());
-        assert_eq!(&bytes[6..8], &TEST_VERSIONS.end().to_be_bytes());
+        assert_eq!(
+            &bytes[6..8],
+            &Header::DEFAULT_APPLICATION_VERSION.to_be_bytes()
+        );
 
         // Verify round-trip
         let parsed = Header::from_bytes(bytes);
@@ -767,14 +787,17 @@ mod tests {
 
     #[test]
     fn test_header_validate_success() {
-        let header = Header::new(*TEST_VERSIONS.end());
-        assert!(header.validate(&TEST_VERSIONS).is_ok());
+        let header = Header::new(Header::DEFAULT_APPLICATION_VERSION);
+        assert!(header
+            .validate(&(Header::DEFAULT_APPLICATION_VERSION..=Header::DEFAULT_APPLICATION_VERSION))
+            .is_ok());
     }
 
     #[test]
     fn test_header_validate_magic_wrong_bytes() {
         let header = Header::from_bytes([0u8; Header::SIZE]);
-        let result = header.validate(&TEST_VERSIONS);
+        let result = header
+            .validate(&(Header::DEFAULT_APPLICATION_VERSION..=Header::DEFAULT_APPLICATION_VERSION));
         match result {
             Err(Error::BlobMagicMismatch { found }) => {
                 assert_eq!(found, [0u8; 4]);
@@ -782,10 +805,11 @@ mod tests {
             _ => panic!("expected BlobMagicMismatch error"),
         }
 
-        let mut bytes = Header::new(*TEST_VERSIONS.end()).to_bytes();
+        let mut bytes = Header::new(Header::DEFAULT_APPLICATION_VERSION).to_bytes();
         bytes[0] = b'X'; // Corrupt first byte
         let header = Header::from_bytes(bytes);
-        let result = header.validate(&TEST_VERSIONS);
+        let result = header
+            .validate(&(Header::DEFAULT_APPLICATION_VERSION..=Header::DEFAULT_APPLICATION_VERSION));
         match result {
             Err(Error::BlobMagicMismatch { found }) => {
                 assert_eq!(found[0], b'X');
@@ -1126,15 +1150,11 @@ mod tests {
 
             // Open a new blob and verify returned version
             let (blob, size, app_version) = context
-                .open(partition, name, TEST_VERSIONS)
+                .open(partition, name)
                 .await
                 .expect("Failed to open blob");
             assert_eq!(size, 0, "new blob should have size 0");
-            assert_eq!(
-                app_version,
-                *TEST_VERSIONS.end(),
-                "new blob should have app version from end of range"
-            );
+            assert_eq!(app_version, Header::DEFAULT_APPLICATION_VERSION);
 
             // Write data to the blob
             let data = b"Hello, Storage!";
@@ -1164,13 +1184,13 @@ mod tests {
 
             // Reopen the blob and verify version persists
             let (blob, len, app_version) = context
-                .open(partition, name, TEST_VERSIONS)
+                .open(partition, name)
                 .await
                 .expect("Failed to reopen blob");
             assert_eq!(len, data.len() as u64);
             assert_eq!(
                 app_version,
-                *TEST_VERSIONS.end(),
+                Header::DEFAULT_APPLICATION_VERSION,
                 "reopened blob should have same app version"
             );
 
@@ -1219,7 +1239,7 @@ mod tests {
 
             // Open a new blob
             let (blob, _, _) = context
-                .open(partition, name, TEST_VERSIONS)
+                .open(partition, name)
                 .await
                 .expect("Failed to open blob");
 
@@ -1275,7 +1295,7 @@ mod tests {
 
             // Open and write to a new blob
             let (blob, _, _) = context
-                .open(partition, name, TEST_VERSIONS)
+                .open(partition, name)
                 .await
                 .expect("Failed to open blob");
 
@@ -1286,7 +1306,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after write");
 
             // Re-open and check length
-            let (blob, len, _) = context.open(partition, name, TEST_VERSIONS).await.unwrap();
+            let (blob, len, _) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
 
             // Resize to extend the file
@@ -1297,7 +1317,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after resize");
 
             // Re-open and check length again
-            let (blob, len, _) = context.open(partition, name, TEST_VERSIONS).await.unwrap();
+            let (blob, len, _) = context.open(partition, name).await.unwrap();
             assert_eq!(len, new_len);
 
             // Read original data
@@ -1316,7 +1336,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // Reopen to check truncation
-            let (blob, size, _) = context.open(partition, name, TEST_VERSIONS).await.unwrap();
+            let (blob, size, _) = context.open(partition, name).await.unwrap();
             assert_eq!(size, data.len() as u64);
 
             // Read truncated data
@@ -1339,7 +1359,7 @@ mod tests {
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
                 let (blob, _, _) = context
-                    .open(partition, name, TEST_VERSIONS)
+                    .open(partition, name)
                     .await
                     .expect("Failed to open blob");
 
@@ -1358,7 +1378,7 @@ mod tests {
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
                 let (blob, len, _) = context
-                    .open(partition, name, TEST_VERSIONS)
+                    .open(partition, name)
                     .await
                     .expect("Failed to open blob");
                 assert_eq!(len, (data1.len() + data2.len() + additional) as u64);
@@ -1384,7 +1404,7 @@ mod tests {
 
             // Open a new blob
             let (blob, _, _) = context
-                .open(partition, name, TEST_VERSIONS)
+                .open(partition, name)
                 .await
                 .expect("Failed to open blob");
 
@@ -1414,7 +1434,7 @@ mod tests {
 
             // Open a new blob
             let (blob, _, _) = context
-                .open(partition, name, TEST_VERSIONS)
+                .open(partition, name)
                 .await
                 .expect("Failed to open blob");
 
