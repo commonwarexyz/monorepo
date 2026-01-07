@@ -81,9 +81,9 @@ impl<'a, D: Digest> certificate::Subject for Subject<'a, D> {
 
     fn message(&self) -> Bytes {
         match self {
-            Self::Notarize { proposal } => proposal.encode().freeze(),
-            Self::Nullify { round } => round.encode().freeze(),
-            Self::Finalize { proposal } => proposal.encode().freeze(),
+            Self::Notarize { proposal } => proposal.encode(),
+            Self::Nullify { round } => round.encode(),
+            Self::Finalize { proposal } => proposal.encode(),
         }
     }
 }

@@ -79,7 +79,7 @@ where
                     };
                     debug!(%view, "notarizing old proposal");
                     let n = Notarize::<S, _>::sign(&self.scheme, proposal.clone()).unwrap();
-                    let msg = Vote::Notarize(n).encode().into();
+                    let msg = Vote::Notarize(n).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Vote::Finalize(finalize) => {
@@ -93,7 +93,7 @@ where
                     };
                     debug!(%view, "finalizing old proposal");
                     let f = Finalize::<S, _>::sign(&self.scheme, proposal.clone()).unwrap();
-                    let msg = Vote::Finalize(f).encode().into();
+                    let msg = Vote::Finalize(f).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,

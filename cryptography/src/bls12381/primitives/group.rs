@@ -37,6 +37,7 @@ use commonware_codec::{
 use commonware_math::algebra::{
     Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
 };
+use commonware_parallel::Strategy;
 use commonware_utils::hex;
 use core::{
     fmt::{Debug, Display, Formatter},
@@ -769,7 +770,7 @@ impl Space<Scalar> for G1 {
     ///
     /// Filters out pairs where the point is the identity element (infinity).
     /// Returns an error if the lengths of the input slices mismatch.
-    fn msm(points: &[Self], scalars: &[Scalar], _concurrency: usize) -> Self {
+    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
         // Assert input validity
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
 
@@ -1053,7 +1054,7 @@ impl Space<Scalar> for G2 {
     ///
     /// Filters out pairs where the point is the identity element (infinity).
     /// Returns an error if the lengths of the input slices mismatch.
-    fn msm(points: &[Self], scalars: &[Scalar], _concurrency: usize) -> Self {
+    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
         // Assert input validity
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
 
@@ -1147,8 +1148,9 @@ mod tests {
     use crate::bls12381::primitives::group::Scalar;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::{test_suites, Random};
+    use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
-    use proptest::prelude::*;
+    use proptest::{prelude::*, strategy::Strategy};
     use std::collections::{BTreeSet, HashMap};
 
     impl Arbitrary for Scalar {
@@ -1282,14 +1284,14 @@ mod tests {
             .collect();
         let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
         let expected_g1 = naive_msm(&points_g1, &scalars);
-        let result_g1 = G1::msm(&points_g1, &scalars, 1);
+        let result_g1 = G1::msm(&points_g1, &scalars, &Sequential);
         assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
 
         // Case 2: Include identity point
         let mut points_with_zero_g1 = points_g1.clone();
         points_with_zero_g1[n / 2] = G1::zero();
         let expected_zero_pt_g1 = naive_msm(&points_with_zero_g1, &scalars);
-        let result_zero_pt_g1 = G1::msm(&points_with_zero_g1, &scalars, 1);
+        let result_zero_pt_g1 = G1::msm(&points_with_zero_g1, &scalars, &Sequential);
         assert_eq!(
             expected_zero_pt_g1, result_zero_pt_g1,
             "G1 MSM with identity point failed"
@@ -1299,7 +1301,7 @@ mod tests {
         let mut scalars_with_zero = scalars.clone();
         scalars_with_zero[n / 2] = Scalar::zero();
         let expected_zero_sc_g1 = naive_msm(&points_g1, &scalars_with_zero);
-        let result_zero_sc_g1 = G1::msm(&points_g1, &scalars_with_zero, 1);
+        let result_zero_sc_g1 = G1::msm(&points_g1, &scalars_with_zero, &Sequential);
         assert_eq!(
             expected_zero_sc_g1, result_zero_sc_g1,
             "G1 MSM with zero scalar failed"
@@ -1308,7 +1310,7 @@ mod tests {
         // Case 4: All points identity
         let zero_points_g1 = vec![G1::zero(); n];
         let expected_all_zero_pt_g1 = naive_msm(&zero_points_g1, &scalars);
-        let result_all_zero_pt_g1 = G1::msm(&zero_points_g1, &scalars, 1);
+        let result_all_zero_pt_g1 = G1::msm(&zero_points_g1, &scalars, &Sequential);
         assert_eq!(
             expected_all_zero_pt_g1,
             G1::zero(),
@@ -1323,7 +1325,7 @@ mod tests {
         // Case 5: All scalars zero
         let zero_scalars = vec![Scalar::zero(); n];
         let expected_all_zero_sc_g1 = naive_msm(&points_g1, &zero_scalars);
-        let result_all_zero_sc_g1 = G1::msm(&points_g1, &zero_scalars, 1);
+        let result_all_zero_sc_g1 = G1::msm(&points_g1, &zero_scalars, &Sequential);
         assert_eq!(
             expected_all_zero_sc_g1,
             G1::zero(),
@@ -1339,7 +1341,7 @@ mod tests {
         let single_point_g1 = [points_g1[0]];
         let single_scalar = [scalars[0].clone()];
         let expected_single_g1 = naive_msm(&single_point_g1, &single_scalar);
-        let result_single_g1 = G1::msm(&single_point_g1, &single_scalar, 1);
+        let result_single_g1 = G1::msm(&single_point_g1, &single_scalar, &Sequential);
         assert_eq!(
             expected_single_g1, result_single_g1,
             "G1 MSM single element failed"
@@ -1349,7 +1351,7 @@ mod tests {
         let empty_points_g1: [G1; 0] = [];
         let empty_scalars: [Scalar; 0] = [];
         let expected_empty_g1 = naive_msm(&empty_points_g1, &empty_scalars);
-        let result_empty_g1 = G1::msm(&empty_points_g1, &empty_scalars, 1);
+        let result_empty_g1 = G1::msm(&empty_points_g1, &empty_scalars, &Sequential);
         assert_eq!(expected_empty_g1, G1::zero(), "G1 MSM empty (naive) failed");
         assert_eq!(result_empty_g1, G1::zero(), "G1 MSM empty failed");
 
@@ -1359,7 +1361,7 @@ mod tests {
             .collect();
         let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::random(&mut rng)).collect();
         let expected_g1 = naive_msm(&points_g1, &scalars);
-        let result_g1 = G1::msm(&points_g1, &scalars, 1);
+        let result_g1 = G1::msm(&points_g1, &scalars, &Sequential);
         assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
     }
 
@@ -1374,14 +1376,14 @@ mod tests {
             .collect();
         let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
         let expected_g2 = naive_msm(&points_g2, &scalars);
-        let result_g2 = G2::msm(&points_g2, &scalars, 1);
+        let result_g2 = G2::msm(&points_g2, &scalars, &Sequential);
         assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
 
         // Case 2: Include identity point
         let mut points_with_zero_g2 = points_g2.clone();
         points_with_zero_g2[n / 2] = G2::zero();
         let expected_zero_pt_g2 = naive_msm(&points_with_zero_g2, &scalars);
-        let result_zero_pt_g2 = G2::msm(&points_with_zero_g2, &scalars, 1);
+        let result_zero_pt_g2 = G2::msm(&points_with_zero_g2, &scalars, &Sequential);
         assert_eq!(
             expected_zero_pt_g2, result_zero_pt_g2,
             "G2 MSM with identity point failed"
@@ -1391,7 +1393,7 @@ mod tests {
         let mut scalars_with_zero = scalars.clone();
         scalars_with_zero[n / 2] = Scalar::zero();
         let expected_zero_sc_g2 = naive_msm(&points_g2, &scalars_with_zero);
-        let result_zero_sc_g2 = G2::msm(&points_g2, &scalars_with_zero, 1);
+        let result_zero_sc_g2 = G2::msm(&points_g2, &scalars_with_zero, &Sequential);
         assert_eq!(
             expected_zero_sc_g2, result_zero_sc_g2,
             "G2 MSM with zero scalar failed"
@@ -1400,7 +1402,7 @@ mod tests {
         // Case 4: All points identity
         let zero_points_g2 = vec![G2::zero(); n];
         let expected_all_zero_pt_g2 = naive_msm(&zero_points_g2, &scalars);
-        let result_all_zero_pt_g2 = G2::msm(&zero_points_g2, &scalars, 1);
+        let result_all_zero_pt_g2 = G2::msm(&zero_points_g2, &scalars, &Sequential);
         assert_eq!(
             expected_all_zero_pt_g2,
             G2::zero(),
@@ -1415,7 +1417,7 @@ mod tests {
         // Case 5: All scalars zero
         let zero_scalars = vec![Scalar::zero(); n];
         let expected_all_zero_sc_g2 = naive_msm(&points_g2, &zero_scalars);
-        let result_all_zero_sc_g2 = G2::msm(&points_g2, &zero_scalars, 1);
+        let result_all_zero_sc_g2 = G2::msm(&points_g2, &zero_scalars, &Sequential);
         assert_eq!(
             expected_all_zero_sc_g2,
             G2::zero(),
@@ -1431,7 +1433,7 @@ mod tests {
         let single_point_g2 = [points_g2[0]];
         let single_scalar = [scalars[0].clone()];
         let expected_single_g2 = naive_msm(&single_point_g2, &single_scalar);
-        let result_single_g2 = G2::msm(&single_point_g2, &single_scalar, 1);
+        let result_single_g2 = G2::msm(&single_point_g2, &single_scalar, &Sequential);
         assert_eq!(
             expected_single_g2, result_single_g2,
             "G2 MSM single element failed"
@@ -1441,7 +1443,7 @@ mod tests {
         let empty_points_g2: [G2; 0] = [];
         let empty_scalars: [Scalar; 0] = [];
         let expected_empty_g2 = naive_msm(&empty_points_g2, &empty_scalars);
-        let result_empty_g2 = G2::msm(&empty_points_g2, &empty_scalars, 1);
+        let result_empty_g2 = G2::msm(&empty_points_g2, &empty_scalars, &Sequential);
         assert_eq!(expected_empty_g2, G2::zero(), "G2 MSM empty (naive) failed");
         assert_eq!(result_empty_g2, G2::zero(), "G2 MSM empty failed");
 
@@ -1451,7 +1453,7 @@ mod tests {
             .collect();
         let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::random(&mut rng)).collect();
         let expected_g2 = naive_msm(&points_g2, &scalars);
-        let result_g2 = G2::msm(&points_g2, &scalars, 1);
+        let result_g2 = G2::msm(&points_g2, &scalars, &Sequential);
         assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
     }
 

@@ -12,6 +12,7 @@ members = [
     "macros",
     "math",
     "p2p",
+    "parallel",
     "resolver",
     "runtime",
     "storage",
@@ -45,6 +46,7 @@ version = "0.0.64"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
+rust-version = "1.91.1"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)'] }
@@ -89,6 +91,7 @@ commonware-deployer = { version = "0.0.64", path = "deployer", default-features 
 commonware-macros = { version = "0.0.64", path = "macros" }
 commonware-math = { version = "0.0.64", path = "math", default-features = false }
 commonware-p2p = { version = "0.0.64", path = "p2p" }
+commonware-parallel = { version = "0.0.64", path = "parallel", default-features = false }
 commonware-resolver = { version = "0.0.64", path = "resolver" }
 commonware-runtime = { version = "0.0.64", path = "runtime" }
 commonware-storage = { version = "0.0.64", path = "storage", default-features = false }

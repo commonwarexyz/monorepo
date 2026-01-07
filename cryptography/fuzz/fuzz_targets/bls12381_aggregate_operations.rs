@@ -6,7 +6,9 @@ use commonware_cryptography::bls12381::primitives::{
     ops::aggregate,
     variant::{MinPk, MinSig},
 };
+use commonware_parallel::{Rayon, Sequential};
 use libfuzzer_sys::fuzz_target;
+use std::num::NonZeroUsize;
 
 mod common;
 use common::{
@@ -85,13 +87,13 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             6 => Ok(FuzzOperation::VerifySameSignerMinPk {
                 public_key: arbitrary_g1(u)?,
-                messages: arbitrary_messages(u, 0, 20)?,
+                messages: arbitrary_messages(u, 1, 20)?,
                 signature: arbitrary_g2(u)?,
                 concurrency: u.int_in_range(1..=8)?,
             }),
             7 => Ok(FuzzOperation::VerifySameSignerMinSig {
                 public_key: arbitrary_g2(u)?,
-                messages: arbitrary_messages(u, 0, 20)?,
+                messages: arbitrary_messages(u, 1, 20)?,
                 signature: arbitrary_g1(u)?,
                 concurrency: u.int_in_range(1..=8)?,
             }),
@@ -164,18 +166,19 @@ fn fuzz(op: FuzzOperation) {
             signature,
             concurrency,
         } => {
-            if !messages.is_empty() && concurrency > 0 {
-                let messages_refs: Vec<(&[u8], &[u8])> = messages
-                    .iter()
-                    .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
-                    .collect();
+            let messages_refs: Vec<(&[u8], &[u8])> = messages
+                .iter()
+                .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
+                .collect();
 
-                let combined_msg =
-                    aggregate::combine_messages::<MinPk, _>(&messages_refs, concurrency);
-                let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
-                let _ =
-                    aggregate::verify_same_signer::<MinPk>(&public_key, &combined_msg, &agg_sig);
-            }
+            let combined_msg = if concurrency > 1 {
+                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                aggregate::combine_messages::<MinPk, _>(&messages_refs, &strategy)
+            } else {
+                aggregate::combine_messages::<MinPk, _>(&messages_refs, &Sequential)
+            };
+            let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
+            let _ = aggregate::verify_same_signer::<MinPk>(&public_key, &combined_msg, &agg_sig);
         }
 
         FuzzOperation::VerifySameSignerMinSig {
@@ -184,18 +187,19 @@ fn fuzz(op: FuzzOperation) {
             signature,
             concurrency,
         } => {
-            if !messages.is_empty() && concurrency > 0 {
-                let messages_refs: Vec<(&[u8], &[u8])> = messages
-                    .iter()
-                    .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
-                    .collect();
+            let messages_refs: Vec<(&[u8], &[u8])> = messages
+                .iter()
+                .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
+                .collect();
 
-                let combined_msg =
-                    aggregate::combine_messages::<MinSig, _>(&messages_refs, concurrency);
-                let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
-                let _ =
-                    aggregate::verify_same_signer::<MinSig>(&public_key, &combined_msg, &agg_sig);
-            }
+            let combined_msg = if concurrency > 1 {
+                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                aggregate::combine_messages::<MinSig, _>(&messages_refs, &strategy)
+            } else {
+                aggregate::combine_messages::<MinSig, _>(&messages_refs, &Sequential)
+            };
+            let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
+            let _ = aggregate::verify_same_signer::<MinSig>(&public_key, &combined_msg, &agg_sig);
         }
     }
 }

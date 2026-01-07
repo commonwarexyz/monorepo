@@ -18,13 +18,20 @@ pub mod ordered_broadcast;
 pub mod simplex;
 pub mod types;
 
-use types::{Epoch, View};
+use types::{Epoch, Height, View};
 
 /// Epochable is a trait that provides access to the epoch number.
 /// Any consensus message or object that is associated with a specific epoch should implement this.
 pub trait Epochable {
     /// Returns the epoch associated with this object.
     fn epoch(&self) -> Epoch;
+}
+
+/// Heightable is a trait that provides access to the height.
+/// Any consensus message or object that is associated with a specific height should implement this.
+pub trait Heightable {
+    /// Returns the height associated with this object.
+    fn height(&self) -> Height;
 }
 
 /// Viewable is a trait that provides access to the view (round) number.
@@ -37,10 +44,7 @@ pub trait Viewable {
 /// Block is the interface for a block in the blockchain.
 ///
 /// Blocks are used to track the progress of the consensus engine.
-pub trait Block: Codec + Digestible + Committable + Send + Sync + 'static {
-    /// Get the height of the block.
-    fn height(&self) -> u64;
-
+pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + 'static {
     /// Get the parent block's digest.
     fn parent(&self) -> Self::Commitment;
 }

@@ -12,16 +12,16 @@ use crate::{
         authenticated,
         contiguous::variable::{Config as JournalConfig, Journal},
     },
-    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
+    mmr::{journaled::Config as MmrConfig, Location},
     qmdb::{
         any::{unordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Committable as _,
-        Error,
+        Durable, Error, Merkleized,
     },
     translator::Translator,
 };
 use commonware_codec::Read;
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
@@ -31,11 +31,11 @@ pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S>;
+pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
-    Db<E, K, V, H, T>
+    Db<E, K, V, H, T, Merkleized<H>, Durable>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -91,11 +91,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
-    use crate::{
-        index::Unordered as _,
-        qmdb::store::{batch_tests, CleanStore as _},
-        translator::TwoCap,
-    };
+    use crate::{index::Unordered as _, qmdb::store::batch_tests, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
@@ -124,7 +120,8 @@ pub(super) mod test {
     }
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    type AnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    type AnyTest =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
 
     /// Deterministic byte vector generator for variable-value tests.
     fn to_bytes(i: u64) -> Vec<u8> {
@@ -160,7 +157,7 @@ pub(super) mod test {
     pub fn test_any_variable_db_log_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.clone()).await.into_mutable();
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
@@ -169,7 +166,7 @@ pub(super) mod test {
                 let v = to_bytes(i);
                 db.update(k, v).await.unwrap();
             }
-            db.commit(None).await.unwrap();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root = db.root();
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
@@ -204,8 +201,9 @@ pub(super) mod test {
         // Build a db with 1000 keys, some of which we update and some of which we delete.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let db = open_db(context.clone()).await;
             let root = db.root();
+            let mut db = db.into_mutable();
 
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
@@ -214,20 +212,22 @@ pub(super) mod test {
             }
 
             // Simulate a failure and test that we rollback to the previous root.
-            db.simulate_failure(false).await.unwrap();
-            let mut db = open_db(context.clone()).await;
+            drop(db);
+            let db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
 
             // re-apply the updates and commit them this time.
+            let mut db = db.into_mutable();
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
-            db.commit(None).await.unwrap();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root = db.root();
 
             // Update every 3rd key
+            let mut db = db.into_mutable();
             for i in 0u64..ELEMENTS {
                 if i % 3 != 0 {
                     continue;
@@ -238,11 +238,12 @@ pub(super) mod test {
             }
 
             // Simulate a failure and test that we rollback to the previous root.
-            db.simulate_failure(false).await.unwrap();
-            let mut db = open_db(context.clone()).await;
+            drop(db);
+            let db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
 
             // Re-apply updates for every 3rd key and commit them this time.
+            let mut db = db.into_mutable();
             for i in 0u64..ELEMENTS {
                 if i % 3 != 0 {
                     continue;
@@ -251,10 +252,11 @@ pub(super) mod test {
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
-            db.commit(None).await.unwrap();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root = db.root();
 
             // Delete every 7th key
+            let mut db = db.into_mutable();
             for i in 0u64..ELEMENTS {
                 if i % 7 != 1 {
                     continue;
@@ -264,11 +266,12 @@ pub(super) mod test {
             }
 
             // Simulate a failure and test that we rollback to the previous root.
-            db.simulate_failure(false).await.unwrap();
-            let mut db = open_db(context.clone()).await;
+            drop(db);
+            let db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
 
             // Re-delete every 7th key and commit this time.
+            let mut db = db.into_mutable();
             for i in 0u64..ELEMENTS {
                 if i % 7 != 1 {
                     continue;
@@ -276,7 +279,7 @@ pub(super) mod test {
                 let k = Sha256::hash(&i.to_be_bytes());
                 db.delete(k).await.unwrap();
             }
-            db.commit(None).await.unwrap();
+            let mut db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let root = db.root();
             assert_eq!(db.op_count(), 1961);
@@ -312,73 +315,17 @@ pub(super) mod test {
     /// Test that various types of unclean shutdown while updating a non-empty DB recover to the
     /// empty DB on re-open.
     #[test_traced("WARN")]
-    fn test_any_variable_non_empty_db_recovery() {
+    fn test_any_fixed_non_empty_db_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
-
-            // Insert 1000 keys then sync.
-            for i in 0u64..1000 {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
-                db.update(k, v).await.unwrap();
-            }
-            db.commit(None).await.unwrap();
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
-            let root = db.root();
-            let op_count = db.op_count();
-            let inactivity_floor_loc = db.inactivity_floor_loc();
-
-            // Reopen DB without clean shutdown and make sure the state is the same.
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.inactivity_floor_loc, inactivity_floor_loc);
-            assert_eq!(db.root(), root);
-
-            async fn apply_more_ops(
-                db: &mut Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
-            ) {
-                for i in 0u64..1000 {
-                    let k = Sha256::hash(&i.to_be_bytes());
-                    let v = vec![(i % 255) as u8; ((i % 13) + 8) as usize];
-                    db.update(k, v).await.unwrap();
-                }
-            }
-
-            // Insert operations without commit, then simulate failure, syncing nothing.
-            apply_more_ops(&mut db).await;
-            db.simulate_failure(false).await.unwrap();
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.inactivity_floor_loc, inactivity_floor_loc);
-            assert_eq!(db.root(), root);
-
-            // Repeat, though this time sync the log.
-            apply_more_ops(&mut db).await;
-            db.simulate_failure(true).await.unwrap();
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-            assert_eq!(db.root(), root);
-
-            // One last check that re-open without proper shutdown still recovers the correct state.
-            apply_more_ops(&mut db).await;
-            apply_more_ops(&mut db).await;
-            apply_more_ops(&mut db).await;
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-            assert_eq!(db.root(), root);
-
-            // Apply the ops one last time but fully commit them this time, then clean up.
-            apply_more_ops(&mut db).await;
-            db.commit(None).await.unwrap();
             let db = open_db(context.clone()).await;
-            assert!(db.op_count() > op_count);
-            assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
-            assert_ne!(db.root(), root);
-
-            db.destroy().await.unwrap();
+            crate::qmdb::any::unordered::test::test_any_db_non_empty_recovery(
+                context,
+                db,
+                |ctx| Box::pin(open_db(ctx)),
+                to_bytes,
+            )
+            .await;
         });
     }
 
@@ -388,70 +335,23 @@ pub(super) mod test {
     fn test_any_variable_empty_db_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize an empty db.
             let db = open_db(context.clone()).await;
-            let root = db.root();
-
-            // Reopen DB without clean shutdown and make sure the state is the same.
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 1);
-            assert_eq!(db.root(), root);
-
-            async fn apply_ops(
-                db: &mut Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>,
-            ) {
-                for i in 0u64..1000 {
-                    let k = Sha256::hash(&i.to_be_bytes());
-                    let v = vec![(i % 255) as u8; ((i % 13) + 8) as usize];
-                    db.update(k, v).await.unwrap();
-                }
-            }
-
-            // Insert operations without commit then simulate failure.
-            apply_ops(&mut db).await;
-            db.simulate_failure(false).await.unwrap();
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 1);
-            assert_eq!(db.root(), root);
-
-            // Insert another 1000 keys then simulate failure after syncing the log.
-            apply_ops(&mut db).await;
-            db.simulate_failure(true).await.unwrap();
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 1);
-            assert_eq!(db.root(), root);
-
-            // Insert another 1000 keys then simulate failure (sync only the mmr).
-            apply_ops(&mut db).await;
-            db.simulate_failure(false).await.unwrap();
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 1);
-            assert_eq!(db.root(), root);
-
-            // One last check that re-open without proper shutdown still recovers the correct state.
-            apply_ops(&mut db).await;
-            apply_ops(&mut db).await;
-            apply_ops(&mut db).await;
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 1);
-            assert_eq!(db.root(), root);
-
-            // Apply the ops one last time but fully commit them this time, then clean up.
-            apply_ops(&mut db).await;
-            db.commit(None).await.unwrap();
-            let db = open_db(context.clone()).await;
-            assert!(db.op_count() > 1);
-            assert_ne!(db.root(), root);
-
-            db.destroy().await.unwrap();
+            crate::qmdb::any::unordered::test::test_any_db_empty_recovery(
+                context,
+                db,
+                |ctx| Box::pin(open_db(ctx)),
+                to_bytes,
+            )
+            .await;
         });
     }
 
     #[test_traced]
-    fn test_variable_db_prune_beyond_inactivity_floor() {
+    fn test_any_variable_db_prune_beyond_inactivity_floor() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut db = open_db(context.clone()).await;
+            let db = open_db(context.clone()).await;
+            let mut db = db.into_mutable();
 
             // Add some operations
             let key1 = Digest::random(&mut context);
@@ -461,13 +361,14 @@ pub(super) mod test {
             db.update(key1, vec![10]).await.unwrap();
             db.update(key2, vec![20]).await.unwrap();
             db.update(key3, vec![30]).await.unwrap();
-            db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
 
             // inactivity_floor should be at some location < op_count
             let inactivity_floor = db.inactivity_floor_loc();
             let beyond_floor = Location::new_unchecked(*inactivity_floor + 1);
 
             // Try to prune beyond the inactivity floor
+            let mut db = db.into_merkleized();
             let result = db.prune(beyond_floor).await;
             assert!(
                 matches!(result, Err(Error::PruneBeyondMinRequired(loc, floor))
@@ -479,11 +380,21 @@ pub(super) mod test {
     }
 
     #[test_traced("DEBUG")]
-    fn test_batch() {
+    fn test_any_unordered_variable_batch() {
         batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
             let cfg = db_config(&format!("batch_{seed}"));
-            AnyTest::init(ctx, cfg).await.unwrap()
+            AnyTest::init(ctx, cfg).await.unwrap().into_mutable()
+        });
+    }
+
+    // Test that merkleization state changes don't reset `steps`.
+    #[test_traced("DEBUG")]
+    fn test_any_unordered_variable_db_steps_not_reset() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = crate::qmdb::any::unordered::test::open_variable_db(context).await;
+            crate::qmdb::any::test::test_any_db_steps_not_reset(db).await;
         });
     }
 

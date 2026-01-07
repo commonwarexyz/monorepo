@@ -925,6 +925,7 @@ dependencies = [
  "commonware-macros",
  "commonware-math",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
  "commonware-stream",
@@ -1026,6 +1027,7 @@ dependencies = [
  "commonware-conformance",
  "commonware-cryptography",
  "commonware-math",
+ "commonware-parallel",
  "commonware-storage",
  "commonware-utils",
  "criterion",
@@ -1047,6 +1049,7 @@ dependencies = [
  "arbitrary",
  "commonware-coding",
  "commonware-cryptography",
+ "commonware-parallel",
  "libfuzzer-sys",
  "rand_chacha 0.3.1",
 ]
@@ -1125,6 +1128,7 @@ dependencies = [
  "commonware-macros",
  "commonware-math",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-resolver",
  "commonware-runtime",
  "commonware-storage",
@@ -1176,6 +1180,7 @@ dependencies = [
  "commonware-codec",
  "commonware-conformance",
  "commonware-math",
+ "commonware-parallel",
  "commonware-utils",
  "criterion",
  "ctutils",
@@ -1205,6 +1210,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-math",
+ "commonware-parallel",
  "ed25519-zebra",
  "libfuzzer-sys",
  "p256",
@@ -1324,12 +1330,12 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-parallel",
  "commonware-utils",
  "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
- "rayon",
 ]
 
 [[package]]
@@ -1379,6 +1385,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-parallel"
+version = "0.0.64"
+dependencies = [
+ "cfg-if",
+ "proptest",
+ "rayon",
+]
+
+[[package]]
 name = "commonware-reshare"
 version = "0.0.64"
 dependencies = [
@@ -1392,6 +1407,7 @@ dependencies = [
  "commonware-macros",
  "commonware-math",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-resolver",
  "commonware-runtime",
  "commonware-storage",
@@ -1434,12 +1450,15 @@ dependencies = [
 name = "commonware-runtime"
 version = "0.0.64"
 dependencies = [
+ "arbitrary",
  "async-lock",
  "axum",
  "bytes",
  "cfg-if",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-macros",
+ "commonware-parallel",
  "commonware-utils",
  "console-subscriber",
  "criterion",
@@ -1454,6 +1473,7 @@ dependencies = [
  "pin-project",
  "prometheus-client",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "rayon",
  "sha2 0.10.9",
  "sysinfo",
@@ -1487,6 +1507,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-macros",
  "commonware-math",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",

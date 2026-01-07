@@ -22,6 +22,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
 * [math](./math/README.md): Create and manipulate mathematical objects.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.
+* [parallel](./parallel/README.md): Parallelize fold operations with pluggable execution strategies.
 * [resolver](./resolver/README.md): Resolve data identified by a fixed-length key.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
 * [storage](./storage/README.md): Persist and retrieve data from an abstract store.

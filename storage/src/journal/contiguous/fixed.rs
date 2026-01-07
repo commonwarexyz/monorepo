@@ -498,15 +498,15 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         assert!(start_blob <= self.tail_index);
         let blobs = self.blobs.range(start_blob..).collect::<Vec<_>>();
         let full_size = items_per_blob * Self::CHUNK_SIZE_U64;
-        let mut blob_plus = blobs
-            .into_iter()
-            .map(|(blob_index, blob)| (*blob_index, blob.clone_blob(), full_size))
-            .collect::<Vec<_>>();
+        let mut blob_plus = Vec::with_capacity(blobs.len() + 1);
+        for (blob_index, blob) in blobs {
+            blob_plus.push((*blob_index, blob.clone_blob().await, full_size));
+        }
 
         // Include the tail blob.
         self.tail.sync().await?; // make sure no data is buffered
         let tail_size = self.tail.size().await;
-        blob_plus.push((self.tail_index, self.tail.clone_blob(), tail_size));
+        blob_plus.push((self.tail_index, self.tail.clone_blob().await, tail_size));
         let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
 
         // Replay all blobs in order and stream items as they are read (to avoid occupying too much

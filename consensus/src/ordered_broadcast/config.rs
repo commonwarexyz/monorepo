@@ -1,6 +1,6 @@
 use super::types::{Activity, ChunkSigner, ChunkVerifier, Context, SequencersProvider};
 use crate::{
-    types::{Epoch, EpochDelta},
+    types::{Epoch, EpochDelta, HeightDelta},
     Automaton, Monitor, Relay, Reporter,
 };
 use commonware_cryptography::{certificate::Provider, Digest, Signer};
@@ -71,7 +71,7 @@ pub struct Config<
     ///
     /// For example, if the current tip for a sequencer is at height 100,
     /// and the height_bound is 10, then acks for heights 100-110 are accepted.
-    pub height_bound: u64,
+    pub height_bound: HeightDelta,
 
     /// A prefix for the journal names.
     /// The rest of the name is the hex-encoded public keys of the relevant sequencer.

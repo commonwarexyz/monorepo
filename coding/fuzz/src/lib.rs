@@ -1,8 +1,9 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_coding::{Config, Scheme};
+use commonware_parallel::Sequential;
 use std::iter;
 
-const CONCURRENCY: usize = 1;
+const STRATEGY: Sequential = Sequential;
 
 #[derive(Debug)]
 struct Shuffle {
@@ -70,7 +71,7 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
         minimum_shards: min,
         extra_shards: recovery,
     };
-    let (commitment, shards) = S::encode(&config, data.as_slice(), CONCURRENCY).unwrap();
+    let (commitment, shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
     assert_eq!(shards.len(), (recovery + min) as usize);
     // We don't use enumerate to get u16s.
     let mut shards = (0u16..).zip(shards).collect::<Vec<_>>();
@@ -97,7 +98,7 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
         &commitment,
         my_checking_data,
         &checked_shards,
-        CONCURRENCY,
+        &STRATEGY,
     )
     .unwrap();
     assert_eq!(&decoded, &data);

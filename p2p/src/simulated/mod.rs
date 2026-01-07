@@ -365,7 +365,7 @@ mod tests {
             let mut msg = vec![0u8; 1024 * 1024 + 1];
             context.fill(&mut msg[..]);
             let result = message_sender
-                .send(Recipients::All, msg.into(), false)
+                .send(Recipients::All, &msg[..], false)
                 .await
                 .unwrap_err();
 

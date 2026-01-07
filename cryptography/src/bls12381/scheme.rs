@@ -38,6 +38,7 @@ use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use commonware_math::algebra::Random;
+use commonware_parallel::Sequential;
 use commonware_utils::{hex, Array, Span};
 use core::{
     fmt::{Debug, Display, Formatter},
@@ -396,7 +397,7 @@ impl BatchVerifier<PublicKey> for Batch {
     }
 
     fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool {
-        MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures).is_ok()
+        MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures, &Sequential).is_ok()
     }
 }
 

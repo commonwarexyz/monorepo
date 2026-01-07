@@ -42,21 +42,20 @@ impl DatabaseType {
 }
 
 /// Helper trait for databases that can be synced.
-pub trait Syncable {
+pub trait Syncable: Sized {
     /// The type of operations in the database.
     type Operation: Operation + Encode + Sync + 'static;
 
     /// Create test operations with the given count and seed.
+    /// The returned operations must end with a commit operation.
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation>;
 
-    /// Add operations to the database.
+    /// Add operations to the database and return the clean database, ignoring any input that
+    /// doesn't end with a commit operation (since without a commit, we can't return a clean DB).
     fn add_operations(
-        database: &mut Self,
+        self,
         operations: Vec<Self::Operation>,
-    ) -> impl Future<Output = Result<(), qmdb::Error>>;
-
-    /// Commit pending operations to the database.
-    fn commit(&mut self) -> impl Future<Output = Result<(), qmdb::Error>>;
+    ) -> impl Future<Output = Result<Self, qmdb::Error>>;
 
     /// Get the database's root digest.
     fn root(&self) -> Key;

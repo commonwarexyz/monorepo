@@ -84,7 +84,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                                 })
                                 .encode();
                             indexer_sender
-                                .send(&msg)
+                                .send(msg)
                                 .await
                                 .expect("failed to send finalization to indexer");
                             let result = indexer_receiver
@@ -125,7 +125,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                     })
                     .encode();
                     indexer_sender
-                        .send(&msg)
+                        .send(msg)
                         .await
                         .expect("failed to send block to indexer");
                     let result = indexer_receiver
@@ -153,7 +153,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                     })
                     .encode();
                     indexer_sender
-                        .send(&msg)
+                        .send(msg)
                         .await
                         .expect("failed to send block to indexer");
                     let result = indexer_receiver
@@ -206,7 +206,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                                 })
                                 .encode();
                             indexer_sender
-                                .send(&msg)
+                                .send(msg)
                                 .await
                                 .expect("failed to send finalization to indexer");
                             let result = indexer_receiver
