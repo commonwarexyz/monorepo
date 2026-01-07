@@ -216,24 +216,6 @@ pub type Private = Scalar;
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
-    /// Generate a non-zero scalar from the randomly populated buffer.
-    ///
-    /// The buffer is zeroized after use.
-    fn from_bytes(ikm: &mut [u8; 64]) -> Self {
-        let mut sc = blst_scalar::default();
-        let mut ret = blst_fr::default();
-        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
-        unsafe {
-            // blst_keygen loops until a non-zero value is produced (in accordance with IETF BLS KeyGen 4+).
-            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
-            blst_fr_from_scalar(&mut ret, &sc);
-        }
-
-        // Zeroize the ikm buffer in place
-        ikm.zeroize();
-
-        Self(ret)
-    }
 
     /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
     pub fn map(dst: DST, msg: &[u8]) -> Self {
@@ -498,7 +480,20 @@ impl Random for Scalar {
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut ikm = [0u8; 64];
         rng.fill_bytes(&mut ikm);
-        Self::from_bytes(&mut ikm)
+
+        let mut sc = blst_scalar::default();
+        let mut ret = blst_fr::default();
+        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
+        unsafe {
+            // blst_keygen loops until a non-zero value is produced (in accordance with IETF BLS KeyGen 4+).
+            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
+            blst_fr_from_scalar(&mut ret, &sc);
+        }
+
+        // Zeroize the ikm buffer
+        ikm.zeroize();
+
+        Self(ret)
     }
 }
 
@@ -1153,6 +1148,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
     use proptest::{prelude::*, strategy::Strategy};
+    use rand::{rngs::StdRng, SeedableRng};
     use std::collections::{BTreeSet, HashMap};
 
     impl Arbitrary for Scalar {
@@ -1160,8 +1156,8 @@ mod tests {
         type Strategy = BoxedStrategy<Self>;
 
         fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<[u8; 64]>()
-                .prop_map(|mut b| Self::from_bytes(&mut b))
+            any::<[u8; 32]>()
+                .prop_map(|seed| Self::random(&mut StdRng::from_seed(seed)))
                 .boxed()
         }
     }
