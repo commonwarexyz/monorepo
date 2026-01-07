@@ -697,9 +697,12 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     where
         S: scheme::Scheme<D>,
     {
-        let attestation = scheme.sign::<D>(namespace, Subject::Notarize {
-            proposal: &proposal,
-        })?;
+        let attestation = scheme.sign::<D>(
+            namespace,
+            Subject::Notarize {
+                proposal: &proposal,
+            },
+        )?;
 
         Some(Self {
             proposal,
@@ -1065,7 +1068,12 @@ impl<S: Scheme> Nullification<S> {
     /// Verifies the nullification certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed round.
-    pub fn verify<R: CryptoRngCore, D: Digest>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
+    pub fn verify<R: CryptoRngCore, D: Digest>(
+        &self,
+        rng: &mut R,
+        namespace: &[u8],
+        scheme: &S,
+    ) -> bool
     where
         S: scheme::Scheme<D>,
     {

@@ -220,7 +220,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, NAMESPACE, 5);
+        } = ed25519::fixture(&mut rng, 5);
         (schemes, verifier)
     }
 
@@ -232,7 +232,7 @@ mod tests {
         let round = Round::new(EPOCH, view);
         let votes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).expect("sign"))
+            .map(|scheme| Nullify::sign::<Sha256Digest>(NAMESPACE, scheme, round).expect("sign"))
             .collect();
         Nullification::from_nullifies(verifier, &votes).expect("nullification quorum")
     }
@@ -249,7 +249,7 @@ mod tests {
         );
         let votes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("sign"))
+            .map(|scheme| Notarize::sign(NAMESPACE, scheme, proposal.clone()).expect("sign"))
             .collect();
         Notarization::from_notarizes(verifier, votes.iter()).expect("notarization quorum")
     }

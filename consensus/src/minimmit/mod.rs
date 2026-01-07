@@ -108,7 +108,7 @@
 //! `minimmit` supports the same signing schemes as `simplex`:
 //!
 //! * [`scheme::ed25519`]: Attributable, no trusted setup
-//! * [`scheme::secp256r1`]: Attributable, HSM support, no trusted setup
+//! * `secp256r1`: Attributable, HSM support, no trusted setup (not yet implemented)
 //! * [`scheme::bls12381_multisig`]: Attributable, compact certificates
 //! * [`scheme::bls12381_threshold`]: Non-attributable, constant-size certificates, requires DKG
 //!
@@ -539,10 +539,5 @@ mod integration_tests {
     #[test_traced]
     fn test_all_online_ed25519() {
         all_online::<_, _, RoundRobin>(scheme::ed25519::fixture);
-    }
-
-    #[test_traced]
-    fn test_all_online_secp256r1() {
-        all_online::<_, _, RoundRobin>(scheme::secp256r1::fixture);
     }
 }
