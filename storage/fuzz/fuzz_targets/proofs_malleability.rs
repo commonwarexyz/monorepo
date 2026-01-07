@@ -184,7 +184,8 @@ fn fuzz(input: FuzzInput) {
                         mutate_proof_bytes(&mut mutated_proof, mutation, &());
 
                         if mutated_proof != original_proof {
-                            let is_valid = mutated_proof.verify(&mut hasher, &elements, &root).is_ok();
+                            let is_valid =
+                                mutated_proof.verify(&mut hasher, &elements, &root).is_ok();
                             assert!(!is_valid, "Mutated BMT proof must be invalid");
                         }
                     }

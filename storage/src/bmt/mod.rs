@@ -164,7 +164,7 @@ impl<H: Hasher> Tree<H> {
     ///
     /// This is a single-element multi-proof, which includes the minimal siblings
     /// needed to reconstruct the root.
-    pub fn proof(&self, position: u32) -> Result<Proof<H>, Error> {
+    pub fn proof(&self, position: u32) -> Result<MultiProof<H>, Error> {
         self.multi_proof(&[position])
     }
 
@@ -240,7 +240,7 @@ impl<H: Hasher> Tree<H> {
     /// are deduplicated.
     ///
     /// Positions are sorted internally; duplicate positions will return an error.
-    pub fn multi_proof(&self, positions: &[u32]) -> Result<Proof<H>, Error> {
+    pub fn multi_proof(&self, positions: &[u32]) -> Result<MultiProof<H>, Error> {
         // Handle empty positions first - can't prove zero elements
         if positions.is_empty() {
             return Err(Error::NoLeaves);
@@ -254,7 +254,8 @@ impl<H: Hasher> Tree<H> {
         let leaf_count = self.levels.first().len().get() as u32;
 
         // Get required sibling positions (this validates positions and checks for duplicates)
-        let sibling_positions = siblings_required_for_multi_proof(leaf_count, positions)?;
+        let sibling_positions =
+            siblings_required_for_multi_proof(leaf_count, positions.iter().copied())?;
 
         // Collect sibling digests in order
         let siblings: Vec<H::Digest> = sibling_positions
@@ -262,7 +263,7 @@ impl<H: Hasher> Tree<H> {
             .map(|&(level, index)| self.levels[level][index])
             .collect();
 
-        Ok(Proof {
+        Ok(MultiProof {
             leaf_count,
             siblings,
         })
@@ -515,7 +516,7 @@ impl<H: Hasher> EncodeSize for RangeProof<H> {
 /// for each leaf because sibling nodes that are shared between multiple paths
 /// are deduplicated.
 #[derive(Clone, Debug, Eq)]
-pub struct Proof<H: Hasher> {
+pub struct MultiProof<H: Hasher> {
     /// The total number of leaves in the tree.
     pub leaf_count: u32,
     /// The deduplicated sibling digests required to verify all elements,
@@ -523,7 +524,7 @@ pub struct Proof<H: Hasher> {
     pub siblings: Vec<H::Digest>,
 }
 
-impl<H: Hasher> PartialEq for Proof<H>
+impl<H: Hasher> PartialEq for MultiProof<H>
 where
     H::Digest: PartialEq,
 {
@@ -532,7 +533,7 @@ where
     }
 }
 
-impl<H: Hasher> Default for Proof<H> {
+impl<H: Hasher> Default for MultiProof<H> {
     fn default() -> Self {
         Self {
             leaf_count: 0,
@@ -541,14 +542,14 @@ impl<H: Hasher> Default for Proof<H> {
     }
 }
 
-impl<H: Hasher> Write for Proof<H> {
+impl<H: Hasher> Write for MultiProof<H> {
     fn write(&self, writer: &mut impl BufMut) {
         self.leaf_count.write(writer);
         self.siblings.write(writer);
     }
 }
 
-impl<H: Hasher> Read for Proof<H> {
+impl<H: Hasher> Read for MultiProof<H> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -568,14 +569,14 @@ impl<H: Hasher> Read for Proof<H> {
     }
 }
 
-impl<H: Hasher> EncodeSize for Proof<H> {
+impl<H: Hasher> EncodeSize for MultiProof<H> {
     fn encode_size(&self) -> usize {
         self.leaf_count.encode_size() + self.siblings.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<H: Hasher> arbitrary::Arbitrary<'_> for Proof<H>
+impl<H: Hasher> arbitrary::Arbitrary<'_> for MultiProof<H>
 where
     H::Digest: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -602,21 +603,21 @@ const fn levels_in_tree(leaf_count: u32) -> usize {
 /// Each position in the result is encoded as `(level, index)` where level 0 is the leaf level.
 fn siblings_required_for_multi_proof(
     leaf_count: u32,
-    positions: &[u32],
+    positions: impl IntoIterator<Item = u32>,
 ) -> Result<BTreeSet<(usize, usize)>, Error> {
-    if positions.is_empty() {
-        return Err(Error::NoLeaves);
-    }
-
     // Validate positions and check for duplicates.
     let mut current = BTreeSet::new();
-    for &pos in positions {
+    for pos in positions {
         if pos >= leaf_count {
             return Err(Error::InvalidPosition(pos));
         }
         if !current.insert(pos as usize) {
             return Err(Error::DuplicatePosition(pos));
         }
+    }
+
+    if current.is_empty() {
+        return Err(Error::NoLeaves);
     }
 
     // Track positions we can compute at each level and record missing siblings.
@@ -648,7 +649,7 @@ fn siblings_required_for_multi_proof(
     Ok(sibling_positions)
 }
 
-impl<H: Hasher> Proof<H> {
+impl<H: Hasher> MultiProof<H> {
     /// Verifies that the given `elements` at their respective positions are included
     /// in a Binary Merkle Tree with `root`.
     ///
@@ -676,23 +677,19 @@ impl<H: Hasher> Proof<H> {
             return Err(Error::NoLeaves);
         }
 
-        // Extract and validate positions
-        let positions: Vec<u32> = elements.iter().map(|(_, pos)| *pos).collect();
-
-        // Get required sibling positions
-        let sibling_positions = siblings_required_for_multi_proof(self.leaf_count, &positions)?;
+        // Get required sibling positions (validates positions and checks for duplicates)
+        let sibling_positions =
+            siblings_required_for_multi_proof(self.leaf_count, elements.iter().map(|(_, pos)| *pos))?;
 
         // Verify we have the exact number of siblings needed
         if sibling_positions.len() != self.siblings.len() {
             return Err(Error::UnalignedProof);
         }
 
-        // Compute position-hashed leaf digests and build initial available nodes
+        // Compute position-hashed leaf digests and build initial available nodes.
+        // Position bounds and duplicates were already validated by siblings_required_for_multi_proof.
         let mut available: BTreeMap<(usize, usize), H::Digest> = BTreeMap::new();
         for (leaf, position) in elements {
-            if position >= &self.leaf_count {
-                return Err(Error::InvalidPosition(*position));
-            }
             hasher.update(&position.to_be_bytes());
             hasher.update(leaf);
             available.insert((0, *position as usize), hasher.finalize());
@@ -785,7 +782,7 @@ mod tests {
 
             // Serialize and deserialize the proof
             let mut serialized = proof.encode();
-            let deserialized = Proof::<Sha256>::decode(&mut serialized).unwrap();
+            let deserialized = MultiProof::<Sha256>::decode(&mut serialized).unwrap();
             assert!(
                 deserialized.verify(&mut hasher, &elements, &root).is_ok(),
                 "deserialize fail for size={n} leaf={i}"
@@ -1185,7 +1182,7 @@ mod tests {
 
         // Truncate one byte.
         serialized.truncate(serialized.len() - 1);
-        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
+        assert!(MultiProof::<Sha256>::decode(&mut serialized).is_err());
     }
 
     #[test]
@@ -1207,7 +1204,7 @@ mod tests {
 
         // Append an extra byte.
         serialized.extend_from_slice(&[0u8]);
-        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
+        assert!(MultiProof::<Sha256>::decode(&mut serialized).is_err());
     }
 
     #[test]
@@ -2308,7 +2305,7 @@ mod tests {
 
         // Serialize and deserialize
         let mut serialized = multi_proof.encode();
-        let deserialized = Proof::<Sha256>::decode(&mut serialized).unwrap();
+        let deserialized = MultiProof::<Sha256>::decode(&mut serialized).unwrap();
 
         assert_eq!(multi_proof, deserialized);
 
@@ -2341,7 +2338,7 @@ mod tests {
         serialized.truncate(serialized.len() - 1);
 
         // Should fail to deserialize
-        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
+        assert!(MultiProof::<Sha256>::decode(&mut serialized).is_err());
     }
 
     #[test]
@@ -2365,7 +2362,7 @@ mod tests {
         serialized.extend_from_slice(&[0u8]);
 
         // Should fail to deserialize
-        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
+        assert!(MultiProof::<Sha256>::decode(&mut serialized).is_err());
     }
 
     #[test]
@@ -2374,7 +2371,7 @@ mod tests {
         serialized.extend_from_slice(&u32::MAX.encode());
         serialized.extend_from_slice(&1usize.encode());
 
-        let err = Proof::<Sha256>::decode(serialized.as_slice()).unwrap_err();
+        let err = MultiProof::<Sha256>::decode(serialized.as_slice()).unwrap_err();
         assert!(matches!(err, commonware_codec::Error::InvalidLength(_)));
     }
 
@@ -2486,7 +2483,7 @@ mod tests {
     fn test_multi_proof_default_verify() {
         // Default (empty) proof should only verify against empty tree
         let mut hasher = Sha256::default();
-        let default_proof = Proof::<Sha256>::default();
+        let default_proof = MultiProof::<Sha256>::default();
 
         // Empty elements against default proof
         let empty_elements: &[(Digest, u32)] = &[];
@@ -2567,7 +2564,7 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<RangeProof<Sha256>>,
             CodecConformance<Bounds<Sha256Digest>>,
-            CodecConformance<Proof<Sha256>>,
+            CodecConformance<MultiProof<Sha256>>,
         }
     }
 }
