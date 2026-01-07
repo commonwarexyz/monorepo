@@ -4615,8 +4615,8 @@ mod tests {
             for (i, participant) in participants.iter().enumerate() {
                 let recipient = Recipients::One(participant.clone());
                 let msg = match get_type(i) {
-                    ParticipantType::Group2 => notarization_msg.encode().into(),
-                    _ => nullification_msg.encode().into(),
+                    ParticipantType::Group2 => notarization_msg.encode(),
+                    _ => nullification_msg.encode(),
                 };
                 injector_sender.send(recipient, msg, true).await.unwrap();
             }
@@ -4626,22 +4626,18 @@ mod tests {
             for (i, participant) in participants.iter().enumerate() {
                 let recipient = Recipients::One(participant.clone());
                 let msg = match get_type(i) {
-                    ParticipantType::Group1 => notarization_msg.encode().into(),
-                    _ => nullification_msg.encode().into(),
+                    ParticipantType::Group1 => notarization_msg.encode(),
+                    _ => nullification_msg.encode(),
                 };
                 injector_sender.send(recipient, msg, true).await.unwrap();
             }
             // View F:
-            let msg = Certificate::<_, D>::Notarization(b0_notarization)
-                .encode()
-                .into();
+            let msg = Certificate::<_, D>::Notarization(b0_notarization).encode();
             injector_sender
                 .send(Recipients::All, msg, true)
                 .await
                 .unwrap();
-            let msg = Certificate::<_, D>::Finalization(b0_finalization)
-                .encode()
-                .into();
+            let msg = Certificate::<_, D>::Finalization(b0_finalization).encode();
             injector_sender
                 .send(Recipients::All, msg, true)
                 .await

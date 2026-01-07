@@ -1,5 +1,5 @@
 use super::types::Ack;
-use crate::types::Epoch;
+use crate::types::{Epoch, Height};
 use commonware_cryptography::{
     certificate::{Attestation, Scheme},
     Digest, PublicKey,
@@ -46,7 +46,7 @@ pub struct AckManager<P: PublicKey, S: Scheme, D: Digest> {
     // entries where the height is less than the height of the highest chunk for the sequencer.
     // We can often prune entries for old epochs as well.
     #[allow(clippy::type_complexity)]
-    acks: HashMap<P, BTreeMap<u64, BTreeMap<Epoch, Evidence<S, D>>>>,
+    acks: HashMap<P, BTreeMap<Height, BTreeMap<Epoch, Evidence<S, D>>>>,
 }
 
 impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
@@ -96,7 +96,11 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
     /// Returns a tuple of (Epoch, Certificate), if it exists, for the given sequencer and height.
     ///
     /// If multiple epochs have certificates, the highest epoch is returned.
-    pub fn get_certificate(&self, sequencer: &P, height: u64) -> Option<(Epoch, &S::Certificate)> {
+    pub fn get_certificate(
+        &self,
+        sequencer: &P,
+        height: Height,
+    ) -> Option<(Epoch, &S::Certificate)> {
         self.acks
             .get(sequencer)
             .and_then(|m| m.get(&height))
@@ -114,7 +118,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
     pub fn add_certificate(
         &mut self,
         sequencer: &P,
-        height: u64,
+        height: Height,
         epoch: Epoch,
         certificate: S::Certificate,
     ) -> bool {
@@ -137,7 +141,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
         // times (which could otherwise occur if we recover the certificate for some chunk at tip and then
         // receive a duplicate broadcast of said chunk before a sequencer sends one at a new height).
         if let Some(m) = self.acks.get_mut(sequencer) {
-            let min_height = height.saturating_sub(1);
+            let min_height = height.previous().unwrap_or(Height::zero());
             m.retain(|&h, _| h >= min_height);
         }
 
@@ -247,7 +251,7 @@ mod tests {
         let fixture = fixture(&mut test_rng(), NAMESPACE, num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
-        let height = 10;
+        let height = Height::new(10);
 
         // Use different epochs so validators can vote for both chunks
         let epoch1 = Epoch::new(5);
@@ -297,8 +301,8 @@ mod tests {
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(10);
-        let height1 = 10;
-        let height2 = 20;
+        let height1 = Height::new(10);
+        let height2 = Height::new(20);
 
         let chunk1 = Chunk::new(sequencer.clone(), height1, Sha256::hash(b"chunk1"));
         let cert1 =
@@ -345,31 +349,46 @@ mod tests {
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(10);
 
-        let chunk1 = Chunk::new(sequencer.clone(), 10, Sha256::hash(b"chunk1"));
+        let chunk1 = Chunk::new(sequencer.clone(), Height::new(10), Sha256::hash(b"chunk1"));
         let cert1 =
             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk1, epoch, &[0, 1, 2])
                 .expect("Should produce certificate");
-        assert!(acks.add_certificate(&sequencer, 10, epoch, cert1.clone()));
-        assert_eq!(acks.get_certificate(&sequencer, 10), Some((epoch, &cert1)));
+        assert!(acks.add_certificate(&sequencer, Height::new(10), epoch, cert1.clone()));
+        assert_eq!(
+            acks.get_certificate(&sequencer, Height::new(10)),
+            Some((epoch, &cert1))
+        );
 
-        let chunk2 = Chunk::new(sequencer.clone(), 11, Sha256::hash(b"chunk2"));
+        let chunk2 = Chunk::new(sequencer.clone(), Height::new(11), Sha256::hash(b"chunk2"));
         let cert2 =
             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk2, epoch, &[0, 1, 2])
                 .expect("Should produce certificate");
-        assert!(acks.add_certificate(&sequencer, 11, epoch, cert2.clone()));
+        assert!(acks.add_certificate(&sequencer, Height::new(11), epoch, cert2.clone()));
 
-        assert_eq!(acks.get_certificate(&sequencer, 10), Some((epoch, &cert1)));
-        assert_eq!(acks.get_certificate(&sequencer, 11), Some((epoch, &cert2)));
+        assert_eq!(
+            acks.get_certificate(&sequencer, Height::new(10)),
+            Some((epoch, &cert1))
+        );
+        assert_eq!(
+            acks.get_certificate(&sequencer, Height::new(11)),
+            Some((epoch, &cert2))
+        );
 
-        let chunk3 = Chunk::new(sequencer.clone(), 12, Sha256::hash(b"chunk3"));
+        let chunk3 = Chunk::new(sequencer.clone(), Height::new(12), Sha256::hash(b"chunk3"));
         let cert3 =
             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk3, epoch, &[0, 1, 2])
                 .expect("Should produce certificate");
-        assert!(acks.add_certificate(&sequencer, 12, epoch, cert3.clone()));
+        assert!(acks.add_certificate(&sequencer, Height::new(12), epoch, cert3.clone()));
 
-        assert_eq!(acks.get_certificate(&sequencer, 10), None);
-        assert_eq!(acks.get_certificate(&sequencer, 11), Some((epoch, &cert2)));
-        assert_eq!(acks.get_certificate(&sequencer, 12), Some((epoch, &cert3)));
+        assert_eq!(acks.get_certificate(&sequencer, Height::new(10)), None);
+        assert_eq!(
+            acks.get_certificate(&sequencer, Height::new(11)),
+            Some((epoch, &cert2))
+        );
+        assert_eq!(
+            acks.get_certificate(&sequencer, Height::new(12)),
+            Some((epoch, &cert3))
+        );
     }
 
     #[test]
@@ -392,7 +411,7 @@ mod tests {
         let fixture = fixture(&mut test_rng(), NAMESPACE, num_validators);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
-        let height = 30;
+        let height = Height::new(30);
         let epoch1 = Epoch::new(1);
         let epoch2 = Epoch::new(2);
 
@@ -440,7 +459,7 @@ mod tests {
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let epoch = Epoch::new(99);
         let sequencer = fixture.participants[1].clone();
-        let height = 42;
+        let height = Height::new(42);
         let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash(&sequencer));
 
         let cert =
@@ -481,7 +500,7 @@ mod tests {
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
-        let height = 10;
+        let height = Height::new(10);
         let chunk = Chunk::new(sequencer, height, Sha256::hash(b"payload"));
 
         let ack = helpers::create_ack(&fixture.schemes[0], chunk, epoch);
@@ -510,7 +529,7 @@ mod tests {
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
-        let height = 10;
+        let height = Height::new(10);
         let chunk = Chunk::new(sequencer, height, Sha256::hash(b"payload"));
 
         let acks_vec =
@@ -550,7 +569,7 @@ mod tests {
         let sequencer1 = fixture.participants[1].clone();
         let sequencer2 = fixture.participants[3].clone();
         let epoch = Epoch::new(1);
-        let height = 10;
+        let height = Height::new(10);
 
         let chunk1 = Chunk::new(sequencer1.clone(), height, Sha256::hash(b"payload1"));
         let chunk2 = Chunk::new(sequencer2.clone(), height, Sha256::hash(b"payload2"));
@@ -588,7 +607,7 @@ mod tests {
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
-        let height = 10;
+        let height = Height::new(10);
         let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash(b"payload"));
 
         let acks_vec = helpers::create_acks_for_indices(&fixture.schemes, chunk, epoch, &[0, 1]);
@@ -622,7 +641,7 @@ mod tests {
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
-        let height = 10;
+        let height = Height::new(10);
 
         let payload1 = Sha256::hash(b"payload1");
         let payload2 = Sha256::hash(b"payload2");

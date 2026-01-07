@@ -20,7 +20,8 @@ use crate::{
 };
 use commonware_codec::CodecFixed;
 use commonware_cryptography::Hasher;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
+use commonware_parallel::ThreadPool;
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub(crate) mod db;

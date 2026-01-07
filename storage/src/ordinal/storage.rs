@@ -267,7 +267,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
-        blob.write_at(record.encode(), offset).await?;
+        blob.write_at(record.encode_mut(), offset).await?;
         self.pending.insert(section);
 
         // Add to intervals

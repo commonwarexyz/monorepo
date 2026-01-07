@@ -63,7 +63,7 @@
 pub mod utils;
 
 use crate::utils::codec::{recv_frame, send_frame};
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
     handshake::{
@@ -197,13 +197,13 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
                 peer,
             ),
         );
-        send_frame(&mut sink, &syn.encode(), config.max_message_size).await?;
+        send_frame(&mut sink, syn.encode(), config.max_message_size).await?;
 
         let syn_ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
         let syn_ack = SynAck::<S::Signature>::decode(syn_ack_bytes)?;
 
         let (ack, send, recv) = dial_end(state, syn_ack)?;
-        send_frame(&mut sink, &ack.encode(), config.max_message_size).await?;
+        send_frame(&mut sink, ack.encode(), config.max_message_size).await?;
 
         Ok((
             Sender {
@@ -264,7 +264,7 @@ pub async fn listen<
             ),
             msg1,
         )?;
-        send_frame(&mut sink, &syn_ack.encode(), config.max_message_size).await?;
+        send_frame(&mut sink, syn_ack.encode(), config.max_message_size).await?;
 
         let ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
         let ack = Ack::decode(ack_bytes)?;
@@ -301,11 +301,14 @@ pub struct Sender<O> {
 
 impl<O: Sink> Sender<O> {
     /// Encrypts and sends a message to the peer.
-    pub async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
-        let c = self.cipher.send(msg)?;
+    pub async fn send(&mut self, mut buf: impl Buf) -> Result<(), Error> {
+        // Copy the buffer to ensure contiguous memory for encryption.
+        let msg = buf.copy_to_bytes(buf.remaining());
+        let c = self.cipher.send(msg.as_ref())?;
+
         send_frame(
             &mut self.sink,
-            &c,
+            Bytes::from(c),
             self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
         )
         .await?;
@@ -394,10 +397,10 @@ mod test {
             assert_eq!(listener_peer, dialer_crypto.public_key());
             let messages: Vec<&'static [u8]> = vec![b"A", b"B", b"C"];
             for msg in &messages {
-                dialer_sender.send(msg).await?;
+                dialer_sender.send(&msg[..]).await?;
                 let syn_ack = listener_receiver.recv().await?;
                 assert_eq!(msg, &syn_ack);
-                listener_sender.send(msg).await?;
+                listener_sender.send(&msg[..]).await?;
                 let ack = dialer_receiver.recv().await?;
                 assert_eq!(msg, &ack);
             }

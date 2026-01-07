@@ -1,10 +1,10 @@
 use clap::{value_parser, Arg, Command};
 use commonware_bridge::{
-    application, Scheme, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
+    application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    simplex::{self, elector::Random, Engine},
+    simplex::{self, elector::Random, scheme::bls12381_threshold::Scheme, Engine},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
@@ -16,7 +16,9 @@ use commonware_cryptography::{
     ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
-use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Quota, Runner};
+use commonware_runtime::{
+    buffer::PoolRef, tokio, Metrics, Network, Quota, RayonPoolSpawner, Runner,
+};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU32};
 use std::{
@@ -217,11 +219,18 @@ fn main() {
         );
 
         // Initialize application
+        let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let this_network =
-            Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
-                .expect("share must be in participants");
-        let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
+        let this_network = Scheme::signer(
+            &consensus_namespace,
+            validators.clone(),
+            identity,
+            share,
+            strategy.clone(),
+        )
+        .expect("share must be in participants");
+        let other_network =
+            Scheme::certificate_verifier(&consensus_namespace, other_public, strategy);
         let (application, scheme, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
