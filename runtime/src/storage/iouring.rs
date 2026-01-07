@@ -164,7 +164,8 @@ impl crate::Storage for Storage {
             let mut header_bytes = [0u8; Header::SIZE];
             file.read_exact(&mut header_bytes)
                 .map_err(|_| Error::ReadFailed)?;
-            Header::from(header_bytes, raw_len, &versions, partition, name)?
+            Header::from(header_bytes, raw_len, &versions)
+                .map_err(|e| e.into_error(partition, name))?
         };
 
         let blob = Blob::new(partition.into(), name, file, self.io_sender.clone());

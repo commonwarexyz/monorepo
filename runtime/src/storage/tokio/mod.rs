@@ -159,7 +159,7 @@ impl crate::Storage for Storage {
             file.read_exact(&mut header_bytes)
                 .await
                 .map_err(|_| Error::ReadFailed)?;
-            Header::from(header_bytes, len, &versions, partition, name)?
+            Header::from(header_bytes, len, &versions).map_err(|e| e.into_error(partition, name))?
         };
 
         #[cfg(unix)]

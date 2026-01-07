@@ -47,7 +47,8 @@ impl crate::Storage for Storage {
             // Existing blob - read and validate header
             let mut header_bytes = [0u8; Header::SIZE];
             header_bytes.copy_from_slice(&content[..Header::SIZE]);
-            Header::from(header_bytes, raw_len, &versions, partition, name)?
+            Header::from(header_bytes, raw_len, &versions)
+                .map_err(|e| e.into_error(partition, name))?
         };
 
         Ok((

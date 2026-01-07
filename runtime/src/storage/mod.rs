@@ -3,6 +3,45 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
 use commonware_utils::hex;
+use std::ops::RangeInclusive;
+
+/// Errors that can occur when validating a blob header.
+#[derive(Debug)]
+pub(crate) enum HeaderError {
+    InvalidMagic {
+        expected: [u8; 4],
+        found: [u8; 4],
+    },
+    UnsupportedRuntimeVersion {
+        expected: u16,
+        found: u16,
+    },
+    VersionMismatch {
+        expected: RangeInclusive<u16>,
+        found: u16,
+    },
+}
+
+impl HeaderError {
+    /// Converts this error into an [`Error`](enum@crate::Error) with partition and name context.
+    pub(crate) fn into_error(self, partition: &str, name: &[u8]) -> crate::Error {
+        match self {
+            Self::InvalidMagic { expected, found } => crate::Error::BlobCorrupt(
+                partition.into(),
+                hex(name),
+                format!("invalid magic: expected {expected:?}, found {found:?}"),
+            ),
+            Self::UnsupportedRuntimeVersion { expected, found } => crate::Error::BlobCorrupt(
+                partition.into(),
+                hex(name),
+                format!("unsupported runtime version: expected {expected}, found {found}"),
+            ),
+            Self::VersionMismatch { expected, found } => {
+                crate::Error::BlobVersionMismatch { expected, found }
+            }
+        }
+    }
+}
 
 pub mod audited;
 #[cfg(feature = "iouring-storage")]
@@ -62,52 +101,34 @@ impl Header {
         (header, blob_version)
     }
 
-    /// Validates an existing header and computes the logical size.
-    /// Returns (blob_version, logical_len) on success.
+    /// Parses and validates an existing header, returning the blob version and logical size.
     pub(crate) fn from(
         raw_bytes: [u8; Self::SIZE],
         raw_len: u64,
-        versions: &std::ops::RangeInclusive<u16>,
-        partition: &str,
-        name: &[u8],
-    ) -> Result<(u16, u64), crate::Error> {
-        let header: Self =
-            Self::decode(raw_bytes.as_slice()).map_err(|_| crate::Error::ReadFailed)?;
-        header.validate(versions, partition, name)?;
+        versions: &RangeInclusive<u16>,
+    ) -> Result<(u16, u64), HeaderError> {
+        let header: Self = Self::decode(raw_bytes.as_slice())
+            .expect("header decode should never fail for correct size input");
+        header.validate(versions)?;
         Ok((header.blob_version, raw_len - Self::SIZE_U64))
     }
 
     /// Validates the magic bytes, runtime version, and blob version.
-    pub(crate) fn validate(
-        &self,
-        blob_versions: &std::ops::RangeInclusive<u16>,
-        partition: &str,
-        name: &[u8],
-    ) -> Result<(), crate::Error> {
+    pub(crate) fn validate(&self, blob_versions: &RangeInclusive<u16>) -> Result<(), HeaderError> {
         if self.magic != Self::MAGIC {
-            return Err(crate::Error::BlobCorrupt(
-                partition.into(),
-                hex(name),
-                format!(
-                    "invalid magic: expected {:?}, found {:?}",
-                    Self::MAGIC,
-                    self.magic
-                ),
-            ));
+            return Err(HeaderError::InvalidMagic {
+                expected: Self::MAGIC,
+                found: self.magic,
+            });
         }
         if self.runtime_version != Self::RUNTIME_VERSION {
-            return Err(crate::Error::BlobCorrupt(
-                partition.into(),
-                hex(name),
-                format!(
-                    "unsupported runtime version: expected {}, found {}",
-                    Self::RUNTIME_VERSION,
-                    self.runtime_version
-                ),
-            ));
+            return Err(HeaderError::UnsupportedRuntimeVersion {
+                expected: Self::RUNTIME_VERSION,
+                found: self.runtime_version,
+            });
         }
         if !blob_versions.contains(&self.blob_version) {
-            return Err(crate::Error::BlobVersionMismatch {
+            return Err(HeaderError::VersionMismatch {
                 expected: blob_versions.clone(),
                 found: self.blob_version,
             });
@@ -171,7 +192,7 @@ pub fn validate_partition_name(partition: &str) -> Result<(), crate::Error> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::Header;
+    use super::{Header, HeaderError};
     use crate::{Blob, Storage};
     use commonware_codec::{DecodeExt, Encode};
 
@@ -186,37 +207,42 @@ pub(crate) mod tests {
     #[test]
     fn test_header_validate_success() {
         let (header, _) = Header::new(&(5..=5));
-        assert!(header.validate(&(3..=7), "test", b"blob").is_ok());
-        assert!(header.validate(&(5..=5), "test", b"blob").is_ok());
+        assert!(header.validate(&(3..=7)).is_ok());
+        assert!(header.validate(&(5..=5)).is_ok());
     }
 
     #[test]
     fn test_header_validate_magic_mismatch() {
         let (mut header, _) = Header::new(&(5..=5));
         header.magic = *b"XXXX";
-        let result = header.validate(&(3..=7), "test", b"blob");
-        assert!(
-            matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
-        );
+        let result = header.validate(&(3..=7));
+        assert!(matches!(
+            result,
+            Err(HeaderError::InvalidMagic { expected, found })
+            if expected == Header::MAGIC && found == *b"XXXX"
+        ));
     }
 
     #[test]
     fn test_header_validate_runtime_version_mismatch() {
         let (mut header, _) = Header::new(&(5..=5));
         header.runtime_version = 99;
-        let result = header.validate(&(3..=7), "test", b"blob");
-        assert!(
-            matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("unsupported runtime version"))
-        );
+        let result = header.validate(&(3..=7));
+        assert!(matches!(
+            result,
+            Err(HeaderError::UnsupportedRuntimeVersion { expected, found })
+            if expected == Header::RUNTIME_VERSION && found == 99
+        ));
     }
 
     #[test]
     fn test_header_validate_blob_version_out_of_range() {
         let (header, _) = Header::new(&(10..=10));
-        let result = header.validate(&(3..=7), "test", b"blob");
+        let result = header.validate(&(3..=7));
         assert!(matches!(
             result,
-            Err(crate::Error::BlobVersionMismatch { expected, found: 10 }) if expected == (3..=7)
+            Err(HeaderError::VersionMismatch { expected, found })
+            if expected == (3..=7) && found == 10
         ));
     }
 
