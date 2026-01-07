@@ -51,7 +51,7 @@ impl PrivateKey {
         let (mut signature, mut recovery_id) = self
             .0
             .key
-            .sign_recoverable(&payload)
+            .expose(|key| key.sign_recoverable(&payload))
             .expect("signing must succeed");
 
         // The signing algorithm generates k, then calculates r <- x(k * G). Normalizing s by negating it is equivalent

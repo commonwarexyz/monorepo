@@ -11,6 +11,7 @@
 //! is already taken care of for you if you use the provided `deserialize` function.
 
 use super::variant::Variant;
+use crate::Secret;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
@@ -45,6 +46,7 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
     ptr,
 };
+use ctutils::CtEq;
 use rand_core::CryptoRngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -214,23 +216,6 @@ pub type Private = Scalar;
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
-    /// Generate a non-zero scalar from the randomly populated buffer.
-    fn from_bytes(mut ikm: [u8; 64]) -> Self {
-        let mut sc = blst_scalar::default();
-        let mut ret = blst_fr::default();
-        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
-        unsafe {
-            // blst_keygen loops until a non-zero value is produced (in accordance with IETF BLS KeyGen 4+).
-            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
-            blst_fr_from_scalar(&mut ret, &sc);
-        }
-
-        // Zeroize the ikm buffer
-        ikm.zeroize();
-
-        Self(ret)
-    }
-
     /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
     pub fn map(dst: DST, msg: &[u8]) -> Self {
         // The BLS12-381 scalar field has a modulus of approximately 255 bits.
@@ -285,7 +270,7 @@ impl Scalar {
         Self(ret)
     }
 
-    /// Encodes the scalar into a slice.
+    /// Encodes the scalar into a byte array.
     fn as_slice(&self) -> [u8; Self::SIZE] {
         let mut slice = [0u8; Self::SIZE];
         // SAFETY: All pointers valid; blst_bendian_from_scalar writes exactly 32 bytes.
@@ -346,6 +331,12 @@ impl Hash for Scalar {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let slice = self.as_slice();
         state.write(&slice);
+    }
+}
+
+impl CtEq for Scalar {
+    fn ct_eq(&self, other: &Self) -> ctutils::Choice {
+        self.0.l.ct_eq(&other.0.l)
     }
 }
 
@@ -488,39 +479,54 @@ impl Random for Scalar {
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut ikm = [0u8; 64];
         rng.fill_bytes(&mut ikm);
-        Self::from_bytes(ikm)
+
+        let mut sc = blst_scalar::default();
+        let mut ret = blst_fr::default();
+        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
+        unsafe {
+            // blst_keygen loops until a non-zero value is produced (in accordance with IETF BLS KeyGen 4+).
+            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
+            blst_fr_from_scalar(&mut ret, &sc);
+        }
+
+        // Zeroize the ikm buffer
+        ikm.zeroize();
+
+        Self(ret)
     }
 }
 
 /// A share of a threshold signing key.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
     /// The scalar corresponding to the share's secret.
-    pub private: Private,
-}
-
-impl AsRef<Private> for Share {
-    fn as_ref(&self) -> &Private {
-        &self.private
-    }
+    pub private: Secret<Private>,
 }
 
 impl Share {
+    /// Creates a new `Share` with the given index and private key.
+    pub const fn new(index: u32, private: Private) -> Self {
+        Self {
+            index,
+            private: Secret::new(private),
+        }
+    }
+
     /// Returns the public key corresponding to the share.
     ///
     /// This can be verified against the public polynomial.
     pub fn public<V: Variant>(&self) -> V::Public {
-        V::Public::generator() * &self.private
+        self.private
+            .expose(|private| V::Public::generator() * private)
     }
 }
 
 impl Write for Share {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.index).write(buf);
-        self.private.write(buf);
+        self.private.expose(|private| private.write(buf));
     }
 }
 
@@ -530,25 +536,34 @@ impl Read for Share {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let index = UInt::read(buf)?.into();
         let private = Private::read(buf)?;
-        Ok(Self { index, private })
+        Ok(Self {
+            index,
+            private: Secret::new(private),
+        })
     }
 }
 
 impl EncodeSize for Share {
     fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + self.private.encode_size()
+        UInt(self.index).encode_size() + self.private.expose(|private| private.encode_size())
     }
 }
 
 impl Display for Share {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Share(index={}, private={})", self.index, self.private)
+        write!(f, "{:?}", self)
     }
 }
 
-impl Debug for Share {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Share(index={}, private={})", self.index, self.private)
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Share {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let index = u.arbitrary()?;
+        let private = Private::arbitrary(u)?;
+        Ok(Self {
+            index,
+            private: Secret::new(private),
+        })
     }
 }
 
@@ -1126,11 +1141,13 @@ impl HashToGroup for G2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bls12381::primitives::group::Scalar;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_math::algebra::test_suites;
+    use commonware_math::algebra::{test_suites, Random};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
     use proptest::{prelude::*, strategy::Strategy};
+    use rand::{rngs::StdRng, SeedableRng};
     use std::collections::{BTreeSet, HashMap};
 
     impl Arbitrary for Scalar {
@@ -1138,7 +1155,9 @@ mod tests {
         type Strategy = BoxedStrategy<Self>;
 
         fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<[u8; 64]>().prop_map(Self::from_bytes).boxed()
+            any::<[u8; 32]>()
+                .prop_map(|seed| Self::random(&mut StdRng::from_seed(seed)))
+                .boxed()
         }
     }
 
@@ -1445,27 +1464,20 @@ mod tests {
         let mut scalar_set = BTreeSet::new();
         let mut g1_set = BTreeSet::new();
         let mut g2_set = BTreeSet::new();
-        let mut share_set = BTreeSet::new();
         while scalar_set.len() < NUM_ITEMS {
             let scalar = Scalar::random(&mut rng);
             let g1 = G1::generator() * &scalar;
             let g2 = G2::generator() * &scalar;
-            let share = Share {
-                index: scalar_set.len() as u32,
-                private: scalar.clone(),
-            };
 
             scalar_set.insert(scalar);
             g1_set.insert(g1);
             g2_set.insert(g2);
-            share_set.insert(share);
         }
 
         // Verify that the sets contain the expected number of unique items.
         assert_eq!(scalar_set.len(), NUM_ITEMS);
         assert_eq!(g1_set.len(), NUM_ITEMS);
         assert_eq!(g2_set.len(), NUM_ITEMS);
-        assert_eq!(share_set.len(), NUM_ITEMS);
 
         // Verify that `BTreeSet` iteration is sorted, which relies on `Ord`.
         let scalars: Vec<_> = scalar_set.iter().collect();
@@ -1474,20 +1486,16 @@ mod tests {
         assert!(g1s.windows(2).all(|w| w[0] <= w[1]));
         let g2s: Vec<_> = g2_set.iter().collect();
         assert!(g2s.windows(2).all(|w| w[0] <= w[1]));
-        let shares: Vec<_> = share_set.iter().collect();
-        assert!(shares.windows(2).all(|w| w[0] <= w[1]));
 
         // Test that we can use these types as keys in hash maps, which relies on `Hash` and `Eq`.
         let scalar_map: HashMap<_, _> = scalar_set.iter().cloned().zip(0..).collect();
         let g1_map: HashMap<_, _> = g1_set.iter().cloned().zip(0..).collect();
         let g2_map: HashMap<_, _> = g2_set.iter().cloned().zip(0..).collect();
-        let share_map: HashMap<_, _> = share_set.iter().cloned().zip(0..).collect();
 
         // Verify that the maps contain the expected number of unique items.
         assert_eq!(scalar_map.len(), NUM_ITEMS);
         assert_eq!(g1_map.len(), NUM_ITEMS);
         assert_eq!(g2_map.len(), NUM_ITEMS);
-        assert_eq!(share_map.len(), NUM_ITEMS);
     }
 
     #[test]
@@ -1539,6 +1547,33 @@ mod tests {
             Scalar::zero(),
             "Hash should not produce zero scalar"
         );
+    }
+
+    #[test]
+    fn test_secret_scalar_equality() {
+        let mut rng = test_rng();
+        let scalar1 = Scalar::random(&mut rng);
+        let scalar2 = scalar1.clone();
+        let scalar3 = Scalar::random(&mut rng);
+
+        let s1 = Secret::new(scalar1);
+        let s2 = Secret::new(scalar2);
+        let s3 = Secret::new(scalar3);
+
+        // Same scalar should be equal
+        assert_eq!(s1, s2);
+        // Different scalars should (very likely) be different
+        assert_ne!(s1, s3);
+    }
+
+    #[test]
+    fn test_share_redacted() {
+        let mut rng = test_rng();
+        let share = Share::new(1, Scalar::random(&mut rng));
+        let debug = format!("{:?}", share);
+        let display = format!("{}", share);
+        assert!(debug.contains("REDACTED"));
+        assert!(display.contains("REDACTED"));
     }
 
     #[cfg(feature = "arbitrary")]

@@ -35,6 +35,8 @@ pub mod handshake;
 pub mod lthash;
 pub use lthash::LtHash;
 pub mod secp256r1;
+pub mod secret;
+pub use secret::Secret;
 pub mod transcript;
 
 /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
@@ -72,7 +74,7 @@ pub trait Signer: Random + Send + Sync + Clone + 'static {
 }
 
 /// A [Signer] that can be serialized/deserialized.
-pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {}
+pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq {}
 
 /// Verifies [Signature]s over messages.
 pub trait Verifier {

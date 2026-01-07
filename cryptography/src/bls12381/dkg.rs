@@ -290,7 +290,7 @@ use crate::{
         variant::Variant,
     },
     transcript::{Summary, Transcript},
-    PublicKey, Signer,
+    PublicKey, Secret, Signer,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
@@ -566,7 +566,9 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             return false;
         };
         let expected = pub_msg.commitment.eval_msm(&scalar, &Sequential);
-        expected == V::Public::generator() * &priv_msg.share
+        priv_msg
+            .share
+            .expose(|share| expected == V::Public::generator() * share)
     }
 }
 
@@ -680,26 +682,29 @@ where
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DealerPrivMsg {
-    share: Scalar,
+    share: Secret<Scalar>,
 }
 
-impl std::fmt::Debug for DealerPrivMsg {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "DealerPrivMsg(REDACTED)")
+impl DealerPrivMsg {
+    /// Creates a new `DealerPrivMsg` with the given share.
+    pub const fn new(share: Scalar) -> Self {
+        Self {
+            share: Secret::new(share),
+        }
     }
 }
 
 impl EncodeSize for DealerPrivMsg {
     fn encode_size(&self) -> usize {
-        self.share.encode_size()
+        self.share.expose(|share| share.encode_size())
     }
 }
 
 impl Write for DealerPrivMsg {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.share.write(buf);
+        self.share.expose(|share| share.write(buf));
     }
 }
 
@@ -710,17 +715,14 @@ impl Read for DealerPrivMsg {
         buf: &mut impl bytes::Buf,
         _cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            share: ReadExt::read(buf)?,
-        })
+        Ok(Self::new(ReadExt::read(buf)?))
     }
 }
 
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for DealerPrivMsg {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let share = u.arbitrary()?;
-        Ok(Self { share })
+        Ok(Self::new(u.arbitrary()?))
     }
 }
 
@@ -1173,7 +1175,14 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     ) -> Result<(Self, DealerPubMsg<V>, Vec<(S::PublicKey, DealerPrivMsg)>), Error> {
         // Check that this dealer is defined in the round.
         info.dealer_index(&me.public_key())?;
-        let share = info.unwrap_or_random_share(&mut rng, share.map(|x| x.private))?;
+        let share = info.unwrap_or_random_share(
+            &mut rng,
+            // We are extracting the private scalar from `Secret` protection because
+            // `Poly::new_with_constant` requires an owned value. The extracted scalar is
+            // scoped to this function and will be zeroized on drop (i.e. the secret is
+            // only exposed for the duration of this function).
+            share.map(|x| x.private.expose_unwrap()),
+        )?;
         let my_poly = Poly::new_with_constant(&mut rng, info.degree(), share);
         let priv_msgs = info
             .players
@@ -1181,12 +1190,10 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             .map(|pk| {
                 (
                     pk.clone(),
-                    DealerPrivMsg {
-                        share: my_poly.eval_msm(
-                            &info.player_scalar(pk).expect("player should exist"),
-                            &Sequential,
-                        ),
-                    },
+                    DealerPrivMsg::new(my_poly.eval_msm(
+                        &info.player_scalar(pk).expect("player should exist"),
+                        &Sequential,
+                    )),
                 )
             })
             .collect::<Vec<_>>();
@@ -1474,13 +1481,18 @@ impl<V: Variant, S: Signer> Player<V, S> {
         strategy: &Y,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
         let selected = select(&self.info, logs)?;
+        // We are extracting the private scalars from `Secret` protection
+        // because interpolation/summation needs owned scalars for polynomial
+        // arithmetic. The extracted scalars are scoped to this function and
+        // will be zeroized on drop (i.e. the secrets are only exposed for the
+        // duration of this function).
         let dealings = selected
             .iter_pairs()
             .map(|(dealer, log)| {
                 let share = self
                     .view
                     .get(dealer)
-                    .map(|(_, priv_msg)| priv_msg.share.clone())
+                    .map(|(_, priv_msg)| priv_msg.share.clone().expose_unwrap())
                     .unwrap_or_else(|| {
                         log.get_reveal(&self.me_pub).map_or_else(
                             || {
@@ -1488,7 +1500,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
                                     "select didn't check dealer reveal, or we're not a player?"
                                 )
                             },
-                            |priv_msg| priv_msg.share.clone(),
+                            |priv_msg| priv_msg.share.clone().expose_unwrap(),
                         )
                     });
                 (dealer.clone(), share)
@@ -1511,10 +1523,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
                     .expect("select ensures that we can recover")
             },
         );
-        let share = Share {
-            index: self.index,
-            private,
-        };
+        let share = Share::new(self.index, private);
         Ok((output, share))
     }
 }
@@ -1543,10 +1552,7 @@ pub fn deal<V: Variant, P: Clone + Ord>(
                 &mode.scalar(n, i).expect("player index should be valid"),
                 &Sequential,
             );
-            let share = Share {
-                index: i,
-                private: eval,
-            };
+            let share = Share::new(i, eval);
             (p.clone(), share)
         })
         .try_collect()
@@ -1929,69 +1935,66 @@ mod test_plan {
                     let share = match (shares.get(&pk), round.replace_shares.contains(&i_dealer)) {
                         (None, _) => None,
                         (Some(s), false) => Some(s.clone()),
-                        (Some(_), true) => Some(Share {
-                            index: i_dealer,
-                            private: Scalar::random(&mut rng),
-                        }),
+                        (Some(_), true) => Some(Share::new(i_dealer, Scalar::random(&mut rng))),
                     };
 
                     // Start dealer (with potential modifications)
-                    let (mut dealer, pub_msg, mut priv_msgs) = if let Some(shift) =
-                        round.shift_degrees.get(&i_dealer)
-                    {
-                        // Create dealer with shifted degree
-                        let degree =
-                            u32::try_from(info.degree() as i32 + shift.get()).unwrap_or_default();
+                    let (mut dealer, pub_msg, mut priv_msgs) =
+                        if let Some(shift) = round.shift_degrees.get(&i_dealer) {
+                            // Create dealer with shifted degree
+                            let degree = u32::try_from(info.degree() as i32 + shift.get())
+                                .unwrap_or_default();
 
-                        // Manually create the dealer with adjusted polynomial
-                        let share = info
-                            .unwrap_or_random_share(&mut rng, share.map(|s| s.private))
-                            .expect("Failed to generate dealer share");
+                            // Manually create the dealer with adjusted polynomial
+                            let share = info
+                                .unwrap_or_random_share(
+                                    &mut rng,
+                                    share.map(|s| s.private.expose_unwrap()),
+                                )
+                                .expect("Failed to generate dealer share");
 
-                        let my_poly = Poly::new_with_constant(&mut rng, degree, share);
-                        let priv_msgs = info
-                            .players
-                            .iter()
-                            .map(|pk| {
-                                (
-                                    pk.clone(),
-                                    DealerPrivMsg {
-                                        share: my_poly.eval_msm(
+                            let my_poly = Poly::new_with_constant(&mut rng, degree, share);
+                            let priv_msgs = info
+                                .players
+                                .iter()
+                                .map(|pk| {
+                                    (
+                                        pk.clone(),
+                                        DealerPrivMsg::new(my_poly.eval_msm(
                                             &info.player_scalar(pk).expect("player should exist"),
                                             &Sequential,
-                                        ),
-                                    },
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        let results: Map<_, _> = priv_msgs
-                            .iter()
-                            .map(|(pk, pm)| (pk.clone(), AckOrReveal::Reveal(pm.clone())))
-                            .try_collect()
-                            .unwrap();
-                        let commitment = Poly::commit(my_poly);
-                        let pub_msg = DealerPubMsg { commitment };
-                        let transcript = {
-                            let t = transcript_for_round(&info);
-                            transcript_for_ack(&t, &pk, &pub_msg)
+                                        )),
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            let results: Map<_, _> = priv_msgs
+                                .iter()
+                                .map(|(pk, pm)| (pk.clone(), AckOrReveal::Reveal(pm.clone())))
+                                .try_collect()
+                                .unwrap();
+                            let commitment = Poly::commit(my_poly);
+                            let pub_msg = DealerPubMsg { commitment };
+                            let transcript = {
+                                let t = transcript_for_round(&info);
+                                transcript_for_ack(&t, &pk, &pub_msg)
+                            };
+                            let dealer = Dealer {
+                                me: sk.clone(),
+                                info: info.clone(),
+                                pub_msg: pub_msg.clone(),
+                                results,
+                                transcript,
+                            };
+                            (dealer, pub_msg, priv_msgs)
+                        } else {
+                            Dealer::start(&mut rng, info.clone(), sk.clone(), share)?
                         };
-                        let dealer = Dealer {
-                            me: sk.clone(),
-                            info: info.clone(),
-                            pub_msg: pub_msg.clone(),
-                            results,
-                            transcript,
-                        };
-                        (dealer, pub_msg, priv_msgs)
-                    } else {
-                        Dealer::start(&mut rng, info.clone(), sk.clone(), share)?
-                    };
 
                     // Apply BadShare perturbations
                     for (player, priv_msg) in &mut priv_msgs {
                         let player_key_idx = pk_to_key_idx[player];
                         if round.bad_shares.contains(&(i_dealer, player_key_idx)) {
-                            priv_msg.share = Scalar::random(&mut rng);
+                            *priv_msg = DealerPrivMsg::new(Scalar::random(&mut rng));
                         }
                     }
                     assert_eq!(priv_msgs.len(), players.len());
@@ -2068,9 +2071,9 @@ mod test_plan {
                                 *results
                                     .get_value_mut(&player_pk)
                                     .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))? =
-                                    AckOrReveal::Reveal(DealerPrivMsg {
-                                        share: Scalar::random(&mut rng),
-                                    });
+                                    AckOrReveal::Reveal(DealerPrivMsg::new(Scalar::random(
+                                        &mut rng,
+                                    )));
                             }
                         }
                     }
@@ -2398,6 +2401,8 @@ mod test {
     use super::{test_plan::*, *};
     use crate::{bls12381::primitives::variant::MinPk, ed25519};
     use anyhow::anyhow;
+    use commonware_math::algebra::Random;
+    use commonware_utils::test_rng;
     use core::num::NonZeroI32;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
@@ -2571,6 +2576,14 @@ mod test {
         assert!(log1.check(&info).is_none());
 
         Ok(())
+    }
+
+    #[test]
+    fn test_dealer_priv_msg_redacted() {
+        let mut rng = test_rng();
+        let msg = DealerPrivMsg::new(Scalar::random(&mut rng));
+        let debug = format!("{:?}", msg);
+        assert!(debug.contains("REDACTED"));
     }
 
     #[cfg(feature = "arbitrary")]
