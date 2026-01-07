@@ -154,10 +154,9 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
                 Err(e) => return Err(e),
             };
 
+            // Truncate any trailing partial entry
             let entry_count = index_size / chunk_size;
             let aligned_size = entry_count * chunk_size;
-
-            // Truncate any trailing partial entry
             if aligned_size < index_size {
                 warn!(
                     section,
