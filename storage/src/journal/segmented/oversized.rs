@@ -148,9 +148,13 @@ impl<E: Storage + Metrics, I: OversizedRecord, V: Codec> Oversized<E, I, V> {
             let glob_size = match self.values.size(section).await {
                 Ok(size) => size,
                 Err(Error::AlreadyPrunedToSection(oldest)) => {
+                    // This shouldn't happen in normal operation: prune() prunes the index
+                    // first, then the glob. A crash between these would leave the glob
+                    // NOT pruned (opposite of this case). We handle this defensively in
+                    // case of external manipulation or future changes.
                     warn!(
                         section,
-                        oldest, "index has section that glob already pruned (crash during prune?)"
+                        oldest, "index has section that glob already pruned"
                     );
                     0
                 }
@@ -163,7 +167,7 @@ impl<E: Storage + Metrics, I: OversizedRecord, V: Codec> Oversized<E, I, V> {
             match self.index.get(section, last_pos).await {
                 Ok(entry) => {
                     let (value_offset, value_size) = entry.value_location();
-                    let entry_end = value_offset + u64::from(value_size);
+                    let entry_end = value_offset.saturating_add(u64::from(value_size));
 
                     if entry_end <= glob_size {
                         // Last entry valid - all entries in this section are valid
@@ -176,24 +180,9 @@ impl<E: Storage + Metrics, I: OversizedRecord, V: Codec> Oversized<E, I, V> {
                         last_pos, glob_size, entry_end, "invalid entry: glob truncated"
                     );
 
-                    let mut valid_count: u64 = 0;
-                    for pos in (0..last_pos).rev() {
-                        match self.index.get(section, pos).await {
-                            Ok(entry) => {
-                                let (offset, size) = entry.value_location();
-                                if offset + u64::from(size) <= glob_size {
-                                    valid_count = pos + 1;
-                                    break;
-                                }
-                            }
-                            Err(_) => {
-                                // Corrupted entry - continue scanning
-                                continue;
-                            }
-                        }
-                    }
-
-                    // Rewind to last valid entry
+                    let valid_count = self
+                        .find_last_valid_position(section, last_pos, glob_size)
+                        .await;
                     let valid_size = valid_count * chunk_size;
                     debug!(section, index_size, valid_size, "rewinding index journal");
                     self.index.rewind_section(section, valid_size).await?;
@@ -205,20 +194,9 @@ impl<E: Storage + Metrics, I: OversizedRecord, V: Codec> Oversized<E, I, V> {
                         last_pos, "corrupted last entry, scanning backwards"
                     );
 
-                    let mut valid_count: u64 = 0;
-                    for pos in (0..last_pos).rev() {
-                        match self.index.get(section, pos).await {
-                            Ok(entry) => {
-                                let (offset, size) = entry.value_location();
-                                if offset + u64::from(size) <= glob_size {
-                                    valid_count = pos + 1;
-                                    break;
-                                }
-                            }
-                            Err(_) => continue,
-                        }
-                    }
-
+                    let valid_count = self
+                        .find_last_valid_position(section, last_pos, glob_size)
+                        .await;
                     let valid_size = valid_count * chunk_size;
                     debug!(section, index_size, valid_size, "rewinding index journal");
                     self.index.rewind_section(section, valid_size).await?;
@@ -227,6 +205,22 @@ impl<E: Storage + Metrics, I: OversizedRecord, V: Codec> Oversized<E, I, V> {
         }
 
         Ok(())
+    }
+
+    /// Scan backwards from `before_pos` to find the last valid entry position.
+    ///
+    /// Returns the count of valid entries (i.e., `last_valid_pos + 1`), or 0 if none found.
+    async fn find_last_valid_position(&self, section: u64, before_pos: u64, glob_size: u64) -> u64 {
+        for pos in (0..before_pos).rev() {
+            if let Ok(entry) = self.index.get(section, pos).await {
+                let (offset, size) = entry.value_location();
+                let entry_end = offset.saturating_add(u64::from(size));
+                if entry_end <= glob_size {
+                    return pos + 1;
+                }
+            }
+        }
+        0
     }
 
     /// Append entry + value.
