@@ -444,9 +444,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        // Destroy oversized journal (handles both index and values)
-        self.oversized.destroy().await?;
-        Ok(())
+        Ok(self.oversized.destroy().await?)
     }
 }
 
