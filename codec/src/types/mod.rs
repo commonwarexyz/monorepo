@@ -58,8 +58,13 @@ where
     // Add last item, if exists
     if let Some((last_key, last_value)) = last {
         insert(last_key, last_value);
+    }
+
+    Ok(())
+}
+
 /// Read items from [Buf] in ascending order.
-fn read_ordered_set<K, F>(
+pub(crate) fn read_ordered_set<K, F>(
     buf: &mut impl Buf,
     len: usize,
     cfg: &K::Cfg,
