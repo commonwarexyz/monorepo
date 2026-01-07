@@ -6,7 +6,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
 use std::{
@@ -71,7 +71,7 @@ impl FixedSize for Cursor {
     const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
 }
 
-impl commonware_utils::Span for Cursor {}
+impl Span for Cursor {}
 
 impl Array for Cursor {}
 
