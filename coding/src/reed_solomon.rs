@@ -47,7 +47,7 @@ pub struct Chunk<H: Hasher> {
     /// The index of [Chunk] in the original data.
     index: u16,
 
-    /// The proof of the shard in the [bmt] at the given index.
+    /// The multi-proof of the shard in the [bmt] at the given index.
     proof: bmt::Proof<H>,
 }
 
@@ -74,9 +74,8 @@ impl<H: Hasher> Chunk<H> {
         let shard_digest = hasher.finalize();
 
         // Verify proof
-        self.proof
-            .verify(&mut hasher, &shard_digest, self.index as u32, root)
-            .is_ok()
+        let elements = [(shard_digest, self.index as u32)];
+        self.proof.verify(&mut hasher, &elements, root).is_ok()
     }
 }
 
@@ -381,7 +380,7 @@ fn decode<H: Hasher, S: Strategy>(
 /// The encoder takes input data, splits it into `k` data shards, and generates `m` recovery
 /// shards using [Reed-Solomon encoding](https://en.wikipedia.org/wiki/Reed%E2%80%93Solomon_error_correction).
 /// All `n = k + m` shards are then used to build a [bmt], producing a single root hash. Each shard
-/// is packaged as a chunk containing the shard data, its index, and a Merkle proof against the [bmt] root.
+/// is packaged as a chunk containing the shard data, its index, and a Merkle multi-proof against the [bmt] root.
 ///
 /// ## Encoding
 ///
@@ -445,12 +444,12 @@ fn decode<H: Hasher, S: Strategy>(
 /// Each chunk contains:
 /// - `shard`: The shard data (original or recovery).
 /// - `index`: The shard's original index (0 to n-1).
-/// - `proof`: A Merkle proof of the shard's inclusion in the [bmt].
+/// - `proof`: A Merkle multi-proof of the shard's inclusion in the [bmt].
 ///
 /// ## Decoding and Verification
 ///
 /// The decoder requires any `k` chunks to reconstruct the original data.
-/// 1. Each chunk's Merkle proof is verified against the [bmt] root.
+/// 1. Each chunk's Merkle multi-proof is verified against the [bmt] root.
 /// 2. The shards from the valid chunks are used to reconstruct the original `k` data shards.
 /// 3. To ensure consistency, the recovered data shards are re-encoded, and a new [bmt] root is
 ///    generated. This new root MUST match the original [bmt] root. This prevents attacks where

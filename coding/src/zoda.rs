@@ -126,7 +126,7 @@ use commonware_math::{
     ntt::{EvaluationVector, Matrix},
 };
 use commonware_parallel::Strategy;
-use commonware_storage::bmt::{Builder as BmtBuilder, Error as BmtError, MultiProof};
+use commonware_storage::bmt::{Builder as BmtBuilder, Error as BmtError, Proof};
 use rand::seq::SliceRandom as _;
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
@@ -326,7 +326,7 @@ use topology::Topology;
 pub struct Shard<H: Hasher> {
     data_bytes: usize,
     root: H::Digest,
-    inclusion_proof: MultiProof<H>,
+    inclusion_proof: Proof<H>,
     rows: Matrix,
     checksum: Arc<Matrix>,
 }
@@ -400,7 +400,7 @@ where
 
 #[derive(Clone, Debug)]
 pub struct ReShard<H: Hasher> {
-    inclusion_proof: MultiProof<H>,
+    inclusion_proof: Proof<H>,
     shard: Matrix,
 }
 

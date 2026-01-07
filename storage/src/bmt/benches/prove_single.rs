@@ -36,7 +36,8 @@ fn bench_prove_single(c: &mut Criterion) {
                         let mut hasher = Sha256::new();
                         for (pos, element) in samples {
                             let proof = tree.proof(pos).unwrap();
-                            assert!(proof.verify(&mut hasher, &element, pos, &root).is_ok());
+                            let elements = [(element, pos)];
+                            assert!(proof.verify(&mut hasher, &elements, &root).is_ok());
                         }
                     },
                     criterion::BatchSize::SmallInput,

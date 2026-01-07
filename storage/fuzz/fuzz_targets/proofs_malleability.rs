@@ -173,10 +173,9 @@ fn fuzz(input: FuzzInput) {
                     let original_proof = tree.proof(idx as u32).unwrap();
 
                     let mut hasher = Sha256::default();
+                    let elements = [(digests[idx], idx as u32)];
                     assert!(
-                        original_proof
-                            .verify(&mut hasher, &digests[idx], idx as u32, &root)
-                            .is_ok(),
+                        original_proof.verify(&mut hasher, &elements, &root).is_ok(),
                         "Original BMT proof must be valid"
                     );
 
@@ -185,9 +184,7 @@ fn fuzz(input: FuzzInput) {
                         mutate_proof_bytes(&mut mutated_proof, mutation, &());
 
                         if mutated_proof != original_proof {
-                            let is_valid = mutated_proof
-                                .verify(&mut hasher, &digests[idx], idx as u32, &root)
-                                .is_ok();
+                            let is_valid = mutated_proof.verify(&mut hasher, &elements, &root).is_ok();
                             assert!(!is_valid, "Mutated BMT proof must be invalid");
                         }
                     }

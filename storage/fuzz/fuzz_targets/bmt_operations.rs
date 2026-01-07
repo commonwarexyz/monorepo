@@ -71,7 +71,7 @@ struct FuzzInput {
 fn fuzz(input: FuzzInput) {
     let mut builder: Option<Builder<Sha256>> = None;
     let mut tree = None;
-    let mut proof = None;
+    let mut proof: Option<Proof<Sha256>> = None;
     let mut range_proof = None;
     let mut leaf_values = Vec::new();
 
@@ -118,8 +118,9 @@ fn fuzz(input: FuzzInput) {
                 if let (Some(ref p), Some(ref t)) = (&proof, &tree) {
                     let mut hasher = Sha256::default();
                     let leaf_digest = Sha256::hash(&leaf_value.to_be_bytes());
+                    let elements = [(leaf_digest, *position)];
                     let root = t.root();
-                    let _ = p.verify(&mut hasher, &leaf_digest, *position, &root);
+                    let _ = p.verify(&mut hasher, &elements, &root);
                 }
             }
 

@@ -8,7 +8,7 @@ hash = "edc22446bb2952609d0c8daccf2d22f8ad2b71eedfcf45296c3f4db49d78404a"
 
 ["commonware_coding::reed_solomon::tests::conformance::CodecConformance<Chunk<Sha256>>"]
 n_cases = 65536
-hash = "aa8512bb8e86e967833edd1a6cc806280d5e7334e9dc8428a098de9204db12d1"
+hash = "5ca4f04ca6ebdba670037eb1be0133a9b633c6ec64b7b8828eb5d7baa74c2ecd"
 
 ["commonware_coding::test::conformance::CodecConformance<Config>"]
 n_cases = 65536
