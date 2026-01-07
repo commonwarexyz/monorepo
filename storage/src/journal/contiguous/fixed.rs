@@ -137,7 +137,7 @@ pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
 }
 
 impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
-    pub(crate) const CHUNK_SIZE: usize = u32::SIZE + A::SIZE;
+    const CHUNK_SIZE: usize = u32::SIZE + A::SIZE;
     pub(crate) const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
     /// Initialize a new `Journal` instance.

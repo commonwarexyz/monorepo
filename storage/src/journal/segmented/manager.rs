@@ -95,20 +95,20 @@ pub struct Config<F> {
 /// (big-endian u64). This component handles initialization, pruning, syncing,
 /// and metrics.
 pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
-    pub(crate) context: E,
-    pub(crate) partition: String,
-    pub(crate) factory: F,
+    context: E,
+    partition: String,
+    factory: F,
 
     /// One blob per section.
     pub(crate) blobs: BTreeMap<u64, F::Buffer>,
 
     /// A section number before which all sections have been pruned during
     /// the current execution. Not persisted across restarts.
-    pub(crate) oldest_retained_section: u64,
+    oldest_retained_section: u64,
 
-    pub(crate) tracked: Gauge,
-    pub(crate) synced: Counter,
-    pub(crate) pruned: Counter,
+    tracked: Gauge,
+    synced: Counter,
+    pruned: Counter,
 }
 
 impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {

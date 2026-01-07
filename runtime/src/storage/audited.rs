@@ -13,6 +13,11 @@ impl<S: crate::Storage> Storage<S> {
     pub const fn new(inner: S, auditor: Arc<Auditor>) -> Self {
         Self { inner, auditor }
     }
+
+    /// Get a reference to the inner storage.
+    pub const fn inner(&self) -> &S {
+        &self.inner
+    }
 }
 
 impl<S: crate::Storage> crate::Storage for Storage<S> {

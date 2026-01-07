@@ -119,11 +119,11 @@ impl<C> Config<C> {
 /// before the offsets journal.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
-    pub(crate) data: variable::Journal<E, V>,
+    data: variable::Journal<E, V>,
 
     /// Index mapping positions to byte offsets within the data journal.
     /// The section can be calculated from the position using items_per_section.
-    pub(crate) offsets: fixed::Journal<E, u64>,
+    offsets: fixed::Journal<E, u64>,
 
     /// The number of items per section.
     ///

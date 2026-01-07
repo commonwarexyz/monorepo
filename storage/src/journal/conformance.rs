@@ -7,7 +7,7 @@ use crate::journal::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{buffer::PoolRef, deterministic, Blob, Metrics, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
 use commonware_utils::{NZUsize, NZU64};
 use core::num::{NonZeroU64, NonZeroUsize};
 use oversized::OversizedRecord;
@@ -42,23 +42,9 @@ impl Conformance for ContiguousFixed {
                 journal.append(*item).await.unwrap();
             }
             journal.sync().await.unwrap();
+            drop(journal);
 
-            assert_eq!(
-                journal.blobs.len(),
-                data_to_write.len() / ITEMS_PER_BLOB.get() as usize
-            );
-
-            let mut contents: Vec<u8> = Vec::with_capacity(data_to_write.len() * size_of::<u64>());
-
-            // Read all blobs and the tail into a single buffer.
-            for (_, blob) in journal.blobs.iter() {
-                let buf = vec![0u8; blob.size().await as usize];
-                contents.extend(blob.read_at(buf, 0).await.unwrap().as_ref());
-            }
-            let buf = vec![0u8; journal.tail.size().await as usize];
-            contents.extend(journal.tail.read_at(buf, 0).await.unwrap().as_ref());
-
-            contents
+            context.export_blobs_digest().to_vec()
         })
     }
 }
@@ -89,36 +75,14 @@ impl Conformance for ContiguousVariable {
                 item.resize(size, 0);
                 context.fill(item.as_mut_slice());
             }
-            let data_len = data_to_write.len();
-            let data_flat_len = data_to_write.iter().map(|v| v.len()).sum();
 
             for item in data_to_write {
                 journal.append(item).await.unwrap();
             }
             journal.sync().await.unwrap();
+            drop(journal);
 
-            assert_eq!(
-                journal.data.manager.blobs.len(),
-                data_len.div_ceil(ITEMS_PER_BLOB.get() as usize),
-            );
-
-            let mut contents: Vec<u8> = Vec::with_capacity(data_flat_len);
-
-            // Read all of the data journal's blobs into the buffer.
-            for (_, blob) in journal.data.manager.blobs.iter() {
-                let buf = vec![0u8; blob.size().await as usize];
-                contents.extend(blob.read_at(buf, 0).await.unwrap().as_ref());
-            }
-
-            // Read all of the offsets journal's blobs into the buffer.
-            for (_, blob) in journal.offsets.blobs.iter() {
-                let buf = vec![0u8; blob.size().await as usize];
-                contents.extend(blob.read_at(buf, 0).await.unwrap().as_ref());
-            }
-            let buf = vec![0u8; journal.offsets.tail.size().await as usize];
-            contents.extend(journal.offsets.tail.read_at(buf, 0).await.unwrap().as_ref());
-
-            contents
+            context.export_blobs_digest().to_vec()
         })
     }
 }
@@ -154,16 +118,9 @@ impl Conformance for SegmentedFixed {
             for section in 0..3 {
                 journal.sync(section).await.unwrap();
             }
+            drop(journal);
 
-            let mut contents: Vec<u8> = Vec::new();
-
-            // Read all blobs into a single buffer
-            for (_, blob) in journal.manager.blobs.iter() {
-                let buf = vec![0u8; blob.size().await as usize];
-                contents.extend(blob.read_at(buf, 0).await.unwrap().as_ref());
-            }
-
-            contents
+            context.export_blobs_digest().to_vec()
         })
     }
 }
@@ -203,16 +160,9 @@ impl Conformance for SegmentedGlob {
             for section in 0..3 {
                 journal.sync(section).await.unwrap();
             }
+            drop(journal);
 
-            let mut contents: Vec<u8> = Vec::new();
-
-            // Read all blobs into a single buffer
-            for (_, blob) in journal.manager.blobs.iter() {
-                let buf = vec![0u8; blob.size().await as usize];
-                contents.extend(blob.read_at(buf, 0).await.unwrap().as_ref());
-            }
-
-            contents
+            context.export_blobs_digest().to_vec()
         })
     }
 }
@@ -256,16 +206,9 @@ impl Conformance for SegmentedVariable {
             for section in 0..3 {
                 journal.sync(section).await.unwrap();
             }
+            drop(journal);
 
-            let mut contents: Vec<u8> = Vec::new();
-
-            // Read all blobs into a single buffer
-            for (_, blob) in journal.manager.blobs.iter() {
-                let buf = vec![0u8; blob.size().await as usize];
-                contents.extend(blob.read_at(buf, 0).await.unwrap().as_ref());
-            }
-
-            contents
+            context.export_blobs_digest().to_vec()
         })
     }
 }
@@ -363,22 +306,9 @@ impl Conformance for SegmentedOversized {
             for section in 0..3 {
                 journal.sync(section).await.unwrap();
             }
+            drop(journal);
 
-            let mut contents: Vec<u8> = Vec::new();
-
-            // Read all index blobs into a single buffer
-            for (_, blob) in journal.index.manager.blobs.iter() {
-                let buf = vec![0u8; blob.size().await as usize];
-                contents.extend(blob.read_at(buf, 0).await.unwrap().as_ref());
-            }
-
-            // Read all value blobs into a single buffer
-            for (_, blob) in journal.values.manager.blobs.iter() {
-                let buf = vec![0u8; blob.size().await as usize];
-                contents.extend(blob.read_at(buf, 0).await.unwrap().as_ref());
-            }
-
-            contents
+            context.export_blobs_digest().to_vec()
         })
     }
 }

@@ -59,7 +59,7 @@ pub struct Config<C> {
 /// Reads go directly to blobs without any caching (ideal for large values that
 /// shouldn't pollute a buffer pool cache).
 pub struct Glob<E: Storage + Metrics, V: Codec> {
-    pub(crate) manager: Manager<E, WriteFactory>,
+    manager: Manager<E, WriteFactory>,
 
     /// Compression level (if enabled).
     compression: Option<u8>,

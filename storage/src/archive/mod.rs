@@ -11,6 +11,9 @@ use thiserror::Error;
 pub mod immutable;
 pub mod prunable;
 
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
+
 /// Subject of a `get` or `has` operation.
 pub enum Identifier<'a, K: Array> {
     Index(u64),

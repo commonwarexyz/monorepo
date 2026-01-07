@@ -56,7 +56,7 @@ pub struct Config {
 /// Each section is stored in a separate blob. Within each blob, items are
 /// fixed-size with a CRC32 checksum appended.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
-    pub(crate) manager: Manager<E, AppendFactory>,
+    manager: Manager<E, AppendFactory>,
     _array: PhantomData<A>,
 }
 

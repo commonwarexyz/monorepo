@@ -88,8 +88,8 @@ pub struct Config<C> {
 /// Combines a fixed-size index journal with glob storage for variable-length values.
 /// Provides coordinated operations and crash recovery.
 pub struct Oversized<E: Storage + Metrics, I: OversizedRecord, V: Codec> {
-    pub(crate) index: FixedJournal<E, I>,
-    pub(crate) values: Glob<E, V>,
+    index: FixedJournal<E, I>,
+    values: Glob<E, V>,
     _phantom: PhantomData<I>,
 }
 

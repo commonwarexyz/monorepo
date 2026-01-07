@@ -125,7 +125,7 @@ const MIN_ITEM_SIZE: usize = 5;
 
 /// Implementation of `Journal` storage.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
-    pub(crate) manager: Manager<E, AppendFactory>,
+    manager: Manager<E, AppendFactory>,
 
     /// Compression level (if enabled).
     compression: Option<u8>,
@@ -161,7 +161,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     }
 
     /// Reads an item from the blob at the given offset.
-    pub(crate) async fn read(
+    async fn read(
         compressed: bool,
         cfg: &V::Cfg,
         blob: &Append<E::Blob>,

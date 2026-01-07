@@ -72,6 +72,11 @@ impl<S> Storage<S> {
             metrics: Metrics::new(registry).into(),
         }
     }
+
+    /// Get a reference to the inner storage.
+    pub const fn inner(&self) -> &S {
+        &self.inner
+    }
 }
 
 impl<S: crate::Storage> crate::Storage for Storage<S> {
