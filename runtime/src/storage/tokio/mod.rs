@@ -148,7 +148,7 @@ impl crate::Storage for Storage {
                 .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e))?;
             file.write_all(&header.encode())
                 .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+                .map_err(|_| Error::WriteFailed)?;
             file.sync_all()
                 .await
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
