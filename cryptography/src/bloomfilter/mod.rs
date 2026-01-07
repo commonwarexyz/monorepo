@@ -192,11 +192,11 @@ mod tests {
 
     #[test]
     fn test_codec_roundtrip() {
-        let mut bf = BloomFilter::new(NZU8!(5), NZUsize!(100));
+        let mut bf = BloomFilter::new(NZU8!(5), NZUsize!(128));
         bf.insert(b"test1");
         bf.insert(b"test2");
 
-        let cfg = (NZU8!(5), NZU64!(100));
+        let cfg = (NZU8!(5), NZU64!(128));
 
         let encoded = bf.encode();
         let decoded = BloomFilter::decode_cfg(encoded, &cfg).unwrap();
@@ -215,12 +215,12 @@ mod tests {
 
     #[test]
     fn test_codec_with_invalid_hashers() {
-        let mut bf = BloomFilter::new(NZU8!(5), NZUsize!(100));
+        let mut bf = BloomFilter::new(NZU8!(5), NZUsize!(128));
         bf.insert(b"test1");
         let encoded = bf.encode();
 
         // Too large
-        let cfg = (NZU8!(10), NZU64!(100));
+        let cfg = (NZU8!(10), NZU64!(128));
         let decoded = BloomFilter::decode_cfg(encoded.clone(), &cfg);
         assert!(matches!(
             decoded,
@@ -231,7 +231,7 @@ mod tests {
         ));
 
         // Too small
-        let cfg = (NZU8!(4), NZU64!(100));
+        let cfg = (NZU8!(4), NZU64!(128));
         let decoded = BloomFilter::decode_cfg(encoded, &cfg);
         assert!(matches!(
             decoded,
@@ -244,16 +244,16 @@ mod tests {
 
     #[test]
     fn test_codec_with_invalid_bits() {
-        let mut bf = BloomFilter::new(NZU8!(5), NZUsize!(100));
+        let mut bf = BloomFilter::new(NZU8!(5), NZUsize!(128));
         bf.insert(b"test1");
         let encoded = bf.encode();
 
         // Wrong bit count
-        let cfg = (NZU8!(5), NZU64!(99));
+        let cfg = (NZU8!(5), NZU64!(64));
         let result = BloomFilter::decode_cfg(encoded.clone(), &cfg);
-        assert!(matches!(result, Err(CodecError::InvalidLength(100))));
+        assert!(matches!(result, Err(CodecError::InvalidLength(128))));
 
-        let cfg = (NZU8!(5), NZU64!(101));
+        let cfg = (NZU8!(5), NZU64!(256));
         let result = BloomFilter::decode_cfg(encoded, &cfg);
         assert!(matches!(
             result,
