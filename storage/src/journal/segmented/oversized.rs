@@ -161,6 +161,15 @@ impl<E: Storage + Metrics, I: OversizedRecord, V: Codec> Oversized<E, I, V> {
                 Err(e) => return Err(e),
             };
             let entry_count = index_size / chunk_size;
+            if entry_count == 0 {
+                // Partial entry only (crash during write), rewind to 0
+                debug!(
+                    section,
+                    index_size, "partial entry detected, rewinding to 0"
+                );
+                self.index.rewind_section(section, 0).await?;
+                continue;
+            }
 
             // Check the LAST entry
             let last_pos = entry_count - 1;
@@ -1406,6 +1415,104 @@ mod tests {
             // Verify total entry count: 2 original + 3 new = 5
             assert!(oversized.get(1, 4).await.is_ok());
             assert!(oversized.get(1, 5).await.is_err());
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_partial_index_entry() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            // Append 3 entries
+            for i in 0..3u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append");
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Simulate crash during write: truncate index to partial entry
+            // Each entry is TestEntry::SIZE (20) + 4 (CRC32) = 24 bytes
+            // Truncate to 3 full entries + 10 bytes of partial entry
+            let (blob, _) = context
+                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            let partial_size = 3 * 24 + 10; // 3 full entries + partial
+            blob.resize(partial_size).await.expect("Failed to resize");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Reinitialize - should handle partial entry gracefully
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to reinit");
+
+            // First 3 entries should still be valid
+            for i in 0..3u8 {
+                let entry = oversized.get(1, i as u64).await.expect("Failed to get");
+                assert_eq!(entry.id, i as u64);
+            }
+
+            // Entry 3 should not exist (partial entry was removed)
+            assert!(oversized.get(1, 3).await.is_err());
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_only_partial_entry() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Create and populate with single entry
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            let value: TestValue = [42; 16];
+            let entry = TestEntry::new(1, 0, 0);
+            oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Truncate index to only partial data (less than one full entry)
+            let (blob, _) = context
+                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            blob.resize(10).await.expect("Failed to resize"); // Less than chunk size
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Reinitialize - should handle gracefully (rewind to 0)
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to reinit");
+
+            // No entries should exist
+            assert!(oversized.get(1, 0).await.is_err());
 
             oversized.destroy().await.expect("Failed to destroy");
         });
