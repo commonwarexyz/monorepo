@@ -52,7 +52,7 @@ impl Conformance for ArchivePrunable {
             }
             archive.sync().await.unwrap();
 
-            context.export_blobs_digest().to_vec()
+            context.storage_audit().to_vec()
         })
     }
 }
@@ -100,7 +100,7 @@ impl Conformance for ArchiveImmutable {
             }
             archive.sync().await.unwrap();
 
-            context.export_blobs_digest().to_vec()
+            context.storage_audit().to_vec()
         })
     }
 }

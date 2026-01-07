@@ -941,12 +941,9 @@ impl Context {
         self.executor().auditor.clone()
     }
 
-    /// Export a digest of all blob contents for conformance testing.
-    ///
-    /// Returns a SHA-256 hash of all partitions and their blobs in sorted order.
-    /// This is useful for conformance tests that need to verify storage format stability.
-    pub fn export_blobs_digest(&self) -> [u8; 32] {
-        self.storage.inner().inner().export_blobs_digest()
+    /// Compute a [Sha256] digest of all storage contents.
+    pub fn storage_audit(&self) -> Digest {
+        self.storage.inner().inner().audit()
     }
 
     /// Register a DNS mapping for a hostname.

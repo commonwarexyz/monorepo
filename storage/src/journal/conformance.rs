@@ -44,7 +44,7 @@ impl Conformance for ContiguousFixed {
             journal.sync().await.unwrap();
             drop(journal);
 
-            context.export_blobs_digest().to_vec()
+            context.storage_audit().to_vec()
         })
     }
 }
@@ -82,7 +82,7 @@ impl Conformance for ContiguousVariable {
             journal.sync().await.unwrap();
             drop(journal);
 
-            context.export_blobs_digest().to_vec()
+            context.storage_audit().to_vec()
         })
     }
 }
@@ -120,7 +120,7 @@ impl Conformance for SegmentedFixed {
             }
             drop(journal);
 
-            context.export_blobs_digest().to_vec()
+            context.storage_audit().to_vec()
         })
     }
 }
@@ -162,7 +162,7 @@ impl Conformance for SegmentedGlob {
             }
             drop(journal);
 
-            context.export_blobs_digest().to_vec()
+            context.storage_audit().to_vec()
         })
     }
 }
@@ -208,7 +208,7 @@ impl Conformance for SegmentedVariable {
             }
             drop(journal);
 
-            context.export_blobs_digest().to_vec()
+            context.storage_audit().to_vec()
         })
     }
 }
@@ -308,7 +308,7 @@ impl Conformance for SegmentedOversized {
             }
             drop(journal);
 
-            context.export_blobs_digest().to_vec()
+            context.storage_audit().to_vec()
         })
     }
 }
