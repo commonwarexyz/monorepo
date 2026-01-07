@@ -191,7 +191,10 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
             // Truncate glob trailing garbage (can occur when value was written but
             // index entry wasn't, or when index was truncated but glob wasn't)
             if glob_size > glob_target {
-                debug!(section, glob_size, glob_target, "truncating glob trailing garbage");
+                debug!(
+                    section,
+                    glob_size, glob_target, "truncating glob trailing garbage"
+                );
                 self.values.rewind_section(section, glob_target).await?;
             }
         }
@@ -2319,7 +2322,9 @@ mod tests {
 
             // Write 100 bytes of garbage (simulating partial/failed value write)
             let garbage = vec![0xDE; 100];
-            blob.write_at(garbage, size).await.expect("Failed to write garbage");
+            blob.write_at(garbage, size)
+                .await
+                .expect("Failed to write garbage");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
