@@ -33,6 +33,12 @@
 //!
 //! This allows async writes (glob first, then index) while ensuring consistency
 //! after recovery.
+//!
+//! _Recovery only validates that index entries point to valid byte ranges
+//! within the glob. It does **not** verify value checksums during recovery (this would
+//! require reading all values). Value checksums are verified lazily when values are
+//! read via `get_value()`. If the underlying storage is corrupted, `get_value()` will
+//! return a checksum error even though the index entry exists._
 
 use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},

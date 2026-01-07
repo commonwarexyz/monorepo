@@ -222,3 +222,10 @@ path = "fuzz_targets/cache_operations.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "oversized_recovery"
+path = "fuzz_targets/oversized_recovery.rs"
+test = false
+doc = false
+bench = false
