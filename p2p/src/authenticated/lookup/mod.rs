@@ -195,6 +195,7 @@ mod tests {
         One,
     }
 
+    const MAX_MESSAGE_SIZE: u32 = 1_024 * 1_024; // 1MB
     const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 
     /// Ensure no message rate limiting occurred.
@@ -409,7 +410,6 @@ mod tests {
 
     fn run_deterministic_test(seed: u64, mode: Mode) {
         // Configure test
-        const MAX_MESSAGE_SIZE: u32 = 1_024 * 1_024; // 1MB
         const NUM_PEERS: usize = 25;
         const BASE_PORT: u16 = 3000;
 
@@ -471,7 +471,6 @@ mod tests {
     fn test_tokio_connectivity() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            const MAX_MESSAGE_SIZE: u32 = 1_024 * 1_024; // 1MB
             let base_port = 4000;
             let n = 10;
             run_network(context, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
@@ -1472,8 +1471,6 @@ mod tests {
         base_port: u16,
         n: usize,
     ) {
-        const MAX_MESSAGE_SIZE: u32 = 1_024 * 1_024;
-
         // Create peers
         let peers: Vec<_> = (0..n)
             .map(|i| ed25519::PrivateKey::from_seed(i as u64))
@@ -1713,8 +1710,6 @@ mod tests {
         base_port: u16,
         n: usize,
     ) {
-        const MAX_MESSAGE_SIZE: u32 = 1_024 * 1_024;
-
         // Create peers
         let peers: Vec<_> = (0..n)
             .map(|i| ed25519::PrivateKey::from_seed(i as u64))
