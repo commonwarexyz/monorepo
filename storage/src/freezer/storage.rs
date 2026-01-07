@@ -124,9 +124,9 @@ pub struct Checkpoint {
     /// The section of the last committed operation.
     section: u64,
     /// The size of the key index journal in the last committed section.
-    key_index_size: u64,
+    key_size: u64,
     /// The size of the value journal in the last committed section.
-    value_journal_size: u64,
+    value_size: u64,
     /// The size of the table.
     table_size: u32,
 }
@@ -138,8 +138,8 @@ impl Checkpoint {
             table_size,
             epoch: 0,
             section: 0,
-            key_index_size: 0,
-            value_journal_size: 0,
+            key_size: 0,
+            value_size: 0,
         }
     }
 }
@@ -149,14 +149,14 @@ impl Read for Checkpoint {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
-        let key_index_size = u64::read(buf)?;
-        let value_journal_size = u64::read(buf)?;
+        let key_size = u64::read(buf)?;
+        let value_size = u64::read(buf)?;
         let table_size = u32::read(buf)?;
         Ok(Self {
             epoch,
             section,
-            key_index_size,
-            value_journal_size,
+            key_size,
+            value_size,
             table_size,
         })
     }
@@ -166,8 +166,8 @@ impl CodecWrite for Checkpoint {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
         self.section.write(buf);
-        self.key_index_size.write(buf);
-        self.value_journal_size.write(buf);
+        self.key_size.write(buf);
+        self.value_size.write(buf);
         self.table_size.write(buf);
     }
 }
@@ -658,8 +658,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             (0, Some(checkpoint)) => {
                 assert_eq!(checkpoint.epoch, 0);
                 assert_eq!(checkpoint.section, 0);
-                assert_eq!(checkpoint.key_index_size, 0);
-                assert_eq!(checkpoint.value_journal_size, 0);
+                assert_eq!(checkpoint.key_size, 0);
+                assert_eq!(checkpoint.value_size, 0);
                 assert_eq!(checkpoint.table_size, 0);
 
                 Self::init_table(&table, config.table_initial_size).await?;
@@ -677,8 +677,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 oversized
                     .rewind(
                         checkpoint.section,
-                        checkpoint.key_index_size,
-                        checkpoint.value_journal_size,
+                        checkpoint.key_size,
+                        checkpoint.value_size,
                     )
                     .await?;
 
@@ -734,14 +734,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 }
 
                 // Get sizes from oversized (crash recovery already ran during init)
-                let (key_index_size, value_journal_size) = oversized.sizes(max_section).await?;
+                let (key_size, value_size) = oversized.sizes(max_section).await?;
 
                 (
                     Checkpoint {
                         epoch: max_epoch,
                         section: max_section,
-                        key_index_size,
-                        value_journal_size,
+                        key_size,
+                        value_size,
                         table_size,
                     },
                     resizable,
@@ -1093,14 +1093,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
 
         // Get sizes from oversized
-        let (key_index_size, value_journal_size) =
-            self.oversized.sizes(self.current_section).await?;
+        let (key_size, value_size) = self.oversized.sizes(self.current_section).await?;
 
         Ok(Checkpoint {
             epoch: stored_epoch,
             section: self.current_section,
-            key_index_size,
-            value_journal_size,
+            key_size,
+            value_size,
             table_size: self.table_size,
         })
     }
