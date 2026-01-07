@@ -1,6 +1,8 @@
 use super::{Config, Error, Identifier};
 use crate::{
-    journal::segmented::oversized::{Config as OversizedConfig, Oversized, OversizedRecord},
+    journal::segmented::oversized::{
+        Config as OversizedConfig, Oversized, Record as OversizedRecord,
+    },
     kv, Persistable,
 };
 use bytes::{Buf, BufMut};

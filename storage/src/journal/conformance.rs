@@ -10,7 +10,7 @@ use commonware_conformance::{conformance_tests, Conformance};
 use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
 use commonware_utils::{NZUsize, NZU64};
 use core::num::{NonZeroU64, NonZeroUsize};
-use oversized::OversizedRecord;
+use oversized::Record;
 use rand::Rng;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
@@ -248,7 +248,7 @@ impl FixedSize for TestEntry {
     const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
 }
 
-impl OversizedRecord for TestEntry {
+impl Record for TestEntry {
     fn value_location(&self) -> (u64, u32) {
         (self.value_offset, self.value_size)
     }

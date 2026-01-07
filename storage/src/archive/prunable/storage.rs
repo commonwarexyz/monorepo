@@ -2,7 +2,9 @@ use super::{Config, Translator};
 use crate::{
     archive::{Error, Identifier},
     index::{unordered::Index, Unordered},
-    journal::segmented::oversized::{Config as OversizedConfig, Oversized, OversizedRecord},
+    journal::segmented::oversized::{
+        Config as OversizedConfig, Oversized, Record as OversizedRecord,
+    },
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};

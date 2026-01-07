@@ -48,7 +48,7 @@ use tracing::{debug, warn};
 ///
 /// Implementations must provide access to the value location for crash recovery validation,
 /// and a way to set the location when appending.
-pub trait OversizedRecord: CodecFixed<Cfg = ()> + Clone {
+pub trait Record: CodecFixed<Cfg = ()> + Clone {
     /// Returns `(value_offset, value_size)` for crash recovery validation.
     fn value_location(&self) -> (u64, u32);
 
@@ -87,13 +87,13 @@ pub struct Config<C> {
 ///
 /// Combines a fixed-size index journal with glob storage for variable-length values.
 /// Provides coordinated operations and crash recovery.
-pub struct Oversized<E: Storage + Metrics, I: OversizedRecord, V: Codec> {
+pub struct Oversized<E: Storage + Metrics, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
     _phantom: PhantomData<I>,
 }
 
-impl<E: Storage + Metrics, I: OversizedRecord, V: Codec> Oversized<E, I, V> {
+impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
     /// Initialize with crash recovery validation.
     ///
     /// Validates each index entry's glob reference during replay. Invalid entries
@@ -413,7 +413,7 @@ mod tests {
         const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
     }
 
-    impl OversizedRecord for TestEntry {
+    impl Record for TestEntry {
         fn value_location(&self) -> (u64, u32) {
             (self.value_offset, self.value_size)
         }
