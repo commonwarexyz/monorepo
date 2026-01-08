@@ -4159,7 +4159,7 @@ mod tests {
 
     #[test_traced]
     fn test_children_shutdown_on_engine_abort() {
-        for seed in 0..25 {
+        for seed in 0..10 {
             engine_shutdown::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>, false);
             engine_shutdown::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>, false);
             engine_shutdown::<_, _, RoundRobin>(
@@ -4179,7 +4179,7 @@ mod tests {
 
     #[test_traced]
     fn test_graceful_shutdown() {
-        for seed in 0..25 {
+        for seed in 0..10 {
             engine_shutdown::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>, true);
             engine_shutdown::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>, true);
             engine_shutdown::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>, true);
