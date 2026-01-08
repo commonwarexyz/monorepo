@@ -3,99 +3,77 @@ use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::collections::HashSet;
 
-const ITEM_SIZES: [usize; 4] = [32, 256, 2048, 4096];
-const NUM_ITEMS: [usize; 3] = [1000, 10000, 100000];
-const FP_RATES: [f64; 3] = [0.1, 0.01, 0.001];
+const ITEM_SIZES: [usize; 3] = [32, 2048, 4096];
+const NUM_ITEMS: usize = 10000;
+const FP_RATES: [f64; 2] = [0.1, 0.001];
 
-fn benchmark_contains_with_hasher<H: Hasher>(
-    c: &mut Criterion,
+fn run_contains_bench<H: Hasher>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     hasher_name: &str,
     query_inserted: bool,
 ) {
-    let bench_type = if query_inserted {
-        "positive"
-    } else {
-        "negative"
-    };
-    let mut group = c.benchmark_group(format!("bloomfilter/contains_{bench_type}/{hasher_name}"));
+    for &item_size in &ITEM_SIZES {
+        for &fp_rate in &FP_RATES {
+            let mut rng = StdRng::seed_from_u64(42);
 
-    for &num_items in &NUM_ITEMS {
-        for &item_size in &ITEM_SIZES {
-            for &fp_rate in &FP_RATES {
-                let mut rng = StdRng::seed_from_u64(42);
+            // Create and populate the bloom filter
+            let mut bf = BloomFilter::<H>::with_rate(NUM_ITEMS, fp_rate);
+            let mut inserted_set = HashSet::new();
 
-                // Create and populate the bloom filter
-                let mut bf = BloomFilter::<H>::with_rate(num_items, fp_rate);
-                let mut inserted_set = HashSet::new();
+            let inserted: Vec<Vec<u8>> = (0..NUM_ITEMS)
+                .map(|_| {
+                    let mut item = vec![0u8; item_size];
+                    rng.fill_bytes(&mut item);
+                    bf.insert(&item);
+                    inserted_set.insert(item.clone());
+                    item
+                })
+                .collect();
 
-                let inserted: Vec<Vec<u8>> = (0..num_items)
-                    .map(|_| {
-                        let mut item = vec![0u8; item_size];
-                        rng.fill_bytes(&mut item);
-                        bf.insert(&item);
-                        inserted_set.insert(item.clone());
-                        item
-                    })
-                    .collect();
-
-                // Items to query: inserted ones or guaranteed non-inserted ones
-                let query_items = if query_inserted {
-                    inserted
-                } else {
-                    let mut items = Vec::with_capacity(num_items);
-                    while items.len() < num_items {
-                        let mut item = vec![0u8; item_size];
-                        rng.fill_bytes(&mut item);
-                        if !inserted_set.contains(&item) {
-                            items.push(item);
-                        }
+            // Items to query: inserted ones or guaranteed non-inserted ones
+            let query_items = if query_inserted {
+                inserted
+            } else {
+                let mut items = Vec::with_capacity(NUM_ITEMS);
+                while items.len() < NUM_ITEMS {
+                    let mut item = vec![0u8; item_size];
+                    rng.fill_bytes(&mut item);
+                    if !inserted_set.contains(&item) {
+                        items.push(item);
                     }
-                    items
-                };
+                }
+                items
+            };
 
-                group.throughput(Throughput::Elements(1));
-                group.bench_with_input(
-                    BenchmarkId::new(
-                        format!("items={num_items}/size={item_size}"),
-                        format!("fp={fp_rate}"),
-                    ),
-                    &query_items,
-                    |b, items| {
-                        let mut idx = 0;
-                        b.iter(|| {
-                            let result = bf.contains(&items[idx]);
-                            idx = (idx + 1) % items.len();
-                            result
-                        });
-                    },
-                );
-            }
+            group.throughput(Throughput::Elements(1));
+            group.bench_with_input(
+                BenchmarkId::new(format!("{hasher_name}/size={item_size}"), format!("fp={fp_rate}")),
+                &query_items,
+                |b, items| {
+                    let mut idx = 0;
+                    b.iter(|| {
+                        let result = bf.contains(&items[idx]);
+                        idx = (idx + 1) % items.len();
+                        result
+                    });
+                },
+            );
         }
     }
+}
 
+fn benchmark_contains_positive(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bloomfilter/contains_positive");
+    run_contains_bench::<Sha256>(&mut group, "sha256", true);
+    run_contains_bench::<Blake3>(&mut group, "blake3", true);
     group.finish();
 }
 
-fn benchmark_contains_positive_sha256(c: &mut Criterion) {
-    benchmark_contains_with_hasher::<Sha256>(c, "sha256", true);
+fn benchmark_contains_negative(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bloomfilter/contains_negative");
+    run_contains_bench::<Sha256>(&mut group, "sha256", false);
+    run_contains_bench::<Blake3>(&mut group, "blake3", false);
+    group.finish();
 }
 
-fn benchmark_contains_positive_blake3(c: &mut Criterion) {
-    benchmark_contains_with_hasher::<Blake3>(c, "blake3", true);
-}
-
-fn benchmark_contains_negative_sha256(c: &mut Criterion) {
-    benchmark_contains_with_hasher::<Sha256>(c, "sha256", false);
-}
-
-fn benchmark_contains_negative_blake3(c: &mut Criterion) {
-    benchmark_contains_with_hasher::<Blake3>(c, "blake3", false);
-}
-
-criterion_group!(
-    benches,
-    benchmark_contains_positive_sha256,
-    benchmark_contains_positive_blake3,
-    benchmark_contains_negative_sha256,
-    benchmark_contains_negative_blake3
-);
+criterion_group!(benches, benchmark_contains_positive, benchmark_contains_negative);
