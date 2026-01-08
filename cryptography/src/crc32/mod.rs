@@ -3,8 +3,10 @@
 //! This implementation uses the `crc-fast` crate to generate CRC32C (iSCSI/Castagnoli)
 //! checksums as specified in RFC 3720. CRC32C uses polynomial 0x1EDC6F41.
 //!
-//! Note: CRC32 is not a cryptographic hash function. It is designed for error detection,
-//! not security. Use SHA-256 or Blake3 for cryptographic purposes.
+//! # Warning
+//!
+//! CRC32 is not a cryptographic hash function. It is designed for error
+//! detection, not security. Use SHA-256 or Blake3 for cryptographic purposes.
 //!
 //! # Example
 //! ```rust
