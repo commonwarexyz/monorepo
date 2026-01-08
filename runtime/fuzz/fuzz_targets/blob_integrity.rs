@@ -14,7 +14,7 @@
 
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef},
     deterministic, Blob, Runner, Storage,
@@ -26,18 +26,22 @@ use libfuzzer_sys::fuzz_target;
 const CRC_SIZE: u64 = 12;
 /// Buffer capacity for the Append wrapper.
 const BUFFER_CAPACITY: usize = 1024;
+/// Buffer capacity for the blob reader.
+const READER_BUFFER_CAPACITY: usize = 256;
+/// Maximum number of read operations to perform.
+const MAX_READS: usize = 20;
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     /// Seed for deterministic execution.
     seed: u64,
-    /// Logical page size (will be clamped to 1..255).
+    /// Logical page size (1-255).
     page_size: u8,
-    /// Pool page cache capacity (will be clamped to 1..10).
+    /// Pool page cache capacity (1-10).
     pool_capacity: u8,
-    /// Number of bytes to write (will be clamped to 1..10 pages worth).
-    num_bytes: u16,
-    /// Byte offset within the blob to corrupt.
+    /// Number of pages to write (1-10).
+    num_pages: u8,
+    /// Byte offset within the blob to corrupt (will be modulo physical_size).
     corrupt_byte_offset: u16,
     /// Bit position within the byte to flip (0-7).
     corrupt_bit: u8,
@@ -45,29 +49,55 @@ struct FuzzInput {
     reads: Vec<ReadOp>,
 }
 
-#[derive(Arbitrary, Debug)]
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let num_reads = u.int_in_range(0..=MAX_READS)?;
+        let reads = (0..num_reads)
+            .map(|_| ReadOp::arbitrary(u))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(FuzzInput {
+            seed: u.arbitrary()?,
+            page_size: u.int_in_range(1..=255)?,
+            pool_capacity: u.int_in_range(1..=10)?,
+            num_pages: u.int_in_range(1..=10)?,
+            corrupt_byte_offset: u.arbitrary()?,
+            corrupt_bit: u.int_in_range(0..=7)?,
+            reads,
+        })
+    }
+}
+
+#[derive(Debug)]
 struct ReadOp {
     /// Logical offset to read from.
     offset: u16,
-    /// Number of bytes to read.
+    /// Number of bytes to read (1-256).
     len: u16,
     /// Whether to use the Read wrapper (true) or Append.read_at (false).
     use_reader: bool,
 }
 
+impl<'a> Arbitrary<'a> for ReadOp {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(ReadOp {
+            offset: u.arbitrary()?,
+            len: u.int_in_range(1..=256)?,
+            use_reader: u.arbitrary()?,
+        })
+    }
+}
+
 fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        // Use dynamic page size from input (1-255).
-        let page_size = input.page_size.max(1) as u64;
+        let page_size = input.page_size as u64;
         let physical_page_size = page_size + CRC_SIZE;
-        // Pool capacity is number of pages to cache (1-10).
-        let pool_capacity = (input.pool_capacity % 10 + 1) as usize;
+        let pool_capacity = input.pool_capacity as usize;
         let pool_ref = PoolRef::new(NZU16!(page_size as u16), NZUsize!(pool_capacity));
 
-        // Determine how many bytes to write (1 to 10 pages worth).
-        let max_bytes = 10 * page_size as usize;
-        let logical_size = (input.num_bytes as usize).clamp(1, max_bytes) as u64;
+        // Compute logical size from number of pages.
+        let logical_size = input.num_pages as u64 * page_size;
 
         // Generate deterministic data based on seed.
         let expected_data: Vec<u8> = (0..logical_size)
@@ -101,7 +131,7 @@ fn fuzz(input: FuzzInput) {
             full_pages * physical_page_size
         };
         let corrupt_offset = (input.corrupt_byte_offset as u64) % physical_size;
-        let corrupt_bit = input.corrupt_bit % 8;
+        let corrupt_bit = input.corrupt_bit;
 
         // Read the byte, flip the bit, write it back.
         let byte_buf = blob
@@ -136,9 +166,9 @@ fn fuzz(input: FuzzInput) {
         let reported_size = append.size().await;
 
         // Step 4: Perform read operations and verify results.
-        for read_op in input.reads.iter().take(20) {
+        for read_op in &input.reads {
             let offset = read_op.offset as u64;
-            let len = (read_op.len as usize).clamp(1, 256);
+            let len = read_op.len as usize;
 
             // Skip reads that would be entirely out of bounds.
             if offset >= reported_size {
@@ -147,9 +177,6 @@ fn fuzz(input: FuzzInput) {
 
             // Clamp length to not exceed reported size.
             let len = len.min((reported_size - offset) as usize);
-            if len == 0 {
-                continue;
-            }
 
             // Determine which pages this read spans.
             let start_page = offset / page_size;
@@ -162,7 +189,7 @@ fn fuzz(input: FuzzInput) {
                 // Note: The Read wrapper buffers multiple pages at once, so corruption on ANY
                 // page in the buffer can cause a read to fail - not just the page being accessed.
                 // We can only verify that successful reads return correct data.
-                let reader_result = append.as_blob_reader(NZUsize!(256)).await;
+                let reader_result = append.as_blob_reader(NZUsize!(READER_BUFFER_CAPACITY)).await;
                 let mut reader = match reader_result {
                     Ok(r) => r,
                     Err(_) => continue, // Reader creation failed, skip.
