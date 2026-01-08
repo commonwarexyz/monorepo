@@ -2154,10 +2154,12 @@ mod test_plan {
                     .expect("players are unique");
 
                 // Compute expected reveals
+                //
+                // Note: We use union of no_acks and bad_shares since each (dealer, player) pair
+                // results in at most one reveal in the protocol, regardless of whether the player
+                // didn't ack, got a bad share, or both.
                 let mut expected_reveals: BTreeMap<ed25519::PublicKey, u32> = BTreeMap::new();
-                for &(dealer_idx, player_key_idx) in
-                    round.no_acks.iter().chain(round.bad_shares.iter())
-                {
+                for &(dealer_idx, player_key_idx) in round.no_acks.union(&round.bad_shares) {
                     if !selected_dealers.contains(&dealer_idx) {
                         continue;
                     }
@@ -2531,6 +2533,19 @@ mod test {
                         },
                     ),
             )
+            .run::<MinPk>(0)
+    }
+
+    #[test]
+    fn issue_2745_regression() -> anyhow::Result<()> {
+        Plan::new(NonZeroU32::new(6).unwrap())
+            .with(
+                Round::new(vec![0], vec![5, 1, 3, 0, 4])
+                    .no_ack(0, 5)
+                    .bad_share(0, 5),
+            )
+            .with(Round::new(vec![0, 1, 3, 4], vec![0]))
+            .with(Round::new(vec![0], vec![0]))
             .run::<MinPk>(0)
     }
 

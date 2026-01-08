@@ -18,11 +18,11 @@ hash = "3cb6882637c1c1a929a50b3ab425311f3ef342184dc46a80b1eae616ca7b64a4"
 n_cases = 65536
 hash = "20f5ef35a4bbd3a40852e907df519c724e5ce24d9f929e84947fd971a2256d02"
 
-["commonware_storage::bmt::tests::conformance::CodecConformance<Proof<Sha256>>"]
+["commonware_storage::bmt::tests::conformance::CodecConformance<Proof<Sha256Digest>>"]
 n_cases = 65536
-hash = "c1f1d4c35fcd50931d7c36cbcddbb1c0a93afef9a93945cdd3efadf68ff53328"
+hash = "6d6382956289a2f706581a4b1afa08c5cd8e8a4f55b11d454425333b6537cc17"
 
-["commonware_storage::bmt::tests::conformance::CodecConformance<RangeProof<Sha256>>"]
+["commonware_storage::bmt::tests::conformance::CodecConformance<RangeProof<Sha256Digest>>"]
 n_cases = 65536
 hash = "6ecb0491b09443f1f93c178af5472f138ddc71b3e8c0c106f32eafca617b56af"
 
