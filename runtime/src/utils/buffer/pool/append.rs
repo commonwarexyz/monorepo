@@ -878,6 +878,7 @@ impl<B: Blob> Blob for Append<B> {
 mod tests {
     use super::*;
     use crate::{deterministic, Runner as _, Storage as _};
+    use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
     use std::num::NonZeroU16;
@@ -1046,8 +1047,7 @@ mod tests {
     /// Helper to read the CRC record from raw blob bytes at the end of a physical page.
     fn read_crc_record_from_page(page_bytes: &[u8]) -> CrcRecord {
         let crc_start = page_bytes.len() - CRC_RECORD_SIZE as usize;
-        let crc_bytes: [u8; 12] = page_bytes[crc_start..].try_into().unwrap();
-        CrcRecord::from_bytes(crc_bytes)
+        CrcRecord::read(&mut &page_bytes[crc_start..]).unwrap()
     }
 
     /// Dummy marker bytes with len=0 so the mangled slot is never authoritative.

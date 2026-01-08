@@ -23,7 +23,9 @@
 //! full or partial. A partial page's logical bytes are immutable on commit, and if it's re-written,
 //! it's only to add more bytes after the existing ones.
 
+use bytes::{Buf, BufMut};
 use crate::{Blob, Error};
+use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_utils::StableBuf;
 
 mod append;
@@ -88,21 +90,6 @@ impl CrcRecord {
         }
     }
 
-    /// Parse the CRC record from its storage representation.
-    fn from_bytes(buf: [u8; CRC_RECORD_SIZE as usize]) -> Self {
-        let len1 = u16::from_be_bytes(buf[0..2].try_into().unwrap());
-        let crc1 = u32::from_be_bytes(buf[2..6].try_into().unwrap());
-        let len2 = u16::from_be_bytes(buf[6..8].try_into().unwrap());
-        let crc2 = u32::from_be_bytes(buf[8..12].try_into().unwrap());
-
-        Self {
-            len1,
-            crc1,
-            len2,
-            crc2,
-        }
-    }
-
     /// Return the CRC record for the page if it is valid. The provided slice is assumed to be
     /// exactly the size of a physical page. The record may not precisely reflect the bytes written
     /// if what should have been the most recent CRC doesn't validate, in which case it will be
@@ -119,8 +106,8 @@ impl CrcRecord {
         }
 
         let crc_start_idx = (page_size - CRC_RECORD_SIZE) as usize;
-        let crc_bytes: [u8; CRC_RECORD_SIZE as usize] = buf[crc_start_idx..].try_into().unwrap();
-        let mut crc_record = Self::from_bytes(crc_bytes);
+        let mut crc_bytes = &buf[crc_start_idx..];
+        let mut crc_record = Self::read(&mut crc_bytes).expect("CRC record read should not fail");
         let (len, crc) = crc_record.get_crc();
 
         // Validate that len is in the valid range [1, logical_page_size].
@@ -181,17 +168,6 @@ impl CrcRecord {
         true
     }
 
-    /// Returns the CRC record in its storage representation.
-    fn to_bytes(&self) -> [u8; CRC_RECORD_SIZE as usize] {
-        let mut buf = [0; CRC_RECORD_SIZE as usize];
-        buf[0..2].copy_from_slice(&self.len1.to_be_bytes());
-        buf[2..6].copy_from_slice(&self.crc1.to_be_bytes());
-        buf[6..8].copy_from_slice(&self.len2.to_be_bytes());
-        buf[8..12].copy_from_slice(&self.crc2.to_be_bytes());
-
-        buf
-    }
-
     /// Returns the CRC record with the longer (authoritative) length, without performing any
     /// validation. If they both have the same length (which should only happen due to data
     /// corruption) return the first.
@@ -219,6 +195,49 @@ impl CrcRecord {
             (self.len1, self.crc1)
         }
     }
+
+    /// Returns the CRC record in its storage representation.
+    fn to_bytes(&self) -> [u8; CRC_RECORD_SIZE as usize] {
+        self.encode_fixed()
+    }
+}
+
+impl Write for CrcRecord {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.len1.write(buf);
+        self.crc1.write(buf);
+        self.len2.write(buf);
+        self.crc2.write(buf);
+    }
+}
+
+impl CodecRead for CrcRecord {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            len1: u16::read(buf)?,
+            crc1: u32::read(buf)?,
+            len2: u16::read(buf)?,
+            crc2: u32::read(buf)?,
+        })
+    }
+}
+
+impl FixedSize for CrcRecord {
+    const SIZE: usize = CRC_RECORD_SIZE as usize;
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for CrcRecord {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            len1: u.arbitrary()?,
+            crc1: u.arbitrary()?,
+            len2: u.arbitrary()?,
+            crc2: u.arbitrary()?,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -228,7 +247,7 @@ mod tests {
     const CRC_RECORD_USIZE: usize = 12;
 
     #[test]
-    fn test_crc_record_to_bytes_from_bytes_roundtrip() {
+    fn test_crc_record_encode_read_roundtrip() {
         let record = CrcRecord {
             len1: 0x1234,
             crc1: 0xAABBCCDD,
@@ -237,7 +256,7 @@ mod tests {
         };
 
         let bytes = record.to_bytes();
-        let restored = CrcRecord::from_bytes(bytes);
+        let restored = CrcRecord::read(&mut &bytes[..]).unwrap();
 
         assert_eq!(restored.len1, 0x1234);
         assert_eq!(restored.crc1, 0xAABBCCDD);
@@ -246,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn test_crc_record_to_bytes_encoding() {
+    fn test_crc_record_encoding() {
         let record = CrcRecord {
             len1: 0x0102,
             crc1: 0x03040506,
@@ -472,5 +491,15 @@ mod tests {
             validated.is_none(),
             "Should fail when primary is invalid and fallback has len=0"
         );
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<CrcRecord>,
+        }
     }
 }
