@@ -182,11 +182,7 @@ fn fuzz(input: FuzzInput) {
 
                     for mutation in &input.mutations {
                         let mut mutated_proof = original_proof.clone();
-                        mutate_proof_bytes(
-                            &mut mutated_proof,
-                            mutation,
-                            &commonware_storage::bmt::MAX_LEVELS,
-                        );
+                        mutate_proof_bytes(&mut mutated_proof, mutation, &1);
 
                         if mutated_proof != original_proof {
                             let is_valid = mutated_proof
