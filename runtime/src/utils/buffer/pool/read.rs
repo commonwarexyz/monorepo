@@ -6,6 +6,8 @@ use tracing::{debug, error};
 
 const CHECKSUM_SIZE_USIZE: usize = CHECKSUM_SIZE as usize;
 
+/// @lts("0.1.0")
+///
 /// A reader that buffers content from a [Blob] with page-level CRCs to optimize the performance of
 /// a full scan of contents.
 pub struct Read<B: Blob> {

@@ -75,6 +75,8 @@ struct CacheEntry {
     data: Vec<u8>,
 }
 
+/// @lts("0.1.0")
+///
 /// A reference to a page cache that can be shared across threads via cloning, along with the page
 /// size that will be used with it. Provides the API for interacting with the buffer pool in a
 /// thread-safe manner.

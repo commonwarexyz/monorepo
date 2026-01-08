@@ -4,6 +4,8 @@
 use alloc::boxed::Box;
 use thiserror::Error;
 
+/// @lts("0.1.0")
+///
 /// Error type for codec operations
 #[derive(Error, Debug)]
 pub enum Error {

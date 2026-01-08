@@ -1,9 +1,16 @@
 use regex::Regex;
 use serde::Serialize;
-use std::sync::LazyLock;
+use std::{collections::BTreeMap, sync::LazyLock};
 
-static MARKER_PATTERN: LazyLock<Regex> =
+static MODULE_MARKER_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"//!\s*@(beta|gamma|lts)\("([^"]+)"\)"#).unwrap());
+
+static ITEM_MARKER_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?m)^[ \t]*///\s*@(beta|gamma|lts)\("([^"]+)"\)\s*\n(?:[ \t]*(?://.*|#\[.*)?\n)*[ \t]*(?:pub\s+)?(?:trait|struct|enum|fn|type|const|macro_rules!)\s+([a-zA-Z_][a-zA-Z0-9_]*)"#,
+    )
+    .unwrap()
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -41,15 +48,51 @@ impl Markers {
             Stage::Alpha
         }
     }
+
+    pub fn merge(&mut self, other: &Self) {
+        if other.beta.is_some() {
+            self.beta = other.beta.clone();
+        }
+        if other.gamma.is_some() {
+            self.gamma = other.gamma.clone();
+        }
+        if other.lts.is_some() {
+            self.lts = other.lts.clone();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ParsedMarkers {
+    pub module: Markers,
+    pub items: BTreeMap<String, Markers>,
 }
 
 pub fn parse_markers(content: &str) -> Markers {
-    let mut markers = Markers::default();
+    parse_all_markers(content).module
+}
 
-    for cap in MARKER_PATTERN.captures_iter(content) {
+pub fn parse_all_markers(content: &str) -> ParsedMarkers {
+    let mut result = ParsedMarkers::default();
+
+    for cap in MODULE_MARKER_PATTERN.captures_iter(content) {
         let marker_type = &cap[1];
         let version = cap[2].to_string();
 
+        match marker_type {
+            "beta" => result.module.beta = Some(version),
+            "gamma" => result.module.gamma = Some(version),
+            "lts" => result.module.lts = Some(version),
+            _ => {}
+        }
+    }
+
+    for cap in ITEM_MARKER_PATTERN.captures_iter(content) {
+        let marker_type = &cap[1];
+        let version = cap[2].to_string();
+        let item_name = cap[3].to_string();
+
+        let markers = result.items.entry(item_name).or_default();
         match marker_type {
             "beta" => markers.beta = Some(version),
             "gamma" => markers.gamma = Some(version),
@@ -58,7 +101,7 @@ pub fn parse_markers(content: &str) -> Markers {
         }
     }
 
-    markers
+    result
 }
 
 #[cfg(test)]
@@ -104,5 +147,53 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(gamma.current_stage(), Stage::Gamma);
+    }
+
+    #[test]
+    fn test_parse_item_markers() {
+        let content = r#"
+//! Module docs
+
+/// @lts("0.1.0")
+pub trait Codec {}
+
+/// Some docs
+/// @beta("0.2.0")
+/// More docs
+pub struct Config {}
+
+pub fn unmarked() {}
+"#;
+        let parsed = parse_all_markers(content);
+        assert!(parsed.module.is_empty());
+        assert_eq!(parsed.items.len(), 2);
+        assert_eq!(parsed.items["Codec"].lts, Some("0.1.0".to_string()));
+        assert_eq!(parsed.items["Config"].beta, Some("0.2.0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_mixed_markers() {
+        let content = r#"
+//! @beta("0.1.0")
+
+/// @lts("0.2.0")
+pub trait Storage {}
+"#;
+        let parsed = parse_all_markers(content);
+        assert_eq!(parsed.module.beta, Some("0.1.0".to_string()));
+        assert_eq!(parsed.items["Storage"].lts, Some("0.2.0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_item_markers_with_blank_line() {
+        let content = r#"
+/// @lts("0.1.0")
+///
+/// Trait for types with a known, fixed encoded size.
+pub trait FixedSize {}
+"#;
+        let parsed = parse_all_markers(content);
+        assert_eq!(parsed.items.len(), 1);
+        assert_eq!(parsed.items["FixedSize"].lts, Some("0.1.0".to_string()));
     }
 }

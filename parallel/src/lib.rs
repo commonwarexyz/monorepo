@@ -19,9 +19,6 @@
 //!
 //! Two implementations are provided:
 //!
-//! @beta("0.1.0")
-//! @lts("0.1.0")
-//!
 //! - [`Sequential`]: Executes operations sequentially on the current thread (works in `no_std`)
 //! - [`Rayon`]: Executes operations in parallel using a [`rayon`] thread pool (requires `std`)
 //!
@@ -74,6 +71,8 @@ cfg_if! {
     }
 }
 
+/// @lts("0.1.0")
+///
 /// A strategy for executing fold operations.
 ///
 /// This trait abstracts over sequential and parallel execution, allowing algorithms
@@ -335,6 +334,8 @@ impl Strategy for Sequential {
 
 cfg_if! {
     if #[cfg(feature = "std")] {
+        /// @lts("0.1.0")
+        ///
         /// A clone-able wrapper around a [rayon]-compatible thread pool.
         pub type ThreadPool = Arc<RThreadPool>;
 

@@ -16,9 +16,6 @@
 //!
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
-//!
-//! @beta("0.1.0")
-//! @lts("0.1.0")
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
@@ -66,6 +63,8 @@ const METRICS_PREFIX: &str = "runtime";
 /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
 pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
+/// @lts("0.1.0")
+///
 /// Errors that can occur when interacting with the runtime.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -124,6 +123,8 @@ pub enum Error {
     Io(#[from] IoError),
 }
 
+/// @lts("0.1.0")
+///
 /// Interface that any task scheduler must implement to start
 /// running tasks.
 pub trait Runner {
@@ -267,6 +268,8 @@ pub trait RayonPoolSpawner: Spawner + Metrics {
     }
 }
 
+/// @lts("0.1.0")
+///
 /// Interface to register and encode metrics.
 pub trait Metrics: Clone + Send + Sync + 'static {
     /// Get the current label of the context.
@@ -333,6 +336,8 @@ pub type KeyedRateLimiter<K, C> = governor::RateLimiter<
     governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
 >;
 
+/// @lts("0.1.0")
+///
 /// Interface that any task scheduler must implement to provide
 /// time-based operations.
 ///
@@ -549,6 +554,8 @@ pub trait Stream: Sync + Send + 'static {
 /// Partition names must be non-empty and contain only ASCII alphanumeric
 /// characters, dashes (`-`), or underscores (`_`). Names containing other
 /// characters (e.g., `/`, `.`, spaces) will return an error.
+///
+/// @lts("0.1.0")
 pub trait Storage: Clone + Send + Sync + 'static {
     /// The readable/writeable storage buffer that can be opened by this Storage.
     type Blob: Blob;
@@ -626,6 +633,8 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// When a blob is dropped, any unsynced changes may be discarded. Implementations
 /// may attempt to sync during drop but errors will go unhandled. Call `sync`
 /// before dropping to ensure all changes are durably persisted.
+///
+/// @lts("0.1.0")
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
     /// Read from the blob at the given offset.

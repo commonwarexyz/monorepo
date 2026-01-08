@@ -28,9 +28,6 @@
 //! Helper traits combine these for convenience:
 //!
 //! - [Encode]: Combines [Write] + [EncodeSize]. Provides [Encode::encode()] method.
-//!
-//! @beta("0.1.0")
-//! @lts("0.1.0")
 //! - [Decode]: Requires [Read]. Provides [Decode::decode_cfg()] method that ensures
 //!   that the entire buffer is consumed.
 //! - [Codec]: Combines [Encode] + [Decode].

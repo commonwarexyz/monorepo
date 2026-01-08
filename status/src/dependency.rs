@@ -5,6 +5,7 @@ use syn::{Item, UseTree};
 pub struct Dependency {
     pub crate_name: String,
     pub module_path: Vec<String>,
+    pub item_name: Option<String>,
 }
 
 impl Dependency {
@@ -14,6 +15,24 @@ impl Dependency {
         } else {
             format!("{}::{}", self.crate_name, self.module_path.join("::"))
         }
+    }
+
+    pub fn full_string(&self) -> String {
+        self.item_name.as_ref().map_or_else(
+            || self.module_string(),
+            |item| {
+                if self.module_path.is_empty() {
+                    format!("{}::{}", self.crate_name, item)
+                } else {
+                    format!(
+                        "{}::{}::{}",
+                        self.crate_name,
+                        self.module_path.join("::"),
+                        item
+                    )
+                }
+            },
+        )
     }
 }
 
@@ -75,11 +94,12 @@ fn try_add_dep(path: &[String], deps: &mut Vec<Dependency>, seen: &mut HashSet<D
     let first = &path[0];
 
     if let Some(crate_name) = first.strip_prefix("commonware_") {
-        let module_path = extract_module_path(&path[1..]);
+        let (module_path, item_name) = extract_path_and_item(&path[1..]);
 
         let dep = Dependency {
             crate_name: crate_name.to_string(),
             module_path,
+            item_name,
         };
 
         if !seen.contains(&dep) {
@@ -89,18 +109,20 @@ fn try_add_dep(path: &[String], deps: &mut Vec<Dependency>, seen: &mut HashSet<D
     }
 }
 
-fn extract_module_path(segments: &[String]) -> Vec<String> {
+fn extract_path_and_item(segments: &[String]) -> (Vec<String>, Option<String>) {
     let mut module_path = Vec::new();
+    let mut item_name = None;
 
     for segment in segments {
         if is_likely_module_name(segment) {
             module_path.push(segment.clone());
         } else {
+            item_name = Some(segment.clone());
             break;
         }
     }
 
-    module_path
+    (module_path, item_name)
 }
 
 fn is_likely_module_name(name: &str) -> bool {
@@ -122,15 +144,22 @@ mod tests {
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].crate_name, "codec");
         assert!(deps[0].module_path.is_empty());
+        assert_eq!(deps[0].item_name, Some("Encode".to_string()));
     }
 
     #[test]
     fn test_curly_brace_import() {
         let code = r#"use commonware_codec::{Encode, Write, Read};"#;
         let deps = parse_dependencies(code);
-        assert_eq!(deps.len(), 1);
-        assert_eq!(deps[0].crate_name, "codec");
-        assert!(deps[0].module_path.is_empty());
+        assert_eq!(deps.len(), 3);
+        assert!(deps.iter().all(|d| d.crate_name == "codec"));
+        assert!(deps
+            .iter()
+            .any(|d| d.item_name == Some("Encode".to_string())));
+        assert!(deps
+            .iter()
+            .any(|d| d.item_name == Some("Write".to_string())));
+        assert!(deps.iter().any(|d| d.item_name == Some("Read".to_string())));
     }
 
     #[test]
@@ -140,6 +169,7 @@ mod tests {
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].crate_name, "runtime");
         assert_eq!(deps[0].module_path, vec!["buffer"]);
+        assert_eq!(deps[0].item_name, Some("PoolRef".to_string()));
     }
 
     #[test]
@@ -149,6 +179,7 @@ mod tests {
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].crate_name, "codec");
         assert!(deps[0].module_path.is_empty());
+        assert!(deps[0].item_name.is_none());
     }
 
     #[test]
@@ -158,6 +189,7 @@ mod tests {
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].crate_name, "codec");
         assert!(deps[0].module_path.is_empty());
+        assert_eq!(deps[0].item_name, Some("Read".to_string()));
     }
 
     #[test]
@@ -171,7 +203,7 @@ use commonware_codec::Read;
 "#;
         let deps = parse_dependencies(code);
         assert_eq!(deps.len(), 1);
-        assert!(deps[0].module_path.is_empty());
+        assert_eq!(deps[0].item_name, Some("Read".to_string()));
     }
 
     #[test]
@@ -190,9 +222,16 @@ use commonware_codec::Encode;
     fn test_nested_curly_braces() {
         let code = r#"use commonware_codec::{types::{Vec, Map}, Encode};"#;
         let deps = parse_dependencies(code);
-        assert_eq!(deps.len(), 2);
-        assert!(deps.iter().any(|d| d.module_path == vec!["types"]));
-        assert!(deps.iter().any(|d| d.module_path.is_empty()));
+        assert_eq!(deps.len(), 3);
+        assert!(deps
+            .iter()
+            .any(|d| d.module_path == vec!["types"] && d.item_name == Some("Vec".to_string())));
+        assert!(deps
+            .iter()
+            .any(|d| d.module_path == vec!["types"] && d.item_name == Some("Map".to_string())));
+        assert!(deps
+            .iter()
+            .any(|d| d.module_path.is_empty() && d.item_name == Some("Encode".to_string())));
     }
 
     #[test]
@@ -200,14 +239,18 @@ use commonware_codec::Encode;
         let dep = Dependency {
             crate_name: "runtime".to_string(),
             module_path: vec!["buffer".to_string()],
+            item_name: Some("PoolRef".to_string()),
         };
         assert_eq!(dep.module_string(), "runtime::buffer");
+        assert_eq!(dep.full_string(), "runtime::buffer::PoolRef");
 
         let dep_root = Dependency {
             crate_name: "codec".to_string(),
             module_path: vec![],
+            item_name: Some("Encode".to_string()),
         };
         assert_eq!(dep_root.module_string(), "codec");
+        assert_eq!(dep_root.full_string(), "codec::Encode");
     }
 
     #[test]
@@ -217,5 +260,6 @@ use commonware_codec::Encode;
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].crate_name, "runtime");
         assert_eq!(deps[0].module_path, vec!["utils", "buffer", "pool"]);
+        assert_eq!(deps[0].item_name, Some("PoolRef".to_string()));
     }
 }

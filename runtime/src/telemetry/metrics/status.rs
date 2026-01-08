@@ -84,6 +84,8 @@ impl Drop for CounterGuard {
     }
 }
 
+/// @lts("0.1.0")
+///
 /// Trait providing convenience methods for `Gauge`.
 pub trait GaugeExt {
     /// Sets the [`Gauge`] using a value convertible to `i64`, if conversion is not lossy, returning the previous value if successful.

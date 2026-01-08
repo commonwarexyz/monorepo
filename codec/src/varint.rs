@@ -248,6 +248,8 @@ mod sealed {
 
 // ---------- Structs ----------
 
+/// @lts("0.1.0")
+///
 /// An ergonomic wrapper to allow for encoding and decoding of primitive unsigned integers as
 /// varints rather than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

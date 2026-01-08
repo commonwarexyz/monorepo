@@ -1,7 +1,7 @@
 use crate::{
     dependency::{parse_dependencies, Dependency},
     error::Error,
-    marker::{parse_markers, Markers},
+    marker::{parse_all_markers, Markers},
 };
 use serde::Serialize;
 use std::{collections::BTreeMap, path::Path};
@@ -12,15 +12,23 @@ pub struct ModuleStatus {
     pub markers: Markers,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inherited_from: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub items: BTreeMap<String, Markers>,
     #[serde(skip)]
     pub dependencies: Vec<Dependency>,
 }
 
 impl ModuleStatus {
-    pub const fn new(markers: Markers, dependencies: Vec<Dependency>) -> Self {
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn new(
+        markers: Markers,
+        items: BTreeMap<String, Markers>,
+        dependencies: Vec<Dependency>,
+    ) -> Self {
         Self {
             markers,
             inherited_from: None,
+            items,
             dependencies,
         }
     }
@@ -75,10 +83,13 @@ fn scan_directory(
                 .to_string();
 
             let content = std::fs::read_to_string(&path)?;
-            let markers = parse_markers(&content);
+            let parsed = parse_all_markers(&content);
             let dependencies = parse_dependencies(&content);
 
-            modules.insert(rel_path, ModuleStatus::new(markers, dependencies));
+            modules.insert(
+                rel_path,
+                ModuleStatus::new(parsed.module, parsed.items, dependencies),
+            );
         }
     }
 
@@ -98,6 +109,7 @@ mod tests {
                 lts: Some("0.2.0".to_string()),
             },
             inherited_from: None,
+            items: BTreeMap::new(),
             dependencies: vec![],
         };
 

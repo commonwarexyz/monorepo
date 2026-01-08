@@ -7,8 +7,10 @@ use alloc::vec::Vec;
 use bytes::Bytes;
 use core::ops::Index;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// @lts("0.1.0")
+///
 /// A buffer whose memory is stable as long as its not reallocated.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StableBuf {
     Vec(Vec<u8>),
     BytesMut(bytes::BytesMut),

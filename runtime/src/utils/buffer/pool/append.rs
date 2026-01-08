@@ -57,6 +57,8 @@ struct BlobState<B: Blob> {
     partial_page_state: Option<Checksum>,
 }
 
+/// @lts("0.1.0")
+///
 /// A [Blob] wrapper that supports write-cached appending of data, with checksums for data integrity
 /// and buffer pool managed caching.
 #[derive(Clone)]

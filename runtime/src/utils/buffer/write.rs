@@ -35,6 +35,8 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///     assert_eq!(&buf, b"hello world!");
 /// });
 /// ```
+///
+/// @lts("0.1.0")
 #[derive(Clone)]
 pub struct Write<B: Blob> {
     /// The underlying blob to write to.

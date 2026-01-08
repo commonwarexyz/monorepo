@@ -115,13 +115,10 @@ pub fn check_lts_violations(
                     continue;
                 };
 
-                if !is_module_lts(dep, dep_scan) {
+                if !is_dependency_lts(dep, dep_scan) {
                     violations.push(Conflict {
                         path: format!("{}/{}", crate_name, path),
-                        message: format!(
-                            "LTS module imports from non-LTS module: {}",
-                            dep.module_string()
-                        ),
+                        message: format!("LTS module imports from non-LTS: {}", dep.full_string()),
                         severity: Severity::Error,
                     });
                 }
@@ -132,13 +129,36 @@ pub fn check_lts_violations(
     violations
 }
 
-fn is_module_lts(dep: &Dependency, scan: &CrateScan) -> bool {
+fn is_dependency_lts(dep: &Dependency, scan: &CrateScan) -> bool {
     let module_files = get_module_files(&dep.module_path);
 
-    for module_file in module_files {
-        if let Some(status) = scan.modules.get(&module_file) {
+    for module_file in &module_files {
+        if let Some(status) = scan.modules.get(module_file) {
             if status.markers.is_lts() {
                 return true;
+            }
+        }
+    }
+
+    if let Some(item_name) = &dep.item_name {
+        for status in scan.modules.values() {
+            if let Some(item_markers) = status.items.get(item_name) {
+                if item_markers.is_lts() {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Also check if the last segment of module_path is actually an item (e.g., lowercase functions)
+    if dep.item_name.is_none() {
+        if let Some(last_segment) = dep.module_path.last() {
+            for status in scan.modules.values() {
+                if let Some(item_markers) = status.items.get(last_segment) {
+                    if item_markers.is_lts() {
+                        return true;
+                    }
+                }
             }
         }
     }

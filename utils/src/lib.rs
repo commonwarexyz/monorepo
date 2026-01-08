@@ -1,7 +1,4 @@
 //! Leverage common functionality across multiple primitives.
-//!
-//! @beta("0.1.0")
-//! @lts("0.1.0")
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
@@ -88,6 +85,8 @@ pub fn test_rng() -> rand::rngs::StdRng {
 /// Alias for boxed errors that are `Send` and `Sync`.
 pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;
 
+/// @lts("0.1.0")
+///
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {
     let mut hex = String::new();
@@ -204,6 +203,8 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
     result as u64
 }
 
+/// @lts("0.1.0")
+///
 /// A macro to create a `NonZeroUsize` from a value, panicking if the value is zero.
 /// For literal values, validation occurs at compile time. For expressions, validation
 /// occurs at runtime.
@@ -232,6 +233,8 @@ macro_rules! NZU8 {
     };
 }
 
+/// @lts("0.1.0")
+///
 /// A macro to create a `NonZeroU16` from a value, panicking if the value is zero.
 /// For literal values, validation occurs at compile time. For expressions, validation
 /// occurs at runtime.
@@ -260,6 +263,8 @@ macro_rules! NZU32 {
     };
 }
 
+/// @lts("0.1.0")
+///
 /// A macro to create a `NonZeroU64` from a value, panicking if the value is zero.
 /// For literal values, validation occurs at compile time. For expressions, validation
 /// occurs at runtime.

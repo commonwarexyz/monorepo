@@ -40,6 +40,16 @@
             font-size: 0.85em;
             font-weight: bold;
         }
+        .stage-badge.clickable {
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .stage-badge.clickable:hover {
+            opacity: 0.8;
+        }
+        .stage-badge.clickable.active {
+            box-shadow: 0 0 0 2px #333;
+        }
         .stage-alpha { background: #f0f0f0; color: #666; }
         .stage-beta { background: #fff3cd; color: #856404; }
         .stage-gamma { background: #d4edda; color: #155724; }
@@ -55,6 +65,15 @@
             padding: 15px;
             border: 1px solid #ddd;
             text-align: center;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .summary-card:hover {
+            background: #f5f5f5;
+        }
+        .summary-card.active {
+            border-color: #333;
+            background: #f0f0f0;
         }
         .summary-card .count {
             font-size: 2em;
@@ -181,22 +200,16 @@
         </div>
 
         <p>Track the maturity of modules in the Commonware Library. Stages progress from
-           <span class="stage-badge stage-alpha">alpha</span> (default) to
-           <span class="stage-badge stage-beta">beta</span> to
-           <span class="stage-badge stage-gamma">gamma</span>.
-           Modules marked <span class="stage-badge lts-badge">LTS</span> have frozen wire formats.</p>
+           <span class="stage-badge stage-alpha clickable" onclick="setFilter('alpha')">alpha</span> (default) to
+           <span class="stage-badge stage-beta clickable" onclick="setFilter('beta')">beta</span> to
+           <span class="stage-badge stage-gamma clickable" onclick="setFilter('gamma')">gamma</span>.
+           Modules marked <span class="stage-badge lts-badge clickable" onclick="setFilter('lts')">LTS</span> have frozen wire formats.
+           <span class="stage-badge clickable" onclick="setFilter('all')" style="background: #eee; color: #333; margin-left: 10px;">show all</span></p>
 
         <div id="summary"></div>
 
         <h2>Modules by Crate</h2>
         <div class="filter-bar">
-            <select id="stage-filter">
-                <option value="all">All Stages</option>
-                <option value="alpha">Alpha Only</option>
-                <option value="beta">Beta+</option>
-                <option value="gamma">Gamma Only</option>
-                <option value="lts">LTS Only</option>
-            </select>
             <input type="text" id="search-filter" placeholder="Search modules...">
         </div>
         <div id="crates"></div>
@@ -207,6 +220,7 @@
         'use strict';
 
         let statusData = null;
+        let currentStageFilter = 'all';
 
         function getStageBadge(status) {
             let stage = 'alpha';
@@ -232,33 +246,65 @@
             return 'alpha';
         }
 
+        function setFilter(filter) {
+            currentStageFilter = filter;
+            updateFilterUI();
+            renderCrates(statusData);
+        }
+
+        function updateFilterUI() {
+            // Update clickable badges in description
+            document.querySelectorAll('.stage-badge.clickable').forEach(badge => {
+                badge.classList.remove('active');
+            });
+            const filterMap = {
+                'alpha': '.stage-alpha.clickable',
+                'beta': '.stage-beta.clickable',
+                'gamma': '.stage-gamma.clickable',
+                'lts': '.lts-badge.clickable',
+                'all': '.stage-badge.clickable[onclick*="all"]'
+            };
+            const selector = filterMap[currentStageFilter];
+            if (selector) {
+                document.querySelectorAll(selector).forEach(el => el.classList.add('active'));
+            }
+
+            // Update summary cards
+            document.querySelectorAll('.summary-card').forEach(card => {
+                card.classList.remove('active');
+            });
+            const activeCard = document.querySelector(`.summary-card[data-filter="${currentStageFilter}"]`);
+            if (activeCard) activeCard.classList.add('active');
+        }
+
         function renderSummary(data) {
             const summary = data.summary;
             const html = `
                 <div class="summary-grid">
-                    <div class="summary-card">
+                    <div class="summary-card" data-filter="all" onclick="setFilter('all')">
                         <div class="count">${summary.total_modules}</div>
                         <div class="label">Total Modules</div>
                     </div>
-                    <div class="summary-card">
+                    <div class="summary-card" data-filter="alpha" onclick="setFilter('alpha')">
                         <div class="count" style="color: #666">${summary.by_stage.alpha}</div>
                         <div class="label">Alpha</div>
                     </div>
-                    <div class="summary-card">
+                    <div class="summary-card" data-filter="beta" onclick="setFilter('beta')">
                         <div class="count" style="color: #856404">${summary.by_stage.beta}</div>
                         <div class="label">Beta</div>
                     </div>
-                    <div class="summary-card">
+                    <div class="summary-card" data-filter="gamma" onclick="setFilter('gamma')">
                         <div class="count" style="color: #155724">${summary.by_stage.gamma}</div>
                         <div class="label">Gamma</div>
                     </div>
-                    <div class="summary-card">
+                    <div class="summary-card" data-filter="lts" onclick="setFilter('lts')">
                         <div class="count" style="color: #004085">${summary.lts_count}</div>
                         <div class="label">LTS</div>
                     </div>
                 </div>
             `;
             document.getElementById('summary').innerHTML = html;
+            updateFilterUI();
         }
 
         function getCrateStats(modules) {
@@ -292,7 +338,7 @@
         }
 
         function renderCrates(data) {
-            const stageFilter = document.getElementById('stage-filter').value;
+            const stageFilter = currentStageFilter;
             const searchFilter = document.getElementById('search-filter').value;
 
             const cratesHtml = Object.entries(data.crates).sort().map(([crateName, crateData]) => {
@@ -348,7 +394,6 @@
         }
 
         function setupFilters() {
-            document.getElementById('stage-filter').addEventListener('change', () => renderCrates(statusData));
             document.getElementById('search-filter').addEventListener('input', () => renderCrates(statusData));
         }
 

@@ -3,6 +3,8 @@
 use crate::error::Error;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+/// @lts("0.1.0")
+///
 /// Trait for types with a known, fixed encoded size.
 ///
 /// Implementing this trait signifies that the encoded representation of this type *always* has the
@@ -14,6 +16,8 @@ pub trait FixedSize {
     const SIZE: usize;
 }
 
+/// @lts("0.1.0")
+///
 /// Trait for types that can provide their encoded size in bytes.
 ///
 /// This must be implemented by all encodable types. For types implementing [FixedSize], this
@@ -31,6 +35,8 @@ impl<T: FixedSize> EncodeSize for T {
     }
 }
 
+/// @lts("0.1.0")
+///
 /// Trait for types that can be written (encoded) to a byte buffer.
 pub trait Write {
     /// Writes the binary representation of `self` to the provided buffer `buf`.
@@ -39,6 +45,8 @@ pub trait Write {
     fn write(&self, buf: &mut impl BufMut);
 }
 
+/// @lts("0.1.0")
+///
 /// Trait for types that can be read (decoded) from a byte buffer.
 pub trait Read: Sized {
     /// The `Cfg` type parameter allows passing configuration during the read process. This is
@@ -58,6 +66,8 @@ pub trait Read: Sized {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error>;
 }
 
+/// @lts("0.1.0")
+///
 /// Trait combining [Write] and [EncodeSize] for types that can be fully encoded.
 ///
 /// This trait provides the convenience [Encode::encode] method which handles
@@ -123,6 +133,8 @@ pub trait Decode: Read {
 // Automatically implement `Decode` for types that implement `Read`.
 impl<T: Read> Decode for T {}
 
+/// @lts("0.1.0")
+///
 /// Convenience trait combining [Encode] and [Decode].
 ///
 /// Represents types that can be both fully encoded and decoded.
@@ -161,6 +173,8 @@ pub trait EncodeFixed: Write + FixedSize {
 // Automatically implement `EncodeFixed` for types that implement `Write` and `FixedSize`.
 impl<T: Write + FixedSize> EncodeFixed for T {}
 
+/// @lts("0.1.0")
+///
 /// Convenience trait combining `FixedSize` and `Codec`.
 ///
 /// Represents types that can be both fully encoded and decoded from a fixed-size byte sequence.

@@ -1,3 +1,5 @@
+//! @lts("0.1.0")
+//!
 //! A deterministic runtime that randomly selects tasks to run based on a seed
 //!
 //! # Panics

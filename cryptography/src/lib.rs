@@ -4,9 +4,6 @@
 //!
 //! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
-//!
-//! @beta("0.1.0")
-//! @lts("0.1.0")
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
@@ -196,8 +193,11 @@ pub trait Committable: Clone + Sized + Send + Sync + 'static {
     fn commitment(&self) -> Self::Commitment;
 }
 
+/// @lts("0.1.0")
 pub type DigestOf<H> = <H as Hasher>::Digest;
 
+/// @lts("0.1.0")
+///
 /// Interface that commonware crates rely on for hashing.
 ///
 /// Hash functions in commonware primitives are not typically hardcoded

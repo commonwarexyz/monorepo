@@ -16,6 +16,8 @@ cfg_if::cfg_if! {
         /// 11_644_473_600 seconds yields the remaining representable span.
         pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(910_692_730_085, 477_580_700);
 
+        /// @lts("0.1.0")
+        ///
         /// The precision of [`SystemTime`] on Windows.
         pub const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(100);
     } else { // We default to Unix-like behavior on all other platforms
@@ -28,6 +30,8 @@ cfg_if::cfg_if! {
         #[cfg(not(windows))]
         pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(i64::MAX as u64, 999_999_999);
 
+        /// @lts("0.1.0")
+        ///
         /// The precision of [`SystemTime`] on Unix.
         pub const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(1);
     }
@@ -157,6 +161,8 @@ impl DurationExt for Duration {
     }
 }
 
+/// @lts("0.1.0")
+///
 /// Extension trait to add methods to `std::time::SystemTime`
 pub trait SystemTimeExt {
     /// Returns the duration since the Unix epoch.

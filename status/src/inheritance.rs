@@ -68,6 +68,7 @@ mod tests {
         ModuleStatus {
             markers,
             inherited_from: None,
+            items: BTreeMap::new(),
             dependencies: vec![],
         }
     }

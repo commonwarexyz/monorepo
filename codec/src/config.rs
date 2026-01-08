@@ -5,6 +5,8 @@ use core::{
     ops::{Bound, RangeBounds},
 };
 
+/// @lts("0.1.0")
+///
 /// Configuration for limiting the range of a value.
 ///
 /// This is often used to configure length limits for variable-length types or collections.

@@ -8,6 +8,8 @@ use crate::{Decode, Error, RangeCfg, Read};
 use bytes::Buf;
 use core::ops::RangeBounds;
 
+/// @lts("0.1.0")
+///
 /// Extension trait providing ergonomic read method for types requiring no configuration
 /// (i.e. `Cfg = ()`).
 ///
@@ -49,6 +51,8 @@ impl_is_unit_for_tuple!(A, B, C, D, E, F, G, H, I, J);
 impl_is_unit_for_tuple!(A, B, C, D, E, F, G, H, I, J, K);
 impl_is_unit_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
 
+/// @lts("0.1.0")
+///
 /// Extension trait providing ergonomic decode method for types requiring no specific configuration.
 /// This is typically types with only one possible value, such as the unit type `()` or tuples of
 /// such types.
