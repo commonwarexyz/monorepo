@@ -83,6 +83,7 @@ std = [
 	"commonware-math/std",
 	"commonware-parallel/std",
 	"commonware-utils/std",
+	"crc-fast/std",
 	"ecdsa/std",
 	"ed25519-consensus/std",
 	"getrandom/std",
