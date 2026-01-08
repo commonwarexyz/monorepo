@@ -226,7 +226,7 @@ impl CodecRead for Checksum {
 }
 
 impl FixedSize for Checksum {
-    const SIZE: usize = (2 * u16::SIZE + 2 * crc32::Digest::SIZE);
+    const SIZE: usize = 2 * u16::SIZE + 2 * crc32::Digest::SIZE;
 }
 
 #[cfg(feature = "arbitrary")]
