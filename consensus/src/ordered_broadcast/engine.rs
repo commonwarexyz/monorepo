@@ -72,6 +72,7 @@ pub struct Engine<
     R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
+    T: commonware_parallel::Strategy,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -84,6 +85,7 @@ pub struct Engine<
     relay: R,
     monitor: M,
     reporter: Z,
+    strategy: T,
 
     ////////////////////////////////////////
     // Namespace Constants
@@ -208,10 +210,11 @@ impl<
         R: Relay<Digest = D>,
         Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
-    > Engine<E, C, S, P, D, A, R, Z, M>
+        T: commonware_parallel::Strategy,
+    > Engine<E, C, S, P, D, A, R, Z, M, T>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M>) -> Self {
+    pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M, T>) -> Self {
         // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
 
@@ -224,6 +227,7 @@ impl<
             relay: cfg.relay,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
+            strategy: cfg.strategy,
             chunk_verifier: cfg.chunk_verifier,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
@@ -610,7 +614,7 @@ impl<
         };
 
         // Add the vote. If a new certificate is formed, handle it.
-        if let Some(certificate) = self.ack_manager.add_ack(ack, scheme.as_ref(), &commonware_parallel::Sequential) {
+        if let Some(certificate) = self.ack_manager.add_ack(ack, scheme.as_ref(), &self.strategy) {
             debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = %ack.chunk.height, "recovered certificate");
             self.metrics.certificates.inc();
             self.handle_certificate(&ack.chunk, ack.epoch, certificate)
@@ -885,7 +889,7 @@ impl<
             &mut self.context,
             &self.chunk_verifier,
             &self.validators_provider,
-            &commonware_parallel::Sequential,
+            &self.strategy,
         )
     }
 
@@ -943,7 +947,7 @@ impl<
         }
 
         // Validate the vote signature
-        if !ack.verify(&mut self.context, scheme.as_ref(), &commonware_parallel::Sequential) {
+        if !ack.verify(&mut self.context, scheme.as_ref(), &self.strategy) {
             return Err(Error::InvalidAckSignature);
         }
 
