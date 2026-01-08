@@ -4276,6 +4276,7 @@ mod tests {
                     context.with_label("rng"),
                     schemes[idx].clone(),
                     mock_reporter.clone(),
+                    Sequential,
                     true, // Enable verification
                 );
                 reporters.push(mock_reporter.clone());

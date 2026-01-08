@@ -23,6 +23,7 @@ use crate::{
     Reporter,
 };
 use commonware_cryptography::{certificate, Digest};
+use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
@@ -35,6 +36,7 @@ pub struct AttributableReporter<
     E: Clone + CryptoRngCore + Send + 'static,
     S: certificate::Scheme,
     D: Digest,
+    T: Strategy,
     R: Reporter<Activity = Activity<S, D>>,
 > {
     /// RNG for certificate verification
@@ -43,6 +45,8 @@ pub struct AttributableReporter<
     scheme: S,
     /// Inner reporter that receives filtered activities
     reporter: R,
+    /// Strategy for parallel operations.
+    strategy: T,
     /// Whether to always verify peer activities
     verify: bool,
 }
@@ -51,15 +55,17 @@ impl<
         E: Clone + CryptoRngCore + Send + 'static,
         S: certificate::Scheme,
         D: Digest,
+        T: Strategy,
         R: Reporter<Activity = Activity<S, D>>,
-    > AttributableReporter<E, S, D, R>
+    > AttributableReporter<E, S, D, T, R>
 {
     /// Creates a new `AttributableReporter` that wraps an inner reporter.
-    pub const fn new(rng: E, scheme: S, reporter: R, verify: bool) -> Self {
+    pub const fn new(rng: E, scheme: S, reporter: R, strategy: T, verify: bool) -> Self {
         Self {
             rng,
             scheme,
             reporter,
+            strategy,
             verify,
         }
     }
@@ -69,8 +75,9 @@ impl<
         E: Clone + CryptoRngCore + Send + 'static,
         S: Scheme<D>,
         D: Digest,
+        T: Strategy,
         R: Reporter<Activity = Activity<S, D>>,
-    > Reporter for AttributableReporter<E, S, D, R>
+    > Reporter for AttributableReporter<E, S, D, T, R>
 {
     type Activity = Activity<S, D>;
 
@@ -78,11 +85,7 @@ impl<
         // Verify peer activities if verification is enabled
         if self.verify
             && !activity.verified()
-            && !activity.verify(
-                &mut self.rng,
-                &self.scheme,
-                &commonware_parallel::Sequential,
-            )
+            && !activity.verify(&mut self.rng, &self.scheme, &self.strategy)
         {
             // Drop unverified peer activity
             return;
@@ -130,6 +133,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
+    use commonware_parallel::Sequential;
     use futures::executor::block_on;
     use rand::{rngs::StdRng, SeedableRng};
     use std::sync::{Arc, Mutex};
@@ -191,7 +195,7 @@ mod tests {
         );
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), Sequential, true);
 
         // Create an invalid activity (signed with wrong namespace scheme)
         let proposal = create_proposal(0, 1);
@@ -234,6 +238,7 @@ mod tests {
             rng,
             verifier,
             mock.clone(),
+            Sequential,
             false, // Disable verification
         );
 
@@ -272,7 +277,7 @@ mod tests {
         );
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), Sequential, true);
 
         // Create a certificate from multiple validators
         let proposal = create_proposal(0, 1);
@@ -288,7 +293,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble(votes, &commonware_parallel::Sequential)
+            .assemble(votes, &Sequential)
             .expect("failed to assemble certificate");
 
         let notarization = Notarization {
@@ -319,7 +324,7 @@ mod tests {
         );
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), Sequential, true);
 
         // Create peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
@@ -355,7 +360,7 @@ mod tests {
         );
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), Sequential, true);
 
         // Create a peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
