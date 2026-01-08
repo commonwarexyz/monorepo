@@ -789,10 +789,13 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
         let (sender, receiver) = oneshot::channel();
         let channel = if priority { &self.high } else { &self.low };
         let message = message.copy_to_bytes(message.remaining());
-        channel
+        if channel
             .unbounded_send((self.channel, self.me.clone(), recipients, message, sender))
-            .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)
+            .is_err()
+        {
+            return Ok(Vec::new());
+        }
+        Ok(receiver.await.unwrap_or_default())
     }
 }
 

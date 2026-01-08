@@ -18,7 +18,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::StaticManager, Blocker, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{ordered::Quorum, sequence::U64};
+use commonware_utils::{channels::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use futures::{channel::mpsc, StreamExt};
 use rand_core::CryptoRngCore;
 use std::time::Duration;
@@ -241,10 +241,10 @@ impl<
                 let Some(parsed) = self.validate(view, data) else {
                     // Resolver will block any peers that send invalid responses, so
                     // we don't need to do again here
-                    let _ = response.send(false);
+                    response.send_lossy(false);
                     return;
                 };
-                let _ = response.send(true);
+                response.send_lossy(true);
 
                 // Notify voter as soon as possible
                 voter.resolved(parsed.clone()).await;
@@ -260,7 +260,7 @@ impl<
                     // the full timeout)
                     return;
                 };
-                let _ = response.send(certificate.encode());
+                response.send_lossy(certificate.encode());
             }
         }
     }
