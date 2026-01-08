@@ -75,7 +75,7 @@ enum Role<P: PublicKey, V: Variant> {
 /// The scheme is generic over a [`Strategy`] which determines whether cryptographic
 /// operations such as signature recovery and batch verification run sequentially or in parallel.
 #[derive(Clone, Debug)]
-pub struct Scheme<P: PublicKey, V: Variant, S: Strategy = Sequential> {
+pub struct Scheme<P: PublicKey, V: Variant, S: Strategy> {
     role: Role<P, V>,
     strategy: S,
 }
@@ -274,7 +274,7 @@ pub fn fixture<V, R>(
     namespace: &[u8],
     n: u32,
 ) -> commonware_cryptography::certificate::mocks::Fixture<
-    Scheme<commonware_cryptography::ed25519::PublicKey, V>,
+    Scheme<commonware_cryptography::ed25519::PublicKey, V, Sequential>,
 >
 where
     V: Variant,
@@ -356,7 +356,7 @@ impl<V: Variant> Seed<V> {
     }
 
     /// Verifies the threshold signature on this [Seed].
-    pub fn verify<P: PublicKey>(&self, scheme: &Scheme<P, V>) -> bool {
+    pub fn verify<P: PublicKey, S: Strategy>(&self, scheme: &Scheme<P, V, S>) -> bool {
         let seed_message = self.round.encode();
 
         ops::verify_message::<V>(
@@ -446,13 +446,17 @@ pub trait Seedable<V: Variant> {
     fn seed(&self) -> Seed<V>;
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Notarization<Scheme<P, V>, D> {
+impl<P: PublicKey, V: Variant, D: Digest, S: Strategy> Seedable<V>
+    for Notarization<Scheme<P, V, S>, D>
+{
     fn seed(&self) -> Seed<V> {
         Seed::new(self.proposal.round, self.certificate.seed_signature)
     }
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P, V>, D> {
+impl<P: PublicKey, V: Variant, D: Digest, S: Strategy> Seedable<V>
+    for Finalization<Scheme<P, V, S>, D>
+{
     fn seed(&self) -> Seed<V> {
         Seed::new(self.proposal.round, self.certificate.seed_signature)
     }
@@ -773,7 +777,7 @@ mod tests {
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
 
-    type Scheme<V> = super::Scheme<ed25519::PublicKey, V>;
+    type Scheme<V> = super::Scheme<ed25519::PublicKey, V, Sequential>;
     type Signature<V> = super::Signature<V>;
 
     fn setup_signers<V: Variant>(n: u32, seed: u64) -> (Vec<Scheme<V>>, Scheme<V>) {

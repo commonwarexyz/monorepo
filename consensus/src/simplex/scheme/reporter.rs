@@ -123,6 +123,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
+    use commonware_parallel::Sequential;
     use futures::executor::block_on;
     use rand::{rngs::StdRng, SeedableRng};
     use std::sync::{Arc, Mutex};
@@ -260,7 +261,7 @@ mod tests {
         } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
 
         assert!(
-            !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
+            !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk, Sequential>::is_attributable(),
             "BLS threshold must be non-attributable"
         );
 
@@ -307,7 +308,7 @@ mod tests {
         } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
 
         assert!(
-            !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
+            !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk, Sequential>::is_attributable(),
             "BLS threshold must be non-attributable"
         );
 

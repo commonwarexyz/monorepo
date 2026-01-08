@@ -1157,6 +1157,7 @@ dependencies = [
  "commonware-macros",
  "commonware-math",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
  "futures",

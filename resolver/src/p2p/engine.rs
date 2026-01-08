@@ -90,7 +90,6 @@ pub struct Engine<
     metrics: metrics::Metrics<E>,
 
     /// Phantom data for networking types
-    _s: PhantomData<NetS>,
     _r: PhantomData<NetR>,
 }
 
@@ -138,7 +137,6 @@ impl<
                 priority_responses: cfg.priority_responses,
                 metrics,
                 fetch_timers: HashMap::new(),
-                _s: PhantomData,
                 _r: PhantomData,
             },
             Mailbox::new(sender),

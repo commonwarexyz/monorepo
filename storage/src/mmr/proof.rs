@@ -23,6 +23,13 @@ use core::ops::Range;
 #[cfg(feature = "std")]
 use tracing::debug;
 
+/// The maximum number of digests in a proof per element being proven.
+///
+/// This accounts for the worst case proof size, in an MMR with 62 peaks. The
+/// left-most leaf in such a tree requires 122 digests, for 61 path siblings
+/// and 61 peak digests.
+pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 122;
+
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
 #[derive(Error, Debug)]
 pub enum ReconstructionError {
@@ -85,16 +92,21 @@ impl<D: Digest> Write for Proof<D> {
 }
 
 impl<D: Digest> Read for Proof<D> {
-    /// The maximum number of digests in the proof.
+    /// The maximum number of items being proven.
+    ///
+    /// The upper bound on digests is derived as `max_items * MAX_PROOF_DIGESTS_PER_ELEMENT`.
     type Cfg = usize;
 
-    fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(
+        buf: &mut impl Buf,
+        max_items: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
         // Read the number of nodes in the MMR
         let size = Position::new(UInt::<u64>::read(buf)?.into());
 
         // Read the digests
-        let range = ..=max_len;
-        let digests = Vec::<D>::read_range(buf, range)?;
+        let max_digests = max_items.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
+        let digests = Vec::<D>::read_range(buf, ..=max_digests)?;
         Ok(Self { size, digests })
     }
 }
@@ -1089,8 +1101,9 @@ mod tests {
                     expected_size,
                     "serialized proof should have expected size"
                 );
-                let max_digests = proof.digests.len();
-                let deserialized_proof = Proof::decode_cfg(serialized_proof, &max_digests).unwrap();
+                // max_items is the number of elements in the range
+                let max_items = j - i;
+                let deserialized_proof = Proof::decode_cfg(serialized_proof, &max_items).unwrap();
                 assert_eq!(
                     proof, deserialized_proof,
                     "deserialized proof should match source proof"
@@ -1101,7 +1114,7 @@ mod tests {
                 let serialized_proof = proof.encode();
                 let serialized_proof: Bytes = serialized_proof.slice(0..serialized_proof.len() - 1);
                 assert!(
-                    Proof::<Digest>::decode_cfg(serialized_proof, &max_digests).is_err(),
+                    Proof::<Digest>::decode_cfg(serialized_proof, &max_items).is_err(),
                     "proof should not deserialize with truncated data"
                 );
 
@@ -1112,16 +1125,21 @@ mod tests {
                 let serialized_proof = serialized_proof;
 
                 assert!(
-                    Proof::<Digest>::decode_cfg(serialized_proof, &max_digests).is_err(),
+                    Proof::<Digest>::decode_cfg(serialized_proof, &max_items).is_err(),
                     "proof should not deserialize with extra data"
                 );
 
-                // Confirm deserialization fails when max length is exceeded.
-                if max_digests > 0 {
+                // Confirm deserialization fails when max_items is too small.
+                let actual_digests = proof.digests.len();
+                if actual_digests > 0 {
+                    // Find the minimum max_items that would allow this many digests
+                    let min_max_items = actual_digests.div_ceil(MAX_PROOF_DIGESTS_PER_ELEMENT);
+                    // Using one less should fail
+                    let too_small = min_max_items - 1;
                     let serialized_proof = proof.encode();
                     assert!(
-                        Proof::<Digest>::decode_cfg(serialized_proof, &(max_digests - 1)).is_err(),
-                        "proof should not deserialize with max length exceeded"
+                        Proof::<Digest>::decode_cfg(serialized_proof, &too_small).is_err(),
+                        "proof should not deserialize with max_items too small"
                     );
                 }
             }
@@ -1624,6 +1642,109 @@ mod tests {
             let result = nodes_required_for_multi_proof(Position::new(size), &[loc]);
             assert!(matches!(result, Err(Error::InvalidSize(s)) if s == size));
         }
+    }
+
+    #[test]
+    fn test_max_proof_digests_per_element_sufficient() {
+        // Verify that MAX_PROOF_DIGESTS_PER_ELEMENT (122) is sufficient for any single-element
+        // proof in the largest valid MMR.
+        //
+        // MMR sizes follow: mmr_size(N) = 2*N - popcount(N) where N = leaf count.
+        // The number of peaks equals popcount(N).
+        //
+        // To maximize peaks, we want N with maximum popcount. N = 2^62 - 1 has 62 one-bits:
+        //   N = 0x3FFFFFFFFFFFFFFF = 2^0 + 2^1 + ... + 2^61
+        //
+        // This gives us 62 perfect binary trees with leaf counts 2^0, 2^1, ..., 2^61
+        // and corresponding heights 0, 1, ..., 61.
+        //
+        // mmr_size(2^62 - 1) = 2*(2^62 - 1) - 62 = 2^63 - 2 - 62 = 2^63 - 64
+        //
+        // For a single-element proof in a tree of height h:
+        //   - Path siblings from leaf to peak: h digests
+        //   - Other peaks (not containing the element): (62 - 1) = 61 digests
+        //   - Total: h + 61 digests
+        //
+        // Worst case: element in tallest tree (h = 61)
+        //   - Path siblings: 61
+        //   - Other peaks: 61
+        //   - Total: 61 + 61 = 122 digests
+
+        const NUM_PEAKS: usize = 62;
+        const MAX_TREE_HEIGHT: usize = 61;
+        const EXPECTED_WORST_CASE: usize = MAX_TREE_HEIGHT + (NUM_PEAKS - 1);
+
+        let many_peaks_size = Position::new((1u64 << 63) - 64);
+        assert!(
+            many_peaks_size.is_mmr_size(),
+            "Size {many_peaks_size} should be a valid MMR size",
+        );
+
+        let peak_count = PeakIterator::new(many_peaks_size).count();
+        assert_eq!(peak_count, NUM_PEAKS);
+
+        // Verify the peak heights are 61, 60, ..., 1, 0 (from left to right)
+        let peaks: Vec<_> = PeakIterator::new(many_peaks_size).collect();
+        for (i, &(_pos, height)) in peaks.iter().enumerate() {
+            let expected_height = (NUM_PEAKS - 1 - i) as u32;
+            assert_eq!(
+                height, expected_height,
+                "Peak {i} should have height {expected_height}, got {height}",
+            );
+        }
+
+        // Test location 0 (leftmost leaf, in tallest tree of height 61)
+        // Expected: 61 path siblings + 61 other peaks = 122 digests
+        let loc = Location::new_unchecked(0);
+        let positions = nodes_required_for_range_proof(many_peaks_size, loc..loc + 1)
+            .expect("should compute positions for location 0");
+
+        assert_eq!(
+            positions.len(),
+            EXPECTED_WORST_CASE,
+            "Location 0 proof should require exactly {EXPECTED_WORST_CASE} digests (61 path + 61 peaks)",
+        );
+
+        // Test the rightmost leaf (in smallest tree of height 0, which is itself a peak)
+        // Expected: 0 path siblings + 61 other peaks = 61 digests
+        let last_leaf_loc = (1u64 << 62) - 2; // Last leaf location
+        let positions = nodes_required_for_range_proof(
+            many_peaks_size,
+            Location::new_unchecked(last_leaf_loc)..Location::new_unchecked(last_leaf_loc + 1),
+        )
+        .expect("should compute positions for last leaf");
+
+        let expected_last_leaf = NUM_PEAKS - 1;
+        assert_eq!(
+            positions.len(),
+            expected_last_leaf,
+            "Last leaf proof should require exactly {expected_last_leaf} digests (0 path + 61 peaks)",
+        );
+    }
+
+    #[test]
+    fn test_max_proof_digests_per_element_is_maximum() {
+        // For K peaks, the worst-case proof needs: (max_tree_height) + (K - 1) digests
+        // With K peaks of heights K-1, K-2, ..., 0, this is (K-1) + (K-1) = 2*(K-1)
+        //
+        // To get K peaks, leaf count N must have exactly K bits set.
+        // MMR size = 2*N - popcount(N) = 2*N - K
+        //
+        // For 63 peaks: N = 2^63 - 1 (63 bits set), size = 2*(2^63 - 1) - 63 = 2^64 - 65
+        // This exceeds MAX_POSITION, so is_mmr_size() returns false.
+
+        let n_for_63_peaks = (1u128 << 63) - 1;
+        let size_for_63_peaks = 2 * n_for_63_peaks - 63; // = 2^64 - 65
+        assert!(
+            size_for_63_peaks > *crate::mmr::MAX_POSITION as u128,
+            "63 peaks requires size {size_for_63_peaks} > MAX_POSITION",
+        );
+
+        let size_truncated = size_for_63_peaks as u64;
+        assert!(
+            !Position::new(size_truncated).is_mmr_size(),
+            "Size for 63 peaks should fail is_mmr_size()"
+        );
     }
 
     #[cfg(feature = "arbitrary")]

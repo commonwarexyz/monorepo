@@ -317,6 +317,7 @@ mod tests {
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin, SplitTarget},
         Recipients, Sender as _,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef, count_running_tasks, deterministic, Clock, Metrics, Quota, Runner, Spawner,
     };
@@ -4763,7 +4764,7 @@ mod tests {
     fn tle<V, L>()
     where
         V: Variant,
-        L: Elector<bls12381_threshold::Scheme<PublicKey, V>>,
+        L: Elector<bls12381_threshold::Scheme<PublicKey, V, Sequential>>,
     {
         // Create context
         let n = 4;
