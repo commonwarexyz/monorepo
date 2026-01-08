@@ -138,7 +138,7 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
             return Err(Error::Runtime(RError::BlobInsufficientLength));
         }
 
-        let data_len = buf.len() - crc32::SIZE; // UPDATE
+        let data_len = buf.len() - crc32::SIZE;
         let compressed_data = &buf[..data_len];
         let stored_checksum =
             u32::from_be_bytes(buf[data_len..].try_into().expect("checksum is 4 bytes"));
