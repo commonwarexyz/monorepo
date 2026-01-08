@@ -118,6 +118,13 @@ pub trait AsyncFallibleExt<T> {
     /// send succeeded.
     fn send_lossy(&mut self, msg: T) -> impl std::future::Future<Output = bool> + Send;
 
+    /// Try to send a message without blocking, returning `true` if successful.
+    ///
+    /// Use this for fire-and-forget messages where you don't want to wait
+    /// if the channel is full. Returns `false` if the channel is full or
+    /// disconnected.
+    fn try_send_lossy(&mut self, msg: T) -> bool;
+
     /// Send a request message containing a oneshot responder and await the response.
     ///
     /// Returns `None` if:
@@ -151,6 +158,10 @@ pub trait AsyncFallibleExt<T> {
 impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
     async fn send_lossy(&mut self, msg: T) -> bool {
         futures::SinkExt::send(self, msg).await.is_ok()
+    }
+
+    fn try_send_lossy(&mut self, msg: T) -> bool {
+        self.try_send(msg).is_ok()
     }
 
     async fn request<R, F>(&mut self, make_msg: F) -> Option<R>
@@ -342,6 +353,29 @@ mod tests {
         .await;
 
         assert!(result.is_empty());
+    }
+
+    // try_send_lossy tests
+
+    #[test]
+    fn test_try_send_lossy_success() {
+        let (mut tx, mut rx) = mpsc::channel(1);
+        assert!(tx.try_send_lossy(TestMessage::FireAndForget(42)));
+
+        // Message should be received
+        assert!(matches!(
+            rx.try_next(),
+            Ok(Some(TestMessage::FireAndForget(42)))
+        ));
+    }
+
+    #[test]
+    fn test_try_send_lossy_disconnected() {
+        let (mut tx, rx) = mpsc::channel::<TestMessage>(1);
+        drop(rx);
+
+        // Should not panic, returns false
+        assert!(!tx.try_send_lossy(TestMessage::FireAndForget(42)));
     }
 
     // OneshotExt tests

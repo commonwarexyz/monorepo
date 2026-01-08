@@ -1,4 +1,5 @@
 use crate::{types::Epoch, Monitor as M};
+use commonware_utils::channels::fallible::AsyncFallibleExt;
 use futures::channel::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -18,7 +19,7 @@ impl Inner {
     fn update(&mut self, epoch: Epoch) {
         self.epoch = epoch;
         for subscriber in &mut self.subscribers {
-            subscriber.try_send(epoch).ok();
+            subscriber.try_send_lossy(epoch);
         }
     }
 

@@ -12,10 +12,10 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use commonware_utils::channels::fallible::OneshotExt;
+use commonware_utils::channels::fallible::{AsyncFallibleExt, OneshotExt};
 use futures::{
     channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
+    StreamExt,
 };
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
@@ -66,15 +66,16 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
-        let _ = self.sender.send(Message::Genesis { epoch, response }).await;
+        self.sender
+            .send_lossy(Message::Genesis { epoch, response })
+            .await;
         receiver.await.expect("Failed to receive genesis")
     }
 
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(Message::Propose { context, response })
+        self.sender
+            .send_lossy(Message::Propose { context, response })
             .await;
         receiver
     }
@@ -85,9 +86,8 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(Message::Verify {
+        self.sender
+            .send_lossy(Message::Verify {
                 context,
                 payload,
                 response,
@@ -100,9 +100,8 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
     async fn certify(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(Message::Certify {
+        self.sender
+            .send_lossy(Message::Certify {
                 payload,
                 response: tx,
             })
@@ -115,7 +114,7 @@ impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
     type Digest = D;
 
     async fn broadcast(&mut self, payload: Self::Digest) {
-        let _ = self.sender.send(Message::Broadcast { payload }).await;
+        self.sender.send_lossy(Message::Broadcast { payload }).await;
     }
 }
 
