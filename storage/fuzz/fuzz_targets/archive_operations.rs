@@ -9,9 +9,9 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroUsize};
 
 type Key = FixedBytes<16>;
 type Value = FixedBytes<32>;
@@ -40,7 +40,7 @@ struct FuzzInput {
     operations: Vec<ArchiveOperation>,
 }
 
-const PAGE_SIZE: NonZeroUsize = NZUsize!(555);
+const PAGE_SIZE: NonZeroU16 = NZU16!(456);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(100);
 
 fn fuzz(data: FuzzInput) {

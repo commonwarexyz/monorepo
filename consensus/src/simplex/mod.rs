@@ -320,20 +320,20 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef, count_running_tasks, deterministic, Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{max_faults, quorum, test_rng, NZUsize};
+    use commonware_utils::{max_faults, quorum, test_rng, NZUsize, NZU16};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use rand::{rngs::StdRng, Rng as _};
     use std::{
         collections::{BTreeMap, HashMap},
-        num::{NonZeroU32, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         sync::{Arc, Mutex},
         time::Duration,
     };
     use tracing::{debug, info, warn};
     use types::Activity;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 

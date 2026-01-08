@@ -10,11 +10,11 @@ use commonware_storage::qmdb::{
     keyless::{Config as KConfig, Keyless},
     NonDurable, Unmerkleized,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::{Duration, Instant},
 };
 
@@ -24,7 +24,7 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
 const PARTITION_SUFFIX: &str = "keyless_bench_partition";
 
 /// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: NonZeroUsize = NZUsize!(16384);
+const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
 
 /// The number of pages to cache in the buffer pool.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);

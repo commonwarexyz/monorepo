@@ -7,13 +7,13 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_conformance::{conformance_tests, Conformance};
 use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
-use core::num::{NonZeroU64, NonZeroUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::Rng;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
 const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(1024);
-const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
 struct ArchivePrunable;

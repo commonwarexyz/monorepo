@@ -2,9 +2,9 @@
 
 use commonware_runtime::{buffer::PoolRef, tokio::Context};
 use commonware_storage::freezer::{Config, Freezer};
-use commonware_utils::{sequence::FixedBytes, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroUsize};
 
 /// Number of bytes that can be buffered before being written to disk.
 const WRITE_BUFFER: usize = 1024 * 1024; // 1MB
@@ -34,7 +34,7 @@ pub const VALUE_PARTITION: &str = "freezer_bench_value";
 pub const TABLE_PARTITION: &str = "freezer_bench_table";
 
 /// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: NonZeroUsize = NZUsize!(16_384);
+const PAGE_SIZE: NonZeroU16 = NZU16!(16_384);
 
 /// The number of pages to cache in the buffer pool.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);

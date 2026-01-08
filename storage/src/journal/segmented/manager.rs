@@ -5,7 +5,7 @@
 
 use crate::journal::Error;
 use commonware_runtime::{
-    buffer::{Append, PoolRef, Write},
+    buffer::{pool::Append, PoolRef, Write},
     telemetry::metrics::status::GaugeExt,
     Blob, Error as RError, Metrics, Storage,
 };
@@ -61,7 +61,7 @@ impl<B: Blob> BufferFactory<B> for AppendFactory {
     type Buffer = Append<B>;
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
-        Append::new(blob, size, self.write_buffer, self.pool_ref.clone()).await
+        Append::new(blob, size, self.write_buffer.get(), self.pool_ref.clone()).await
     }
 }
 

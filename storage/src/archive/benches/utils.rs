@@ -6,9 +6,9 @@ use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroUsize};
 
 /// Number of bytes that can be buffered in a section before being written to a
 /// [commonware_runtime::Blob].
@@ -20,8 +20,8 @@ const ITEMS_PER_SECTION: u64 = 16_384;
 /// Number of bytes to buffer when replaying a [commonware_runtime::Blob].
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
-/// Page size for the index buffer pool.
-const PAGE_SIZE: NonZeroUsize = NZUsize!(4_096);
+/// Page size for the buffer pool.
+const PAGE_SIZE: NonZeroU16 = NZU16!(4_096);
 
 /// The number of pages to cache in the buffer pool (8,192 × 4KB = 32MB).
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8_192);

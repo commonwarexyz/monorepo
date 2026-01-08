@@ -2,15 +2,12 @@
 //!
 //! # Format
 //!
-//! Data is stored in one blob per section. Within each blob, items are stored with
-//! their checksum (CRC32):
+//! Data is stored in one blob per section. Items are stored sequentially:
 //!
 //! ```text
-//! +--------+-----------+--------+-----------+--------+----------+-------------+
-//! | item_0 | C(Item_0) | item_1 | C(Item_1) |   ...  | item_n-1 | C(Item_n-1) |
-//! +--------+-----------+--------+-----------+--------+----------+-------------+
-//!
-//! C = CRC32
+//! +--------+--------+--------+----------+
+//! | item_0 | item_1 |   ...  | item_n-1 |
+//! +--------+--------+--------+----------+
 //! ```
 //!
 //! # Sync
@@ -25,12 +22,8 @@
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
-use bytes::BufMut;
-use commonware_codec::{CodecFixed, DecodeExt as _, FixedSize};
-use commonware_runtime::{
-    buffer::{PoolRef, Read},
-    Blob, Error as RError, Metrics, Storage,
-};
+use commonware_codec::{CodecFixed, DecodeExt as _};
+use commonware_runtime::{buffer::PoolRef, Blob, Error as RError, Metrics, Storage};
 use futures::{
     stream::{self, Stream},
     StreamExt,
@@ -54,15 +47,15 @@ pub struct Config {
 /// A segmented journal with fixed-size entries.
 ///
 /// Each section is stored in a separate blob. Within each blob, items are
-/// fixed-size with a CRC32 checksum appended.
+/// fixed-size.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     manager: Manager<E, AppendFactory>,
     _array: PhantomData<A>,
 }
 
 impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
-    /// Size of each entry: item + CRC32 checksum.
-    pub const CHUNK_SIZE: usize = A::SIZE + u32::SIZE;
+    /// Size of each entry.
+    pub const CHUNK_SIZE: usize = A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
     /// Initialize a new `Journal` instance.
@@ -100,13 +93,9 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         }
         let position = size / Self::CHUNK_SIZE_U64;
 
-        // Pre-allocate exact size and write directly to avoid copying
-        let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
-        item.write(&mut buf);
-        let checksum = crc32fast::hash(&buf);
-        buf.put_u32(checksum);
-
-        blob.append(buf).await?;
+        // Encode the item
+        let buf = item.encode_mut();
+        blob.append(&buf).await?;
         trace!(section, position, "appended item");
 
         Ok(position)
@@ -136,7 +125,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         }
 
         let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        Self::verify_integrity(buf.as_ref())
+        A::decode(buf.as_ref()).map_err(Error::Codec)
     }
 
     /// Read the last item in a section, if any.
@@ -154,18 +143,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         let last_position = (size / Self::CHUNK_SIZE_U64) - 1;
         let offset = last_position * Self::CHUNK_SIZE_U64;
         let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        Self::verify_integrity(buf.as_ref()).map(Some)
-    }
-
-    /// Verify the integrity of the item + checksum in `buf`.
-    fn verify_integrity(buf: &[u8]) -> Result<A, Error> {
-        let stored_checksum =
-            u32::from_be_bytes(buf[A::SIZE..].try_into().expect("checksum is 4 bytes"));
-        let checksum = crc32fast::hash(&buf[..A::SIZE]);
-        if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
-        }
-        A::decode(&buf[..A::SIZE]).map_err(Error::Codec)
+        A::decode(buf.as_ref()).map_err(Error::Codec).map(Some)
     }
 
     /// Returns a stream of all items starting from the given section.
@@ -180,21 +158,22 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         start_section: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u64, A), Error>> + '_, Error> {
+        // Pre-create readers from blobs (async operation)
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
-            let size = blob.size().await;
-            blob_info.push((section, blob.clone(), size));
+            let blob_size = blob.size().await;
+            let reader = blob.as_blob_reader(buffer).await?;
+            blob_info.push((section, blob.clone(), reader, blob_size));
         }
 
-        Ok(
-            stream::iter(blob_info).flat_map(move |(section, blob, blob_size)| {
-                let reader = Read::new(blob, blob_size, buffer);
+        Ok(stream::iter(blob_info).flat_map(
+            move |(section, blob, reader, blob_size)| {
                 let buf = vec![0u8; Self::CHUNK_SIZE];
 
                 stream::unfold(
-                    (section, buf, reader, 0u64, 0u64),
-                    move |(section, mut buf, mut reader, offset, valid_size)| async move {
-                        if offset >= reader.blob_size() {
+                    (section, buf, blob, reader, 0u64, 0u64, blob_size),
+                    move |(section, mut buf, blob, mut reader, offset, valid_size, blob_size)| async move {
+                        if offset >= blob_size {
                             return None;
                         }
 
@@ -202,25 +181,13 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
                         match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
                             Ok(()) => {
                                 let next_offset = offset + Self::CHUNK_SIZE_U64;
-                                match Self::verify_integrity(&buf) {
+                                match A::decode(buf.as_slice()).map_err(Error::Codec) {
                                     Ok(item) => Some((
                                         Ok((section, position, item)),
-                                        (section, buf, reader, next_offset, next_offset),
+                                        (section, buf, blob, reader, next_offset, next_offset, blob_size),
                                     )),
-                                    Err(Error::ChecksumMismatch(expected, found)) => {
-                                        warn!(
-                                            section,
-                                            position,
-                                            expected,
-                                            found,
-                                            new_size = valid_size,
-                                            "corruption detected: truncating"
-                                        );
-                                        reader.resize(valid_size).await.ok()?;
-                                        None
-                                    }
                                     Err(err) => {
-                                        Some((Err(err), (section, buf, reader, offset, valid_size)))
+                                        Some((Err(err), (section, buf, blob, reader, offset, valid_size, blob_size)))
                                     }
                                 }
                             }
@@ -231,21 +198,21 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
                                     new_size = valid_size,
                                     "trailing bytes detected: truncating"
                                 );
-                                reader.resize(valid_size).await.ok()?;
+                                blob.resize(valid_size).await.ok()?;
                                 None
                             }
                             Err(err) => {
                                 warn!(section, position, ?err, "unexpected error");
                                 Some((
                                     Err(Error::Runtime(err)),
-                                    (section, buf, reader, offset, valid_size),
+                                    (section, buf, blob, reader, offset, valid_size, blob_size),
                                 ))
                             }
                         }
                     },
                 )
-            }),
-        )
+            },
+        ))
     }
 
     /// Sync the given section to storage.
@@ -316,10 +283,11 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, NZU16};
+    use core::num::NonZeroU16;
     use futures::{pin_mut, StreamExt};
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(44);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(44);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
 
     fn test_digest(value: u64) -> Digest {

@@ -444,7 +444,7 @@ mod tests {
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, NZU16};
 
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {
@@ -512,7 +512,7 @@ mod tests {
         Config {
             index_partition: "test_index".to_string(),
             value_partition: "test_values".to_string(),
-            index_buffer_pool: PoolRef::new(NZUsize!(64), NZUsize!(8)),
+            index_buffer_pool: PoolRef::new(NZU16!(64), NZUsize!(8)),
             index_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             compression: None,
@@ -900,7 +900,18 @@ mod tests {
     fn test_recovery_corrupted_last_index_entry() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            // Use page size = entry size so each entry is on its own page.
+            // This allows corrupting just the last entry's page without affecting others.
+            // Physical page size = TestEntry::SIZE (20) + 12 (CRC record) = 32 bytes.
+            let cfg = Config {
+                index_partition: "test_index".to_string(),
+                value_partition: "test_values".to_string(),
+                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                compression: None,
+                codec_config: (),
+            };
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -908,7 +919,7 @@ mod tests {
                     .await
                     .expect("Failed to init");
 
-            // Append 5 entries
+            // Append 5 entries (each on its own page)
             for i in 0..5u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
@@ -920,34 +931,36 @@ mod tests {
             oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Corrupt the last index entry's checksum
+            // Corrupt the last page's CRC to trigger page-level integrity failure
             let (blob, size) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
 
-            // Each entry is TestEntry::SIZE (16) + 4 (CRC32) = 20 bytes
-            // Corrupt the CRC of the last entry
-            let last_entry_crc_offset = size - 4;
-            blob.write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], last_entry_crc_offset)
+            // Physical page size = 20 + 12 = 32 bytes
+            // 5 entries = 5 pages = 160 bytes total
+            // Last page CRC starts at offset 160 - 12 = 148
+            assert_eq!(size, 160);
+            let last_page_crc_offset = size - 12;
+            blob.write_at(vec![0xFF; 12], last_page_crc_offset)
                 .await
                 .expect("Failed to corrupt");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - should detect corruption and scan backwards
+            // Reinitialize - should detect page corruption and truncate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.clone(), cfg)
                     .await
                     .expect("Failed to reinit");
 
-            // First 4 entries should be valid
+            // First 4 entries should be valid (on pages 0-3)
             for i in 0..4u8 {
                 let entry = oversized.get(1, i as u64).await.expect("Failed to get");
                 assert_eq!(entry.id, i as u64);
             }
 
-            // Entry 4 should be gone (corrupted and rewound)
+            // Entry 4 should be gone (its page was corrupted)
             assert!(oversized.get(1, 4).await.is_err());
 
             // Should be able to append after recovery
@@ -1423,7 +1436,18 @@ mod tests {
     fn test_recovery_glob_synced_but_index_not() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            // Use page size = entry size so each entry is exactly one page.
+            // This allows truncating by entry count to equal truncating by full pages,
+            // maintaining page-level integrity.
+            let cfg = Config {
+                index_partition: "test_index".to_string(),
+                value_partition: "test_values".to_string(),
+                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                compression: None,
+                codec_config: (),
+            };
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1452,9 +1476,10 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
 
-            // Keep only first 2 index entries
-            let chunk_size = (TestEntry::SIZE + u32::SIZE) as u64; // entry + CRC32
-            blob.resize(2 * chunk_size)
+            // Keep only first 2 index entries (2 full pages)
+            // Physical page size = logical (20) + CRC record (12) = 32 bytes
+            let physical_page_size = (TestEntry::SIZE + 12) as u64;
+            blob.resize(2 * physical_page_size)
                 .await
                 .expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
@@ -1692,7 +1717,18 @@ mod tests {
         // Simulates crash where index was rewound but glob wasn't
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            // Use page size = entry size so each entry is exactly one page.
+            // This allows truncating by entry count to equal truncating by full pages,
+            // maintaining page-level integrity.
+            let cfg = Config {
+                index_partition: "test_index".to_string(),
+                value_partition: "test_values".to_string(),
+                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                compression: None,
+                codec_config: (),
+            };
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1719,8 +1755,9 @@ mod tests {
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let chunk_size = (TestEntry::SIZE + u32::SIZE) as u64;
-            blob.resize(2 * chunk_size)
+            // Physical page size = logical (20) + CRC record (12) = 32 bytes
+            let physical_page_size = (TestEntry::SIZE + 12) as u64;
+            blob.resize(2 * physical_page_size)
                 .await
                 .expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
@@ -1845,15 +1882,20 @@ mod tests {
             // Size 0 - should fail
             assert!(oversized.get_value(1, offset, 0).await.is_err());
 
-            // Size < CRC_SIZE (1, 2, 3 bytes) - should fail with BlobInsufficientLength
+            // Size < value size - should fail with codec error, checksum mismatch, or
+            // insufficient length (if size < 4 bytes for checksum)
             for size in 1..4u32 {
                 let result = oversized.get_value(1, offset, size).await;
-                assert!(matches!(
-                    result,
-                    Err(Error::Runtime(
-                        commonware_runtime::Error::BlobInsufficientLength
-                    ))
-                ));
+                assert!(
+                    matches!(
+                        result,
+                        Err(Error::Codec(_))
+                            | Err(Error::ChecksumMismatch(_, _))
+                            | Err(Error::Runtime(_))
+                    ),
+                    "expected error, got: {:?}",
+                    result
+                );
             }
 
             oversized.destroy().await.expect("Failed to destroy");
@@ -1877,9 +1919,17 @@ mod tests {
                 .expect("Failed to append");
             oversized.sync(1).await.expect("Failed to sync");
 
-            // Size too small (but >= CRC_SIZE) - checksum mismatch
+            // Size too small - will fail to decode or checksum mismatch
+            // (checksum mismatch can occur because we read wrong bytes as the checksum)
             let result = oversized.get_value(1, offset, correct_size - 1).await;
-            assert!(matches!(result, Err(Error::ChecksumMismatch(_, _))));
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::Codec(_)) | Err(Error::ChecksumMismatch(_, _))
+                ),
+                "expected Codec or ChecksumMismatch error, got: {:?}",
+                result
+            );
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -2394,7 +2444,16 @@ mod tests {
         // when added to size is detected as invalid during recovery.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            // Use page size = entry size so one entry per page
+            let cfg = Config {
+                index_partition: "test_index".to_string(),
+                value_partition: "test_values".to_string(),
+                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                compression: None,
+                codec_config: (),
+            };
 
             // Create and populate with valid entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2411,25 +2470,38 @@ mod tests {
             oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Corrupt the index entry to have offset near u64::MAX
-            // Entry format: id (8) + value_offset (8) + value_size (4) + CRC32 (4) = 24 bytes
+            // Build a corrupted entry with offset near u64::MAX that would overflow.
+            // We need to write a valid page (with correct page-level CRC) containing
+            // the semantically-invalid entry data.
             let (blob, _) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
 
-            // Write a corrupted entry with offset = u64::MAX - 10 and size = 100
-            // This would overflow when computing offset + size
-            let mut corrupted_entry = Vec::new();
-            1u64.write(&mut corrupted_entry); // id
-            (u64::MAX - 10).write(&mut corrupted_entry); // value_offset (near max)
-            100u32.write(&mut corrupted_entry); // value_size
-            let checksum = crc32fast::hash(&corrupted_entry);
-            corrupted_entry.put_u32(checksum);
+            // Build entry data: id (8) + value_offset (8) + value_size (4) = 20 bytes
+            let mut entry_data = Vec::new();
+            1u64.write(&mut entry_data); // id
+            (u64::MAX - 10).write(&mut entry_data); // value_offset (near max)
+            100u32.write(&mut entry_data); // value_size (offset + size overflows)
+            assert_eq!(entry_data.len(), TestEntry::SIZE);
 
-            blob.write_at(corrupted_entry, 0)
+            // Build page-level CRC record (12 bytes):
+            // len1 (2) + crc1 (4) + len2 (2) + crc2 (4)
+            let crc = crc32fast::hash(&entry_data);
+            let len1 = TestEntry::SIZE as u16;
+            let mut crc_record = Vec::new();
+            crc_record.extend_from_slice(&len1.to_be_bytes()); // len1
+            crc_record.extend_from_slice(&crc.to_be_bytes()); // crc1
+            crc_record.extend_from_slice(&0u16.to_be_bytes()); // len2 (unused)
+            crc_record.extend_from_slice(&0u32.to_be_bytes()); // crc2 (unused)
+            assert_eq!(crc_record.len(), 12);
+
+            // Write the complete physical page: entry_data + crc_record
+            let mut page = entry_data;
+            page.extend_from_slice(&crc_record);
+            blob.write_at(page, 0)
                 .await
-                .expect("Failed to write corrupted entry");
+                .expect("Failed to write corrupted page");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 

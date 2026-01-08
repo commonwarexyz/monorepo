@@ -71,15 +71,15 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config as NConfig, Network};
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{quorum, NZUsize};
+    use commonware_utils::{quorum, NZUsize, NZU16};
     use futures::{channel::mpsc, FutureExt, StreamExt};
     use std::{
-        num::NonZeroU32,
+        num::{NonZeroU16, NonZeroU32},
         sync::{Arc, Mutex},
         time::Duration,
     };
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 

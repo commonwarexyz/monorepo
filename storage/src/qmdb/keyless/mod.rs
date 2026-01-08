@@ -405,12 +405,13 @@ mod test {
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::Rng;
+    use std::num::NonZeroU16;
 
     // Use some weird sizes here to test boundary conditions.
-    const PAGE_SIZE: usize = 101;
-    const PAGE_CACHE_SIZE: usize = 11;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(101);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
     fn db_config(suffix: &str) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
         Config {
@@ -424,7 +425,7 @@ mod test {
             log_codec_config: ((0..=10000).into(), ()),
             log_items_per_section: NZU64!(7),
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
