@@ -27,11 +27,12 @@ impl<Si: Sink, St: Stream, P: PublicKey> Mailbox<Message<Si, St, P>> {
         connection: (Sender<Si>, Receiver<St>),
         reservation: Reservation<P>,
     ) {
-        self.send_lossy(Message::Spawn {
-            peer: reservation.metadata().public_key().clone(),
-            connection,
-            reservation,
-        })
-        .await;
+        self.0
+            .send_lossy(Message::Spawn {
+                peer: reservation.metadata().public_key().clone(),
+                connection,
+                reservation,
+            })
+            .await;
     }
 }

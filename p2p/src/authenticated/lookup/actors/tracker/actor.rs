@@ -114,7 +114,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             },
             _ = self.directory.wait_for_unblock() => {
                 if self.directory.unblock_expired() {
-                    self.listener.send_lossy(self.directory.listenable()).await;
+                    self.listener.0.send_lossy(self.directory.listenable()).await;
                 }
             },
             msg = self.receiver.next() => {
@@ -143,7 +143,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 }
 
                 // Send the updated listenable IPs to the listener.
-                self.listener.send_lossy(self.directory.listenable()).await;
+                self.listener
+                    .0
+                    .send_lossy(self.directory.listenable())
+                    .await;
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
@@ -214,7 +217,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 }
 
                 // Send the updated listenable IPs to the listener.
-                self.listener.send_lossy(self.directory.listenable()).await;
+                self.listener
+                    .0
+                    .send_lossy(self.directory.listenable())
+                    .await;
             }
             Message::Release { metadata } => {
                 // Clear the peer handle if it exists

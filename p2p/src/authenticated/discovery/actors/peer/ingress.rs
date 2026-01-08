@@ -17,14 +17,14 @@ pub enum Message<C: PublicKey> {
 
 impl<C: PublicKey> Mailbox<Message<C>> {
     pub async fn bit_vec(&mut self, bit_vec: types::BitVec) {
-        self.send_lossy(Message::BitVec(bit_vec)).await;
+        self.0.send_lossy(Message::BitVec(bit_vec)).await;
     }
 
     pub async fn peers(&mut self, peers: Vec<types::Info<C>>) {
-        self.send_lossy(Message::Peers(peers)).await;
+        self.0.send_lossy(Message::Peers(peers)).await;
     }
 
     pub async fn kill(&mut self) {
-        self.send_lossy(Message::Kill).await;
+        self.0.send_lossy(Message::Kill).await;
     }
 }

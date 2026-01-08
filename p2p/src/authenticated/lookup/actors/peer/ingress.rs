@@ -10,6 +10,6 @@ pub enum Message {
 
 impl Mailbox<Message> {
     pub async fn kill(&mut self) {
-        self.send_lossy(Message::Kill).await;
+        self.0.send_lossy(Message::Kill).await;
     }
 }

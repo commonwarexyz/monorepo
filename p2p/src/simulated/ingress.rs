@@ -158,6 +158,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Return a list of all blocked peers.
     pub async fn blocked(&self) -> Result<Vec<(P, P)>, Error> {
         self.sender
+            .0
             .request(|result| Message::Blocked { result })
             .await
             .ok_or(Error::NetworkClosed)?
@@ -176,6 +177,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         ingress_cap: Option<usize>,
     ) -> Result<(), Error> {
         self.sender
+            .0
             .request(|result| Message::LimitBandwidth {
                 public_key,
                 egress_cap,
@@ -209,6 +211,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         let sampler = Normal::new(latency_ms, jitter_ms).unwrap();
 
         self.sender
+            .0
             .request(|result| Message::AddLink {
                 sender,
                 receiver,
@@ -230,6 +233,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         }
 
         self.sender
+            .0
             .request(|result| Message::RemoveLink {
                 sender,
                 receiver,
@@ -241,12 +245,13 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
 
     /// Set the peers for a given id.
     async fn update(&self, id: u64, peers: Set<P>) {
-        self.sender.send_lossy(Message::Update { id, peers });
+        self.sender.0.send_lossy(Message::Update { id, peers });
     }
 
     /// Get the peers for a given id.
     async fn peer_set(&self, id: u64) -> Option<Set<P>> {
         self.sender
+            .0
             .request(|response| Message::PeerSet { id, response })
             .await
             .flatten()
@@ -255,7 +260,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Subscribe to notifications when new peer sets are added.
     async fn subscribe(&self) -> mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)> {
         let (sender, receiver) = mpsc::unbounded();
-        self.sender.send_lossy(Message::Subscribe { sender });
+        self.sender.0.send_lossy(Message::Subscribe { sender });
         receiver
     }
 }
@@ -382,6 +387,7 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
     ) -> Result<(Sender<P, E>, Receiver<P>), Error> {
         let public_key = self.me.clone();
         self.sender
+            .0
             .request(|result| Message::Register {
                 channel,
                 public_key,
@@ -397,7 +403,7 @@ impl<P: PublicKey, E: Clock> crate::Blocker for Control<P, E> {
     type PublicKey = P;
 
     async fn block(&mut self, public_key: P) {
-        self.sender.send_lossy(Message::Block {
+        self.sender.0.send_lossy(Message::Block {
             from: self.me.clone(),
             to: public_key,
         });

@@ -141,34 +141,36 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Returns `Some(info)` if the peer is eligible, `None` if the channel was
     /// dropped (peer not eligible or tracker shut down).
     pub async fn connect(&mut self, public_key: C, dialer: bool) -> Option<types::Info<C>> {
-        self.request(|responder| Message::Connect {
-            public_key,
-            dialer,
-            responder,
-        })
-        .await
+        self.0
+            .request(|responder| Message::Connect {
+                public_key,
+                dialer,
+                responder,
+            })
+            .await
     }
 
     /// Send a `Construct` message to the tracker.
     pub fn construct(&mut self, public_key: C, peer: Mailbox<peer::Message<C>>) {
-        self.send_lossy(Message::Construct { public_key, peer });
+        self.0.send_lossy(Message::Construct { public_key, peer });
     }
 
     /// Send a `BitVec` message to the tracker.
     pub fn bit_vec(&mut self, bit_vec: types::BitVec, peer: Mailbox<peer::Message<C>>) {
-        self.send_lossy(Message::BitVec { bit_vec, peer });
+        self.0.send_lossy(Message::BitVec { bit_vec, peer });
     }
 
     /// Send a `Peers` message to the tracker.
     pub fn peers(&mut self, peers: Vec<types::Info<C>>) {
-        self.send_lossy(Message::Peers { peers });
+        self.0.send_lossy(Message::Peers { peers });
     }
 
     /// Request a list of dialable peers from the tracker.
     ///
     /// Returns an empty list if the tracker is shut down.
     pub async fn dialable(&mut self) -> Vec<C> {
-        self.request_or_default(|responder| Message::Dialable { responder })
+        self.0
+            .request_or_default(|responder| Message::Dialable { responder })
             .await
     }
 
@@ -176,38 +178,41 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     ///
     /// Returns `None` if the tracker is shut down.
     pub async fn dial(&mut self, public_key: C) -> Option<Reservation<C>> {
-        self.request(|reservation| Message::Dial {
-            public_key,
-            reservation,
-        })
-        .await
-        .flatten()
+        self.0
+            .request(|reservation| Message::Dial {
+                public_key,
+                reservation,
+            })
+            .await
+            .flatten()
     }
 
     /// Send an `Acceptable` message to the tracker.
     ///
     /// Returns `false` if the tracker is shut down.
     pub async fn acceptable(&mut self, public_key: C) -> bool {
-        self.request_or(
-            |responder| Message::Acceptable {
-                public_key,
-                responder,
-            },
-            false,
-        )
-        .await
+        self.0
+            .request_or(
+                |responder| Message::Acceptable {
+                    public_key,
+                    responder,
+                },
+                false,
+            )
+            .await
     }
 
     /// Send a `Listen` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
     pub async fn listen(&mut self, public_key: C) -> Option<Reservation<C>> {
-        self.request(|reservation| Message::Listen {
-            public_key,
-            reservation,
-        })
-        .await
-        .flatten()
+        self.0
+            .request(|reservation| Message::Listen {
+                public_key,
+                reservation,
+            })
+            .await
+            .flatten()
     }
 }
 
@@ -225,7 +230,7 @@ impl<C: PublicKey> Releaser<C> {
 
     /// Release a reservation.
     pub fn release(&mut self, metadata: Metadata<C>) {
-        self.sender.send_lossy(Message::Release { metadata });
+        self.sender.0.send_lossy(Message::Release { metadata });
     }
 }
 
@@ -260,11 +265,12 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
     ///   Must be monotonically increasing, per the rules of [Set].
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
     async fn update(&mut self, index: u64, peers: Self::Peers) {
-        self.sender.send_lossy(Message::Register { index, peers });
+        self.sender.0.send_lossy(Message::Register { index, peers });
     }
 
     async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
         self.sender
+            .0
             .request(|responder| Message::PeerSet {
                 index: id,
                 responder,
@@ -277,6 +283,7 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
         &mut self,
     ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
         self.sender
+            .0
             .request(|responder| Message::Subscribe { responder })
             .await
             .unwrap_or_else(|| {
@@ -290,6 +297,6 @@ impl<C: PublicKey> crate::Blocker for Oracle<C> {
     type PublicKey = C;
 
     async fn block(&mut self, public_key: Self::PublicKey) {
-        self.sender.send_lossy(Message::Block { public_key });
+        self.sender.0.send_lossy(Message::Block { public_key });
     }
 }

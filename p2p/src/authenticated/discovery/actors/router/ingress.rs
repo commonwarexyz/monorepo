@@ -41,12 +41,13 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     ///
     /// Returns `None` if the router has shut down.
     pub async fn ready(&mut self, peer: P, relay: Relay<Data>) -> Option<Channels<P>> {
-        self.request(|channels| Message::Ready {
-            peer,
-            relay,
-            channels,
-        })
-        .await
+        self.0
+            .request(|channels| Message::Ready {
+                peer,
+                relay,
+                channels,
+            })
+            .await
     }
 
     /// Notify the router that a peer is no longer available.
@@ -54,7 +55,7 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     /// This may fail during shutdown if the router has already exited,
     /// which is harmless since the router no longer tracks any peers.
     pub async fn release(&mut self, peer: P) {
-        self.send_lossy(Message::Release { peer }).await;
+        self.0.send_lossy(Message::Release { peer }).await;
     }
 }
 
@@ -83,6 +84,7 @@ impl<P: PublicKey> Messenger<P> {
     ) -> Vec<P> {
         let message = message.copy_to_bytes(message.remaining());
         self.sender
+            .0
             .request_or_default(|success| Message::Content {
                 recipients,
                 channel,
@@ -99,6 +101,7 @@ impl<P: PublicKey> Connected for Messenger<P> {
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
         self.sender
+            .0
             .request(|response| Message::SubscribePeers { response })
             .await
             .unwrap_or_else(|| {

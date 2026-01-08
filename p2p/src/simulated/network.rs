@@ -748,6 +748,7 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
         self.mailbox
+            .0
             .request(|response| ingress::Message::SubscribeConnected { response })
             .await
             .unwrap_or_else(|| {
