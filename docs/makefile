@@ -35,7 +35,7 @@ sitemap:
 
 # Generate module status (run locally, commit status.json)
 status:
-	cargo run -p commonware-status --manifest-path ../Cargo.toml -- --repo-root .. --output status.json
+	cargo run -p commonware-status --manifest-path ../Cargo.toml -- --repo-root .. --output docs/status.json
 
 # Deploy: mirror code and generate sitemap (status.json is pre-committed)
 deploy: mirror sitemap

@@ -9,8 +9,7 @@ pub mod validator;
 use error::Error;
 use output::StatusReport;
 use scanner::CrateScan;
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 use validator::Conflict;
 
 pub const CORE_CRATES: &[&str] = &[

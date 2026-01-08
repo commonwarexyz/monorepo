@@ -1,9 +1,10 @@
-use crate::dependency::{parse_dependencies, Dependency};
-use crate::error::Error;
-use crate::marker::{parse_markers, Markers};
+use crate::{
+    dependency::{parse_dependencies, Dependency},
+    error::Error,
+    marker::{parse_markers, Markers},
+};
 use serde::Serialize;
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ModuleStatus {

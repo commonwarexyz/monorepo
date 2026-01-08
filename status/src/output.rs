@@ -1,8 +1,26 @@
-use crate::marker::Stage;
-use crate::scanner::{CrateScan, ModuleStatus};
+use crate::{
+    marker::Stage,
+    scanner::{CrateScan, ModuleStatus},
+};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::BTreeMap;
+
+fn file_path_to_module_path(file_path: &str) -> String {
+    let path = file_path
+        .strip_prefix("src/")
+        .unwrap_or(file_path)
+        .strip_suffix(".rs")
+        .unwrap_or(file_path);
+
+    if path == "lib" {
+        return "(root)".to_string();
+    }
+
+    let path = path.strip_suffix("/mod").unwrap_or(path);
+
+    path.replace('/', "::")
+}
 
 #[derive(Debug, Serialize)]
 pub struct StatusReport {
@@ -59,7 +77,8 @@ pub fn generate_report(all_scans: &BTreeMap<String, CrateScan>) -> StatusReport 
         let mut modules = BTreeMap::new();
 
         for (path, status) in &scan.modules {
-            modules.insert(path.clone(), ModuleStatusOutput::from(status));
+            let module_path = file_path_to_module_path(path);
+            modules.insert(module_path, ModuleStatusOutput::from(status));
 
             total_modules += 1;
 
@@ -87,5 +106,49 @@ pub fn generate_report(all_scans: &BTreeMap<String, CrateScan>) -> StatusReport 
             by_stage,
             lts_count,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_file_path_to_module_path_lib() {
+        assert_eq!(file_path_to_module_path("src/lib.rs"), "(root)");
+    }
+
+    #[test]
+    fn test_file_path_to_module_path_simple() {
+        assert_eq!(file_path_to_module_path("src/types.rs"), "types");
+    }
+
+    #[test]
+    fn test_file_path_to_module_path_mod_rs() {
+        assert_eq!(file_path_to_module_path("src/journal/mod.rs"), "journal");
+    }
+
+    #[test]
+    fn test_file_path_to_module_path_nested() {
+        assert_eq!(
+            file_path_to_module_path("src/journal/fixed.rs"),
+            "journal::fixed"
+        );
+    }
+
+    #[test]
+    fn test_file_path_to_module_path_deeply_nested() {
+        assert_eq!(
+            file_path_to_module_path("src/utils/buffer/pool.rs"),
+            "utils::buffer::pool"
+        );
+    }
+
+    #[test]
+    fn test_file_path_to_module_path_nested_mod_rs() {
+        assert_eq!(
+            file_path_to_module_path("src/journal/types/mod.rs"),
+            "journal::types"
+        );
     }
 }

@@ -1,9 +1,10 @@
-use crate::dependency::Dependency;
-use crate::marker::Markers;
-use crate::scanner::{CrateScan, ModuleStatus};
+use crate::{
+    dependency::Dependency,
+    marker::Markers,
+    scanner::{CrateScan, ModuleStatus},
+};
 use serde::Serialize;
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]

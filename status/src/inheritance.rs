@@ -1,7 +1,5 @@
-use crate::marker::Markers;
-use crate::scanner::ModuleStatus;
-use std::collections::BTreeMap;
-use std::path::Path;
+use crate::{marker::Markers, scanner::ModuleStatus};
+use std::{collections::BTreeMap, path::Path};
 
 pub fn apply_inheritance(modules: &mut BTreeMap<String, ModuleStatus>) {
     let explicit_mod_markers: BTreeMap<String, Markers> = modules
@@ -50,8 +48,7 @@ fn find_parent_mod(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::marker::Markers;
-    use crate::scanner::ModuleStatus;
+    use crate::{marker::Markers, scanner::ModuleStatus};
 
     fn make_status(markers: Markers) -> ModuleStatus {
         ModuleStatus {

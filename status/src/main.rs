@@ -1,7 +1,6 @@
 use clap::Parser;
 use commonware_status::validator::Severity;
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Parser)]
 #[command(name = "status")]
