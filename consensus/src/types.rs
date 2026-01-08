@@ -687,6 +687,9 @@ impl ExactSizeIterator for HeightRange {
     }
 }
 
+/// Re-export [Participant] from commonware_utils for convenience.
+pub use commonware_utils::Participant;
+
 #[cfg(test)]
 mod tests {
     use super::*;

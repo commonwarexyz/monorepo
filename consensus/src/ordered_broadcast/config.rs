@@ -5,7 +5,10 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Provider, Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
-use std::{num::NonZeroUsize, time::Duration};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
+};
 
 /// Configuration for the [super::Engine].
 pub struct Config<
@@ -78,7 +81,7 @@ pub struct Config<
     pub journal_name_prefix: String,
 
     /// The number of entries to keep per journal section.
-    pub journal_heights_per_section: u64,
+    pub journal_heights_per_section: NonZeroU64,
 
     /// The number of bytes to buffer when replaying a journal.
     pub journal_replay_buffer: NonZeroUsize,

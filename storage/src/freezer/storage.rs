@@ -12,9 +12,7 @@ use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
-use std::{
-    cmp::Ordering, collections::BTreeSet, marker::PhantomData, num::NonZeroUsize, ops::Deref,
-};
+use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
 use tracing::debug;
 
 /// The percentage of table entries that must reach `table_resize_frequency`
@@ -407,9 +405,6 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     unnecessary_reads: Counter,
     unnecessary_writes: Counter,
     resizes: Counter,
-
-    // Phantom data to satisfy the compiler about generic types
-    _phantom: PhantomData<(K, V)>,
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
@@ -784,7 +779,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             unnecessary_reads,
             unnecessary_writes,
             resizes,
-            _phantom: PhantomData,
         })
     }
 

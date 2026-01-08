@@ -15,13 +15,14 @@ use commonware_cryptography::{
     ed25519::PublicKey,
     sha256,
 };
+use commonware_parallel::Sequential;
 use libfuzzer_sys::fuzz_target;
 
 type Ed25519Scheme = ed25519::Scheme;
 type Bls12381MultisigMinPk = bls12381_multisig::Scheme<PublicKey, MinPk>;
 type Bls12381MultisigMinSig = bls12381_multisig::Scheme<PublicKey, MinSig>;
-type ThresholdSchemeMinPk = bls12381_threshold::Scheme<PublicKey, MinPk>;
-type ThresholdSchemeMinSig = bls12381_threshold::Scheme<PublicKey, MinSig>;
+type ThresholdSchemeMinPk = bls12381_threshold::Scheme<PublicKey, MinPk, Sequential>;
+type ThresholdSchemeMinSig = bls12381_threshold::Scheme<PublicKey, MinSig, Sequential>;
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {

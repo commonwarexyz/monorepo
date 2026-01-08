@@ -57,7 +57,7 @@ mod tests {
             scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
-        types::{Round, View},
+        types::{Participant, Round, View},
         Viewable,
     };
     use commonware_codec::Encode;
@@ -1386,10 +1386,10 @@ mod tests {
             let temp_elector: RoundRobinElector<S> =
                 elector_config.clone().build(schemes[0].participants());
             let leader_idx = temp_elector.elect(view2_round, None);
-            let leader = participants[leader_idx as usize].clone();
+            let leader = participants[leader_idx.get() as usize].clone();
 
             // Create a voter with the leader's identity
-            let leader_scheme = schemes[leader_idx as usize].clone();
+            let leader_scheme = schemes[leader_idx.get() as usize].clone();
 
             // Setup application mock with some latency so we can inject peer
             // message before automaton completes
@@ -2166,8 +2166,8 @@ mod tests {
                 current_view = new_view;
 
                 // Check if we're NOT the leader for this view
-                if leader != 0 {
-                    break (current_view, participants[leader as usize].clone());
+                if leader != Participant::new(0) {
+                    break (current_view, participants[leader.get() as usize].clone());
                 }
 
                 // We're the leader, advance to next view
@@ -2769,7 +2769,7 @@ mod tests {
             .await;
             assert_ne!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
-                0,
+                Participant::new(0),
                 "we should not be leader at view 3"
             );
 
@@ -2892,7 +2892,7 @@ mod tests {
             .await;
             assert_ne!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
-                0,
+                Participant::new(0),
                 "we should not be leader at view 3"
             );
 
@@ -3050,7 +3050,7 @@ mod tests {
             .await;
             assert_eq!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
-                0,
+                Participant::new(0),
                 "we should be leader at view 2"
             );
 

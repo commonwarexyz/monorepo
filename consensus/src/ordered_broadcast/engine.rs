@@ -39,7 +39,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
-use commonware_utils::futures::Pool as FuturesPool;
+use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum};
 use futures::{
     channel::oneshot,
     future::{self, Either},
@@ -48,7 +48,7 @@ use futures::{
 use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, info, warn};
@@ -138,7 +138,7 @@ pub struct Engine<
     ////////////////////////////////////////
 
     // The number of heights per each journal section.
-    journal_heights_per_section: u64,
+    journal_heights_per_section: NonZeroU64,
 
     // The number of bytes to buffer when replaying a journal.
     journal_replay_buffer: NonZeroUsize,
@@ -907,10 +907,10 @@ impl<
 
         // Validate sender is a participant and matches the vote signer
         let participants = scheme.participants();
-        let Some(index) = participants.iter().position(|p| p == sender) else {
+        let Some(index) = participants.index(sender) else {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
         };
-        if index as u32 != ack.attestation.signer {
+        if index != ack.attestation.signer {
             return Err(Error::PeerMismatch);
         }
 
@@ -993,7 +993,7 @@ impl<
 
     /// Returns the section of the journal for the given height.
     const fn get_journal_section(&self, height: Height) -> u64 {
-        height.get() / self.journal_heights_per_section
+        height.get() / self.journal_heights_per_section.get()
     }
 
     /// Ensures the journal exists and is initialized for the given sequencer.
