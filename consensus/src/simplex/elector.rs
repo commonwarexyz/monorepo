@@ -482,6 +482,7 @@ mod tests {
 
     mod conformance {
         use super::*;
+        use commonware_codec::{Encode, Write};
         use commonware_conformance::Conformance;
         use commonware_cryptography::Sha256;
         use rand::{Rng, SeedableRng};
@@ -499,7 +500,7 @@ mod tests {
                 let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
                 // Generate deterministic participants (using ed25519 fixture)
-                let n = (rng.gen::<u8>() % 100) as u32 + 1; // 1-100 participants
+                let n = rng.gen_range(1..=100);
                 let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, n);
                 let participants = Set::try_from_iter(participants).unwrap();
 
@@ -511,12 +512,7 @@ mod tests {
                     RoundRobin::<Sha256>::shuffled(&shuffle_seed).build(&participants);
 
                 // Encode the permutation as the commitment
-                // This captures the exact shuffle order
-                elector
-                    .permutation
-                    .iter()
-                    .flat_map(|p| p.get().to_le_bytes())
-                    .collect()
+                elector.permutation.encode().to_vec()
             }
         }
 
@@ -531,9 +527,8 @@ mod tests {
             async fn commit(seed: u64) -> Vec<u8> {
                 let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
-                // Generate deterministic BLS threshold fixture
-                // Use 4-10 participants to keep test fast while covering various quorum sizes
-                let n = (rng.gen::<u8>() % 7) as u32 + 4;
+                // Generate deterministic BLS threshold fixture (4-10 participants)
+                let n = rng.gen_range(4..=10);
                 let Fixture {
                     participants,
                     schemes,
@@ -544,8 +539,8 @@ mod tests {
                 let quorum = quorum_from_slice(&schemes) as usize;
 
                 // Generate deterministic round parameters
-                let epoch = rng.gen::<u64>() % 1000; // Keep epoch reasonable
-                let view = (rng.gen::<u64>() % 100) + 2; // views >= 2 require certificate
+                let epoch = rng.gen_range(0..1000);
+                let view = rng.gen_range(2..=101);
 
                 let round = Round::new(Epoch::new(epoch), View::new(view));
 
@@ -565,16 +560,15 @@ mod tests {
                 let leader_v1 = elector.elect(round_v1, None);
 
                 // Commit both results
-                let mut result = Vec::new();
-                result.extend_from_slice(&leader.get().to_le_bytes());
-                result.extend_from_slice(&leader_v1.get().to_le_bytes());
-                result
+                let mut result = leader.encode_mut();
+                leader_v1.write(&mut result);
+                result.to_vec()
             }
         }
 
         commonware_conformance::conformance_tests! {
-            RoundRobinShuffleConformance,
-            RandomSelectLeaderConformance,
+            RoundRobinShuffleConformance => 512,
+            RandomSelectLeaderConformance => 512,
         }
     }
 }
