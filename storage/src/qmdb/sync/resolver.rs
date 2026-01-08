@@ -67,466 +67,128 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
 }
 
-impl<E, K, V, H, T> Resolver for Arc<FixedDb<E, K, V, H, T, Merkleized<H>, Durable>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: FixedValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = FixedOperation<K, V>;
-    type Error = qmdb::Error;
+macro_rules! impl_resolver {
+    ($db:ident, $op:ident, $val_bound:ident, with_option) => {
+        impl_resolver!($db, $op, $val_bound);
 
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        self.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
+        impl<E, K, V, H, T> Resolver
+            for Arc<RwLock<Option<$db<E, K, V, H, T, Merkleized<H>, Durable>>>>
+        where
+            E: Storage + Clock + Metrics,
+            K: Array,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+        {
+            type Digest = H::Digest;
+            type Op = $op<K, V>;
+            type Error = qmdb::Error;
+
+            async fn get_operations(
+                &self,
+                op_count: Location,
+                start_loc: Location,
+                max_ops: NonZeroU64,
+            ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
+                let guard = self.read().await;
+                let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
+                db.historical_proof(op_count, start_loc, max_ops).await.map(
+                    |(proof, operations)| FetchResult {
+                        proof,
+                        operations,
+                        success_tx: oneshot::channel().0,
+                    },
+                )
+            }
+        }
+    };
+    ($db:ident, $op:ident, $val_bound:ident) => {
+        impl<E, K, V, H, T> Resolver for Arc<$db<E, K, V, H, T, Merkleized<H>, Durable>>
+        where
+            E: Storage + Clock + Metrics,
+            K: Array,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+        {
+            type Digest = H::Digest;
+            type Op = $op<K, V>;
+            type Error = qmdb::Error;
+
+            async fn get_operations(
+                &self,
+                op_count: Location,
+                start_loc: Location,
+                max_ops: NonZeroU64,
+            ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+                self.historical_proof(op_count, start_loc, max_ops)
+                    .await
+                    .map(|(proof, operations)| FetchResult {
+                        proof,
+                        operations,
+                        success_tx: oneshot::channel().0,
+                    })
+            }
+        }
+
+        impl<E, K, V, H, T> Resolver for Arc<RwLock<$db<E, K, V, H, T, Merkleized<H>, Durable>>>
+        where
+            E: Storage + Clock + Metrics,
+            K: Array,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+        {
+            type Digest = H::Digest;
+            type Op = $op<K, V>;
+            type Error = qmdb::Error;
+
+            async fn get_operations(
+                &self,
+                op_count: Location,
+                start_loc: Location,
+                max_ops: NonZeroU64,
+            ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
+                let db = self.read().await;
+                db.historical_proof(op_count, start_loc, max_ops).await.map(
+                    |(proof, operations)| FetchResult {
+                        proof,
+                        operations,
+                        success_tx: oneshot::channel().0,
+                    },
+                )
+            }
+        }
+    };
 }
 
-/// Implement Resolver directly for `Arc<RwLock<FixedDb>>` to eliminate the need for wrapper types
-/// while allowing direct database access.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<FixedDb<E, K, V, H, T, Merkleized<H>, Durable>>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: FixedValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = FixedOperation<K, V>;
-    type Error = qmdb::Error;
+// Unordered Fixed
+impl_resolver!(FixedDb, FixedOperation, FixedValue, with_option);
 
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
-        let db = self.read().await;
-        db.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
+// Unordered Variable
+impl_resolver!(VariableDb, VariableOperation, VariableValue, with_option);
 
-impl<E, K, V, H, T> Resolver for Arc<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = VariableOperation<K, V>;
-    type Error = qmdb::Error;
+// Ordered Fixed
+impl_resolver!(
+    OrderedFixedDb,
+    OrderedFixedOperation,
+    FixedValue,
+    with_option
+);
 
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        self.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
+// Ordered Variable
+impl_resolver!(
+    OrderedVariableDb,
+    OrderedVariableOperation,
+    VariableValue,
+    with_option
+);
 
-/// Implement Resolver directly for `Arc<RwLock<VariableDb>>` to eliminate the need for wrapper
-/// types while allowing direct database access.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = VariableOperation<K, V>;
-    type Error = qmdb::Error;
-
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
-        let db = self.read().await;
-        db.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
-
-/// Implement Resolver for `Arc<RwLock<Option<FixedDb>>>` to allow taking ownership during sync.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<Option<FixedDb<E, K, V, H, T, Merkleized<H>, Durable>>>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: FixedValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = FixedOperation<K, V>;
-    type Error = qmdb::Error;
-
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
-        let guard = self.read().await;
-        let db: &FixedDb<E, K, V, H, T, Merkleized<H>, Durable> =
-            guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-        db.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
-
-/// Implement Resolver for `Arc<RwLock<Option<VariableDb>>>` to allow taking ownership during sync.
-impl<E, K, V, H, T> Resolver
-    for Arc<RwLock<Option<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = VariableOperation<K, V>;
-    type Error = qmdb::Error;
-
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
-        let guard = self.read().await;
-        let db: &VariableDb<E, K, V, H, T, Merkleized<H>, Durable> =
-            guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-        db.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
-
-// --- Ordered Fixed Database Resolver Implementations ---
-
-impl<E, K, V, H, T> Resolver for Arc<OrderedFixedDb<E, K, V, H, T, Merkleized<H>, Durable>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: FixedValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = OrderedFixedOperation<K, V>;
-    type Error = qmdb::Error;
-
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        self.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
-
-/// Implement Resolver directly for `Arc<RwLock<OrderedFixedDb>>` to eliminate the need for wrapper
-/// types while allowing direct database access.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<OrderedFixedDb<E, K, V, H, T, Merkleized<H>, Durable>>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: FixedValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = OrderedFixedOperation<K, V>;
-    type Error = qmdb::Error;
-
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
-        let db = self.read().await;
-        db.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
-
-/// Implement Resolver for `Arc<RwLock<Option<OrderedFixedDb>>>` to allow taking ownership during
-/// sync.
-impl<E, K, V, H, T> Resolver
-    for Arc<RwLock<Option<OrderedFixedDb<E, K, V, H, T, Merkleized<H>, Durable>>>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: FixedValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = OrderedFixedOperation<K, V>;
-    type Error = qmdb::Error;
-
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
-        let guard = self.read().await;
-        let db: &OrderedFixedDb<E, K, V, H, T, Merkleized<H>, Durable> =
-            guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-        db.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
-
-// --- Ordered Variable Database Resolver Implementations ---
-
-impl<E, K, V, H, T> Resolver for Arc<OrderedVariableDb<E, K, V, H, T, Merkleized<H>, Durable>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = OrderedVariableOperation<K, V>;
-    type Error = qmdb::Error;
-
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        self.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
-
-/// Implement Resolver directly for `Arc<RwLock<OrderedVariableDb>>` to eliminate the need for
-/// wrapper types while allowing direct database access.
-impl<E, K, V, H, T> Resolver
-    for Arc<RwLock<OrderedVariableDb<E, K, V, H, T, Merkleized<H>, Durable>>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = OrderedVariableOperation<K, V>;
-    type Error = qmdb::Error;
-
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
-        let db = self.read().await;
-        db.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
-
-/// Implement Resolver for `Arc<RwLock<Option<OrderedVariableDb>>>` to allow taking ownership
-/// during sync.
-impl<E, K, V, H, T> Resolver
-    for Arc<RwLock<Option<OrderedVariableDb<E, K, V, H, T, Merkleized<H>, Durable>>>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = OrderedVariableOperation<K, V>;
-    type Error = qmdb::Error;
-
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
-        let guard = self.read().await;
-        let db: &OrderedVariableDb<E, K, V, H, T, Merkleized<H>, Durable> =
-            guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-        db.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
-
-impl<E, K, V, H, T> Resolver for Arc<Immutable<E, K, V, H, T, Merkleized<H>, Durable>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = ImmutableOp<K, V>;
-    type Error = crate::qmdb::Error;
-
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        self.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
-
-/// Implement Resolver directly for `Arc<RwLock<Immutable>>` to eliminate the need for wrapper
-/// types while allowing direct database access.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<Immutable<E, K, V, H, T, Merkleized<H>, Durable>>>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: VariableValue + Send + Sync + 'static,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    type Digest = H::Digest;
-    type Op = ImmutableOp<K, V>;
-    type Error = crate::qmdb::Error;
-
-    async fn get_operations(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        let db = self.read().await;
-        db.historical_proof(op_count, start_loc, max_ops)
-            .await
-            .map(|(proof, operations)| FetchResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
+// Immutable (no Option variant)
+impl_resolver!(Immutable, ImmutableOp, VariableValue);
 
 #[cfg(test)]
 pub(crate) mod tests {
