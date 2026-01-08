@@ -91,55 +91,34 @@ where
     let weighted_sigs: Vec<V::Signature> =
         strategy.map_collect_vec(sigs.iter().zip(&scalars), |(sig, s)| *sig * s);
 
-    // Use sum-based bisection (O(n) additions total, no repeated conversions)
-    verify_same_message_bisect_sums::<V>(&weighted_pks, &weighted_sigs, &hm, 0, entries.len())
-}
+    // Use iterative bisection to find invalid signatures (avoids stack overflow)
+    let mut invalid = Vec::new();
+    let mut stack = vec![(0, entries.len())];
+    while let Some((start, end)) = stack.pop() {
+        if start >= end {
+            continue;
+        }
 
-/// Recursive bisection using pre-computed weighted values.
-/// Uses simple sums instead of MSM to avoid repeated affine conversions.
-fn verify_same_message_bisect_sums<V>(
-    weighted_pks: &[V::Public],
-    weighted_sigs: &[V::Signature],
-    hm: &V::Signature,
-    start: usize,
-    end: usize,
-) -> Vec<usize>
-where
-    V: Variant,
-{
-    if start >= end {
-        return Vec::new();
+        // Sum pre-computed weighted values for this range
+        let pk_agg = weighted_pks[start..end]
+            .iter()
+            .fold(V::Public::zero(), |acc, pk| acc + pk);
+        let sig_agg = weighted_sigs[start..end]
+            .iter()
+            .fold(V::Signature::zero(), |acc, sig| acc + sig);
+
+        // Verify: e(pk_agg, H(m)) == e(sig_agg, G)
+        if V::verify(&pk_agg, &hm, &sig_agg).is_err() {
+            if end - start == 1 {
+                invalid.push(start);
+            } else {
+                let mid = start + (end - start) / 2;
+                stack.push((mid, end));
+                stack.push((start, mid));
+            }
+        }
     }
 
-    // Sum the pre-computed weighted values for this range
-    let pk_agg = weighted_pks[start..end]
-        .iter()
-        .fold(V::Public::zero(), |acc, pk| acc + pk);
-    let sig_agg = weighted_sigs[start..end]
-        .iter()
-        .fold(V::Signature::zero(), |acc, sig| acc + sig);
-
-    // Verify: e(pk_agg, H(m)) == e(sig_agg, G)
-    if V::verify(&pk_agg, hm, &sig_agg).is_ok() {
-        return Vec::new(); // All valid in this range
-    }
-
-    // Single invalid signature found
-    if end - start == 1 {
-        return vec![start];
-    }
-
-    // Bisect recursively
-    let mid = start + (end - start) / 2;
-    let mut invalid =
-        verify_same_message_bisect_sums::<V>(weighted_pks, weighted_sigs, hm, start, mid);
-    invalid.extend(verify_same_message_bisect_sums::<V>(
-        weighted_pks,
-        weighted_sigs,
-        hm,
-        mid,
-        end,
-    ));
     invalid
 }
 
