@@ -410,6 +410,9 @@ impl<
                 self.sync_journal(nullify.view()).await;
             }
 
+            // Add local vote to VoteTracker for certificate assembly
+            self.state.add_nullify_vote(nullify.view(), nullify.clone());
+
             // Broadcast nullify
             debug!(round=?nullify.round(), "broadcasting nullify");
             self.broadcast_vote(vote_sender, Vote::Nullify(nullify))
@@ -661,6 +664,9 @@ impl<
         // Keep the vote durable for crash recovery.
         self.sync_journal(view).await;
 
+        // Add local vote to VoteTracker for certificate assembly
+        self.state.add_notarize_vote(view, notarize.clone());
+
         // Broadcast the notarize vote
         debug!(
             proposal=?notarize.proposal,
@@ -688,6 +694,9 @@ impl<
         self.handle_nullify(nullify.clone()).await;
         // Keep the vote durable for crash recovery.
         self.sync_journal(view).await;
+
+        // Add local vote to VoteTracker for certificate assembly
+        self.state.add_nullify_vote(view, nullify.clone());
 
         // Broadcast the nullify vote
         debug!(
@@ -794,6 +803,10 @@ impl<
             .await;
         // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
         self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
+            .await;
+
+        // Check thresholds after adding local votes to potentially form certificates
+        self.check_thresholds(resolver, vote_sender, certificate_sender, view)
             .await;
     }
 
