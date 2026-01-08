@@ -1462,7 +1462,6 @@ dependencies = [
  "commonware-utils",
  "console-subscriber",
  "crc-fast",
- "crc32fast",
  "criterion",
  "futures",
  "getrandom 0.2.16",

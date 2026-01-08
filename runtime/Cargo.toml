@@ -23,7 +23,6 @@ commonware-conformance = { workspace = true, optional = true }
 commonware-macros.workspace = true
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
-crc32fast.workspace = true # TODO: remove
 crc-fast.workspace = true
 futures.workspace = true
 governor.workspace = true
