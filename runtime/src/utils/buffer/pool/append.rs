@@ -16,7 +16,7 @@
 //! # Recovery
 //!
 //! On `sync`, this wrapper will durably write buffered data to the underlying blob in pages. All
-//! pages have a [CrcRecord] at the end. If no CRC record existed before for the page being written,
+//! pages have a [Checksum] at the end. If no CRC record existed before for the page being written,
 //! then one of the checksums will be all zero. If a checksum already existed for the page being
 //! written, then the write will overwrite only the checksum with the lesser length value. Should
 //! this write fail, the previously committed page state can still be recovered.
@@ -28,7 +28,7 @@
 
 use crate::{
     buffer::{
-        pool::{CrcRecord, PoolRef, Read, CRC_RECORD_SIZE},
+        pool::{Checksum, PoolRef, Read, CRC_RECORD_SIZE},
         tip::Buffer,
     },
     Blob, Error, RwLock, RwLockWriteGuard,
@@ -54,7 +54,7 @@ struct BlobState<B: Blob> {
 
     /// The state of the partial page in the blob. If it was written due to a sync call, then this
     /// will contain its CRC record.
-    partial_page_state: Option<CrcRecord>,
+    partial_page_state: Option<Checksum>,
 }
 
 /// A [Blob] wrapper that supports write-cached appending of data, with checksums for data integrity
@@ -274,7 +274,7 @@ impl<B: Blob> Append<B> {
         blob: &B,
         blob_size: u64,
         page_size: u64,
-    ) -> Result<(Option<(Vec<u8>, CrcRecord)>, u64, bool), Error> {
+    ) -> Result<(Option<(Vec<u8>, Checksum)>, u64, bool), Error> {
         let physical_page_size = page_size + CRC_RECORD_SIZE;
         let partial_bytes = blob_size % physical_page_size;
         let mut last_page_end = blob_size - partial_bytes;
@@ -289,7 +289,7 @@ impl<B: Blob> Append<B> {
             let buf = vec![0; physical_page_size as usize];
             let buf = blob.read_at(buf, page_start).await?;
 
-            match CrcRecord::validate_page(buf.as_ref()) {
+            match Checksum::validate_page(buf.as_ref()) {
                 Some(crc_record) => {
                     // Found a valid page.
                     let (len, _) = crc_record.get_crc();
@@ -586,7 +586,7 @@ impl<B: Blob> Append<B> {
     ///   zeros (skip writing)
     /// - `protected_crc`: which CRC slot must not be overwritten
     fn identify_protected_regions(
-        partial_page_state: Option<&CrcRecord>,
+        partial_page_state: Option<&Checksum>,
     ) -> Option<(usize, ProtectedCrc)> {
         let crc_record = partial_page_state?;
         let (old_len, _) = crc_record.get_crc();
@@ -614,8 +614,8 @@ impl<B: Blob> Append<B> {
         &self,
         buffer: &Buffer,
         include_partial_page: bool,
-        old_crc_record: Option<&CrcRecord>,
-    ) -> (Vec<u8>, Option<CrcRecord>) {
+        old_crc_record: Option<&Checksum>,
+    ) -> (Vec<u8>, Option<Checksum>) {
         let logical_page_size = self.pool_ref.page_size() as usize;
         let physical_page_size = logical_page_size + CRC_RECORD_SIZE as usize;
         let pages_to_write = buffer.data.len() / logical_page_size;
@@ -637,7 +637,7 @@ impl<B: Blob> Append<B> {
             let crc_record = if let (0, Some(old_crc)) = (page, old_crc_record) {
                 Self::build_crc_record_preserving_old(logical_page_size_u16, crc, old_crc)
             } else {
-                CrcRecord::new(logical_page_size_u16, crc)
+                Checksum::new(logical_page_size_u16, crc)
             };
             write_buffer.extend_from_slice(&crc_record.to_bytes());
         }
@@ -663,7 +663,7 @@ impl<B: Blob> Append<B> {
         let crc_record = if let (0, Some(old_crc)) = (pages_to_write, old_crc_record) {
             Self::build_crc_record_preserving_old(partial_len as u16, crc, old_crc)
         } else {
-            CrcRecord::new(partial_len as u16, crc)
+            Checksum::new(partial_len as u16, crc)
         };
 
         write_buffer.extend_from_slice(&crc_record.to_bytes());
@@ -678,13 +678,13 @@ impl<B: Blob> Append<B> {
     const fn build_crc_record_preserving_old(
         new_len: u16,
         new_crc: u32,
-        old_crc: &CrcRecord,
-    ) -> CrcRecord {
+        old_crc: &Checksum,
+    ) -> Checksum {
         let (old_len, old_crc_val) = old_crc.get_crc();
         // The old CRC is in the slot with the larger length value (first slot wins ties).
         if old_crc.len1 >= old_crc.len2 {
             // Old CRC is in slot 0, put new CRC in slot 1
-            CrcRecord {
+            Checksum {
                 len1: old_len,
                 crc1: old_crc_val,
                 len2: new_len,
@@ -692,7 +692,7 @@ impl<B: Blob> Append<B> {
             }
         } else {
             // Old CRC is in slot 1, put new CRC in slot 0
-            CrcRecord {
+            Checksum {
                 len1: new_len,
                 crc1: new_crc,
                 len2: old_len,
@@ -974,7 +974,7 @@ mod tests {
             drop(append);
 
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
-            // Physical page = 103 logical + 12 CrcRecord = 115 bytes (padded partial page)
+            // Physical page = 103 logical + 12 Checksum = 115 bytes (padded partial page)
             assert_eq!(blob_size, 115);
             let append = Append::new(blob, blob_size, BUFFER_SIZE, pool_ref.clone())
                 .await
@@ -1045,9 +1045,9 @@ mod tests {
     }
 
     /// Helper to read the CRC record from raw blob bytes at the end of a physical page.
-    fn read_crc_record_from_page(page_bytes: &[u8]) -> CrcRecord {
+    fn read_crc_record_from_page(page_bytes: &[u8]) -> Checksum {
         let crc_start = page_bytes.len() - CRC_RECORD_SIZE as usize;
-        CrcRecord::read(&mut &page_bytes[crc_start..]).unwrap()
+        Checksum::read(&mut &page_bytes[crc_start..]).unwrap()
     }
 
     /// Dummy marker bytes with len=0 so the mangled slot is never authoritative.
@@ -1057,7 +1057,7 @@ mod tests {
     #[test]
     fn test_identify_protected_regions_equal_lengths() {
         // When lengths are equal, the first CRC should be protected (tie-breaking rule).
-        let record = CrcRecord {
+        let record = Checksum {
             len1: 50,
             crc1: 0xAAAAAAAA,
             len2: 50,
@@ -1078,7 +1078,7 @@ mod tests {
     #[test]
     fn test_identify_protected_regions_len1_larger() {
         // When len1 > len2, the first CRC should be protected.
-        let record = CrcRecord {
+        let record = Checksum {
             len1: 100,
             crc1: 0xAAAAAAAA,
             len2: 50,
@@ -1099,7 +1099,7 @@ mod tests {
     #[test]
     fn test_identify_protected_regions_len2_larger() {
         // When len2 > len1, the second CRC should be protected.
-        let record = CrcRecord {
+        let record = Checksum {
             len1: 50,
             crc1: 0xAAAAAAAA,
             len2: 100,

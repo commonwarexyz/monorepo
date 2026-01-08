@@ -416,7 +416,7 @@ impl Pool {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::CrcRecord, *};
+    use super::{super::Checksum, *};
     use crate::{buffer::pool::CRC_RECORD_SIZE, deterministic, Runner as _, Storage as _};
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
@@ -487,10 +487,10 @@ mod tests {
                 .expect("Failed to open blob");
             assert_eq!(size, 0);
             for i in 0..11 {
-                // Write logical data followed by CrcRecord.
+                // Write logical data followed by Checksum.
                 let logical_data = vec![i as u8; PAGE_SIZE.get() as usize];
                 let crc = crc32fast::hash(&logical_data);
-                let record = CrcRecord::new(PAGE_SIZE.get(), crc);
+                let record = Checksum::new(PAGE_SIZE.get(), crc);
                 let mut page_data = logical_data;
                 page_data.extend_from_slice(&record.to_bytes());
                 blob.write_at(page_data, i * physical_page_size)

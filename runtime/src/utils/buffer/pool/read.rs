@@ -1,4 +1,4 @@
-use super::{CrcRecord, CRC_RECORD_SIZE};
+use super::{Checksum, CRC_RECORD_SIZE};
 use crate::{Blob, Error};
 use commonware_utils::StableBuf;
 use std::num::NonZeroUsize;
@@ -25,14 +25,14 @@ pub struct Read<B: Blob> {
     /// The capacity of the buffer.  We always fully fill the buffer, unless we are at the end of
     /// the blob. The buffer capacity must be a multiple of the page size.
     buffer_capacity: usize,
-    /// The physical page size of each full page in the blob, including its 12-byte CrcRecord.
+    /// The physical page size of each full page in the blob, including its 12-byte Checksum.
     page_size: usize,
 }
 
 impl<B: Blob> Read<B> {
     /// Creates a new `Read` that reads from the given blob with the specified buffer size. The
     /// `logical_page_size` is the size of the logical data portion of each page (not including the
-    /// CrcRecord). If the buffer capacity is not a multiple of the physical page size, it will be
+    /// Checksum). If the buffer capacity is not a multiple of the physical page size, it will be
     /// rounded up to the nearest.
     ///
     /// The `physical_blob_size` is the size of the underlying blob on disk (must be a multiple of
@@ -190,7 +190,7 @@ impl<B: Blob> Read<B> {
             // Check if full page or partial
             if remaining >= self.page_size {
                 let page_slice = &self.buffer[read_offset..read_offset + self.page_size];
-                let Some(record) = CrcRecord::validate_page(page_slice) else {
+                let Some(record) = Checksum::validate_page(page_slice) else {
                     error!(
                         page = self.blob_page + (read_offset / self.page_size) as u64,
                         "CRC mismatch"
@@ -230,7 +230,7 @@ impl<B: Blob> Read<B> {
                 return Err(Error::InvalidChecksum);
             }
             let page_slice = &self.buffer[read_offset..];
-            let Some(record) = CrcRecord::validate_page(page_slice) else {
+            let Some(record) = Checksum::validate_page(page_slice) else {
                 error!(
                     page = self.blob_page + (read_offset / self.page_size) as u64,
                     "CRC mismatch"
@@ -449,7 +449,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as u64;
             let short_len = page_size / 2;
             let crc = crc32fast::hash(&data[..short_len as usize]);
-            let record = super::CrcRecord::new(short_len as u16, crc);
+            let record = super::Checksum::new(short_len as u16, crc);
             let crc_offset = page_size; // CRC record starts after logical page bytes
             blob.write_at(record.to_bytes().to_vec(), crc_offset)
                 .await

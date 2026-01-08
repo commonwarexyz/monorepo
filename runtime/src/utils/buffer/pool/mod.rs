@@ -23,8 +23,8 @@
 //! full or partial. A partial page's logical bytes are immutable on commit, and if it's re-written,
 //! it's only to add more bytes after the existing ones.
 
-use bytes::{Buf, BufMut};
 use crate::{Blob, Error};
+use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_utils::StableBuf;
 
@@ -55,7 +55,7 @@ async fn get_page_from_blob(
         .read_at(vec![0; physical_page_size as usize], physical_page_start)
         .await?;
 
-    let Some(record) = CrcRecord::validate_page(page.as_ref()) else {
+    let Some(record) = Checksum::validate_page(page.as_ref()) else {
         return Err(Error::InvalidChecksum);
     };
     let (len, _) = record.get_crc();
@@ -71,14 +71,14 @@ async fn get_page_from_blob(
 /// the page. Two checksums are stored so that partial pages can be written without overwriting a
 /// valid checksum for a previously committed partial page.
 #[derive(Clone)]
-struct CrcRecord {
+struct Checksum {
     len1: u16,
     crc1: u32,
     len2: u16,
     crc2: u32,
 }
 
-impl CrcRecord {
+impl Checksum {
     /// Create a new CRC record with the given length and CRC.
     /// The new CRC is stored in the first slot (len1/crc1), with the second slot zeroed.
     const fn new(len: u16, crc: u32) -> Self {
@@ -202,7 +202,7 @@ impl CrcRecord {
     }
 }
 
-impl Write for CrcRecord {
+impl Write for Checksum {
     fn write(&self, buf: &mut impl BufMut) {
         self.len1.write(buf);
         self.crc1.write(buf);
@@ -211,7 +211,7 @@ impl Write for CrcRecord {
     }
 }
 
-impl CodecRead for CrcRecord {
+impl CodecRead for Checksum {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -224,12 +224,12 @@ impl CodecRead for CrcRecord {
     }
 }
 
-impl FixedSize for CrcRecord {
+impl FixedSize for Checksum {
     const SIZE: usize = CRC_RECORD_SIZE as usize;
 }
 
 #[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for CrcRecord {
+impl arbitrary::Arbitrary<'_> for Checksum {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             len1: u.arbitrary()?,
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn test_crc_record_encode_read_roundtrip() {
-        let record = CrcRecord {
+        let record = Checksum {
             len1: 0x1234,
             crc1: 0xAABBCCDD,
             len2: 0x5678,
@@ -256,7 +256,7 @@ mod tests {
         };
 
         let bytes = record.to_bytes();
-        let restored = CrcRecord::read(&mut &bytes[..]).unwrap();
+        let restored = Checksum::read(&mut &bytes[..]).unwrap();
 
         assert_eq!(restored.len1, 0x1234);
         assert_eq!(restored.crc1, 0xAABBCCDD);
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_crc_record_encoding() {
-        let record = CrcRecord {
+        let record = Checksum {
             len1: 0x0102,
             crc1: 0x03040506,
             len2: 0x0708,
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn test_crc_record_get_crc_len1_larger() {
-        let record = CrcRecord {
+        let record = Checksum {
             len1: 200,
             crc1: 0xAAAAAAAA,
             len2: 100,
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_crc_record_get_crc_len2_larger() {
-        let record = CrcRecord {
+        let record = Checksum {
             len1: 100,
             crc1: 0xAAAAAAAA,
             len2: 200,
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn test_crc_record_get_crc_equal_lengths() {
         // When lengths are equal, len1/crc1 is returned (first slot wins ties).
-        let record = CrcRecord {
+        let record = Checksum {
             len1: 100,
             crc1: 0xAAAAAAAA,
             len2: 100,
@@ -336,14 +336,14 @@ mod tests {
 
         // Compute CRC of the data portion
         let crc = crc32fast::hash(&page[..data.len()]);
-        let record = CrcRecord::new(data.len() as u16, crc);
+        let record = Checksum::new(data.len() as u16, crc);
 
         // Write the CRC record at the end
         let crc_start = physical_page_size - CRC_RECORD_USIZE;
         page[crc_start..].copy_from_slice(&record.to_bytes());
 
-        // Validate - should return Some with the CrcRecord
-        let validated = CrcRecord::validate_page(&page);
+        // Validate - should return Some with the Checksum
+        let validated = Checksum::validate_page(&page);
         assert!(validated.is_some());
         let (len, _) = validated.unwrap().get_crc();
         assert_eq!(len as usize, data.len());
@@ -361,13 +361,13 @@ mod tests {
 
         // Write a record with wrong CRC
         let wrong_crc = 0xBADBADBA;
-        let record = CrcRecord::new(data.len() as u16, wrong_crc);
+        let record = Checksum::new(data.len() as u16, wrong_crc);
 
         let crc_start = physical_page_size - CRC_RECORD_USIZE;
         page[crc_start..].copy_from_slice(&record.to_bytes());
 
         // Should fail validation (return None)
-        let validated = CrcRecord::validate_page(&page);
+        let validated = Checksum::validate_page(&page);
         assert!(validated.is_none());
     }
 
@@ -381,7 +381,7 @@ mod tests {
         let data = b"hello world";
         page[..data.len()].copy_from_slice(data);
         let crc = crc32fast::hash(&page[..data.len()]);
-        let record = CrcRecord::new(data.len() as u16, crc);
+        let record = Checksum::new(data.len() as u16, crc);
 
         let crc_start = physical_page_size - CRC_RECORD_USIZE;
         page[crc_start..].copy_from_slice(&record.to_bytes());
@@ -390,7 +390,7 @@ mod tests {
         page[0] = 0xFF;
 
         // Should fail validation (return None)
-        let validated = CrcRecord::validate_page(&page);
+        let validated = Checksum::validate_page(&page);
         assert!(validated.is_none());
     }
 
@@ -406,7 +406,7 @@ mod tests {
         let crc = crc32fast::hash(&page[..data.len()]);
 
         // Create a record where len2 has the valid CRC for longer data
-        let record = CrcRecord {
+        let record = Checksum {
             len1: 5,
             crc1: 0xDEADBEEF, // Invalid CRC for shorter data
             len2: data.len() as u16,
@@ -417,7 +417,7 @@ mod tests {
         page[crc_start..].copy_from_slice(&record.to_bytes());
 
         // Should validate using len2/crc2 since len2 > len1
-        let validated = CrcRecord::validate_page(&page);
+        let validated = Checksum::validate_page(&page);
         assert!(validated.is_some());
         let (len, _) = validated.unwrap().get_crc();
         assert_eq!(len as usize, data.len());
@@ -438,7 +438,7 @@ mod tests {
         // Create a record where:
         // len1 is larger (primary) but INVALID
         // len2 is smaller (fallback) but VALID
-        let record = CrcRecord {
+        let record = Checksum {
             len1: valid_len + 10, // Larger, so it's primary
             crc1: 0xBAD1DEA,      // Invalid CRC
             len2: valid_len,      // Smaller, so it's fallback
@@ -449,7 +449,7 @@ mod tests {
         page[crc_start..].copy_from_slice(&record.to_bytes());
 
         // Should validate using the fallback (len2)
-        let validated = CrcRecord::validate_page(&page);
+        let validated = Checksum::validate_page(&page);
 
         assert!(validated.is_some(), "Should have validated using fallback");
         let validated = validated.unwrap();
@@ -475,7 +475,7 @@ mod tests {
         // Create a record where:
         // len1 > 0 (primary) but with INVALID CRC
         // len2 = 0 (no fallback available)
-        let record = CrcRecord {
+        let record = Checksum {
             len1: data.len() as u16,
             crc1: 0xBAD1DEA, // Invalid CRC
             len2: 0,         // No fallback
@@ -486,7 +486,7 @@ mod tests {
         page[crc_start..].copy_from_slice(&record.to_bytes());
 
         // Should fail validation since primary is invalid and no fallback exists
-        let validated = CrcRecord::validate_page(&page);
+        let validated = Checksum::validate_page(&page);
         assert!(
             validated.is_none(),
             "Should fail when primary is invalid and fallback has len=0"
@@ -499,7 +499,7 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<CrcRecord>,
+            CodecConformance<Checksum>,
         }
     }
 }
