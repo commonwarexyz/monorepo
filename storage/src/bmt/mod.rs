@@ -572,10 +572,7 @@ where
 /// Returns the number of levels in a tree with `leaf_count` leaves.
 /// A tree with 1 leaf has 1 level, a tree with 2 leaves has 2 levels, etc.
 const fn levels_in_tree(leaf_count: u32) -> usize {
-    match leaf_count {
-        0 | 1 => 1,
-        n => (u32::BITS - (n - 1).leading_zeros() + 1) as usize,
-    }
+    (u32::BITS - (leaf_count.saturating_sub(1)).leading_zeros() + 1) as usize
 }
 
 /// Returns the sorted, deduplicated positions of siblings required to prove
@@ -726,37 +723,37 @@ impl<D: Digest> Proof<D> {
             return Err(Error::NoLeaves);
         }
 
-        // 1. Initialize current level nodes (sorted by position)
-        let mut current: Vec<(u32, D)> = Vec::with_capacity(elements.len());
+        // 1. Sort elements by position and check for duplicates/bounds
+        let mut sorted: Vec<(u32, D)> = Vec::with_capacity(elements.len());
         for (leaf, position) in elements {
             if *position >= self.leaf_count {
                 return Err(Error::InvalidPosition(*position));
             }
             hasher.update(&position.to_be_bytes());
             hasher.update(leaf);
-            current.push((*position, hasher.finalize()));
+            sorted.push((*position, hasher.finalize()));
         }
+        sorted.sort_unstable_by_key(|(pos, _)| *pos);
 
-        // Sort by position to enable linear processing
-        current.sort_unstable_by(|(p1, _), (p2, _)| p1.cmp(p2));
-
-        // Check for duplicates
-        for i in 1..current.len() {
-            if current[i].0 == current[i - 1].0 {
-                return Err(Error::DuplicatePosition(current[i].0));
+        // Check for duplicates (adjacent elements with same position after sorting)
+        for i in 1..sorted.len() {
+            if sorted[i - 1].0 == sorted[i].0 {
+                return Err(Error::DuplicatePosition(sorted[i].0));
             }
         }
 
         // 2. Iterate up the tree
+        // Since we process left-to-right and parent_pos = pos/2, next_level stays sorted.
         let levels = levels_in_tree(self.leaf_count);
         let mut level_size = self.leaf_count;
         let mut sibling_iter = self.siblings.iter();
-        let mut next_level = Vec::with_capacity(current.len() / 2 + 1);
+        let mut current = sorted;
+        let mut next_level: Vec<(u32, D)> = Vec::with_capacity(current.len());
 
         for _ in 0..levels - 1 {
-            let mut i = 0;
-            while i < current.len() {
-                let (pos, digest) = current[i];
+            let mut idx = 0;
+            while idx < current.len() {
+                let (pos, digest) = current[idx];
                 let parent_pos = pos / 2;
 
                 // Determine if we have the left or right child
@@ -765,25 +762,20 @@ impl<D: Digest> Proof<D> {
                     let left = digest;
 
                     // Check if we have the right child in our current set
-                    let right = if i + 1 < current.len() && current[i + 1].0 == pos + 1 {
-                        i += 2; // Consume both
-                        current[i - 1].1
-                    } else {
-                        i += 1; // Consume left
-
+                    let right = if idx + 1 < current.len() && current[idx + 1].0 == pos + 1 {
+                        idx += 1;
+                        current[idx].1
+                    } else if pos + 1 >= level_size {
                         // If no right child exists in tree, duplicate left
-                        if pos + 1 >= level_size {
-                            left
-                        } else {
-                            // Otherwise, must consume a sibling
-                            *sibling_iter.next().ok_or(Error::UnalignedProof)?
-                        }
+                        left
+                    } else {
+                        // Otherwise, must consume a sibling
+                        *sibling_iter.next().ok_or(Error::UnalignedProof)?
                     };
                     (left, right)
                 } else {
                     // We are the RIGHT child
                     // This implies the LEFT child was missing from 'current', so it must be a sibling.
-                    i += 1;
                     let right = digest;
                     let left = *sibling_iter.next().ok_or(Error::UnalignedProof)?;
                     (left, right)
@@ -793,11 +785,13 @@ impl<D: Digest> Proof<D> {
                 hasher.update(&left);
                 hasher.update(&right);
                 next_level.push((parent_pos, hasher.finalize()));
+
+                idx += 1;
             }
 
             // Prepare for next level
-            current.clear();
-            current.append(&mut next_level);
+            core::mem::swap(&mut current, &mut next_level);
+            next_level.clear();
             level_size = level_size.div_ceil(2);
         }
 
