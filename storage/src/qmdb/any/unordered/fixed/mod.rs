@@ -18,8 +18,6 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
 
-pub mod sync;
-
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
 pub type Operation<K, V> = unordered::Operation<K, FixedEncoding<V>>;
 
@@ -72,7 +70,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
 
 // pub(super) so helpers can be used by the sync module.
 #[cfg(test)]
-pub(super) mod test {
+pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,

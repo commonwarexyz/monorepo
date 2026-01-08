@@ -7,9 +7,7 @@ use crate::{
     mmr::{mem::Clean, Location, Position, StandardHasher},
     qmdb::{
         self,
-        any::{
-            db::Db, FixedConfig, VariableConfig,
-        },
+        any::{db::Db, FixedConfig, VariableConfig},
         Durable, Merkleized,
     },
 };
@@ -19,7 +17,8 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use std::ops::Range;
 
 // Blanket implementation for Fixed Journal
-impl<E, O, I, H, U> qmdb::sync::Database for Db<E, fixed::Journal<E, O>, I, H, U, Merkleized<H>, Durable>
+impl<E, O, I, H, U> qmdb::sync::Database
+    for Db<E, fixed::Journal<E, O>, I, H, U, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     O: CodecFixed<Cfg = ()> + Send + Sync + 'static,
@@ -114,7 +113,8 @@ where
 }
 
 // Blanket implementation for Variable Journal
-impl<E, O, I, H, U> qmdb::sync::Database for Db<E, variable::Journal<E, O>, I, H, U, Merkleized<H>, Durable>
+impl<E, O, I, H, U> qmdb::sync::Database
+    for Db<E, variable::Journal<E, O>, I, H, U, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     O: Codec + Send + Sync + 'static,

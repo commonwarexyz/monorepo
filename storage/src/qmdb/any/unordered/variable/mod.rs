@@ -4,8 +4,6 @@
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::unordered::fixed]
 //! instead for better performance._
 
-pub mod sync;
-
 use crate::{
     index::unordered::Index,
     journal::{
@@ -89,7 +87,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
 }
 
 #[cfg(test)]
-pub(super) mod test {
+pub(crate) mod test {
     use super::*;
     use crate::{index::Unordered as _, qmdb::store::batch_tests, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};

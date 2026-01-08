@@ -1,8 +1,8 @@
 use crate::{
-    index::Unordered as Index,
+    index::{unordered::Index as UnorderedIndex, Unordered as Index},
     journal::contiguous::{Contiguous, MutableContiguous},
     kv::{self, Batchable},
-    mmr::Location,
+    mmr::{mem::Clean, Location},
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
@@ -13,6 +13,7 @@ use crate::{
         update_key, update_known_loc, DurabilityState, Durable, Error, MerkleizationState,
         Merkleized, NonDurable, Unmerkleized,
     },
+    translator::Translator,
 };
 #[cfg(any(test, feature = "test-traits"))]
 use crate::{
@@ -25,12 +26,6 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
-
-use crate::{
-    index::unordered::Index as UnorderedIndex,
-    mmr::mem::Clean,
-    translator::Translator,
-};
 
 impl<
         E: Storage + Clock + Metrics,

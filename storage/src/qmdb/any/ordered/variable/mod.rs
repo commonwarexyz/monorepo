@@ -25,8 +25,6 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
 
-pub mod sync;
-
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
 pub type Operation<K, V> = ordered::Operation<K, VariableEncoding<V>>;
 
