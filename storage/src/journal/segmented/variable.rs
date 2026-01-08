@@ -80,7 +80,7 @@
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, Codec, EncodeSize, FixedSize, ReadExt, Write as CodecWrite};
+use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef, Read},
     Blob, Error as RError, Metrics, Storage,
@@ -219,9 +219,19 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let (buf, available) = reader.read_up_to(buf).await?;
         let (size, varint_len) = parse_length_prefix(&buf.as_ref()[..available])?;
 
+        // Calculate the correct next offset
+        let next_offset = offset
+            .checked_add(varint_len as u64)
+            .ok_or(Error::OffsetOverflow)?
+            .checked_add(size as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
         // Get item bytes - either from buffer directly or by reading more
         let extra_bytes = available - varint_len;
         let item_data: Cow<'_, [u8]> = if extra_bytes >= size {
+            // We already have all the data we need, but reader position may be ahead
+            // Seek to the correct next position
+            reader.seek_to(next_offset).map_err(Error::Runtime)?;
             Cow::Borrowed(&buf.as_ref()[varint_len..varint_len + size])
         } else {
             let mut v = vec![0u8; size];
@@ -242,8 +252,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             V::decode_cfg(item_data.as_ref(), cfg).map_err(Error::Codec)?
         };
 
-        // Calculate next offset (no alignment)
-        let next_offset = reader.position();
         Ok((next_offset, next_offset, size as u32, item))
     }
 
@@ -265,7 +273,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         mut offset: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u64, u32, V), Error>> + '_, Error> {
-        // Collect all blobs to replay
+        // Collect all blobs to replay (keeping blob reference for potential resize)
         let codec_config = self.codec_config.clone();
         let compressed = self.compression.is_some();
         let mut blobs = Vec::new();
@@ -273,6 +281,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             let blob_size = blob.size().await;
             blobs.push((
                 section,
+                blob.clone(),
                 blob.as_blob_reader(buffer).await?,
                 blob_size,
                 codec_config.clone(),
@@ -283,7 +292,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Replay all blobs in order and stream items as they are read (to avoid occupying too much
         // memory with buffered data)
         Ok(stream::iter(blobs).flat_map(
-            move |(section, mut reader, blob_size, codec_config, compressed)| {
+            move |(section, blob, mut reader, blob_size, codec_config, compressed)| {
                 if section == start_section && offset != 0 {
                     if let Err(err) = reader.seek_to(offset) {
                         warn!(section, offset, ?err, "failed to seek to offset");
@@ -298,6 +307,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 stream::unfold(
                     (
                         section,
+                        blob,
                         reader,
                         offset,
                         0u64,
@@ -307,6 +317,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                     ),
                     move |(
                         section,
+                        blob,
                         mut reader,
                         offset,
                         valid_size,
@@ -329,6 +340,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     Ok((section, offset, size, item)),
                                     (
                                         section,
+                                        blob,
                                         reader,
                                         next_offset,
                                         next_valid_size,
@@ -348,7 +360,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     new_size = valid_size,
                                     "trailing bytes detected: truncating"
                                 );
-                                reader.resize(valid_size).await.ok()?;
+                                blob.resize(valid_size).await.ok()?;
                                 None
                             }
                             Err(err) => {
@@ -359,6 +371,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     Err(err),
                                     (
                                         section,
+                                        blob,
                                         reader,
                                         offset,
                                         valid_size,

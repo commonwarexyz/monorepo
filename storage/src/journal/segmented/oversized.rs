@@ -444,7 +444,7 @@ mod tests {
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZU16, NZUsize};
 
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {
@@ -512,7 +512,7 @@ mod tests {
         Config {
             index_partition: "test_index".to_string(),
             value_partition: "test_values".to_string(),
-            index_buffer_pool: PoolRef::new(NZUsize!(64), NZUsize!(8)),
+            index_buffer_pool: PoolRef::new(NZU16!(64), NZUsize!(8)),
             index_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             compression: None,
@@ -1845,15 +1845,10 @@ mod tests {
             // Size 0 - should fail
             assert!(oversized.get_value(1, offset, 0).await.is_err());
 
-            // Size < CRC_SIZE (1, 2, 3 bytes) - should fail with BlobInsufficientLength
+            // Size < value size - should fail with codec error
             for size in 1..4u32 {
                 let result = oversized.get_value(1, offset, size).await;
-                assert!(matches!(
-                    result,
-                    Err(Error::Runtime(
-                        commonware_runtime::Error::BlobInsufficientLength
-                    ))
-                ));
+                assert!(matches!(result, Err(Error::Codec(_))));
             }
 
             oversized.destroy().await.expect("Failed to destroy");
@@ -1877,9 +1872,9 @@ mod tests {
                 .expect("Failed to append");
             oversized.sync(1).await.expect("Failed to sync");
 
-            // Size too small (but >= CRC_SIZE) - checksum mismatch
+            // Size too small - will fail to decode
             let result = oversized.get_value(1, offset, correct_size - 1).await;
-            assert!(matches!(result, Err(Error::ChecksumMismatch(_, _))));
+            assert!(matches!(result, Err(Error::Codec(_))));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
