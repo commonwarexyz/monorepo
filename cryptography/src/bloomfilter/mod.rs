@@ -207,6 +207,12 @@ impl<H: Hasher> Read for BloomFilter<H> {
         buf: &mut impl Buf,
         (hashers_cfg, bits_cfg): &Self::Cfg,
     ) -> Result<Self, CodecError> {
+        if !bits_cfg.get().is_power_of_two() {
+            return Err(CodecError::Invalid(
+                "BloomFilter",
+                "bits must be a power of 2",
+            ));
+        }
         let hashers = u8::read_cfg(buf, &())?;
         if hashers != hashers_cfg.get() {
             return Err(CodecError::Invalid(
@@ -371,12 +377,23 @@ mod tests {
         assert!(matches!(result, Err(CodecError::InvalidLength(128))));
 
         let cfg = (NZU8!(5), NZU64!(256));
-        let result = BloomFilter::<Sha256>::decode_cfg(encoded, &cfg);
+        let result = BloomFilter::<Sha256>::decode_cfg(encoded.clone(), &cfg);
         assert!(matches!(
             result,
             Err(CodecError::Invalid(
                 "BloomFilter",
                 "bitmap length doesn't match config"
+            ))
+        ));
+
+        // Non-power-of-2 bits
+        let cfg = (NZU8!(5), NZU64!(100));
+        let result = BloomFilter::<Sha256>::decode_cfg(encoded, &cfg);
+        assert!(matches!(
+            result,
+            Err(CodecError::Invalid(
+                "BloomFilter",
+                "bits must be a power of 2"
             ))
         ));
     }
