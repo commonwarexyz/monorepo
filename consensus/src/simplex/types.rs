@@ -3268,9 +3268,7 @@ mod tests {
         use crate::simplex::scheme::bls12381_threshold;
         use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
-        use commonware_parallel::Sequential;
-
-        type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig, Sequential>;
+        type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Vote<Scheme, Sha256Digest>>,

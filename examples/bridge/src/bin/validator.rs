@@ -226,11 +226,9 @@ fn main() {
             validators.clone(),
             identity,
             share,
-            strategy.clone(),
         )
         .expect("share must be in participants");
-        let other_network =
-            Scheme::certificate_verifier(&consensus_namespace, other_public, strategy);
+        let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
         let (application, scheme, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
@@ -265,6 +263,7 @@ fn main() {
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
                 buffer_pool: PoolRef::new(NZU16!(16_384), NZUsize!(10_000)),
+                strategy,
             },
         );
 

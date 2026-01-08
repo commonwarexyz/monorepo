@@ -101,6 +101,7 @@ where
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
         FixedEpocher,
+        St,
     >,
     #[allow(clippy::type_complexity)]
     orchestrator: orchestrator::Actor<
@@ -279,6 +280,7 @@ where
                 value_write_buffer: WRITE_BUFFER,
                 block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
+                strategy: config.strategy.clone(),
             },
         )
         .await;
@@ -297,6 +299,7 @@ where
                 application,
                 provider,
                 marshal: marshal_mailbox,
+                strategy: config.strategy.clone(),
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),

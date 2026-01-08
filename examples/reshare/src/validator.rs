@@ -428,10 +428,8 @@ mod test {
                 self.start_one::<EdScheme, RoundRobin>(ctx, oracle, updates, pk)
                     .await;
             } else {
-                self.start_one::<ThresholdScheme<MinSig, Sequential>, Random>(
-                    ctx, oracle, updates, pk,
-                )
-                .await;
+                self.start_one::<ThresholdScheme<MinSig>, Random>(ctx, oracle, updates, pk)
+                    .await;
             }
         }
 
@@ -725,7 +723,7 @@ mod test {
                         if team.output.is_none() {
                             team.start_one::<EdScheme, RoundRobin>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         } else {
-                            team.start_one::<ThresholdScheme<MinSig, Sequential>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                            team.start_one::<ThresholdScheme<MinSig>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         }
                     },
                     _ = crash_receiver.next() => {

@@ -10,15 +10,19 @@ use crate::{
 pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
+use commonware_parallel::Strategy;
 pub use ingress::{Mailbox, Message};
 pub use round::Round;
 pub use verifier::Verifier;
 
-pub struct Config<S: Scheme, B: Blocker, R: Reporter> {
+pub struct Config<S: Scheme, B: Blocker, R: Reporter, T: Strategy> {
     pub scheme: S,
 
     pub blocker: B,
     pub reporter: R,
+
+    /// Strategy for parallel verification operations.
+    pub strategy: T,
 
     pub activity_timeout: ViewDelta,
     pub skip_timeout: ViewDelta,
@@ -151,6 +155,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -311,6 +316,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -456,6 +462,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -646,6 +653,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -849,6 +857,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -975,6 +984,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -1103,6 +1113,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(skip_timeout),
                 epoch,
@@ -1251,6 +1262,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -1449,6 +1461,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,

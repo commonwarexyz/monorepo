@@ -27,6 +27,7 @@ use commonware_cryptography::{
     Sha256,
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{max_faults, NZUsize, NZU16};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
@@ -262,6 +263,7 @@ fn run<P: Simplex>(input: FuzzInput) {
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
             };
             let engine = Engine::new(context.with_label("engine"), engine_cfg);
             engine.start(pending, recovered, resolver);

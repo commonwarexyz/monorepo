@@ -46,6 +46,7 @@ where
     pub application: A,
     pub provider: Provider<S, C, St>,
     pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
+    pub strategy: St,
 
     pub muxer_size: usize,
     pub mailbox_size: usize,
@@ -78,6 +79,7 @@ where
     oracle: B,
     marshal: marshal::Mailbox<S, Block<H, C, V>>,
     provider: Provider<S, C, St>,
+    strategy: St,
 
     muxer_size: usize,
     partition_prefix: String,
@@ -115,6 +117,7 @@ where
                 oracle: config.oracle,
                 marshal: config.marshal,
                 provider: config.provider,
+                strategy: config.strategy,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 pool_ref,
@@ -315,6 +318,7 @@ where
                 skip_timeout: ViewDelta::new(10),
                 fetch_concurrent: 32,
                 buffer_pool: self.pool_ref.clone(),
+                strategy: self.strategy.clone(),
             },
         );
 

@@ -633,6 +633,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_parallel::Sequential;
     use commonware_math::algebra::{Additive, Random};
     use commonware_utils::{ordered::Set, quorum, test_rng, TryCollect, NZU32};
 
@@ -710,7 +711,8 @@ mod tests {
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &attestation
+            &attestation,
+            &Sequential,
         ));
     }
 
@@ -758,6 +760,7 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             attestations.clone(),
+            &Sequential,
         );
         assert!(result.invalid.is_empty());
         assert_eq!(result.verified.len(), quorum);
@@ -771,6 +774,7 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             attestations_corrupted,
+            &Sequential,
         );
         assert_eq!(result.invalid, vec![Participant::new(999)]);
         assert_eq!(result.verified.len(), quorum - 1);
@@ -784,6 +788,7 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             attestations_corrupted,
+            &Sequential,
         );
         assert_eq!(result.invalid.len(), 1);
         assert_eq!(result.verified.len(), quorum - 1);
@@ -811,7 +816,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations).unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Verify the assembled certificate
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
@@ -819,7 +824,8 @@ mod tests {
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &certificate
+            &certificate,
+            &Sequential,
         ));
     }
 
@@ -845,14 +851,15 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations).unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &certificate
+            &certificate,
+            &Sequential,
         ));
     }
 
@@ -878,7 +885,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations).unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
@@ -886,7 +893,8 @@ mod tests {
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &certificate
+            &certificate,
+            &Sequential,
         ));
 
         // Corrupted certificate fails
@@ -896,7 +904,8 @@ mod tests {
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &corrupted
+            &corrupted,
+            &Sequential,
         ));
     }
 
@@ -922,7 +931,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations).unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
         let encoded = certificate.encode();
         let decoded = V::Signature::decode(encoded).expect("decode certificate");
         assert_eq!(decoded, certificate);
@@ -950,7 +959,7 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0].assemble(attestations).is_none());
+        assert!(schemes[0].assemble(attestations, &Sequential).is_none());
     }
 
     #[test]
@@ -982,7 +991,7 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble(attestations).unwrap());
+            certificates.push(schemes[0].assemble(attestations, &Sequential).unwrap());
         }
 
         let certs_iter = messages.iter().zip(&certificates).map(|(msg, cert)| {
@@ -994,7 +1003,7 @@ mod tests {
             )
         });
 
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, certs_iter));
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, certs_iter, &Sequential));
     }
 
     #[test]
@@ -1022,7 +1031,7 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble(attestations).unwrap());
+            certificates.push(schemes[0].assemble(attestations, &Sequential).unwrap());
         }
 
         // Corrupt second certificate
@@ -1037,7 +1046,7 @@ mod tests {
             )
         });
 
-        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, certs_iter));
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, certs_iter, &Sequential));
     }
 
     #[test]
@@ -1062,7 +1071,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations).unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Create a certificate-only verifier using the identity from the polynomial
         let identity = polynomial.public();
@@ -1075,7 +1084,8 @@ mod tests {
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &certificate
+            &certificate,
+            &Sequential,
         ));
 
         // Should not be able to sign
@@ -1122,7 +1132,8 @@ mod tests {
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &vote
+            &vote,
+            &Sequential,
         ));
     }
 
@@ -1185,6 +1196,7 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             &vote,
+            &Sequential,
         );
     }
 
@@ -1311,7 +1323,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations).unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
         let mut encoded = certificate.encode();
         encoded.truncate(encoded.len() - 1);
         assert!(V::Signature::decode(encoded).is_err());

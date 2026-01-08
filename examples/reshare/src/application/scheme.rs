@@ -18,8 +18,8 @@ use std::{
 };
 
 /// The BLS12-381 threshold signing scheme used in simplex.
-pub type ThresholdScheme<V, S> =
-    simplex::scheme::bls12381_threshold::Scheme<ed25519::PublicKey, V, S>;
+pub type ThresholdScheme<V> =
+    simplex::scheme::bls12381_threshold::Scheme<ed25519::PublicKey, V>;
 
 /// The ED25519 signing scheme used in simplex.
 pub type EdScheme = simplex::scheme::ed25519::Scheme;
@@ -107,11 +107,11 @@ pub trait EpochProvider {
 }
 
 impl<V: Variant, St: Strategy> EpochProvider
-    for Provider<ThresholdScheme<V, St>, ed25519::PrivateKey, St>
+    for Provider<ThresholdScheme<V>, ed25519::PrivateKey, St>
 {
     type Variant = V;
     type PublicKey = ed25519::PublicKey;
-    type Scheme = ThresholdScheme<V, St>;
+    type Scheme = ThresholdScheme<V>;
     type Strategy = St;
 
     fn scheme_for_epoch(
@@ -127,7 +127,6 @@ impl<V: Variant, St: Strategy> EpochProvider
                         .poly
                         .clone()
                         .expect("group polynomial must exist"),
-                    self.strategy.clone(),
                 )
             },
             |share| {
@@ -139,7 +138,6 @@ impl<V: Variant, St: Strategy> EpochProvider
                         .clone()
                         .expect("group polynomial must exist"),
                     share.clone(),
-                    self.strategy.clone(),
                 )
                 .expect("share must be in dealers")
             },
@@ -149,12 +147,11 @@ impl<V: Variant, St: Strategy> EpochProvider
     fn certificate_verifier(
         namespace: &[u8],
         output: &dkg::Output<Self::Variant, Self::PublicKey>,
-        strategy: Self::Strategy,
+        _strategy: Self::Strategy,
     ) -> Option<Self::Scheme> {
         Some(ThresholdScheme::certificate_verifier(
             namespace,
             *output.public().public(),
-            strategy,
         ))
     }
 }
