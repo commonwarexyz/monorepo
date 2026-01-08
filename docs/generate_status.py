@@ -18,8 +18,12 @@ REPO_ROOT = DOCS_ROOT.parent
 # Marker pattern: //! @beta("0.1.0") or //! @gamma("0.2.0") or //! @lts("0.3.0")
 MARKER_PATTERN = re.compile(r"//!\s*@(beta|gamma|lts)\(\"([^\"]+)\"\)")
 
-# Use statement pattern to find commonware dependencies
-USE_PATTERN = re.compile(r"use\s+commonware_(\w+)")
+# Use statement pattern to find commonware dependencies with module paths
+# Captures: crate name, optional module path
+USE_PATTERN = re.compile(r"use\s+commonware_(\w+)(?:::(\w+(?:::\w+)*))?")
+
+# Crates excluded from LTS dependency checking (test-only dependencies)
+LTS_EXCLUDED_CRATES = {"conformance"}
 
 # Core crates to scan (exclude examples and fuzz)
 CORE_CRATES = [
@@ -51,7 +55,7 @@ class ModuleStatus:
     gamma: str | None = None
     lts: str | None = None
     inherited_from: str | None = None
-    dependencies: list[str] = field(default_factory=list)
+    _dependencies: list["Dependency"] = field(default_factory=list)
 
     def current_stage(self) -> str:
         """Return the highest stage this module has reached."""
@@ -74,8 +78,6 @@ class ModuleStatus:
             result["lts"] = self.lts
         if self.inherited_from:
             result["inherited_from"] = self.inherited_from
-        if self.dependencies:
-            result["dependencies"] = self.dependencies
         return result
 
 
@@ -105,13 +107,52 @@ def parse_markers(content: str) -> ModuleStatus:
     return status
 
 
-def parse_dependencies(content: str) -> list[str]:
-    """Parse commonware crate dependencies from use statements."""
-    deps = set()
-    for match in USE_PATTERN.finditer(content):
-        crate_name = match.group(1).replace("_", "-")
-        deps.add(f"commonware-{crate_name}")
-    return sorted(deps)
+@dataclass
+class Dependency:
+    """A dependency on another commonware module."""
+
+    crate: str  # e.g., "codec"
+    module_path: str | None  # e.g., "codec" or "types::vec" or None for crate root
+
+
+def parse_dependencies(content: str) -> list[Dependency]:
+    """Parse commonware crate dependencies from use statements.
+
+    Skips doc comments (lines starting with ///, //!, or inside /** */).
+    """
+    deps: list[Dependency] = []
+    seen: set[tuple[str, str | None]] = set()
+
+    # Process line by line to skip comments
+    in_block_comment = False
+    for line in content.split("\n"):
+        stripped = line.strip()
+
+        # Track block comments
+        if "/*" in stripped and "*/" not in stripped:
+            in_block_comment = True
+            continue
+        if "*/" in stripped:
+            in_block_comment = False
+            continue
+        if in_block_comment:
+            continue
+
+        # Skip doc comments and regular comments
+        if stripped.startswith("//"):
+            continue
+        if stripped.startswith("*"):  # Inside block comment
+            continue
+
+        # Now look for actual use statements
+        for match in USE_PATTERN.finditer(line):
+            crate_name = match.group(1)
+            module_path = match.group(2)  # May be None
+            key = (crate_name, module_path)
+            if key not in seen:
+                seen.add(key)
+                deps.append(Dependency(crate=crate_name, module_path=module_path))
+    return deps
 
 
 def scan_crate(crate_path: Path) -> dict[str, ModuleStatus]:
@@ -129,16 +170,17 @@ def scan_crate(crate_path: Path) -> dict[str, ModuleStatus]:
         content = rs_file.read_text(encoding="utf-8", errors="ignore")
         status = parse_markers(content)
         deps = parse_dependencies(content)
-        status.dependencies = deps
+        status._dependencies = deps
 
         # Only store if there are explicit markers
         if status.beta or status.gamma or status.lts:
             explicit_markers[str(rel_path)] = status
 
         # Store all modules (will apply inheritance later)
-        modules[str(rel_path)] = ModuleStatus(dependencies=deps)
+        modules[str(rel_path)] = ModuleStatus(_dependencies=deps)
 
-    # Second pass: apply inheritance from mod.rs files
+    # Second pass: apply inheritance from mod.rs files only
+    # (lib.rs markers do NOT cascade to submodules - only mod.rs does)
     # Sort paths so parents are processed before children
     sorted_paths = sorted(modules.keys())
 
@@ -188,10 +230,15 @@ def check_conflicts(
         if status.inherited_from:
             continue  # Skip inherited modules for parent/child conflict check
 
+        # Skip if this module has no markers
+        if not (status.beta or status.gamma or status.lts):
+            continue
+
         path_obj = Path(path)
         parts = path_obj.parts
 
-        # Check if any ancestor has markers (redundant marker check)
+        # Check if any ancestor mod.rs has markers (redundant marker check)
+        # Note: lib.rs does NOT cascade, so we don't check it here
         for i in range(len(parts) - 1, 0, -1):
             parent_dir = Path(*parts[:i])
             parent_mod = str(parent_dir / "mod.rs")
@@ -205,7 +252,7 @@ def check_conflicts(
                         Conflict(
                             path=f"{crate_name}/{path}",
                             message=f"Redundant @beta marker (already inherited from {parent_mod})",
-                            severity="warning",
+                            severity="error",
                         )
                     )
                 if status.gamma and parent_status.gamma:
@@ -213,7 +260,7 @@ def check_conflicts(
                         Conflict(
                             path=f"{crate_name}/{path}",
                             message=f"Redundant @gamma marker (already inherited from {parent_mod})",
-                            severity="warning",
+                            severity="error",
                         )
                     )
                 if status.lts and parent_status.lts:
@@ -221,12 +268,41 @@ def check_conflicts(
                         Conflict(
                             path=f"{crate_name}/{path}",
                             message=f"Redundant @lts marker (already inherited from {parent_mod})",
-                            severity="warning",
+                            severity="error",
                         )
                     )
                 break
 
     return conflicts
+
+
+def find_module_paths(crate: str, module_path: str | None) -> list[str]:
+    """Find possible source file paths for a module import."""
+    if module_path is None:
+        # Import from crate root
+        return ["src/lib.rs"]
+
+    # Convert module path like "codec" or "types::vec" to file paths
+    parts = module_path.split("::")
+    paths = []
+
+    # Could be src/module.rs or src/module/mod.rs
+    file_path = "src/" + "/".join(parts) + ".rs"
+    mod_path = "src/" + "/".join(parts) + "/mod.rs"
+    paths.append(file_path)
+    paths.append(mod_path)
+
+    # Also check parent modules (for re-exports)
+    for i in range(len(parts) - 1, 0, -1):
+        parent_file = "src/" + "/".join(parts[:i]) + ".rs"
+        parent_mod = "src/" + "/".join(parts[:i]) + "/mod.rs"
+        paths.append(parent_file)
+        paths.append(parent_mod)
+
+    # Always include lib.rs as items can be re-exported
+    paths.append("src/lib.rs")
+
+    return paths
 
 
 def check_lts_violations(
@@ -235,25 +311,39 @@ def check_lts_violations(
     """Check for LTS modules that depend on non-LTS code."""
     violations: list[Conflict] = []
 
-    # Build a set of all LTS crates (a crate is LTS if its lib.rs is LTS)
-    lts_crates: set[str] = set()
-    for crate_name, modules in all_modules.items():
-        lib_path = "src/lib.rs"
-        if lib_path in modules and modules[lib_path].is_lts():
-            lts_crates.add(f"commonware-{crate_name}")
-
     # Check each LTS module for non-LTS dependencies
     for crate_name, modules in all_modules.items():
         for path, status in modules.items():
             if not status.is_lts():
                 continue
 
-            for dep in status.dependencies:
-                if dep.startswith("commonware-") and dep not in lts_crates:
+            for dep in status._dependencies:
+                # Skip excluded crates (test-only dependencies)
+                if dep.crate in LTS_EXCLUDED_CRATES:
+                    continue
+
+                # Skip if dependency crate is not in our tracked crates
+                if dep.crate not in all_modules:
+                    continue
+
+                dep_modules = all_modules[dep.crate]
+                possible_paths = find_module_paths(dep.crate, dep.module_path)
+
+                # Check if any of the possible source paths are LTS
+                is_dep_lts = False
+                for possible_path in possible_paths:
+                    if possible_path in dep_modules and dep_modules[possible_path].is_lts():
+                        is_dep_lts = True
+                        break
+
+                if not is_dep_lts:
+                    dep_str = f"commonware_{dep.crate}"
+                    if dep.module_path:
+                        dep_str += f"::{dep.module_path}"
                     violations.append(
                         Conflict(
                             path=f"{crate_name}/{path}",
-                            message=f"LTS module depends on non-LTS crate: {dep}",
+                            message=f"LTS module imports from non-LTS: {dep_str}",
                             severity="error",
                         )
                     )
@@ -282,7 +372,7 @@ def compute_summary(all_modules: dict[str, dict[str, ModuleStatus]]) -> dict[str
     }
 
 
-def main() -> None:
+def main() -> int:
     all_modules: dict[str, dict[str, ModuleStatus]] = {}
     all_conflicts: list[Conflict] = []
 
@@ -303,13 +393,14 @@ def main() -> None:
     lts_violations = check_lts_violations(all_modules)
     all_conflicts.extend(lts_violations)
 
-    # Build output
+    errors = [c for c in all_conflicts if c.severity == "error"]
+    warnings = [c for c in all_conflicts if c.severity == "warning"]
+
+    # Build output (no errors/warnings in JSON - CI handles validation)
     output: dict[str, Any] = {
         "generated": datetime.now(timezone.utc).isoformat(),
         "crates": {},
         "summary": compute_summary(all_modules),
-        "conflicts": [c.to_dict() for c in all_conflicts if c.severity == "error"],
-        "warnings": [c.to_dict() for c in all_conflicts if c.severity == "warning"],
     }
 
     for crate_name, modules in all_modules.items():
@@ -331,16 +422,20 @@ def main() -> None:
     print(f"  By stage: {summary['by_stage']}")
     print(f"  LTS modules: {summary['lts_count']}")
 
-    if output["conflicts"]:
-        print(f"\nErrors ({len(output['conflicts'])}):")
-        for c in output["conflicts"]:
-            print(f"  - {c['path']}: {c['message']}")
+    if warnings:
+        print(f"\nWarnings ({len(warnings)}):")
+        for c in warnings:
+            print(f"  - {c.path}: {c.message}")
 
-    if output["warnings"]:
-        print(f"\nWarnings ({len(output['warnings'])}):")
-        for c in output["warnings"]:
-            print(f"  - {c['path']}: {c['message']}")
+    if errors:
+        print(f"\nErrors ({len(errors)}):")
+        for c in errors:
+            print(f"  - {c.path}: {c.message}")
+        return 1
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())

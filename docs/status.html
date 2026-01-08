@@ -103,40 +103,6 @@
             font-style: italic;
         }
 
-        .conflicts-section {
-            margin: 20px 0;
-            padding: 15px;
-            border: 1px solid #f5c6cb;
-            background: #f8d7da;
-        }
-        .conflicts-section h3 {
-            color: #721c24;
-            margin-top: 0;
-        }
-        .conflict-item {
-            margin: 10px 0;
-            padding: 10px;
-            background: white;
-            border-left: 3px solid #dc3545;
-        }
-
-        .warnings-section {
-            margin: 20px 0;
-            padding: 15px;
-            border: 1px solid #ffeeba;
-            background: #fff3cd;
-        }
-        .warnings-section h3 {
-            color: #856404;
-            margin-top: 0;
-        }
-        .warning-item {
-            margin: 10px 0;
-            padding: 10px;
-            background: white;
-            border-left: 3px solid #ffc107;
-        }
-
         .crate-section {
             margin: 20px 0;
         }
@@ -221,8 +187,6 @@
            Modules marked <span class="stage-badge lts-badge">LTS</span> have frozen wire formats.</p>
 
         <div id="summary"></div>
-        <div id="conflicts"></div>
-        <div id="warnings"></div>
 
         <h2>Modules by Crate</h2>
         <div class="filter-bar">
@@ -295,48 +259,6 @@
                 </div>
             `;
             document.getElementById('summary').innerHTML = html;
-        }
-
-        function renderConflicts(data) {
-            if (!data.conflicts || data.conflicts.length === 0) {
-                document.getElementById('conflicts').innerHTML = '';
-                return;
-            }
-
-            const items = data.conflicts.map(c => `
-                <div class="conflict-item">
-                    <strong>${c.path}</strong><br>
-                    ${c.message}
-                </div>
-            `).join('');
-
-            document.getElementById('conflicts').innerHTML = `
-                <div class="conflicts-section">
-                    <h3>Errors (${data.conflicts.length})</h3>
-                    ${items}
-                </div>
-            `;
-        }
-
-        function renderWarnings(data) {
-            if (!data.warnings || data.warnings.length === 0) {
-                document.getElementById('warnings').innerHTML = '';
-                return;
-            }
-
-            const items = data.warnings.map(c => `
-                <div class="warning-item">
-                    <strong>${c.path}</strong><br>
-                    ${c.message}
-                </div>
-            `).join('');
-
-            document.getElementById('warnings').innerHTML = `
-                <div class="warnings-section">
-                    <h3>Warnings (${data.warnings.length})</h3>
-                    ${items}
-                </div>
-            `;
         }
 
         function getCrateStats(modules) {
@@ -438,8 +360,6 @@
             document.getElementById('last-update').textContent = new Date(data.generated).toLocaleString();
 
             renderSummary(data);
-            renderConflicts(data);
-            renderWarnings(data);
             renderCrates(data);
             setupFilters();
         }

@@ -1,76 +1,27 @@
 {
-  "generated": "2026-01-08T11:11:14.249532+00:00",
+  "generated": "2026-01-08T11:33:13.373416+00:00",
   "crates": {
     "broadcast": {
       "modules": {
-        "src/buffered/config.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/buffered/engine.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime"
-          ]
-        },
-        "src/buffered/ingress.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-p2p"
-          ]
-        },
-        "src/buffered/metrics.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime"
-          ]
-        },
-        "src/buffered/mocks.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography"
-          ]
-        },
-        "src/buffered/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime"
-          ]
-        },
-        "src/lib.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        }
+        "src/buffered/config.rs": {},
+        "src/buffered/engine.rs": {},
+        "src/buffered/ingress.rs": {},
+        "src/buffered/metrics.rs": {},
+        "src/buffered/mocks.rs": {},
+        "src/buffered/mod.rs": {},
+        "src/lib.rs": {}
       }
     },
     "codec": {
       "modules": {
         "src/codec.rs": {},
-        "src/config.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
-        "src/conformance.rs": {
-          "dependencies": [
-            "commonware-conformance"
-          ]
-        },
+        "src/config.rs": {},
+        "src/conformance.rs": {},
         "src/error.rs": {},
         "src/extensions.rs": {},
         "src/lib.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
+          "beta": "0.1.0",
+          "lts": "0.1.0"
         },
         "src/types/btree_map.rs": {},
         "src/types/btree_set.rs": {},
@@ -83,1128 +34,212 @@
         "src/types/tuple.rs": {},
         "src/types/vec.rs": {},
         "src/util.rs": {},
-        "src/varint.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        }
+        "src/varint.rs": {}
       }
     },
     "coding": {
       "modules": {
-        "src/benches/bench.rs": {
-          "dependencies": [
-            "commonware-coding",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/benches/bench_size.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-coding",
-            "commonware-cryptography",
-            "commonware-parallel"
-          ]
-        },
-        "src/benches/no_coding.rs": {
-          "dependencies": [
-            "commonware-coding",
-            "commonware-cryptography"
-          ]
-        },
-        "src/benches/reed_solomon.rs": {
-          "dependencies": [
-            "commonware-coding",
-            "commonware-cryptography"
-          ]
-        },
-        "src/benches/zoda.rs": {
-          "dependencies": [
-            "commonware-coding",
-            "commonware-cryptography"
-          ]
-        },
-        "src/lib.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-coding",
-            "commonware-cryptography",
-            "commonware-parallel"
-          ]
-        },
-        "src/no_coding.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-parallel"
-          ]
-        },
-        "src/reed_solomon.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-parallel",
-            "commonware-storage"
-          ]
-        },
-        "src/zoda.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        }
+        "src/benches/bench.rs": {},
+        "src/benches/bench_size.rs": {},
+        "src/benches/no_coding.rs": {},
+        "src/benches/reed_solomon.rs": {},
+        "src/benches/zoda.rs": {},
+        "src/lib.rs": {},
+        "src/no_coding.rs": {},
+        "src/reed_solomon.rs": {},
+        "src/zoda.rs": {}
       }
     },
     "collector": {
       "modules": {
-        "src/lib.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-p2p"
-          ]
-        },
-        "src/p2p/engine.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/p2p/ingress.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-p2p"
-          ]
-        },
-        "src/p2p/mocks/handler.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
+        "src/lib.rs": {},
+        "src/p2p/engine.rs": {},
+        "src/p2p/ingress.rs": {},
+        "src/p2p/mocks/handler.rs": {},
         "src/p2p/mocks/mod.rs": {},
-        "src/p2p/mocks/monitor.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/p2p/mocks/sender.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-p2p"
-          ]
-        },
-        "src/p2p/mocks/types.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography"
-          ]
-        },
-        "src/p2p/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        }
+        "src/p2p/mocks/monitor.rs": {},
+        "src/p2p/mocks/sender.rs": {},
+        "src/p2p/mocks/types.rs": {},
+        "src/p2p/mod.rs": {}
       }
     },
     "conformance": {
       "modules": {
-        "src/lib.rs": {
-          "dependencies": [
-            "commonware-conformance",
-            "commonware-conformance-macros",
-            "commonware-macros"
-          ]
-        }
+        "src/lib.rs": {}
       }
     },
     "consensus": {
       "modules": {
-        "src/aggregation/config.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/aggregation/engine.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/aggregation/metrics.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
-        "src/aggregation/mocks/application.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
+        "src/aggregation/config.rs": {},
+        "src/aggregation/engine.rs": {},
+        "src/aggregation/metrics.rs": {},
+        "src/aggregation/mocks/application.rs": {},
         "src/aggregation/mocks/mod.rs": {},
         "src/aggregation/mocks/monitor.rs": {},
-        "src/aggregation/mocks/provider.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/aggregation/mocks/reporter.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography"
-          ]
-        },
-        "src/aggregation/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/aggregation/safe_tip.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/aggregation/scheme.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/aggregation/types.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/application/marshaled.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
+        "src/aggregation/mocks/provider.rs": {},
+        "src/aggregation/mocks/reporter.rs": {},
+        "src/aggregation/mod.rs": {},
+        "src/aggregation/safe_tip.rs": {},
+        "src/aggregation/scheme.rs": {},
+        "src/aggregation/types.rs": {},
+        "src/application/marshaled.rs": {},
         "src/application/mod.rs": {},
-        "src/lib.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-runtime"
-          ]
-        },
-        "src/marshal/actor.rs": {
-          "dependencies": [
-            "commonware-broadcast",
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-resolver",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/marshal/cache.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-storage"
-          ]
-        },
-        "src/marshal/config.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime"
-          ]
-        },
-        "src/marshal/ingress/handler.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-resolver",
-            "commonware-utils"
-          ]
-        },
-        "src/marshal/ingress/mailbox.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
+        "src/lib.rs": {},
+        "src/marshal/actor.rs": {},
+        "src/marshal/cache.rs": {},
+        "src/marshal/config.rs": {},
+        "src/marshal/ingress/handler.rs": {},
+        "src/marshal/ingress/mailbox.rs": {},
         "src/marshal/ingress/mod.rs": {},
-        "src/marshal/mocks/application.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/marshal/mocks/block.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography"
-          ]
-        },
+        "src/marshal/mocks/application.rs": {},
+        "src/marshal/mocks/block.rs": {},
         "src/marshal/mocks/mod.rs": {},
         "src/marshal/mocks/resolver.rs": {},
-        "src/marshal/mod.rs": {
-          "dependencies": [
-            "commonware-broadcast",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
+        "src/marshal/mod.rs": {},
         "src/marshal/resolver/mod.rs": {},
-        "src/marshal/resolver/p2p.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-p2p",
-            "commonware-resolver",
-            "commonware-runtime"
-          ]
-        },
-        "src/marshal/store.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-storage"
-          ]
-        },
-        "src/ordered_broadcast/ack_manager.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/ordered_broadcast/config.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime"
-          ]
-        },
-        "src/ordered_broadcast/engine.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/ordered_broadcast/metrics.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime"
-          ]
-        },
-        "src/ordered_broadcast/mocks/automaton.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
+        "src/marshal/resolver/p2p.rs": {},
+        "src/marshal/store.rs": {},
+        "src/ordered_broadcast/ack_manager.rs": {},
+        "src/ordered_broadcast/config.rs": {},
+        "src/ordered_broadcast/engine.rs": {},
+        "src/ordered_broadcast/metrics.rs": {},
+        "src/ordered_broadcast/mocks/automaton.rs": {},
         "src/ordered_broadcast/mocks/mod.rs": {},
         "src/ordered_broadcast/mocks/monitor.rs": {},
-        "src/ordered_broadcast/mocks/provider.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/ordered_broadcast/mocks/reporter.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography"
-          ]
-        },
-        "src/ordered_broadcast/mocks/sequencers.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/ordered_broadcast/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/ordered_broadcast/scheme.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/ordered_broadcast/tip_manager.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
-        "src/ordered_broadcast/types.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/reporter.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/actors/batcher/actor.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/actors/batcher/ingress.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/simplex/actors/batcher/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/actors/batcher/round.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-p2p",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/actors/batcher/verifier.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
+        "src/ordered_broadcast/mocks/provider.rs": {},
+        "src/ordered_broadcast/mocks/reporter.rs": {},
+        "src/ordered_broadcast/mocks/sequencers.rs": {},
+        "src/ordered_broadcast/mod.rs": {},
+        "src/ordered_broadcast/scheme.rs": {},
+        "src/ordered_broadcast/tip_manager.rs": {},
+        "src/ordered_broadcast/types.rs": {},
+        "src/reporter.rs": {},
+        "src/simplex/actors/batcher/actor.rs": {},
+        "src/simplex/actors/batcher/ingress.rs": {},
+        "src/simplex/actors/batcher/mod.rs": {},
+        "src/simplex/actors/batcher/round.rs": {},
+        "src/simplex/actors/batcher/verifier.rs": {},
         "src/simplex/actors/mod.rs": {},
-        "src/simplex/actors/resolver/actor.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-resolver",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/actors/resolver/ingress.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-resolver",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/actors/resolver/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-p2p"
-          ]
-        },
-        "src/simplex/actors/resolver/state.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-resolver",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/actors/voter/actor.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/actors/voter/ingress.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/simplex/actors/voter/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/actors/voter/round.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/actors/voter/slot.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/simplex/actors/voter/state.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/config.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-p2p",
-            "commonware-runtime"
-          ]
-        },
-        "src/simplex/elector.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/engine.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime"
-          ]
-        },
-        "src/simplex/metrics.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/mocks/application.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime"
-          ]
-        },
-        "src/simplex/mocks/conflicter.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-p2p",
-            "commonware-runtime"
-          ]
-        },
-        "src/simplex/mocks/equivocator.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-p2p",
-            "commonware-runtime"
-          ]
-        },
-        "src/simplex/mocks/impersonator.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-p2p",
-            "commonware-runtime"
-          ]
-        },
+        "src/simplex/actors/resolver/actor.rs": {},
+        "src/simplex/actors/resolver/ingress.rs": {},
+        "src/simplex/actors/resolver/mod.rs": {},
+        "src/simplex/actors/resolver/state.rs": {},
+        "src/simplex/actors/voter/actor.rs": {},
+        "src/simplex/actors/voter/ingress.rs": {},
+        "src/simplex/actors/voter/mod.rs": {},
+        "src/simplex/actors/voter/round.rs": {},
+        "src/simplex/actors/voter/slot.rs": {},
+        "src/simplex/actors/voter/state.rs": {},
+        "src/simplex/config.rs": {},
+        "src/simplex/elector.rs": {},
+        "src/simplex/engine.rs": {},
+        "src/simplex/metrics.rs": {},
+        "src/simplex/mocks/application.rs": {},
+        "src/simplex/mocks/conflicter.rs": {},
+        "src/simplex/mocks/equivocator.rs": {},
+        "src/simplex/mocks/impersonator.rs": {},
         "src/simplex/mocks/mod.rs": {},
-        "src/simplex/mocks/nuller.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-p2p",
-            "commonware-runtime"
-          ]
-        },
-        "src/simplex/mocks/nullify_only.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-p2p",
-            "commonware-runtime"
-          ]
-        },
-        "src/simplex/mocks/outdated.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-p2p",
-            "commonware-runtime"
-          ]
-        },
-        "src/simplex/mocks/reconfigurer.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-p2p",
-            "commonware-runtime"
-          ]
-        },
-        "src/simplex/mocks/relay.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/simplex/mocks/reporter.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/mocks/twins.rs": {
-          "dependencies": [
-            "commonware-p2p"
-          ]
-        },
-        "src/simplex/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/scheme/bls12381_multisig.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/simplex/scheme/bls12381_threshold.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/scheme/ed25519.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/simplex/scheme/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/simplex/scheme/reporter.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/simplex/scheme/secp256r1.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/simplex/types.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/types.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-consensus",
-            "commonware-utils"
-          ]
-        }
+        "src/simplex/mocks/nuller.rs": {},
+        "src/simplex/mocks/nullify_only.rs": {},
+        "src/simplex/mocks/outdated.rs": {},
+        "src/simplex/mocks/reconfigurer.rs": {},
+        "src/simplex/mocks/relay.rs": {},
+        "src/simplex/mocks/reporter.rs": {},
+        "src/simplex/mocks/twins.rs": {},
+        "src/simplex/mod.rs": {},
+        "src/simplex/scheme/bls12381_multisig.rs": {},
+        "src/simplex/scheme/bls12381_threshold.rs": {},
+        "src/simplex/scheme/ed25519.rs": {},
+        "src/simplex/scheme/mod.rs": {},
+        "src/simplex/scheme/reporter.rs": {},
+        "src/simplex/scheme/secp256r1.rs": {},
+        "src/simplex/types.rs": {},
+        "src/types.rs": {}
       }
     },
     "cryptography": {
       "modules": {
         "src/blake3/benches/bench.rs": {},
-        "src/blake3/benches/hash_message.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/blake3/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
-        "src/bloomfilter.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/benches/aggregate_verify_same_message.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/bls12381/benches/aggregate_verify_same_signer.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-parallel"
-          ]
-        },
-        "src/bls12381/benches/batch_verify_same_signer.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-parallel"
-          ]
-        },
+        "src/blake3/benches/hash_message.rs": {},
+        "src/blake3/mod.rs": {},
+        "src/bloomfilter.rs": {},
+        "src/bls12381/benches/aggregate_verify_same_message.rs": {},
+        "src/bls12381/benches/aggregate_verify_same_signer.rs": {},
+        "src/bls12381/benches/batch_verify_same_signer.rs": {},
         "src/bls12381/benches/bench.rs": {},
-        "src/bls12381/benches/combine_public_keys.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/bls12381/benches/combine_signatures.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/bls12381/benches/dkg.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/benches/evaluate_point.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/benches/scheme_batch_verify_same_message.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math"
-          ]
-        },
-        "src/bls12381/benches/scheme_batch_verify_same_signer.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math"
-          ]
-        },
-        "src/bls12381/benches/signature_generation.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math"
-          ]
-        },
-        "src/bls12381/benches/signature_verification.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math"
-          ]
-        },
-        "src/bls12381/benches/threshold_batch_verify_same_message.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/benches/threshold_batch_verify_same_message_precomputed.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/benches/threshold_recover.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/benches/tle_decrypt.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/bls12381/benches/tle_encrypt.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
+        "src/bls12381/benches/combine_public_keys.rs": {},
+        "src/bls12381/benches/combine_signatures.rs": {},
+        "src/bls12381/benches/dkg.rs": {},
+        "src/bls12381/benches/evaluate_point.rs": {},
+        "src/bls12381/benches/scheme_batch_verify_same_message.rs": {},
+        "src/bls12381/benches/scheme_batch_verify_same_signer.rs": {},
+        "src/bls12381/benches/signature_generation.rs": {},
+        "src/bls12381/benches/signature_verification.rs": {},
+        "src/bls12381/benches/threshold_batch_verify_same_message.rs": {},
+        "src/bls12381/benches/threshold_batch_verify_same_message_precomputed.rs": {},
+        "src/bls12381/benches/threshold_recover.rs": {},
+        "src/bls12381/benches/tle_decrypt.rs": {},
+        "src/bls12381/benches/tle_encrypt.rs": {},
         "src/bls12381/certificate/mod.rs": {},
-        "src/bls12381/certificate/multisig/mocks.rs": {
-          "dependencies": [
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/certificate/multisig/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/certificate/threshold/mocks.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/certificate/threshold/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/dkg.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
+        "src/bls12381/certificate/multisig/mocks.rs": {},
+        "src/bls12381/certificate/multisig/mod.rs": {},
+        "src/bls12381/certificate/threshold/mocks.rs": {},
+        "src/bls12381/certificate/threshold/mod.rs": {},
+        "src/bls12381/dkg.rs": {},
         "src/bls12381/mod.rs": {},
-        "src/bls12381/primitives/group.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/primitives/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/primitives/ops/aggregate.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/primitives/ops/batch.rs": {
-          "dependencies": [
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/primitives/ops/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/primitives/ops/threshold.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/primitives/sharing.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/primitives/variant.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/scheme.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/bls12381/tle.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
-        "src/certificate.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/ed25519/benches/batch_verify_same_message.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math"
-          ]
-        },
-        "src/ed25519/benches/batch_verify_same_signer.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math"
-          ]
-        },
+        "src/bls12381/primitives/group.rs": {},
+        "src/bls12381/primitives/mod.rs": {},
+        "src/bls12381/primitives/ops/aggregate.rs": {},
+        "src/bls12381/primitives/ops/batch.rs": {},
+        "src/bls12381/primitives/ops/mod.rs": {},
+        "src/bls12381/primitives/ops/threshold.rs": {},
+        "src/bls12381/primitives/sharing.rs": {},
+        "src/bls12381/primitives/variant.rs": {},
+        "src/bls12381/scheme.rs": {},
+        "src/bls12381/tle.rs": {},
+        "src/certificate.rs": {},
+        "src/ed25519/benches/batch_verify_same_message.rs": {},
+        "src/ed25519/benches/batch_verify_same_signer.rs": {},
         "src/ed25519/benches/bench.rs": {},
-        "src/ed25519/benches/signature_generation.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math"
-          ]
-        },
-        "src/ed25519/benches/signature_verification.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math"
-          ]
-        },
-        "src/ed25519/certificate/mocks.rs": {
-          "dependencies": [
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
-        "src/ed25519/certificate/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
-        "src/ed25519/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math"
-          ]
-        },
-        "src/ed25519/scheme.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
-        "src/handshake.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math"
-          ]
-        },
-        "src/handshake/benches/bench.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math"
-          ]
-        },
+        "src/ed25519/benches/signature_generation.rs": {},
+        "src/ed25519/benches/signature_verification.rs": {},
+        "src/ed25519/certificate/mocks.rs": {},
+        "src/ed25519/certificate/mod.rs": {},
+        "src/ed25519/mod.rs": {},
+        "src/ed25519/scheme.rs": {},
+        "src/handshake.rs": {},
+        "src/handshake/benches/bench.rs": {},
         "src/handshake/benches/handshake.rs": {},
         "src/handshake/benches/transport.rs": {},
         "src/handshake/cipher.rs": {},
-        "src/handshake/conformance.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-conformance",
-            "commonware-math"
-          ]
-        },
+        "src/handshake/conformance.rs": {},
         "src/handshake/error.rs": {},
-        "src/handshake/key_exchange.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
+        "src/handshake/key_exchange.rs": {},
         "src/lib.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-utils"
-          ]
+          "beta": "0.1.0",
+          "lts": "0.1.0"
         },
-        "src/lthash/benches/add.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
+        "src/lthash/benches/add.rs": {},
         "src/lthash/benches/bench.rs": {},
-        "src/lthash/benches/checksum.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/lthash/benches/combine.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/lthash/benches/subtract.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/lthash/benches/update.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/lthash/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography"
-          ]
-        },
+        "src/lthash/benches/checksum.rs": {},
+        "src/lthash/benches/combine.rs": {},
+        "src/lthash/benches/subtract.rs": {},
+        "src/lthash/benches/update.rs": {},
+        "src/lthash/mod.rs": {},
         "src/secp256r1/benches/bench.rs": {},
-        "src/secp256r1/benches/signature_generation.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/secp256r1/benches/signature_verification.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/secp256r1/certificate/mocks.rs": {
-          "dependencies": [
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
-        "src/secp256r1/certificate/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
-        "src/secp256r1/common.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
-        "src/secp256r1/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math"
-          ]
-        },
-        "src/secp256r1/recoverable.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
-        "src/secp256r1/standard.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
+        "src/secp256r1/benches/signature_generation.rs": {},
+        "src/secp256r1/benches/signature_verification.rs": {},
+        "src/secp256r1/certificate/mocks.rs": {},
+        "src/secp256r1/certificate/mod.rs": {},
+        "src/secp256r1/common.rs": {},
+        "src/secp256r1/mod.rs": {},
+        "src/secp256r1/recoverable.rs": {},
+        "src/secp256r1/standard.rs": {},
         "src/secret.rs": {},
         "src/sha256/benches/bench.rs": {},
-        "src/sha256/benches/hash_message.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/sha256/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-utils"
-          ]
-        },
-        "src/transcript.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-utils"
-          ]
-        }
+        "src/sha256/benches/hash_message.rs": {},
+        "src/sha256/mod.rs": {},
+        "src/transcript.rs": {}
       }
     },
     "deployer": {
@@ -1224,10 +259,8 @@
     "macros": {
       "modules": {
         "src/lib.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-runtime"
-          ]
+          "beta": "0.1.0",
+          "lts": "0.1.0"
         },
         "src/nextest.rs": {}
       }
@@ -1235,653 +268,142 @@
     "math": {
       "modules": {
         "src/algebra.rs": {
-          "dependencies": [
-            "commonware-math",
-            "commonware-parallel"
-          ]
+          "beta": "0.1.0",
+          "lts": "0.1.0"
         },
-        "src/fields/goldilocks.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
+        "src/fields/goldilocks.rs": {},
         "src/lib.rs": {},
-        "src/ntt.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/poly.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-math",
-            "commonware-parallel",
-            "commonware-utils"
-          ]
-        },
-        "src/test.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        }
+        "src/ntt.rs": {},
+        "src/poly.rs": {},
+        "src/test.rs": {}
       }
     },
     "p2p": {
       "modules": {
-        "src/authenticated/data.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
-        "src/authenticated/discovery/actors/dialer.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-stream",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/discovery/actors/listener.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-stream",
-            "commonware-utils"
-          ]
-        },
+        "src/authenticated/data.rs": {},
+        "src/authenticated/discovery/actors/dialer.rs": {},
+        "src/authenticated/discovery/actors/listener.rs": {},
         "src/authenticated/discovery/actors/mod.rs": {},
-        "src/authenticated/discovery/actors/peer/actor.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-stream",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/discovery/actors/peer/ingress.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/discovery/actors/peer/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography"
-          ]
-        },
-        "src/authenticated/discovery/actors/router/actor.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/discovery/actors/router/ingress.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
+        "src/authenticated/discovery/actors/peer/actor.rs": {},
+        "src/authenticated/discovery/actors/peer/ingress.rs": {},
+        "src/authenticated/discovery/actors/peer/mod.rs": {},
+        "src/authenticated/discovery/actors/router/actor.rs": {},
+        "src/authenticated/discovery/actors/router/ingress.rs": {},
         "src/authenticated/discovery/actors/router/mod.rs": {},
-        "src/authenticated/discovery/actors/spawner/actor.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime"
-          ]
-        },
-        "src/authenticated/discovery/actors/spawner/ingress.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-stream",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/discovery/actors/spawner/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/authenticated/discovery/actors/tracker/actor.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/discovery/actors/tracker/directory.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/discovery/actors/tracker/ingress.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/discovery/actors/tracker/metadata.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/authenticated/discovery/actors/tracker/metrics.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
-        "src/authenticated/discovery/actors/tracker/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime"
-          ]
-        },
-        "src/authenticated/discovery/actors/tracker/record.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/authenticated/discovery/actors/tracker/reservation.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/authenticated/discovery/actors/tracker/set.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/discovery/channels.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime"
-          ]
-        },
-        "src/authenticated/discovery/config.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/discovery/metrics.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/discovery/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/discovery/network.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-stream",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/discovery/types.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/lookup/actors/dialer.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-stream",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/lookup/actors/listener.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-stream",
-            "commonware-utils"
-          ]
-        },
+        "src/authenticated/discovery/actors/spawner/actor.rs": {},
+        "src/authenticated/discovery/actors/spawner/ingress.rs": {},
+        "src/authenticated/discovery/actors/spawner/mod.rs": {},
+        "src/authenticated/discovery/actors/tracker/actor.rs": {},
+        "src/authenticated/discovery/actors/tracker/directory.rs": {},
+        "src/authenticated/discovery/actors/tracker/ingress.rs": {},
+        "src/authenticated/discovery/actors/tracker/metadata.rs": {},
+        "src/authenticated/discovery/actors/tracker/metrics.rs": {},
+        "src/authenticated/discovery/actors/tracker/mod.rs": {},
+        "src/authenticated/discovery/actors/tracker/record.rs": {},
+        "src/authenticated/discovery/actors/tracker/reservation.rs": {},
+        "src/authenticated/discovery/actors/tracker/set.rs": {},
+        "src/authenticated/discovery/channels.rs": {},
+        "src/authenticated/discovery/config.rs": {},
+        "src/authenticated/discovery/metrics.rs": {},
+        "src/authenticated/discovery/mod.rs": {},
+        "src/authenticated/discovery/network.rs": {},
+        "src/authenticated/discovery/types.rs": {},
+        "src/authenticated/lookup/actors/dialer.rs": {},
+        "src/authenticated/lookup/actors/listener.rs": {},
         "src/authenticated/lookup/actors/mod.rs": {},
-        "src/authenticated/lookup/actors/peer/actor.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-stream",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/lookup/actors/peer/ingress.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/lookup/actors/peer/mod.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
-        "src/authenticated/lookup/actors/router/actor.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/lookup/actors/router/ingress.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
+        "src/authenticated/lookup/actors/peer/actor.rs": {},
+        "src/authenticated/lookup/actors/peer/ingress.rs": {},
+        "src/authenticated/lookup/actors/peer/mod.rs": {},
+        "src/authenticated/lookup/actors/router/actor.rs": {},
+        "src/authenticated/lookup/actors/router/ingress.rs": {},
         "src/authenticated/lookup/actors/router/mod.rs": {},
-        "src/authenticated/lookup/actors/spawner/actor.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime"
-          ]
-        },
-        "src/authenticated/lookup/actors/spawner/ingress.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-stream",
-            "commonware-utils"
-          ]
-        },
+        "src/authenticated/lookup/actors/spawner/actor.rs": {},
+        "src/authenticated/lookup/actors/spawner/ingress.rs": {},
         "src/authenticated/lookup/actors/spawner/mod.rs": {},
-        "src/authenticated/lookup/actors/tracker/actor.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/lookup/actors/tracker/directory.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/lookup/actors/tracker/ingress.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/lookup/actors/tracker/metadata.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/authenticated/lookup/actors/tracker/metrics.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
-        "src/authenticated/lookup/actors/tracker/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime"
-          ]
-        },
+        "src/authenticated/lookup/actors/tracker/actor.rs": {},
+        "src/authenticated/lookup/actors/tracker/directory.rs": {},
+        "src/authenticated/lookup/actors/tracker/ingress.rs": {},
+        "src/authenticated/lookup/actors/tracker/metadata.rs": {},
+        "src/authenticated/lookup/actors/tracker/metrics.rs": {},
+        "src/authenticated/lookup/actors/tracker/mod.rs": {},
         "src/authenticated/lookup/actors/tracker/record.rs": {},
-        "src/authenticated/lookup/actors/tracker/reservation.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/authenticated/lookup/channels.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime"
-          ]
-        },
-        "src/authenticated/lookup/config.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/lookup/metrics.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/lookup/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/lookup/network.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-stream",
-            "commonware-utils"
-          ]
-        },
-        "src/authenticated/lookup/types.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
+        "src/authenticated/lookup/actors/tracker/reservation.rs": {},
+        "src/authenticated/lookup/channels.rs": {},
+        "src/authenticated/lookup/config.rs": {},
+        "src/authenticated/lookup/metrics.rs": {},
+        "src/authenticated/lookup/mod.rs": {},
+        "src/authenticated/lookup/network.rs": {},
+        "src/authenticated/lookup/types.rs": {},
         "src/authenticated/mailbox.rs": {},
         "src/authenticated/mod.rs": {},
-        "src/authenticated/relay.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
-        "src/lib.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/simulated/bandwidth.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/simulated/ingress.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/simulated/metrics.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/simulated/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/simulated/network.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-stream",
-            "commonware-utils"
-          ]
-        },
-        "src/simulated/transmitter.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/types.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/utils/codec.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
-        "src/utils/limited.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/utils/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/utils/mux.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        }
+        "src/authenticated/relay.rs": {},
+        "src/lib.rs": {},
+        "src/simulated/bandwidth.rs": {},
+        "src/simulated/ingress.rs": {},
+        "src/simulated/metrics.rs": {},
+        "src/simulated/mod.rs": {},
+        "src/simulated/network.rs": {},
+        "src/simulated/transmitter.rs": {},
+        "src/types.rs": {},
+        "src/utils/codec.rs": {},
+        "src/utils/limited.rs": {},
+        "src/utils/mod.rs": {},
+        "src/utils/mux.rs": {}
       }
     },
     "parallel": {
       "modules": {
         "src/lib.rs": {
-          "dependencies": [
-            "commonware-parallel"
-          ]
+          "beta": "0.1.0",
+          "lts": "0.1.0"
         }
       }
     },
     "resolver": {
       "modules": {
-        "src/lib.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/p2p/config.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-p2p",
-            "commonware-utils"
-          ]
-        },
-        "src/p2p/engine.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/p2p/fetcher.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/p2p/ingress.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/p2p/metrics.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
+        "src/lib.rs": {},
+        "src/p2p/config.rs": {},
+        "src/p2p/engine.rs": {},
+        "src/p2p/fetcher.rs": {},
+        "src/p2p/ingress.rs": {},
+        "src/p2p/metrics.rs": {},
         "src/p2p/mocks/consumer.rs": {},
-        "src/p2p/mocks/key.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
+        "src/p2p/mocks/key.rs": {},
         "src/p2p/mocks/mod.rs": {},
         "src/p2p/mocks/producer.rs": {},
-        "src/p2p/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-p2p",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/p2p/wire.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        }
+        "src/p2p/mod.rs": {},
+        "src/p2p/wire.rs": {}
       }
     },
     "runtime": {
       "modules": {
         "src/benchmarks/context.rs": {},
         "src/benchmarks/mod.rs": {},
-        "src/benchmarks/tokio.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
-        "src/deterministic.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-macros",
-            "commonware-parallel",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/iouring/mod.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
+        "src/benchmarks/tokio.rs": {},
+        "src/deterministic.rs": {},
+        "src/iouring/mod.rs": {},
         "src/lib.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-parallel",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
+          "beta": "0.1.0",
+          "lts": "0.1.0"
         },
         "src/macros.rs": {},
-        "src/mocks.rs": {
-          "dependencies": [
-            "commonware-macros"
-          ]
-        },
-        "src/network/audited.rs": {
-          "dependencies": [
-            "commonware-macros"
-          ]
-        },
-        "src/network/deterministic.rs": {
-          "dependencies": [
-            "commonware-macros"
-          ]
-        },
-        "src/network/iouring.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-utils"
-          ]
-        },
-        "src/network/metered.rs": {
-          "dependencies": [
-            "commonware-macros"
-          ]
-        },
+        "src/mocks.rs": {},
+        "src/network/audited.rs": {},
+        "src/network/deterministic.rs": {},
+        "src/network/iouring.rs": {},
+        "src/network/metered.rs": {},
         "src/network/mod.rs": {},
-        "src/network/tokio.rs": {
-          "dependencies": [
-            "commonware-macros"
-          ]
-        },
+        "src/network/tokio.rs": {},
         "src/process/metered.rs": {},
         "src/process/mod.rs": {},
-        "src/storage/audited.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/storage/iouring.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/storage/memory.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/storage/metered.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/storage/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/storage/tokio/fallback.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/storage/tokio/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/storage/tokio/unix.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
+        "src/storage/audited.rs": {},
+        "src/storage/iouring.rs": {},
+        "src/storage/memory.rs": {},
+        "src/storage/metered.rs": {},
+        "src/storage/mod.rs": {},
+        "src/storage/tokio/fallback.rs": {},
+        "src/storage/tokio/mod.rs": {},
+        "src/storage/tokio/unix.rs": {},
         "src/telemetry/metrics/histogram.rs": {},
         "src/telemetry/metrics/mod.rs": {},
         "src/telemetry/metrics/status.rs": {},
@@ -1890,382 +412,108 @@
         "src/telemetry/traces/collector.rs": {},
         "src/telemetry/traces/mod.rs": {},
         "src/telemetry/traces/status.rs": {},
-        "src/tokio/mod.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
-        "src/tokio/runtime.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-parallel"
-          ]
-        },
+        "src/tokio/mod.rs": {},
+        "src/tokio/runtime.rs": {},
         "src/tokio/telemetry.rs": {},
         "src/tokio/tracing.rs": {},
-        "src/utils/buffer/mod.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-utils"
-          ]
-        },
-        "src/utils/buffer/pool/append.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-macros",
-            "commonware-utils"
-          ]
-        },
-        "src/utils/buffer/pool/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
+        "src/utils/buffer/mod.rs": {},
+        "src/utils/buffer/pool/append.rs": {},
+        "src/utils/buffer/pool/mod.rs": {},
         "src/utils/buffer/pool/page_cache.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-utils"
-          ]
+          "beta": "0.1.0",
+          "lts": "0.1.0"
         },
-        "src/utils/buffer/pool/read.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-utils"
-          ]
-        },
-        "src/utils/buffer/read.rs": {
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
+        "src/utils/buffer/pool/read.rs": {},
+        "src/utils/buffer/read.rs": {},
         "src/utils/buffer/tip.rs": {},
-        "src/utils/buffer/write.rs": {
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/utils/cell.rs": {
-          "dependencies": [
-            "commonware-parallel"
-          ]
-        },
+        "src/utils/buffer/write.rs": {},
+        "src/utils/cell.rs": {},
         "src/utils/handle.rs": {},
-        "src/utils/mod.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-runtime"
-          ]
-        },
-        "src/utils/signal.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-runtime"
-          ]
-        },
+        "src/utils/mod.rs": {},
+        "src/utils/signal.rs": {},
         "src/utils/supervision.rs": {}
       }
     },
     "storage": {
       "modules": {
         "src/archive/benches/bench.rs": {},
-        "src/archive/benches/get.rs": {
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage"
-          ]
-        },
-        "src/archive/benches/put.rs": {
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage"
-          ]
-        },
-        "src/archive/benches/restart.rs": {
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage"
-          ]
-        },
-        "src/archive/benches/utils.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/archive/conformance.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-conformance",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/archive/immutable/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/archive/immutable/storage.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/archive/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/archive/prunable/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/archive/prunable/storage.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/bitmap/authenticated.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-parallel",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
+        "src/archive/benches/get.rs": {},
+        "src/archive/benches/put.rs": {},
+        "src/archive/benches/restart.rs": {},
+        "src/archive/benches/utils.rs": {},
+        "src/archive/conformance.rs": {},
+        "src/archive/immutable/mod.rs": {},
+        "src/archive/immutable/storage.rs": {},
+        "src/archive/mod.rs": {},
+        "src/archive/prunable/mod.rs": {},
+        "src/archive/prunable/storage.rs": {},
+        "src/bitmap/authenticated.rs": {},
         "src/bitmap/mod.rs": {},
         "src/bmt/benches/bench.rs": {},
-        "src/bmt/benches/build.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-storage"
-          ]
-        },
-        "src/bmt/benches/prove_range.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-storage"
-          ]
-        },
-        "src/bmt/benches/prove_single.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-storage"
-          ]
-        },
-        "src/bmt/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/cache/mod.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/cache/storage.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-runtime"
-          ]
-        },
+        "src/bmt/benches/build.rs": {},
+        "src/bmt/benches/prove_range.rs": {},
+        "src/bmt/benches/prove_single.rs": {},
+        "src/bmt/mod.rs": {},
+        "src/cache/mod.rs": {},
+        "src/cache/storage.rs": {},
         "src/freezer/benches/bench.rs": {},
-        "src/freezer/benches/get.rs": {
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage"
-          ]
-        },
-        "src/freezer/benches/put.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
-        "src/freezer/benches/restart.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
-        "src/freezer/benches/utils.rs": {
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/freezer/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/freezer/storage.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
+        "src/freezer/benches/get.rs": {},
+        "src/freezer/benches/put.rs": {},
+        "src/freezer/benches/restart.rs": {},
+        "src/freezer/benches/utils.rs": {},
+        "src/freezer/mod.rs": {},
+        "src/freezer/storage.rs": {},
         "src/index/benches/bench.rs": {},
         "src/index/benches/hashmap_insert.rs": {},
         "src/index/benches/hashmap_insert_fixed.rs": {},
         "src/index/benches/hashmap_iteration.rs": {},
-        "src/index/benches/insert.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-storage"
-          ]
-        },
-        "src/index/mod.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-runtime"
-          ]
-        },
-        "src/index/ordered.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
+        "src/index/benches/insert.rs": {},
+        "src/index/mod.rs": {},
+        "src/index/ordered.rs": {},
         "src/index/partitioned/mod.rs": {},
-        "src/index/partitioned/ordered.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/index/partitioned/unordered.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
+        "src/index/partitioned/ordered.rs": {},
+        "src/index/partitioned/unordered.rs": {},
         "src/index/storage.rs": {},
-        "src/index/unordered.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
+        "src/index/unordered.rs": {},
         "src/journal/authenticated.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/benches/bench.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/benches/fixed_append.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/benches/fixed_read_random.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/benches/fixed_read_sequential.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/benches/fixed_replay.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/conformance.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-codec",
-            "commonware-conformance",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/contiguous/fixed.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/contiguous/mod.rs": {
           "beta": "0.1.0",
@@ -2275,21 +523,12 @@
         "src/journal/contiguous/tests.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/contiguous/variable.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-codec",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/mod.rs": {
           "beta": "0.1.0",
@@ -2298,34 +537,17 @@
         "src/journal/segmented/fixed.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/segmented/glob.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-codec",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/segmented/manager.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/segmented/mod.rs": {
           "beta": "0.1.0",
@@ -2335,611 +557,110 @@
         "src/journal/segmented/oversized.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-codec",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
         "src/journal/segmented/variable.rs": {
           "beta": "0.1.0",
           "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs",
-          "dependencies": [
-            "commonware-codec",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
+          "inherited_from": "src/journal/mod.rs"
         },
-        "src/kv/batch.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
+        "src/kv/batch.rs": {},
         "src/kv/mod.rs": {},
         "src/lib.rs": {},
         "src/metadata/benches/bench.rs": {},
-        "src/metadata/benches/restart.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
-        "src/metadata/benches/sync.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
-        "src/metadata/benches/utils.rs": {
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/metadata/mod.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/metadata/storage.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/mmr/benches/append.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-storage"
-          ]
-        },
-        "src/mmr/benches/append_additional.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-storage"
-          ]
-        },
+        "src/metadata/benches/restart.rs": {},
+        "src/metadata/benches/sync.rs": {},
+        "src/metadata/benches/utils.rs": {},
+        "src/metadata/mod.rs": {},
+        "src/metadata/storage.rs": {},
+        "src/mmr/benches/append.rs": {},
+        "src/mmr/benches/append_additional.rs": {},
         "src/mmr/benches/bench.rs": {},
-        "src/mmr/benches/prove_many_elements.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-storage"
-          ]
-        },
-        "src/mmr/benches/prove_single_element.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-storage"
-          ]
-        },
-        "src/mmr/benches/update.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-math",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/mmr/grafting.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/mmr/hasher.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/mmr/iterator.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/mmr/journaled.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-parallel",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/mmr/location.rs": {
-          "dependencies": [
-            "commonware-storage"
-          ]
-        },
-        "src/mmr/mem.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-parallel",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
+        "src/mmr/benches/prove_many_elements.rs": {},
+        "src/mmr/benches/prove_single_element.rs": {},
+        "src/mmr/benches/update.rs": {},
+        "src/mmr/grafting.rs": {},
+        "src/mmr/hasher.rs": {},
+        "src/mmr/iterator.rs": {},
+        "src/mmr/journaled.rs": {},
+        "src/mmr/location.rs": {},
+        "src/mmr/mem.rs": {},
         "src/mmr/mod.rs": {},
-        "src/mmr/position.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-storage"
-          ]
-        },
-        "src/mmr/proof.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros"
-          ]
-        },
-        "src/mmr/stability.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/mmr/storage.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/mmr/verification.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime"
-          ]
-        },
+        "src/mmr/position.rs": {},
+        "src/mmr/proof.rs": {},
+        "src/mmr/stability.rs": {},
+        "src/mmr/storage.rs": {},
+        "src/mmr/verification.rs": {},
         "src/ordinal/benches/bench.rs": {},
-        "src/ordinal/benches/get.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
-        "src/ordinal/benches/put.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
-        "src/ordinal/benches/restart.rs": {
-          "dependencies": [
-            "commonware-runtime"
-          ]
-        },
-        "src/ordinal/benches/utils.rs": {
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/ordinal/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/ordinal/storage.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/db.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-parallel",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/operation/fixed.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/operation/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/operation/update/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/operation/update/ordered.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/operation/update/unordered.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/operation/variable.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/ordered/fixed.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-math",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/ordered/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/ordered/variable.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/states.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/unordered/fixed/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-math",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/unordered/fixed/sync.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/unordered/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/unordered/sync_tests.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/unordered/variable/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-math",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/unordered/variable/sync.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-math",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/any/value.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
+        "src/ordinal/benches/get.rs": {},
+        "src/ordinal/benches/put.rs": {},
+        "src/ordinal/benches/restart.rs": {},
+        "src/ordinal/benches/utils.rs": {},
+        "src/ordinal/mod.rs": {},
+        "src/ordinal/storage.rs": {},
+        "src/qmdb/any/db.rs": {},
+        "src/qmdb/any/mod.rs": {},
+        "src/qmdb/any/operation/fixed.rs": {},
+        "src/qmdb/any/operation/mod.rs": {},
+        "src/qmdb/any/operation/update/mod.rs": {},
+        "src/qmdb/any/operation/update/ordered.rs": {},
+        "src/qmdb/any/operation/update/unordered.rs": {},
+        "src/qmdb/any/operation/variable.rs": {},
+        "src/qmdb/any/ordered/fixed.rs": {},
+        "src/qmdb/any/ordered/mod.rs": {},
+        "src/qmdb/any/ordered/variable.rs": {},
+        "src/qmdb/any/states.rs": {},
+        "src/qmdb/any/unordered/fixed/mod.rs": {},
+        "src/qmdb/any/unordered/fixed/sync.rs": {},
+        "src/qmdb/any/unordered/mod.rs": {},
+        "src/qmdb/any/unordered/sync_tests.rs": {},
+        "src/qmdb/any/unordered/variable/mod.rs": {},
+        "src/qmdb/any/unordered/variable/sync.rs": {},
+        "src/qmdb/any/value.rs": {},
         "src/qmdb/benches/bench.rs": {},
-        "src/qmdb/benches/fixed/generate.rs": {
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage"
-          ]
-        },
-        "src/qmdb/benches/fixed/init.rs": {
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage"
-          ]
-        },
-        "src/qmdb/benches/fixed/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-parallel",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/benches/keyless_generate.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-parallel",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/benches/variable/generate.rs": {
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage"
-          ]
-        },
-        "src/qmdb/benches/variable/init.rs": {
-          "dependencies": [
-            "commonware-runtime",
-            "commonware-storage"
-          ]
-        },
-        "src/qmdb/benches/variable/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-parallel",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/current/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-parallel",
-            "commonware-runtime"
-          ]
-        },
-        "src/qmdb/current/ordered/fixed.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/current/ordered/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/current/proof.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-runtime"
-          ]
-        },
-        "src/qmdb/current/unordered/fixed.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
+        "src/qmdb/benches/fixed/generate.rs": {},
+        "src/qmdb/benches/fixed/init.rs": {},
+        "src/qmdb/benches/fixed/mod.rs": {},
+        "src/qmdb/benches/keyless_generate.rs": {},
+        "src/qmdb/benches/variable/generate.rs": {},
+        "src/qmdb/benches/variable/init.rs": {},
+        "src/qmdb/benches/variable/mod.rs": {},
+        "src/qmdb/current/mod.rs": {},
+        "src/qmdb/current/ordered/fixed.rs": {},
+        "src/qmdb/current/ordered/mod.rs": {},
+        "src/qmdb/current/proof.rs": {},
+        "src/qmdb/current/unordered/fixed.rs": {},
         "src/qmdb/current/unordered/mod.rs": {},
-        "src/qmdb/immutable/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-parallel",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/immutable/operation.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/immutable/sync/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-math",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/keyless/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-parallel",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/keyless/operation.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/mod.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/operation.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/store/batch.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/store/db.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-math",
-            "commonware-runtime",
-            "commonware-storage",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/store/mod.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography"
-          ]
-        },
-        "src/qmdb/sync/database.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/qmdb/sync/engine.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/sync/error.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
+        "src/qmdb/immutable/mod.rs": {},
+        "src/qmdb/immutable/operation.rs": {},
+        "src/qmdb/immutable/sync/mod.rs": {},
+        "src/qmdb/keyless/mod.rs": {},
+        "src/qmdb/keyless/operation.rs": {},
+        "src/qmdb/mod.rs": {},
+        "src/qmdb/operation.rs": {},
+        "src/qmdb/store/batch.rs": {},
+        "src/qmdb/store/db.rs": {},
+        "src/qmdb/store/mod.rs": {},
+        "src/qmdb/sync/database.rs": {},
+        "src/qmdb/sync/engine.rs": {},
+        "src/qmdb/sync/error.rs": {},
         "src/qmdb/sync/gaps.rs": {},
         "src/qmdb/sync/journal.rs": {},
-        "src/qmdb/sync/mod.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
-        "src/qmdb/sync/requests.rs": {
-          "dependencies": [
-            "commonware-cryptography"
-          ]
-        },
-        "src/qmdb/sync/resolver.rs": {
-          "dependencies": [
-            "commonware-cryptography",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/qmdb/sync/target.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography"
-          ]
-        },
-        "src/qmdb/verify.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime"
-          ]
-        },
+        "src/qmdb/sync/mod.rs": {},
+        "src/qmdb/sync/requests.rs": {},
+        "src/qmdb/sync/resolver.rs": {},
+        "src/qmdb/sync/target.rs": {},
+        "src/qmdb/verify.rs": {},
         "src/rmap/benches/bench.rs": {},
-        "src/rmap/benches/insert.rs": {
-          "dependencies": [
-            "commonware-storage"
-          ]
-        },
-        "src/rmap/mod.rs": {
-          "dependencies": [
-            "commonware-storage"
-          ]
-        },
+        "src/rmap/benches/insert.rs": {},
+        "src/rmap/mod.rs": {},
         "src/translator.rs": {}
       }
     },
     "stream": {
       "modules": {
-        "src/lib.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-cryptography",
-            "commonware-macros",
-            "commonware-runtime",
-            "commonware-utils"
-          ]
-        },
-        "src/utils/codec.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-runtime"
-          ]
-        },
+        "src/lib.rs": {},
+        "src/utils/codec.rs": {},
         "src/utils/mod.rs": {}
       }
     },
@@ -2947,405 +668,52 @@
       "modules": {
         "src/acknowledgement.rs": {},
         "src/benches/bench.rs": {},
-        "src/benches/log2_ceil.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/bitmap/historical/batch.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/bitmap/historical/bitmap.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
+        "src/benches/log2_ceil.rs": {},
+        "src/bitmap/historical/batch.rs": {},
+        "src/bitmap/historical/bitmap.rs": {},
         "src/bitmap/historical/error.rs": {},
-        "src/bitmap/historical/mod.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
+        "src/bitmap/historical/mod.rs": {},
         "src/bitmap/historical/tests.rs": {},
-        "src/bitmap/mod.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
-        "src/bitmap/prunable.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
-        "src/channels/fallible.rs": {
-          "dependencies": [
-            "commonware-macros",
-            "commonware-utils"
-          ]
-        },
+        "src/bitmap/mod.rs": {},
+        "src/bitmap/prunable.rs": {},
+        "src/channels/fallible.rs": {},
         "src/channels/mod.rs": {},
-        "src/channels/ring.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/channels/tracked.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
+        "src/channels/ring.rs": {},
+        "src/channels/tracked.rs": {},
         "src/concurrency.rs": {},
-        "src/futures.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
+        "src/futures.rs": {},
         "src/hex_literal.rs": {},
-        "src/hostname.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        },
+        "src/hostname.rs": {},
         "src/lib.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
+          "beta": "0.1.0",
+          "lts": "0.1.0"
         },
         "src/net.rs": {},
-        "src/ordered.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
+        "src/ordered.rs": {},
         "src/priority_set.rs": {},
-        "src/rational.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
+        "src/rational.rs": {},
         "src/sequence/fixed_bytes.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
+          "beta": "0.1.0",
+          "lts": "0.1.0"
         },
-        "src/sequence/mod.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
-        "src/sequence/prefixed_u64.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
-        "src/sequence/u32.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
-        "src/sequence/u64.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
-        "src/sequence/unit.rs": {
-          "dependencies": [
-            "commonware-codec"
-          ]
-        },
+        "src/sequence/mod.rs": {},
+        "src/sequence/prefixed_u64.rs": {},
+        "src/sequence/u32.rs": {},
+        "src/sequence/u64.rs": {},
+        "src/sequence/unit.rs": {},
         "src/stable_buf.rs": {},
-        "src/time.rs": {
-          "dependencies": [
-            "commonware-utils"
-          ]
-        },
-        "src/vec.rs": {
-          "dependencies": [
-            "commonware-codec",
-            "commonware-utils"
-          ]
-        }
+        "src/time.rs": {},
+        "src/vec.rs": {}
       }
     }
   },
   "summary": {
     "total_modules": 539,
     "by_stage": {
-      "alpha": 521,
-      "beta": 18,
+      "alpha": 512,
+      "beta": 27,
       "gamma": 0
     },
-    "lts_count": 18
-  },
-  "conflicts": [
-    {
-      "path": "storage/src/journal/authenticated.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-codec",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/authenticated.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-cryptography",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/authenticated.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-macros",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/authenticated.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/authenticated.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/conformance.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-codec",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/conformance.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-conformance",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/conformance.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/conformance.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/contiguous/fixed.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-codec",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/contiguous/fixed.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-cryptography",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/contiguous/fixed.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-macros",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/contiguous/fixed.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/contiguous/fixed.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/contiguous/tests.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/contiguous/variable.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-codec",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/contiguous/variable.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-macros",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/contiguous/variable.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/contiguous/variable.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/fixed.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-codec",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/fixed.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-cryptography",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/fixed.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-macros",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/fixed.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/fixed.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/oversized.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-codec",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/oversized.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-macros",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/oversized.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/oversized.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/manager.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/manager.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/variable.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-codec",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/variable.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-macros",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/variable.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/variable.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-storage",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/variable.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/glob.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-codec",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/glob.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-macros",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/glob.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/segmented/glob.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/fixed_append.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/fixed_append.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/fixed_read_random.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/fixed_read_random.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-storage",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/fixed_read_random.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/fixed_read_sequential.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/fixed_read_sequential.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-storage",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/fixed_read_sequential.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/fixed_replay.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/fixed_replay.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-storage",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/fixed_replay.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/bench.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-runtime",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/bench.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-storage",
-      "severity": "error"
-    },
-    {
-      "path": "storage/src/journal/benches/bench.rs",
-      "message": "LTS module depends on non-LTS crate: commonware-utils",
-      "severity": "error"
-    }
-  ],
-  "warnings": []
+    "lts_count": 27
+  }
 }
