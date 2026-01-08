@@ -35,7 +35,7 @@ impl<V: CodecFixed<Cfg = ()>> Record<V> {
 }
 
 impl<V: CodecFixed<Cfg = ()>> FixedSize for Record<V> {
-    const SIZE: usize = V::SIZE + crc32::SIZE;
+    const SIZE: usize = V::SIZE + crc32::Digest::SIZE;
 }
 
 impl<V: CodecFixed<Cfg = ()>> CodecWrite for Record<V> {

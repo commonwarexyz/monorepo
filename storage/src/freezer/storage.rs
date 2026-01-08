@@ -229,7 +229,7 @@ impl Entry {
 }
 
 impl FixedSize for Entry {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE + u8::SIZE + crc32::SIZE;
+    const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE + u8::SIZE + crc32::Digest::SIZE;
 }
 
 impl CodecWrite for Entry {

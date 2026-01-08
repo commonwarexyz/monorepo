@@ -40,7 +40,7 @@ use rand_core::CryptoRngCore;
 use zeroize::Zeroize;
 
 /// Size of a CRC32 checksum in bytes.
-pub const SIZE: usize = 4;
+const SIZE: usize = 4;
 
 /// The CRC32 algorithm used (CRC32C/iSCSI/Castagnoli).
 const ALGORITHM: crc_fast::CrcAlgorithm = crc_fast::CrcAlgorithm::Crc32Iscsi;
