@@ -1,135 +1,22 @@
 //! Sync implementation for [Db].
 
-use super::{Db, Operation};
-use crate::{
-    index::unordered::Index,
-    journal::{authenticated, contiguous::fixed},
-    mmr::{mem::Clean, Location, Position, StandardHasher},
-    qmdb::{
-        self,
-        any::{sync::fixed::init_journal, FixedValue},
-        Durable, Merkleized,
-    },
-    translator::Translator,
-};
-use commonware_cryptography::{DigestOf, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
-use std::ops::Range;
-
-impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T, Merkleized<H>, Durable>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: FixedValue,
-    H: Hasher,
-    T: Translator,
-{
-    type Context = E;
-    type Op = Operation<K, V>;
-    type Journal = fixed::Journal<E, Operation<K, V>>;
-    type Hasher = H;
-    type Config = qmdb::any::FixedConfig<T>;
-    type Digest = H::Digest;
-
-    async fn create_journal(
-        context: Self::Context,
-        config: &Self::Config,
-        range: Range<Location>,
-    ) -> Result<Self::Journal, qmdb::Error> {
-        let journal_config = fixed::Config {
-            partition: config.log_journal_partition.clone(),
-            items_per_blob: config.log_items_per_blob,
-            write_buffer: config.log_write_buffer,
-            buffer_pool: config.buffer_pool.clone(),
-        };
-
-        init_journal(
-            context.with_label("log"),
-            journal_config,
-            *range.start..*range.end,
-        )
-        .await
-    }
-
-    async fn from_sync_result(
-        context: Self::Context,
-        db_config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
-        range: Range<Location>,
-        apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error> {
-        let mut hasher = StandardHasher::<H>::new();
-
-        let mmr = crate::mmr::journaled::Mmr::init_sync(
-            context.with_label("mmr"),
-            crate::mmr::journaled::SyncConfig {
-                config: crate::mmr::journaled::Config {
-                    journal_partition: db_config.mmr_journal_partition,
-                    metadata_partition: db_config.mmr_metadata_partition,
-                    items_per_blob: db_config.mmr_items_per_blob,
-                    write_buffer: db_config.mmr_write_buffer,
-                    thread_pool: db_config.thread_pool.clone(),
-                    buffer_pool: db_config.buffer_pool.clone(),
-                },
-                // The last node of an MMR with `range.end` leaves is at the position
-                // right before where the next leaf (at location `range.end`) goes.
-                range: Position::try_from(range.start).unwrap()
-                    ..Position::try_from(range.end + 1).unwrap(),
-                pinned_nodes,
-            },
-            &mut hasher,
-        )
-        .await?;
-
-        let log = authenticated::Journal::<_, _, _, Clean<DigestOf<H>>>::from_components(
-            mmr,
-            log,
-            hasher,
-            apply_batch_size as u64,
-        )
-        .await?;
-        // Build the snapshot from the log.
-        let snapshot = Index::new(context.with_label("snapshot"), db_config.translator.clone());
-        let db = Self::from_components(range.start, log, snapshot).await?;
-
-        Ok(db)
-    }
-
-    fn root(&self) -> Self::Digest {
-        self.log.root()
-    }
-
-    async fn resize_journal(
-        mut journal: Self::Journal,
-        context: Self::Context,
-        config: &Self::Config,
-        range: Range<Location>,
-    ) -> Result<Self::Journal, qmdb::Error> {
-        let size = journal.size();
-
-        if size <= range.start {
-            // Create a new journal with the new bounds
-            journal.destroy().await?;
-            Self::create_journal(context, config, range).await
-        } else {
-            // Just prune to the lower bound
-            journal.prune(*range.start).await?;
-            Ok(journal)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{
-        journal,
-        qmdb::any::{
-            sync::{fixed::init_journal_at_size, tests as sync_tests},
-            unordered::fixed::test::{
-                apply_ops, create_test_config, create_test_db, create_test_ops, AnyTest,
+        journal::{self, contiguous::fixed as fixed_journal},
+        qmdb::{
+            self,
+            any::{
+                sync::{
+                    fixed::{init_journal, init_journal_at_size},
+                    tests as sync_tests,
+                },
+                unordered::fixed::{
+                    test::{
+                        apply_ops, create_test_config, create_test_db, create_test_ops, AnyTest,
+                    },
+                    Operation,
+                },
             },
         },
         translator::TwoCap,
@@ -139,7 +26,7 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
-        Runner as _,
+        Runner as _, Storage,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rstest::rstest;
@@ -303,7 +190,7 @@ mod tests {
     fn test_init_sync_no_existing_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = fixed::Config {
+            let cfg = fixed_journal::Config {
                 partition: "test_fresh_start".into(),
                 items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(1024),
@@ -353,7 +240,7 @@ mod tests {
     fn test_init_sync_existing_data_overlap() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = fixed::Config {
+            let cfg = fixed_journal::Config {
                 partition: "test_overlap".into(),
                 items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
@@ -361,7 +248,7 @@ mod tests {
             };
 
             // Create initial journal with 20 operations
-            let mut journal = fixed::Journal::<Context, Digest>::init(context.clone(), cfg.clone())
+            let mut journal = fixed_journal::Journal::<Context, Digest>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to create initial journal");
 
@@ -419,7 +306,7 @@ mod tests {
     fn test_init_sync_existing_data_exact_match() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = fixed::Config {
+            let cfg = fixed_journal::Config {
                 partition: "test_exact_match".into(),
                 items_per_blob: NZU64!(3),
                 write_buffer: NZUsize!(1024),
@@ -427,7 +314,7 @@ mod tests {
             };
 
             // Create initial journal with 20 operations (0-19)
-            let mut journal = fixed::Journal::<Context, Digest>::init(context.clone(), cfg.clone())
+            let mut journal = fixed_journal::Journal::<Context, Digest>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to create initial journal");
 
@@ -485,7 +372,7 @@ mod tests {
     fn test_init_sync_existing_data_exceeds_upper_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = fixed::Config {
+            let cfg = fixed_journal::Config {
                 partition: "test_unexpected_data".into(),
                 items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
@@ -493,7 +380,7 @@ mod tests {
             };
 
             // Create initial journal with 30 operations (0-29)
-            let mut journal = fixed::Journal::<Context, Digest>::init(context.clone(), cfg.clone())
+            let mut journal = fixed_journal::Journal::<Context, Digest>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to create initial journal");
 
@@ -526,7 +413,7 @@ mod tests {
     fn test_init_sync_invalid_range() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = fixed::Config {
+            let cfg = fixed_journal::Config {
                 partition: "test_invalid_range".into(),
                 items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
@@ -549,7 +436,7 @@ mod tests {
     fn test_init_at_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = fixed::Config {
+            let cfg = fixed_journal::Config {
                 partition: "test_init_at_size".into(),
                 items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(1024),

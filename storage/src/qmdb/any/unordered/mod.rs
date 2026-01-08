@@ -26,6 +26,35 @@ use commonware_utils::Array;
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
 
+use crate::{
+    index::unordered::Index as UnorderedIndex,
+    mmr::mem::Clean,
+    translator::Translator,
+};
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: ValueEncoding,
+        C: MutableContiguous<Item = Operation<K, V>>,
+        T: Translator + Clone,
+        H: Hasher,
+    > crate::qmdb::any::sync::Reconstructable<E, C, H>
+    for Db<E, C, UnorderedIndex<T, Location>, H, Update<K, V>, Merkleized<H>, Durable>
+where
+    Operation<K, V>: Codec,
+{
+    type Index = UnorderedIndex<T, Location>;
+
+    async fn reconstruct(
+        range: std::ops::Range<Location>,
+        log: crate::journal::authenticated::Journal<E, C, H, Clean<H::Digest>>,
+        index: Self::Index,
+    ) -> Result<Self, Error> {
+        Self::from_components(range.start, log, index).await
+    }
+}
+
 pub mod fixed;
 pub mod variable;
 

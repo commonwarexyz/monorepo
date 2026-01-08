@@ -1,8 +1,8 @@
 use crate::{
-    index::{Cursor as _, Ordered as Index, Unordered},
+    index::{ordered::Index as OrderedIndex, Cursor as _, Ordered as Index, Unordered},
     journal::contiguous::{Contiguous, MutableContiguous},
     kv::{self, Batchable},
-    mmr::Location,
+    mmr::{mem::Clean, Location},
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
@@ -10,16 +10,14 @@ use crate::{
         },
         build_snapshot_from_log, delete_known_loc,
         operation::{Committable, Operation as OperationTrait},
-        update_known_loc, DurabilityState, Durable, Error, MerkleizationState, NonDurable,
-        Unmerkleized,
+        update_known_loc, DurabilityState, Durable, Error, MerkleizationState, Merkleized,
+        NonDurable, Unmerkleized,
     },
+    translator::Translator,
 };
 #[cfg(any(test, feature = "test-traits"))]
 use crate::{
-    qmdb::{
-        any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
-        Merkleized,
-    },
+    qmdb::any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
     Persistable,
 };
 use commonware_codec::Codec;
@@ -36,6 +34,29 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Bound,
 };
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: ValueEncoding,
+        C: MutableContiguous<Item = Operation<K, V>>,
+        T: Translator + Clone,
+        H: Hasher,
+    > crate::qmdb::any::sync::Reconstructable<E, C, H>
+    for Db<E, C, OrderedIndex<T, Location>, H, Update<K, V>, Merkleized<H>, Durable>
+where
+    Operation<K, V>: Codec,
+{
+    type Index = OrderedIndex<T, Location>;
+
+    async fn reconstruct(
+        range: std::ops::Range<Location>,
+        log: crate::journal::authenticated::Journal<E, C, H, Clean<H::Digest>>,
+        index: Self::Index,
+    ) -> Result<Self, Error> {
+        Self::from_components(range.start, log, index).await
+    }
+}
 
 pub mod fixed;
 pub mod variable;

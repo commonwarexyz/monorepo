@@ -121,7 +121,7 @@ pub(super) mod test {
     }
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    type AnyTest =
+    pub(crate) type AnyTest =
         Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
 
     /// Deterministic byte vector generator for variable-value tests.
