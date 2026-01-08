@@ -133,7 +133,7 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(any(test, feature = "mocks"))]
+#[cfg(any(test, feature = "fuzz"))]
 pub mod mocks;
 
 /// Calculate f (maximum Byzantine replicas) from n where n >= 5f + 1.
@@ -540,4 +540,24 @@ mod integration_tests {
     fn test_all_online_ed25519() {
         all_online::<_, _, RoundRobin>(scheme::ed25519::fixture);
     }
+
+    #[test_traced]
+    fn test_all_online_bls12381_multisig() {
+        use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
+        all_online::<_, _, RoundRobin>(scheme::bls12381_multisig::fixture::<MinPk, _>);
+        all_online::<_, _, RoundRobin>(scheme::bls12381_multisig::fixture::<MinSig, _>);
+    }
+
+    // TODO: Enable these tests once the minimmit engine supports nullification properly.
+    // Currently the engine cannot form nullification certificates when a validator is offline,
+    // which causes the test to timeout.
+    //
+    // Tests to implement:
+    // - test_one_offline: Verify consensus works with one offline validator
+    // - test_slow_validator: Verify consensus works with one slow validator
+    // - test_slow_and_lossy_links: Verify consensus works under degraded network conditions
+    // - test_conflicter: Verify Byzantine conflict detection
+    // - test_determinism: Verify deterministic execution with same seed
+    //
+    // See simplex::tests for reference implementations of these tests.
 }
