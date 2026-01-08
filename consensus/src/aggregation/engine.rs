@@ -15,7 +15,7 @@ use commonware_cryptography::{
     certificate::{Provider, Scheme},
     Digest,
 };
-use commonware_parallel::Sequential;
+use commonware_parallel::Strategy;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -78,6 +78,7 @@ pub struct Engine<
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+    T: Strategy,
 > {
     // ---------- Interfaces ----------
     context: ContextCell<E>,
@@ -86,6 +87,7 @@ pub struct Engine<
     provider: P,
     reporter: Z,
     blocker: B,
+    strategy: T,
 
     // Pruning
     /// A tuple representing the epochs to keep in memory.
@@ -159,10 +161,11 @@ impl<
         Z: Reporter<Activity = Activity<P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
         B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
-    > Engine<E, P, D, A, Z, M, B>
+        T: Strategy,
+    > Engine<E, P, D, A, Z, M, B, T>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<P, D, A, Z, M, B>) -> Self {
+    pub fn new(context: E, cfg: Config<P, D, A, Z, M, B, T>) -> Self {
         // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
 
@@ -173,6 +176,7 @@ impl<
             monitor: cfg.monitor,
             provider: cfg.provider,
             blocker: cfg.blocker,
+            strategy: cfg.strategy,
             epoch_bounds: cfg.epoch_bounds,
             window: HeightDelta::new(cfg.window.into()),
             activity_timeout: cfg.activity_timeout,
@@ -520,7 +524,7 @@ impl<
             .filter(|a| a.item.digest == ack.item.digest)
             .collect::<Vec<_>>();
         if filtered.len() >= quorum as usize {
-            if let Some(certificate) = Certificate::from_acks(&*scheme, filtered, &Sequential) {
+            if let Some(certificate) = Certificate::from_acks(&*scheme, filtered, &self.strategy) {
                 self.metrics.certificates.inc();
                 self.handle_certificate(certificate).await;
             }
@@ -667,7 +671,7 @@ impl<
         }
 
         // Validate signature
-        if !ack.verify(&mut self.context, &*scheme, &Sequential) {
+        if !ack.verify(&mut self.context, &*scheme, &self.strategy) {
             return Err(Error::InvalidAckSignature);
         }
 
