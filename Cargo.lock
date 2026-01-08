@@ -1187,6 +1187,7 @@ dependencies = [
  "ecdsa",
  "ed25519-consensus",
  "getrandom 0.2.16",
+ "libc",
  "p256",
  "proptest",
  "rand 0.8.5",

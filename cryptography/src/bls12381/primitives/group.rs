@@ -507,7 +507,7 @@ pub struct Share {
 
 impl Share {
     /// Creates a new `Share` with the given index and private key.
-    pub const fn new(index: u32, private: Private) -> Self {
+    pub fn new(index: u32, private: Private) -> Self {
         Self {
             index,
             private: Secret::new(private),

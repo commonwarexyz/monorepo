@@ -9,7 +9,7 @@ pub struct SharedSecret {
 
 impl SharedSecret {
     /// Creates a new SharedSecret wrapping the given x25519 shared secret.
-    const fn new(secret: x25519_dalek::SharedSecret) -> Self {
+    fn new(secret: x25519_dalek::SharedSecret) -> Self {
         Self {
             secret: Secret::new(secret),
         }
