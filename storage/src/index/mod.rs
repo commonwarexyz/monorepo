@@ -103,7 +103,7 @@ pub trait Cursor: Send + Sync {
 
 /// A trait defining the operations provided by a memory-efficient index that maps translated keys
 /// to arbitrary values, with no ordering assumed over the key space.
-pub trait Unordered {
+pub trait Unordered: Send + Sync {
     /// The type of values the index stores.
     type Value: Eq + Send + Sync;
 
@@ -163,7 +163,7 @@ pub trait Unordered {
 
 /// A trait defining the additional operations provided by a memory-efficient index that allows
 /// ordered traversal of the indexed keys.
-pub trait Ordered: Unordered {
+pub trait Ordered: Unordered + Send + Sync {
     type Iterator<'a>: Iterator<Item = &'a Self::Value> + Send
     where
         Self: 'a;

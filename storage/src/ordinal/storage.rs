@@ -68,7 +68,7 @@ where
 }
 
 /// Implementation of [Ordinal].
-pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
+pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()> + Send + Sync> {
     // Configuration and context
     context: E,
     config: Config,
@@ -92,7 +92,7 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()> + Send + Sync> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         Self::init_with_bits(context, config, None).await
@@ -415,7 +415,9 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Gettable for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()> + Send + Sync> kv::Gettable
+    for Ordinal<E, V>
+{
     type Key = u64;
     type Value = V;
     type Error = Error;
@@ -425,13 +427,17 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Gettable for Ord
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Updatable for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()> + Send + Sync> kv::Updatable
+    for Ordinal<E, V>
+{
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Persistable for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()> + Send + Sync> Persistable
+    for Ordinal<E, V>
+{
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Self::Error> {

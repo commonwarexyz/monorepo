@@ -1678,4 +1678,36 @@ pub mod test {
             open_db(ctx, &prefix).await.into_mutable()
         });
     }
+
+    /// Compile-time check that Db is Send + Sync when its type parameters are.
+    const _: () = {
+        const fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CleanCurrentTest>();
+        assert_send_sync::<DirtyCurrentTest>();
+    };
+
+    /// Helper to assert a future is Send at compile time.
+    fn assert_send<T: Send>(_: T) {}
+
+    /// Test that futures returned by Clean (Merkleized, Durable) Db methods are Send.
+    #[allow(dead_code)]
+    fn test_clean_futures_are_send(db: &mut CleanCurrentTest) {
+        use crate::mmr::Location;
+
+        // Durable-specific operations
+        assert_send(db.sync());
+        assert_send(db.prune(Location::new_unchecked(0)));
+    }
+
+    /// Test that futures returned by Dirty (Unmerkleized, NonDurable) Db methods are Send.
+    #[allow(dead_code)]
+    fn test_dirty_futures_are_send(mut db: DirtyCurrentTest, key: Digest) {
+        // Mutation operations
+        assert_send(db.update(key, key));
+        assert_send(db.create(key, key));
+        assert_send(db.delete(key));
+
+        // Commit (consumes self)
+        assert_send(db.commit(None));
+    }
 }

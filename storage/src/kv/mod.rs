@@ -6,8 +6,8 @@ use std::future::Future;
 
 /// A readable key-value store.
 pub trait Gettable {
-    type Key;
-    type Value;
+    type Key: Send + Sync;
+    type Value: Send + Sync;
     type Error;
 
     /// Get the value of a key.
