@@ -27,6 +27,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::Recipients;
+use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
@@ -109,7 +110,7 @@ where
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
     ES: Epocher,
-    T: commonware_parallel::Strategy,
+    T: Strategy,
     A: Acknowledgement,
 {
     // ---------- Context ----------
@@ -170,7 +171,7 @@ where
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
     ES: Epocher,
-    T: commonware_parallel::Strategy,
+    T: Strategy,
     A: Acknowledgement,
 {
     /// Create a new application actor.

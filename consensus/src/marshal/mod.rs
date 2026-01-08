@@ -148,7 +148,7 @@ mod tests {
     type B = Block<D>;
     type K = PublicKey;
     type V = MinPk;
-    type S = bls12381_threshold::Scheme<K, V, Sequential>;
+    type S = bls12381_threshold::Scheme<K, V>;
     type P = ConstantProvider<S, Epoch>;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);

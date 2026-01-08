@@ -29,6 +29,7 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Receiver, Recipients, Sender,
 };
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::PoolRef,
     spawn_cell,
@@ -72,7 +73,7 @@ pub struct Engine<
     R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    T: commonware_parallel::Strategy,
+    T: Strategy,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -210,7 +211,7 @@ impl<
         R: Relay<Digest = D>,
         Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
-        T: commonware_parallel::Strategy,
+        T: Strategy,
     > Engine<E, C, S, P, D, A, R, Z, M, T>
 {
     /// Creates a new engine with the given context and configuration.

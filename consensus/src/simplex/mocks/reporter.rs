@@ -14,6 +14,7 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_parallel::Sequential;
 use commonware_utils::{
     channels::fallible::AsyncFallibleExt,
     ordered::{Quorum, Set},
@@ -288,11 +289,7 @@ where
             }
             Activity::ConflictingFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(
-                    &mut self.context,
-                    &self.scheme,
-                    &commonware_parallel::Sequential,
-                ) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -311,11 +308,7 @@ where
             }
             Activity::NullifyFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(
-                    &mut self.context,
-                    &self.scheme,
-                    &commonware_parallel::Sequential,
-                ) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;

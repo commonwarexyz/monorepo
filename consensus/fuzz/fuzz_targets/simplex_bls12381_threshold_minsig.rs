@@ -6,14 +6,13 @@ use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, certificate::mocks::Fixture,
     ed25519::PublicKey as Ed25519PublicKey,
 };
-use commonware_parallel::Sequential;
 use commonware_runtime::deterministic;
 use libfuzzer_sys::fuzz_target;
 
 struct SimplexBls12381MinSig;
 
 impl Simplex for SimplexBls12381MinSig {
-    type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinSig, Sequential>;
+    type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinSig>;
     type Elector = Random;
 
     fn fixture(

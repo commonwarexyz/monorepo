@@ -4789,7 +4789,7 @@ mod tests {
     fn tle<V, L>()
     where
         V: Variant,
-        L: Elector<bls12381_threshold::Scheme<PublicKey, V, Sequential>>,
+        L: Elector<bls12381_threshold::Scheme<PublicKey, V>>,
     {
         // Create context
         let n = 4;
