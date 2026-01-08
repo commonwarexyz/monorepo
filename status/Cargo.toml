@@ -1,0 +1,27 @@
+[package]
+name = "commonware-status"
+edition.workspace = true
+publish = false
+version.workspace = true
+license.workspace = true
+description = "Generate module status reports for the Commonware workspace"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+chrono = { workspace = true, features = ["serde"] }
+regex = "1.11"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+syn = { workspace = true, features = ["full", "parsing"] }
+thiserror.workspace = true
+
+[[bin]]
+name = "status"
+path = "src/main.rs"
+bench = false
+
+[lib]
+bench = false

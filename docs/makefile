@@ -35,7 +35,7 @@ sitemap:
 
 # Generate module status
 status:
-	python3 generate_status.py
+	cargo run -p commonware-status --manifest-path ../Cargo.toml -- --repo-root .. --output status.json
 
 # Deploy: mirror code and generate sitemap
 deploy: mirror sitemap status
