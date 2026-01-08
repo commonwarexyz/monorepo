@@ -97,6 +97,6 @@ pub struct Config<
     /// Buffer pool for the journal.
     pub journal_buffer_pool: PoolRef,
 
-    /// Strategy for parallel verification operations.
+    /// Strategy for parallel operations.
     pub strategy: T,
 }

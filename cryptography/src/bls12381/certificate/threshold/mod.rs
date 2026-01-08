@@ -633,8 +633,8 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_parallel::Sequential;
     use commonware_math::algebra::{Additive, Random};
+    use commonware_parallel::Sequential;
     use commonware_utils::{ordered::Set, quorum, test_rng, TryCollect, NZU32};
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
@@ -1003,7 +1003,11 @@ mod tests {
             )
         });
 
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, certs_iter, &Sequential));
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            certs_iter,
+            &Sequential
+        ));
     }
 
     #[test]
@@ -1046,7 +1050,11 @@ mod tests {
             )
         });
 
-        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, certs_iter, &Sequential));
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            certs_iter,
+            &Sequential
+        ));
     }
 
     #[test]

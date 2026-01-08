@@ -918,7 +918,12 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Verifies the notarization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
+    pub fn verify<R: CryptoRngCore>(
+        &self,
+        rng: &mut R,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> bool
     where
         S: scheme::Scheme<D>,
     {
@@ -1394,7 +1399,12 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Verifies the finalization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
+    pub fn verify<R: CryptoRngCore>(
+        &self,
+        rng: &mut R,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> bool
     where
         S: scheme::Scheme<D>,
     {
@@ -1903,7 +1913,12 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// This method **always** performs verification regardless of whether the activity has been
     /// previously verified. Callers can use [`Activity::verified`] to check if verification is
     /// necessary before calling this method.
-    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
+    pub fn verify<R: CryptoRngCore>(
+        &self,
+        rng: &mut R,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> bool
     where
         S: scheme::Scheme<D>,
     {
@@ -2172,7 +2187,8 @@ impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.notarize_1.verify(rng, scheme, strategy) && self.notarize_2.verify(rng, scheme, strategy)
+        self.notarize_1.verify(rng, scheme, strategy)
+            && self.notarize_2.verify(rng, scheme, strategy)
     }
 }
 
@@ -2287,7 +2303,8 @@ impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.finalize_1.verify(rng, scheme, strategy) && self.finalize_2.verify(rng, scheme, strategy)
+        self.finalize_1.verify(rng, scheme, strategy)
+            && self.finalize_2.verify(rng, scheme, strategy)
     }
 }
 
@@ -2566,7 +2583,8 @@ mod tests {
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
+        let notarization =
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
         let encoded = notarization.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Notarization::decode_cfg(encoded, &cfg).unwrap();
@@ -2622,7 +2640,8 @@ mod tests {
             .iter()
             .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
             .collect();
-        let nullification = Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
+        let nullification =
+            Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
         let encoded = nullification.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Nullification::decode_cfg(encoded, &cfg).unwrap();
@@ -2680,7 +2699,8 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let finalization = Finalization::from_finalizes(&fixture.schemes[0], &finalizes, &Sequential).unwrap();
+        let finalization =
+            Finalization::from_finalizes(&fixture.schemes[0], &finalizes, &Sequential).unwrap();
         let encoded = finalization.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Finalization::decode_cfg(encoded, &cfg).unwrap();
@@ -2724,14 +2744,16 @@ mod tests {
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
+        let notarization =
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
 
         let nullifies: Vec<_> = fixture
             .schemes
             .iter()
             .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
             .collect();
-        let nullification = Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
+        let nullification =
+            Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
 
         let response = Response::<S, Sha256>::new(1, vec![notarization], vec![nullification]);
         let encoded_response = Backfiller::<S, Sha256>::Response(response.clone()).encode();
@@ -2777,14 +2799,16 @@ mod tests {
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
+        let notarization =
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
 
         let nullifies: Vec<_> = fixture
             .schemes
             .iter()
             .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
             .collect();
-        let nullification = Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
+        let nullification =
+            Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
 
         let response = Response::<S, Sha256>::new(1, vec![notarization], vec![nullification]);
         let cfg = fixture.schemes[0].certificate_codec_config();
@@ -2990,8 +3014,9 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
-            .expect("quorum notarization");
+        let notarization =
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
+                .expect("quorum notarization");
         let mut rng = OsRng;
         assert!(notarization.verify(&mut rng, &fixture.schemes[0], &Sequential));
 
@@ -3028,8 +3053,9 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
-            .expect("quorum notarization");
+        let notarization =
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
+                .expect("quorum notarization");
         assert!(notarization.verify(&mut rng, &fixture.schemes[0], &Sequential));
 
         assert!(!notarization.verify(&mut rng, &wrong_fixture.schemes[0], &Sequential));
@@ -3161,8 +3187,9 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let finalization = Finalization::from_finalizes(&fixture.schemes[0], &finalizes, &Sequential)
-            .expect("quorum finalization");
+        let finalization =
+            Finalization::from_finalizes(&fixture.schemes[0], &finalizes, &Sequential)
+                .expect("quorum finalization");
         let mut rng = OsRng;
         assert!(finalization.verify(&mut rng, &fixture.schemes[0], &Sequential));
 

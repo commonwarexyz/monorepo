@@ -198,7 +198,10 @@ fn main() {
                             let _ = response.send(false);
                             continue;
                         };
-                        if !incoming.finalization.verify(&mut ctx, verifier, &Sequential) {
+                        if !incoming
+                            .finalization
+                            .verify(&mut ctx, verifier, &Sequential)
+                        {
                             let _ = response.send(false);
                             continue;
                         }

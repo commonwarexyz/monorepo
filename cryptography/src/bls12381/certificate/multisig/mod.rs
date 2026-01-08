@@ -578,8 +578,8 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
-    use commonware_parallel::Sequential;
     use commonware_math::algebra::{CryptoGroup, Random};
+    use commonware_parallel::Sequential;
     use commonware_utils::{ordered::BiMap, quorum, test_rng, Participant, TryCollect};
 
     const NAMESPACE: &[u8] = b"test-bls12381-multisig";
@@ -1097,7 +1097,11 @@ mod tests {
             )
         });
 
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, certs_iter, &Sequential));
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            certs_iter,
+            &Sequential
+        ));
     }
 
     #[test]
@@ -1143,7 +1147,11 @@ mod tests {
             )
         });
 
-        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, certs_iter, &Sequential));
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            certs_iter,
+            &Sequential
+        ));
     }
 
     #[test]

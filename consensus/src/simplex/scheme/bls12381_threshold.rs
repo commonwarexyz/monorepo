@@ -605,11 +605,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         )
     }
 
-    fn assemble<I>(
-        &self,
-        attestations: I,
-        strategy: &impl Strategy,
-    ) -> Option<Self::Certificate>
+    fn assemble<I>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>,
     {
@@ -843,11 +839,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 5);
         let (polynomial, _) = deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
-        Scheme::<V>::verifier(
-            NAMESPACE,
-            participants.keys().clone(),
-            polynomial,
-        );
+        Scheme::<V>::verifier(NAMESPACE, participants.keys().clone(), polynomial);
     }
 
     #[test]
@@ -1064,7 +1056,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(votes, &Sequential).expect("assemble certificate");
+        let certificate = schemes[0]
+            .assemble(votes, &Sequential)
+            .expect("assemble certificate");
 
         assert!(verifier.verify_certificate(
             &mut test_rng(),
@@ -1100,7 +1094,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(votes, &Sequential).expect("assemble certificate");
+        let certificate = schemes[0]
+            .assemble(votes, &Sequential)
+            .expect("assemble certificate");
 
         assert!(verifier.verify_certificate(
             &mut rng,
@@ -1146,7 +1142,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(votes, &Sequential).expect("assemble certificate");
+        let certificate = schemes[0]
+            .assemble(votes, &Sequential)
+            .expect("assemble certificate");
 
         let encoded = certificate.encode();
         let decoded = Signature::<V>::decode_cfg(encoded, &()).expect("decode certificate");
@@ -1176,7 +1174,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(votes, &Sequential).expect("assemble certificate");
+        let certificate = schemes[0]
+            .assemble(votes, &Sequential)
+            .expect("assemble certificate");
 
         let seed = Seed::new(proposal.round, certificate.seed_signature);
 
@@ -1208,7 +1208,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(votes, &Sequential).expect("assemble certificate");
+        let certificate = schemes[0]
+            .assemble(votes, &Sequential)
+            .expect("assemble certificate");
 
         let seed = Seed::new(proposal.round, certificate.seed_signature);
 
@@ -1240,7 +1242,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let notarization = Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap();
+        let notarization =
+            Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap();
 
         let finalizes: Vec<_> = schemes
             .iter()
@@ -1248,7 +1251,8 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let finalization = Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap();
+        let finalization =
+            Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap();
 
         assert_eq!(notarization.seed(), finalization.seed());
         assert!(notarization.seed().verify(&schemes[0]));
@@ -1307,7 +1311,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(votes, &Sequential).expect("assemble certificate");
+        let certificate = schemes[0]
+            .assemble(votes, &Sequential)
+            .expect("assemble certificate");
 
         let certificate_verifier =
             Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity());
@@ -1385,7 +1391,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(votes, &Sequential).expect("assemble certificate");
+        let certificate = schemes[0]
+            .assemble(votes, &Sequential)
+            .expect("assemble certificate");
 
         let seed = Seed::<V>::new(proposal.round, certificate.seed_signature);
         assert_eq!(seed.signature, certificate.seed_signature);
@@ -1414,7 +1422,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(votes, &Sequential).expect("assemble certificate");
+        let certificate = schemes[0]
+            .assemble(votes, &Sequential)
+            .expect("assemble certificate");
 
         let mut encoded = certificate.encode();
         let truncated = encoded.split_to(encoded.len() - 1);
@@ -1483,7 +1493,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(votes, &Sequential).expect("assemble certificate");
+        let certificate = schemes[0]
+            .assemble(votes, &Sequential)
+            .expect("assemble certificate");
 
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
@@ -1537,7 +1549,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let notarization = Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap();
+        let notarization =
+            Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap();
 
         // Decrypt using the seed
         let seed = notarization.seed();
@@ -1700,7 +1713,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(votes, &Sequential).expect("assemble certificate");
+        let certificate = schemes[0]
+            .assemble(votes, &Sequential)
+            .expect("assemble certificate");
 
         assert!(verifier.verify_certificate(
             &mut rng,
@@ -1771,8 +1786,12 @@ mod tests {
             })
             .collect();
 
-        let certificate1 = schemes[0].assemble(votes1, &Sequential).expect("assemble certificate1");
-        let certificate2 = schemes[0].assemble(votes2, &Sequential).expect("assemble certificate2");
+        let certificate1 = schemes[0]
+            .assemble(votes1, &Sequential)
+            .expect("assemble certificate1");
+        let certificate2 = schemes[0]
+            .assemble(votes2, &Sequential)
+            .expect("assemble certificate2");
 
         assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
             &mut rng,

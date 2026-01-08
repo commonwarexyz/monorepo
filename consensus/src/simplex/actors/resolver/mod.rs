@@ -17,7 +17,7 @@ pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
 
     pub blocker: B,
 
-    /// Strategy for parallel verification operations.
+    /// Strategy for parallel operations.
     pub strategy: T,
 
     pub epoch: Epoch,

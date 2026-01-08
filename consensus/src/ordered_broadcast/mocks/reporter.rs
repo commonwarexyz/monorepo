@@ -101,7 +101,11 @@ where
                 }
                 Message::Locked(lock) => {
                     // Verify properly constructed (not needed in production)
-                    if !lock.verify(&mut self.rng, &self.scheme, &commonware_parallel::Sequential) {
+                    if !lock.verify(
+                        &mut self.rng,
+                        &self.scheme,
+                        &commonware_parallel::Sequential,
+                    ) {
                         panic!("Invalid proof");
                     }
 

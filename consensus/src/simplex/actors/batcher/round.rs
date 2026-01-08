@@ -384,7 +384,11 @@ impl<
     /// Attempts to construct a notarization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_notarization(&mut self, scheme: &S, strategy: &impl Strategy) -> Option<Notarization<S, D>> {
+    pub fn try_construct_notarization(
+        &mut self,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Option<Notarization<S, D>> {
         if self.has_notarization() {
             return None;
         }
@@ -400,7 +404,11 @@ impl<
     /// Attempts to construct a nullification certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_nullification(&mut self, scheme: &S, strategy: &impl Strategy) -> Option<Nullification<S>> {
+    pub fn try_construct_nullification(
+        &mut self,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Option<Nullification<S>> {
         if self.has_nullification() {
             return None;
         }
@@ -416,7 +424,11 @@ impl<
     /// Attempts to construct a finalization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_finalization(&mut self, scheme: &S, strategy: &impl Strategy) -> Option<Finalization<S, D>> {
+    pub fn try_construct_finalization(
+        &mut self,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Option<Finalization<S, D>> {
         if self.has_finalization() {
             return None;
         }

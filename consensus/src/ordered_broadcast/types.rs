@@ -1822,7 +1822,9 @@ mod tests {
         // Verification should succeed
         let provider = ConstantProvider::new(fixture.verifier);
         let verifier = chunk_verifier();
-        assert!(node.verify(&mut rng, &verifier, &provider, &Sequential).is_ok());
+        assert!(node
+            .verify(&mut rng, &verifier, &provider, &Sequential)
+            .is_ok());
 
         // Now create a node with invalid signature
         let tampered_signature = scheme.sign(chunk_namespace.as_ref(), &node.encode());
@@ -1890,7 +1892,9 @@ mod tests {
         // Verification should succeed
         let provider = ConstantProvider::new(fixture.verifier.clone());
         let verifier = chunk_verifier();
-        assert!(node.verify(&mut rng, &verifier, &provider, &Sequential).is_ok());
+        assert!(node
+            .verify(&mut rng, &verifier, &provider, &Sequential)
+            .is_ok());
 
         // Now create a parent with invalid certificate
         // Generate certificate with the wrong keys (sign with schemes[1..] but pretend it's from schemes[0..])

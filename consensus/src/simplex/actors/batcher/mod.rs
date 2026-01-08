@@ -21,7 +21,7 @@ pub struct Config<S: Scheme, B: Blocker, R: Reporter, T: Strategy> {
     pub blocker: B,
     pub reporter: R,
 
-    /// Strategy for parallel verification operations.
+    /// Strategy for parallel operations.
     pub strategy: T,
 
     pub activity_timeout: ViewDelta,
@@ -56,11 +56,11 @@ mod tests {
         Hasher as _, Sha256, Signer,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_parallel::Sequential;
     use commonware_p2p::{
         simulated::{Config as NConfig, Link, Network},
         Recipients, Sender as _,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};

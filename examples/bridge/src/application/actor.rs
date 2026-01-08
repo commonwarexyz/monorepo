@@ -12,11 +12,11 @@ use crate::{
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{simplex::types::Activity, types::Epoch, Viewable};
-use commonware_parallel::Sequential;
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     Hasher,
 };
+use commonware_parallel::Sequential;
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, StreamExt};
@@ -105,7 +105,11 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
 
                             // Verify certificate
                             assert!(
-                                finalization.verify(&mut self.context, &self.other_network, &Sequential),
+                                finalization.verify(
+                                    &mut self.context,
+                                    &self.other_network,
+                                    &Sequential
+                                ),
                                 "indexer is corrupt"
                             );
 
@@ -178,8 +182,11 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                             let _ = response.send(true);
                         }
                         BlockFormat::Bridge(finalization) => {
-                            let result =
-                                finalization.verify(&mut self.context, &self.other_network, &Sequential);
+                            let result = finalization.verify(
+                                &mut self.context,
+                                &self.other_network,
+                                &Sequential,
+                            );
                             let _ = response.send(result);
                         }
                     }

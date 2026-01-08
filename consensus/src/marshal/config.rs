@@ -53,6 +53,6 @@ where
     /// Maximum number of blocks to repair at once.
     pub max_repair: NonZeroUsize,
 
-    /// Strategy for parallel verification operations.
+    /// Strategy for parallel operations.
     pub strategy: T,
 }

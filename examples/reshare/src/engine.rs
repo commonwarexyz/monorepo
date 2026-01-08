@@ -84,8 +84,7 @@ where
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
     St: Strategy,
-    Provider<S, C, St>:
-        EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
     config: Config<C, P, B, V, St>,
@@ -97,7 +96,7 @@ where
     marshal: marshal::Actor<
         E,
         Block<H, C, V>,
-        Provider<S, C, St>,
+        Provider<S, C>,
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
         FixedEpocher,
@@ -129,8 +128,7 @@ where
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
     St: Strategy,
-    Provider<S, C, St>:
-        EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, P, B, V, St>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
@@ -246,17 +244,12 @@ where
         // Create the certificate verifier from the initial output (if available).
         // This allows epoch-independent certificate verification after the DKG is complete.
         let certificate_verifier = config.output.as_ref().and_then(|output| {
-            <Provider<S, C, St> as EpochProvider>::certificate_verifier(
-                &consensus_namespace,
-                output,
-                config.strategy.clone(),
-            )
+            <Provider<S, C> as EpochProvider>::certificate_verifier(&consensus_namespace, output)
         });
         let provider = Provider::new(
             consensus_namespace.clone(),
             config.signer.clone(),
             certificate_verifier,
-            config.strategy.clone(),
         );
 
         let (marshal, marshal_mailbox, _processed_height) = marshal::Actor::init(

@@ -69,8 +69,8 @@ mod tests {
         Hasher as _, Sha256,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_parallel::Sequential;
     use commonware_p2p::simulated::{Config as NConfig, Network};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::{quorum, NZUsize, NZU16};
     use futures::{channel::mpsc, FutureExt, StreamExt};

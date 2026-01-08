@@ -53,8 +53,8 @@ use commonware_consensus::{
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{ed25519, Sha256, Signer as _};
-use commonware_parallel::Sequential;
 use commonware_p2p::{authenticated::discovery, Manager};
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Quota, Runner};
 use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{

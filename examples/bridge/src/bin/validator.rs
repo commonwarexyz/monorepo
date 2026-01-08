@@ -221,13 +221,9 @@ fn main() {
         // Initialize application
         let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let this_network = Scheme::signer(
-            &consensus_namespace,
-            validators.clone(),
-            identity,
-            share,
-        )
-        .expect("share must be in participants");
+        let this_network =
+            Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
+                .expect("share must be in participants");
         let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
         let (application, scheme, mailbox) = application::Application::new(
             context.with_label("application"),

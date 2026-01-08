@@ -14,7 +14,6 @@ use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
 use commonware_p2p::authenticated::discovery;
-use commonware_parallel::Rayon;
 use commonware_runtime::{tokio, Metrics, Quota, RayonPoolSpawner};
 use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
@@ -43,12 +42,8 @@ pub async fn run<S, L>(
 ) where
     S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
     L: Elector<S>,
-    Provider<S, ed25519::PrivateKey, Rayon>: EpochProvider<
-        Variant = MinSig,
-        PublicKey = ed25519::PublicKey,
-        Scheme = S,
-        Strategy = Rayon,
-    >,
+    Provider<S, ed25519::PrivateKey>:
+        EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
     // Load the participant configuration.
     let config_str = std::fs::read_to_string(&args.config_path)
@@ -335,12 +330,8 @@ mod test {
         ) where
             S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = PublicKey>,
             L: Elector<S>,
-            Provider<S, PrivateKey, Sequential>: EpochProvider<
-                Variant = MinSig,
-                PublicKey = PublicKey,
-                Scheme = S,
-                Strategy = Sequential,
-            >,
+            Provider<S, PrivateKey>:
+                EpochProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {
             if let Some(handle) = self.handles.remove(&pk) {
                 handle.abort();

@@ -614,7 +614,10 @@ impl<
         };
 
         // Add the vote. If a new certificate is formed, handle it.
-        if let Some(certificate) = self.ack_manager.add_ack(ack, scheme.as_ref(), &self.strategy) {
+        if let Some(certificate) = self
+            .ack_manager
+            .add_ack(ack, scheme.as_ref(), &self.strategy)
+        {
             debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = %ack.chunk.height, "recovered certificate");
             self.metrics.certificates.inc();
             self.handle_certificate(&ack.chunk, ack.epoch, certificate)

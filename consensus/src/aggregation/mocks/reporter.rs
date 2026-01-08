@@ -77,7 +77,11 @@ where
             match msg {
                 Message::Ack(ack) => {
                     // Verify properly constructed (not needed in production)
-                    assert!(ack.verify(&mut self.rng, &self.scheme, &commonware_parallel::Sequential));
+                    assert!(ack.verify(
+                        &mut self.rng,
+                        &self.scheme,
+                        &commonware_parallel::Sequential
+                    ));
 
                     // Test encoding/decoding
                     let encoded = ack.encode();
@@ -91,7 +95,11 @@ where
                 }
                 Message::Certified(certificate) => {
                     // Verify certificate
-                    assert!(certificate.verify(&mut self.rng, &self.scheme, &commonware_parallel::Sequential));
+                    assert!(certificate.verify(
+                        &mut self.rng,
+                        &self.scheme,
+                        &commonware_parallel::Sequential
+                    ));
 
                     // Test encoding/decoding
                     let encoded = certificate.encode();

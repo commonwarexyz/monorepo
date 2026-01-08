@@ -67,9 +67,9 @@ pub use crate::{
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
-use commonware_parallel::Strategy;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_parallel::Strategy;
 use commonware_utils::{bitmap::BitMap, ordered::Set, Participant};
 use core::{fmt::Debug, hash::Hash};
 use rand_core::CryptoRngCore;

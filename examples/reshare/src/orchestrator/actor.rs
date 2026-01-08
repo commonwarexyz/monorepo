@@ -44,7 +44,7 @@ where
 {
     pub oracle: B,
     pub application: A,
-    pub provider: Provider<S, C, St>,
+    pub provider: Provider<S, C>,
     pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
     pub strategy: St,
 
@@ -69,8 +69,7 @@ where
     S: Scheme,
     L: Elector<S>,
     St: Strategy,
-    Provider<S, C, St>:
-        EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
@@ -78,7 +77,7 @@ where
 
     oracle: B,
     marshal: marshal::Mailbox<S, Block<H, C, V>>,
-    provider: Provider<S, C, St>,
+    provider: Provider<S, C>,
     strategy: St,
 
     muxer_size: usize,
@@ -99,8 +98,7 @@ where
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
     St: Strategy,
-    Provider<S, C, St>:
-        EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(
         context: E,

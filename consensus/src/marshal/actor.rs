@@ -130,7 +130,7 @@ where
     max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: B::Cfg,
-    // Strategy for parallel verification operations
+    // Strategy for parallel operations
     strategy: T,
 
     // ---------- State ----------

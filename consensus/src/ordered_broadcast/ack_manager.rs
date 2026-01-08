@@ -511,8 +511,12 @@ mod tests {
         let chunk = Chunk::new(sequencer, height, Sha256::hash(b"payload"));
 
         let ack = helpers::create_ack(&fixture.schemes[0], chunk, epoch);
-        assert!(acks.add_ack(&ack, &fixture.schemes[0], &Sequential).is_none());
-        assert!(acks.add_ack(&ack, &fixture.schemes[0], &Sequential).is_none());
+        assert!(acks
+            .add_ack(&ack, &fixture.schemes[0], &Sequential)
+            .is_none());
+        assert!(acks
+            .add_ack(&ack, &fixture.schemes[0], &Sequential)
+            .is_none());
     }
 
     #[test]
@@ -550,7 +554,9 @@ mod tests {
         assert!(produced.is_some());
 
         let ack = helpers::create_ack(&fixture.schemes[3], chunk, epoch);
-        assert!(acks.add_ack(&ack, &fixture.schemes[0], &Sequential).is_none());
+        assert!(acks
+            .add_ack(&ack, &fixture.schemes[0], &Sequential)
+            .is_none());
     }
 
     #[test]
@@ -619,7 +625,9 @@ mod tests {
 
         let acks_vec = helpers::create_acks_for_indices(&fixture.schemes, chunk, epoch, &[0, 1]);
         for ack in acks_vec {
-            assert!(acks.add_ack(&ack, &fixture.schemes[0], &Sequential).is_none());
+            assert!(acks
+                .add_ack(&ack, &fixture.schemes[0], &Sequential)
+                .is_none());
         }
         assert_eq!(acks.get_certificate(&sequencer, height), None);
     }

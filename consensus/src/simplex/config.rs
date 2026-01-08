@@ -60,7 +60,7 @@ pub struct Config<
     /// automatically filter and verify activities based on scheme attributability.
     pub reporter: F,
 
-    /// Strategy for parallel verification operations.
+    /// Strategy for parallel operations.
     pub strategy: T,
 
     /// Partition for the consensus engine.

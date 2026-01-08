@@ -1131,7 +1131,11 @@ mod tests {
             )
         });
 
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, certs_iter, &Sequential));
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            certs_iter,
+            &Sequential
+        ));
     }
 
     #[test]
@@ -1172,7 +1176,11 @@ mod tests {
             )
         });
 
-        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, certs_iter, &Sequential));
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            certs_iter,
+            &Sequential
+        ));
     }
 
     #[test]
