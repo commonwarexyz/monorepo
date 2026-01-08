@@ -148,10 +148,6 @@ pub(crate) async fn init_fixed_authenticated_log<
     Ok(log)
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// SyncConfig implementations
-// ═══════════════════════════════════════════════════════════════════════════
-
 impl<T: Translator + Clone> sync::SyncConfig for FixedConfig<T> {
     fn mmr_config(&self) -> MmrConfig {
         MmrConfig {

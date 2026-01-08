@@ -151,7 +151,7 @@ impl<T: Translator, V: Eq> Index<T, V> {
 
 impl<T: Translator, V: Eq> crate::qmdb::any::sync::SyncIndex for Index<T, V> {
     type Translator = T;
-    fn new_for_sync(ctx: impl Metrics, translator: T) -> Self {
+    fn new(ctx: impl Metrics, translator: T) -> Self {
         Self::new(ctx, translator)
     }
 }

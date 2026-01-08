@@ -1236,7 +1236,7 @@ mod harnesses {
     use commonware_cryptography::sha256::Digest;
     use commonware_runtime::deterministic::Context;
 
-    // ----- Ordered Fixed -----
+    // ----- Ordered/Fixed -----
 
     pub struct OrderedFixedHarness;
 
@@ -1280,7 +1280,7 @@ mod harnesses {
         }
     }
 
-    // ----- Ordered Variable -----
+    // ----- Ordered/Variable -----
 
     pub struct OrderedVariableHarness;
 
@@ -1330,7 +1330,7 @@ mod harnesses {
         }
     }
 
-    // ----- Unordered Fixed -----
+    // ----- Unordered/Fixed -----
 
     pub struct UnorderedFixedHarness;
 
@@ -1376,7 +1376,7 @@ mod harnesses {
         }
     }
 
-    // ----- Unordered Variable -----
+    // ----- Unordered/Variable -----
     // This harness has its own test config with different mmr_items_per_blob values.
 
     use crate::qmdb::{

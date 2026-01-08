@@ -47,8 +47,12 @@ where
             buffer_pool: config.buffer_pool.clone(),
         };
 
-        fixed::Journal::init_sync(context.with_label("log"), journal_config, *range.start..*range.end)
-            .await
+        fixed::Journal::init_sync(
+            context.with_label("log"),
+            journal_config,
+            *range.start..*range.end,
+        )
+        .await
     }
 
     async fn from_sync_result(
@@ -80,7 +84,7 @@ where
             apply_batch_size as u64,
         )
         .await?;
-        let snapshot = I::new_for_sync(context.with_label("snapshot"), config.translator.clone());
+        let snapshot = I::new(context.with_label("snapshot"), config.translator.clone());
         let db = Self::reconstruct(range, log, snapshot).await?;
 
         Ok(db)
@@ -179,7 +183,7 @@ where
             apply_batch_size as u64,
         )
         .await?;
-        let snapshot = I::new_for_sync(context.with_label("snapshot"), config.translator.clone());
+        let snapshot = I::new(context.with_label("snapshot"), config.translator.clone());
         let db = Self::reconstruct(range, log, snapshot).await?;
 
         Ok(db)

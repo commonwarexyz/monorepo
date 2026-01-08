@@ -27,7 +27,7 @@ pub trait SyncConfig: Clone {
 pub trait SyncIndex: Sized {
     type Translator: crate::translator::Translator + Clone;
     /// Create a new index for use during sync.
-    fn new_for_sync(ctx: impl Metrics, translator: Self::Translator) -> Self;
+    fn new(ctx: impl Metrics, translator: Self::Translator) -> Self;
 }
 
 /// Logic for reconstructing a database from its components.
