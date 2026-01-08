@@ -1,5 +1,5 @@
 {
-  "generated": "2026-01-08T12:08:02.496289+00:00",
+  "generated": "2026-01-08T12:11:03.851199+00:00",
   "crates": {
     "broadcast": {
       "modules": {
@@ -18,23 +18,91 @@
           "beta": "0.1.0",
           "lts": "0.1.0"
         },
-        "codec": {},
-        "config": {},
-        "conformance": {},
-        "error": {},
-        "extensions": {},
-        "types": {},
-        "types::btree_map": {},
-        "types::btree_set": {},
-        "types::bytes": {},
-        "types::hash_map": {},
-        "types::hash_set": {},
-        "types::net": {},
-        "types::primitives": {},
-        "types::tuple": {},
-        "types::vec": {},
-        "util": {},
-        "varint": {}
+        "codec": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "config": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "conformance": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "error": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "extensions": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "types": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "types::btree_map": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "types::btree_set": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "types::bytes": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "types::hash_map": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "types::hash_set": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "types::net": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "types::primitives": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "types::tuple": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "types::vec": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "util": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "varint": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        }
       }
     },
     "coding": {
@@ -158,45 +226,201 @@
           "beta": "0.1.0",
           "lts": "0.1.0"
         },
-        "blake3": {},
-        "bloomfilter": {},
-        "bls12381": {},
-        "bls12381::certificate": {},
-        "bls12381::certificate::multisig": {},
-        "bls12381::certificate::multisig::mocks": {},
-        "bls12381::certificate::threshold": {},
-        "bls12381::certificate::threshold::mocks": {},
-        "bls12381::dkg": {},
-        "bls12381::primitives": {},
-        "bls12381::primitives::group": {},
-        "bls12381::primitives::ops": {},
-        "bls12381::primitives::ops::aggregate": {},
-        "bls12381::primitives::ops::batch": {},
-        "bls12381::primitives::ops::threshold": {},
-        "bls12381::primitives::sharing": {},
-        "bls12381::primitives::variant": {},
-        "bls12381::scheme": {},
-        "bls12381::tle": {},
-        "certificate": {},
-        "ed25519": {},
-        "ed25519::certificate": {},
-        "ed25519::certificate::mocks": {},
-        "ed25519::scheme": {},
-        "handshake": {},
-        "handshake::cipher": {},
-        "handshake::conformance": {},
-        "handshake::error": {},
-        "handshake::key_exchange": {},
-        "lthash": {},
-        "secp256r1": {},
-        "secp256r1::certificate": {},
-        "secp256r1::certificate::mocks": {},
-        "secp256r1::common": {},
-        "secp256r1::recoverable": {},
-        "secp256r1::standard": {},
-        "secret": {},
-        "sha256": {},
-        "transcript": {}
+        "blake3": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bloomfilter": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::certificate": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::certificate::multisig": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::certificate::multisig::mocks": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::certificate::threshold": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::certificate::threshold::mocks": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::dkg": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::primitives": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::primitives::group": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::primitives::ops": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::primitives::ops::aggregate": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::primitives::ops::batch": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::primitives::ops::threshold": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::primitives::sharing": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::primitives::variant": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::scheme": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bls12381::tle": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "certificate": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "ed25519": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "ed25519::certificate": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "ed25519::certificate::mocks": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "ed25519::scheme": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "handshake": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "handshake::cipher": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "handshake::conformance": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "handshake::error": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "handshake::key_exchange": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "lthash": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "secp256r1": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "secp256r1::certificate": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "secp256r1::certificate::mocks": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "secp256r1::common": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "secp256r1::recoverable": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "secp256r1::standard": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "secret": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "sha256": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "transcript": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        }
       }
     },
     "deployer": {
@@ -219,20 +443,43 @@
           "beta": "0.1.0",
           "lts": "0.1.0"
         },
-        "nextest": {}
+        "nextest": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        }
       }
     },
     "math": {
       "modules": {
-        "(root)": {},
+        "(root)": {
+          "beta": "0.1.0",
+          "lts": "0.1.0"
+        },
         "algebra": {
           "beta": "0.1.0",
           "lts": "0.1.0"
         },
-        "fields::goldilocks": {},
-        "ntt": {},
-        "poly": {},
-        "test": {}
+        "fields::goldilocks": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "ntt": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "poly": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "test": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        }
       }
     },
     "p2p": {
@@ -338,57 +585,245 @@
           "beta": "0.1.0",
           "lts": "0.1.0"
         },
-        "benchmarks": {},
-        "benchmarks::context": {},
-        "benchmarks::tokio": {},
-        "deterministic": {},
-        "iouring": {},
-        "macros": {},
-        "mocks": {},
-        "network": {},
-        "network::audited": {},
-        "network::deterministic": {},
-        "network::iouring": {},
-        "network::metered": {},
-        "network::tokio": {},
-        "process": {},
-        "process::metered": {},
-        "storage": {},
-        "storage::audited": {},
-        "storage::iouring": {},
-        "storage::memory": {},
-        "storage::metered": {},
-        "storage::tokio": {},
-        "storage::tokio::fallback": {},
-        "storage::tokio::unix": {},
-        "telemetry": {},
-        "telemetry::metrics": {},
-        "telemetry::metrics::histogram": {},
-        "telemetry::metrics::status": {},
-        "telemetry::metrics::task": {},
-        "telemetry::traces": {},
-        "telemetry::traces::collector": {},
-        "telemetry::traces::status": {},
-        "tokio": {},
-        "tokio::runtime": {},
-        "tokio::telemetry": {},
-        "tokio::tracing": {},
-        "utils": {},
-        "utils::buffer": {},
-        "utils::buffer::pool": {},
-        "utils::buffer::pool::append": {},
+        "benchmarks": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "benchmarks::context": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "benchmarks::tokio": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "deterministic": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "iouring": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "macros": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "mocks": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "network": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "network::audited": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "network::deterministic": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "network::iouring": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "network::metered": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "network::tokio": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "process": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "process::metered": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "storage": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "storage::audited": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "storage::iouring": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "storage::memory": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "storage::metered": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "storage::tokio": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "storage::tokio::fallback": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "storage::tokio::unix": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "telemetry": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "telemetry::metrics": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "telemetry::metrics::histogram": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "telemetry::metrics::status": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "telemetry::metrics::task": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "telemetry::traces": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "telemetry::traces::collector": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "telemetry::traces::status": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "tokio": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "tokio::runtime": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "tokio::telemetry": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "tokio::tracing": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "utils": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "utils::buffer": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "utils::buffer::pool": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "utils::buffer::pool::append": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
         "utils::buffer::pool::page_cache": {
           "beta": "0.1.0",
           "lts": "0.1.0"
         },
-        "utils::buffer::pool::read": {},
-        "utils::buffer::read": {},
-        "utils::buffer::tip": {},
-        "utils::buffer::write": {},
-        "utils::cell": {},
-        "utils::handle": {},
-        "utils::signal": {},
-        "utils::supervision": {}
+        "utils::buffer::pool::read": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "utils::buffer::read": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "utils::buffer::tip": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "utils::buffer::write": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "utils::cell": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "utils::handle": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "utils::signal": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "utils::supervision": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        }
       }
     },
     "storage": {
@@ -558,48 +993,160 @@
           "beta": "0.1.0",
           "lts": "0.1.0"
         },
-        "acknowledgement": {},
-        "bitmap": {},
-        "bitmap::historical": {},
-        "bitmap::historical::batch": {},
-        "bitmap::historical::bitmap": {},
-        "bitmap::historical::error": {},
-        "bitmap::historical::tests": {},
-        "bitmap::prunable": {},
-        "channels": {},
-        "channels::fallible": {},
-        "channels::ring": {},
-        "channels::tracked": {},
-        "concurrency": {},
-        "futures": {},
-        "hex_literal": {},
-        "hostname": {},
-        "net": {},
-        "ordered": {},
-        "priority_set": {},
-        "rational": {},
-        "sequence": {},
+        "acknowledgement": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bitmap": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bitmap::historical": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bitmap::historical::batch": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bitmap::historical::bitmap": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bitmap::historical::error": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bitmap::historical::tests": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "bitmap::prunable": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "channels": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "channels::fallible": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "channels::ring": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "channels::tracked": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "concurrency": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "futures": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "hex_literal": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "hostname": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "net": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "ordered": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "priority_set": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "rational": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "sequence": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
         "sequence::fixed_bytes": {
           "beta": "0.1.0",
           "lts": "0.1.0"
         },
-        "sequence::prefixed_u64": {},
-        "sequence::u32": {},
-        "sequence::u64": {},
-        "sequence::unit": {},
-        "stable_buf": {},
-        "time": {},
-        "vec": {}
+        "sequence::prefixed_u64": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "sequence::u32": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "sequence::u64": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "sequence::unit": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "stable_buf": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "time": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        },
+        "vec": {
+          "beta": "0.1.0",
+          "lts": "0.1.0",
+          "inherited_from": "src/lib.rs"
+        }
       }
     }
   },
   "summary": {
     "total_modules": 445,
     "by_stage": {
-      "alpha": 423,
-      "beta": 22,
+      "alpha": 286,
+      "beta": 159,
       "gamma": 0
     },
-    "lts_count": 22
+    "lts_count": 159
   }
 }

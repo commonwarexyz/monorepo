@@ -2,6 +2,11 @@ use crate::{marker::Markers, scanner::ModuleStatus};
 use std::{collections::BTreeMap, path::Path};
 
 pub fn apply_inheritance(modules: &mut BTreeMap<String, ModuleStatus>) {
+    let lib_markers: Option<Markers> = modules
+        .get("src/lib.rs")
+        .filter(|status| !status.markers.is_empty())
+        .map(|status| status.markers.clone());
+
     let explicit_mod_markers: BTreeMap<String, Markers> = modules
         .iter()
         .filter(|(path, status)| path.ends_with("/mod.rs") && !status.markers.is_empty())
@@ -17,7 +22,9 @@ pub fn apply_inheritance(modules: &mut BTreeMap<String, ModuleStatus>) {
             continue;
         }
 
-        if let Some((parent_path, parent_markers)) = find_parent_mod(&path, &explicit_mod_markers) {
+        if let Some((parent_path, parent_markers)) =
+            find_parent_mod(&path, &explicit_mod_markers, &lib_markers)
+        {
             let status = modules.get_mut(&path).unwrap();
             status.markers = parent_markers;
             status.inherited_from = Some(parent_path);
@@ -28,6 +35,7 @@ pub fn apply_inheritance(modules: &mut BTreeMap<String, ModuleStatus>) {
 fn find_parent_mod(
     path: &str,
     explicit_markers: &BTreeMap<String, Markers>,
+    lib_markers: &Option<Markers>,
 ) -> Option<(String, Markers)> {
     let path_obj = Path::new(path);
     let mut current = path_obj.parent();
@@ -40,6 +48,12 @@ fn find_parent_mod(
         }
 
         current = dir.parent();
+    }
+
+    if path != "src/lib.rs" {
+        if let Some(markers) = lib_markers {
+            return Some(("src/lib.rs".to_string(), markers.clone()));
+        }
     }
 
     None
@@ -91,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lib_rs_does_not_cascade() {
+    fn test_lib_rs_cascades_to_all() {
         let mut modules = BTreeMap::new();
 
         modules.insert(
@@ -102,12 +116,20 @@ mod tests {
             }),
         );
         modules.insert("src/types.rs".to_string(), make_status(Markers::default()));
+        modules.insert(
+            "src/utils/helper.rs".to_string(),
+            make_status(Markers::default()),
+        );
 
         apply_inheritance(&mut modules);
 
         let types = modules.get("src/types.rs").unwrap();
-        assert!(types.markers.is_empty());
-        assert!(types.inherited_from.is_none());
+        assert_eq!(types.markers.beta, Some("0.1.0".to_string()));
+        assert_eq!(types.inherited_from, Some("src/lib.rs".to_string()));
+
+        let helper = modules.get("src/utils/helper.rs").unwrap();
+        assert_eq!(helper.markers.beta, Some("0.1.0".to_string()));
+        assert_eq!(helper.inherited_from, Some("src/lib.rs".to_string()));
     }
 
     #[test]
