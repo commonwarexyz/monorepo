@@ -123,8 +123,8 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
-    use commonware_utils::test_rng;
     use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
     use futures::executor::block_on;
     use std::sync::{Arc, Mutex};
 
