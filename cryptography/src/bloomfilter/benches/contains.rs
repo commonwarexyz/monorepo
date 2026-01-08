@@ -1,14 +1,14 @@
 use commonware_cryptography::{blake3::Blake3, sha256::Sha256, BloomFilter, Hasher};
-use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, measurement::Measurement, Criterion, Throughput};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::collections::HashSet;
+use std::{collections::HashSet, hint::black_box};
 
 const ITEM_SIZES: [usize; 3] = [32, 2048, 4096];
 const NUM_ITEMS: usize = 10000;
 const FP_RATES: [f64; 2] = [0.1, 0.001];
 
 fn run_contains_bench<H: Hasher>(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    group: &mut criterion::BenchmarkGroup<'_, impl Measurement>,
     hasher_name: &str,
     query_inserted: bool,
 ) {
@@ -31,7 +31,7 @@ fn run_contains_bench<H: Hasher>(
                 .collect();
 
             // Items to query: inserted ones or guaranteed non-inserted ones
-            let query_items = if query_inserted {
+            let items = if query_inserted {
                 inserted
             } else {
                 let mut items = Vec::with_capacity(NUM_ITEMS);
@@ -46,13 +46,12 @@ fn run_contains_bench<H: Hasher>(
             };
 
             group.throughput(Throughput::Elements(1));
-            group.bench_with_input(
-                BenchmarkId::new(format!("{hasher_name}/size={item_size}"), format!("fp={fp_rate}")),
-                &query_items,
-                |b, items| {
+            group.bench_function(
+                format!("{hasher_name}/size={item_size} fp={fp_rate}"),
+                |b| {
                     let mut idx = 0;
                     b.iter(|| {
-                        let result = bf.contains(&items[idx]);
+                        let result = bf.contains(black_box(&items[idx]));
                         idx = (idx + 1) % items.len();
                         result
                     });
@@ -63,17 +62,21 @@ fn run_contains_bench<H: Hasher>(
 }
 
 fn benchmark_contains_positive(c: &mut Criterion) {
-    let mut group = c.benchmark_group("bloomfilter/contains_positive");
+    let mut group = c.benchmark_group(format!("{}/positive", module_path!()));
     run_contains_bench::<Sha256>(&mut group, "sha256", true);
     run_contains_bench::<Blake3>(&mut group, "blake3", true);
     group.finish();
 }
 
 fn benchmark_contains_negative(c: &mut Criterion) {
-    let mut group = c.benchmark_group("bloomfilter/contains_negative");
+    let mut group = c.benchmark_group(format!("{}/negative", module_path!()));
     run_contains_bench::<Sha256>(&mut group, "sha256", false);
     run_contains_bench::<Blake3>(&mut group, "blake3", false);
     group.finish();
 }
 
-criterion_group!(benches, benchmark_contains_positive, benchmark_contains_negative);
+criterion_group!(
+    benches,
+    benchmark_contains_positive,
+    benchmark_contains_negative
+);
