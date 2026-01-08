@@ -5,7 +5,10 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
-use commonware_utils::{channels::ring, NZUsize};
+use commonware_utils::{
+    channels::{fallible::AsyncFallibleExt, ring},
+    NZUsize,
+};
 use futures::channel::oneshot;
 
 /// Messages that can be processed by the router.
@@ -52,7 +55,7 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     /// This may fail during shutdown if the router has already exited,
     /// which is harmless since the router no longer tracks any peers.
     pub async fn release(&mut self, peer: P) {
-        let _ = self.send(Message::Release { peer }).await;
+        self.send_lossy(Message::Release { peer }).await;
     }
 }
 
@@ -79,22 +82,16 @@ impl<P: PublicKey> Messenger<P> {
         mut message: impl Buf + Send,
         priority: bool,
     ) -> Vec<P> {
-        let (sender, receiver) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::Content {
+        let message = message.copy_to_bytes(message.remaining());
+        self.sender
+            .request_or_default(|success| Message::Content {
                 recipients,
                 channel,
-                message: message.copy_to_bytes(message.remaining()),
+                message,
                 priority,
-                success: sender,
+                success,
             })
             .await
-            .is_err()
-        {
-            return Vec::new();
-        }
-        receiver.await.unwrap_or_default()
     }
 }
 
@@ -102,20 +99,12 @@ impl<P: PublicKey> Connected for Messenger<P> {
     type PublicKey = P;
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
-        let (sender, receiver) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::SubscribePeers { response: sender })
+        self.sender
+            .request(|response| Message::SubscribePeers { response })
             .await
-            .is_err()
-        {
-            // Return a closed receiver
-            let (_, rx) = ring::channel(NZUsize!(1));
-            return rx;
-        }
-        receiver.await.unwrap_or_else(|_| {
-            let (_, rx) = ring::channel(NZUsize!(1));
-            rx
-        })
+            .unwrap_or_else(|| {
+                let (_, rx) = ring::channel(NZUsize!(1));
+                rx
+            })
     }
 }

@@ -1,4 +1,8 @@
-use futures::{channel::mpsc, SinkExt as _};
+use commonware_utils::channels::fallible::{AsyncFallibleExt, FallibleExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt as _,
+};
 
 /// A mailbox wraps a sender for messages of type `T`.
 #[derive(Debug)]
@@ -30,6 +34,40 @@ impl<T> Mailbox<T> {
     }
 }
 
+impl<T: Send> AsyncFallibleExt<T> for Mailbox<T> {
+    async fn send_lossy(&mut self, msg: T) {
+        self.0.send_lossy(msg).await;
+    }
+
+    async fn try_send_lossy(&mut self, msg: T) -> bool {
+        self.0.try_send_lossy(msg).await
+    }
+
+    async fn request<R, F>(&mut self, make_msg: F) -> Option<R>
+    where
+        R: Send,
+        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+    {
+        self.0.request(make_msg).await
+    }
+
+    async fn request_or<R, F>(&mut self, make_msg: F, default: R) -> R
+    where
+        R: Send,
+        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+    {
+        self.0.request_or(make_msg, default).await
+    }
+
+    async fn request_or_default<R, F>(&mut self, make_msg: F) -> R
+    where
+        R: Default + Send,
+        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+    {
+        self.0.request_or_default(make_msg).await
+    }
+}
+
 /// A mailbox wraps an unbounded sender for messages of type `T`.
 #[derive(Debug)]
 pub struct UnboundedMailbox<T>(mpsc::UnboundedSender<T>);
@@ -48,9 +86,36 @@ impl<T> Clone for UnboundedMailbox<T> {
     }
 }
 
-impl<T> UnboundedMailbox<T> {
-    /// Sends a message to the corresponding receiver.
-    pub fn send(&mut self, message: T) -> Result<(), mpsc::TrySendError<T>> {
-        self.0.unbounded_send(message)
+impl<T: Send> FallibleExt<T> for UnboundedMailbox<T> {
+    fn send_lossy(&self, msg: T) {
+        self.0.send_lossy(msg);
+    }
+
+    fn try_send_lossy(&self, msg: T) -> bool {
+        self.0.try_send_lossy(msg)
+    }
+
+    async fn request<R, F>(&self, make_msg: F) -> Option<R>
+    where
+        R: Send,
+        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+    {
+        self.0.request(make_msg).await
+    }
+
+    async fn request_or<R, F>(&self, make_msg: F, default: R) -> R
+    where
+        R: Send,
+        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+    {
+        self.0.request_or(make_msg, default).await
+    }
+
+    async fn request_or_default<R, F>(&self, make_msg: F) -> R
+    where
+        R: Default + Send,
+        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+    {
+        self.0.request_or_default(make_msg).await
     }
 }

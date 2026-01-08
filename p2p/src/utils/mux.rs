@@ -279,7 +279,7 @@ impl<R: Receiver> Drop for SubReceiver<R> {
             .expect("SubReceiver::drop called twice");
 
         // Deregister the subchannel immediately.
-        control_tx.try_send(Control::Deregister {
+        control_tx.send_lossy(Control::Deregister {
             subchannel: self.subchannel,
         });
     }

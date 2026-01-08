@@ -10,7 +10,7 @@
 //! use commonware_utils::channels::fallible::FallibleExt;
 //!
 //! // Fire-and-forget: silently ignore disconnection
-//! sender.try_send(Message::Shutdown);
+//! sender.send_lossy(Message::Shutdown);
 //!
 //! // Request-response: return None on disconnection
 //! let result = sender.request(|tx| Message::Query { responder: tx }).await;
@@ -27,12 +27,13 @@ pub trait FallibleExt<T> {
     ///
     /// Use this for fire-and-forget messages where the receiver
     /// may have been dropped during shutdown.
-    fn try_send(&self, msg: T);
+    fn send_lossy(&self, msg: T);
 
     /// Send a message, returning `true` if successful.
     ///
-    /// Returns `false` if the receiver has been dropped.
-    fn try_send_checked(&self, msg: T) -> bool;
+    /// Like [`send_lossy`](Self::send_lossy), this silently handles disconnection
+    /// but returns a bool indicating whether the send succeeded.
+    fn try_send_lossy(&self, msg: T) -> bool;
 
     /// Send a request message containing a oneshot responder and await the response.
     ///
@@ -76,11 +77,11 @@ pub trait FallibleExt<T> {
 }
 
 impl<T: Send> FallibleExt<T> for mpsc::UnboundedSender<T> {
-    fn try_send(&self, msg: T) {
+    fn send_lossy(&self, msg: T) {
         let _ = self.unbounded_send(msg);
     }
 
-    fn try_send_checked(&self, msg: T) -> bool {
+    fn try_send_lossy(&self, msg: T) -> bool {
         self.unbounded_send(msg).is_ok()
     }
 
@@ -113,6 +114,90 @@ impl<T: Send> FallibleExt<T> for mpsc::UnboundedSender<T> {
     }
 }
 
+/// Extension trait for bounded channel operations that may fail due to disconnection.
+///
+/// Similar to [`FallibleExt`] but for bounded channels where send operations are async.
+pub trait AsyncFallibleExt<T> {
+    /// Send a message asynchronously, silently ignoring disconnection errors.
+    ///
+    /// Use this for fire-and-forget messages where the receiver
+    /// may have been dropped during shutdown.
+    fn send_lossy(&mut self, msg: T) -> impl std::future::Future<Output = ()> + Send;
+
+    /// Send a message asynchronously, returning `true` if successful.
+    ///
+    /// Like [`send_lossy`](Self::send_lossy), this silently handles disconnection
+    /// but returns a bool indicating whether the send succeeded.
+    fn try_send_lossy(&mut self, msg: T) -> impl std::future::Future<Output = bool> + Send;
+
+    /// Send a request message containing a oneshot responder and await the response.
+    ///
+    /// Returns `None` if:
+    /// - The receiver has been dropped (send fails)
+    /// - The responder is dropped without sending (receive fails)
+    fn request<R, F>(&mut self, make_msg: F) -> impl std::future::Future<Output = Option<R>> + Send
+    where
+        R: Send,
+        F: FnOnce(oneshot::Sender<R>) -> T + Send;
+
+    /// Send a request and return the provided default on failure.
+    fn request_or<R, F>(
+        &mut self,
+        make_msg: F,
+        default: R,
+    ) -> impl std::future::Future<Output = R> + Send
+    where
+        R: Send,
+        F: FnOnce(oneshot::Sender<R>) -> T + Send;
+
+    /// Send a request and return `R::default()` on failure.
+    fn request_or_default<R, F>(
+        &mut self,
+        make_msg: F,
+    ) -> impl std::future::Future<Output = R> + Send
+    where
+        R: Default + Send,
+        F: FnOnce(oneshot::Sender<R>) -> T + Send;
+}
+
+impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
+    async fn send_lossy(&mut self, msg: T) {
+        let _ = futures::SinkExt::send(self, msg).await;
+    }
+
+    async fn try_send_lossy(&mut self, msg: T) -> bool {
+        futures::SinkExt::send(self, msg).await.is_ok()
+    }
+
+    async fn request<R, F>(&mut self, make_msg: F) -> Option<R>
+    where
+        R: Send,
+        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+    {
+        let (tx, rx) = oneshot::channel();
+        if futures::SinkExt::send(self, make_msg(tx)).await.is_err() {
+            return None;
+        }
+        rx.await.ok()
+    }
+
+    async fn request_or<R, F>(&mut self, make_msg: F, default: R) -> R
+    where
+        R: Send,
+        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+    {
+        self.request(make_msg).await.unwrap_or(default)
+    }
+
+    async fn request_or_default<R, F>(&mut self, make_msg: F) -> R
+    where
+        R: Default + Send,
+        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+    {
+        self.request(make_msg).await.unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,9 +219,9 @@ mod tests {
     }
 
     #[test]
-    fn test_try_send_success() {
+    fn test_send_lossy_success() {
         let (tx, mut rx) = mpsc::unbounded();
-        tx.try_send(TestMessage::FireAndForget(42));
+        tx.send_lossy(TestMessage::FireAndForget(42));
 
         // Message should be received
         assert!(matches!(
@@ -146,25 +231,25 @@ mod tests {
     }
 
     #[test]
-    fn test_try_send_disconnected() {
+    fn test_send_lossy_disconnected() {
         let (tx, rx) = mpsc::unbounded::<TestMessage>();
         drop(rx);
 
         // Should not panic
-        tx.try_send(TestMessage::FireAndForget(42));
+        tx.send_lossy(TestMessage::FireAndForget(42));
     }
 
     #[test]
-    fn test_try_send_checked_success() {
+    fn test_try_send_lossy_success() {
         let (tx, _rx) = mpsc::unbounded();
-        assert!(tx.try_send_checked(TestMessage::FireAndForget(42)));
+        assert!(tx.try_send_lossy(TestMessage::FireAndForget(42)));
     }
 
     #[test]
-    fn test_try_send_checked_disconnected() {
+    fn test_try_send_lossy_disconnected() {
         let (tx, rx) = mpsc::unbounded::<TestMessage>();
         drop(rx);
-        assert!(!tx.try_send_checked(TestMessage::FireAndForget(42)));
+        assert!(!tx.try_send_lossy(TestMessage::FireAndForget(42)));
     }
 
     #[test_async]
@@ -199,6 +284,82 @@ mod tests {
         let result: Vec<u32> = tx
             .request_or_default(|responder| TestMessage::RequestVec { responder })
             .await;
+
+        assert!(result.is_empty());
+    }
+
+    // AsyncFallibleExt tests for bounded channels
+
+    #[test_async]
+    async fn test_async_send_lossy_success() {
+        let (mut tx, mut rx) = mpsc::channel(1);
+        tx.send_lossy(TestMessage::FireAndForget(42)).await;
+
+        // Message should be received
+        assert!(matches!(
+            rx.try_next(),
+            Ok(Some(TestMessage::FireAndForget(42)))
+        ));
+    }
+
+    #[test_async]
+    async fn test_async_send_lossy_disconnected() {
+        let (mut tx, rx) = mpsc::channel::<TestMessage>(1);
+        drop(rx);
+
+        // Should not panic
+        tx.send_lossy(TestMessage::FireAndForget(42)).await;
+    }
+
+    #[test_async]
+    async fn test_async_try_send_lossy_success() {
+        let (mut tx, _rx) = mpsc::channel(1);
+        assert!(tx.try_send_lossy(TestMessage::FireAndForget(42)).await);
+    }
+
+    #[test_async]
+    async fn test_async_try_send_lossy_disconnected() {
+        let (mut tx, rx) = mpsc::channel::<TestMessage>(1);
+        drop(rx);
+        assert!(!tx.try_send_lossy(TestMessage::FireAndForget(42)).await);
+    }
+
+    #[test_async]
+    async fn test_async_request_send_disconnected() {
+        let (mut tx, rx) = mpsc::channel::<TestMessage>(1);
+        drop(rx);
+
+        let result: Option<String> =
+            AsyncFallibleExt::request(&mut tx, |responder| TestMessage::Request { responder })
+                .await;
+
+        assert_eq!(result, None);
+    }
+
+    #[test_async]
+    async fn test_async_request_or_disconnected() {
+        let (mut tx, rx) = mpsc::channel::<TestMessage>(1);
+        drop(rx);
+
+        let result = AsyncFallibleExt::request_or(
+            &mut tx,
+            |responder| TestMessage::RequestBool { responder },
+            false,
+        )
+        .await;
+
+        assert!(!result);
+    }
+
+    #[test_async]
+    async fn test_async_request_or_default_disconnected() {
+        let (mut tx, rx) = mpsc::channel::<TestMessage>(1);
+        drop(rx);
+
+        let result: Vec<u32> = AsyncFallibleExt::request_or_default(&mut tx, |responder| {
+            TestMessage::RequestVec { responder }
+        })
+        .await;
 
         assert!(result.is_empty());
     }

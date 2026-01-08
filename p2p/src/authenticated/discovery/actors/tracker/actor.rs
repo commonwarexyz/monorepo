@@ -161,7 +161,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
-                    subscriber.try_send_checked((index, peers.clone(), self.directory.tracked()))
+                    subscriber.try_send_lossy((index, peers.clone(), self.directory.tracked()))
                 });
             }
             Message::PeerSet { index, responder } => {
@@ -175,7 +175,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
                     let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
-                    sender.try_send((latest_set_id, latest_set, self.directory.tracked()));
+                    sender.send_lossy((latest_set_id, latest_set, self.directory.tracked()));
                 }
                 self.subscribers.push(sender);
 

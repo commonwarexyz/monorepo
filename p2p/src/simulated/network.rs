@@ -313,7 +313,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let all = self.all_tracked_peers();
                 let notification = (id, peers, all);
                 self.subscribers
-                    .retain(|subscriber| subscriber.try_send_checked(notification.clone()));
+                    .retain(|subscriber| subscriber.try_send_lossy(notification.clone()));
 
                 // Broadcast updated peer list to LimitedSender subscribers
                 self.broadcast_peer_list().await;
@@ -379,7 +379,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 if let Some((index, peers)) = self.peer_sets.last_key_value() {
                     let all = self.all_tracked_peers();
                     let notification = (*index, peers.clone(), all);
-                    sender.try_send(notification);
+                    sender.send_lossy(notification);
                 }
                 self.subscribers.push(sender);
             }

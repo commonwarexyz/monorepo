@@ -44,7 +44,7 @@ impl<P: PublicKey> Manager for StaticManager<P> {
 
     async fn subscribe(&mut self) -> UnboundedReceiver<(u64, Set<P>, Set<P>)> {
         let (sender, receiver) = unbounded();
-        sender.try_send((self.id, self.peers.clone(), self.peers.clone()));
+        sender.send_lossy((self.id, self.peers.clone(), self.peers.clone()));
         self.senders.push(sender); // prevent the receiver from closing
         receiver
     }
