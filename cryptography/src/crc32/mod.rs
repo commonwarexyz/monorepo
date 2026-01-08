@@ -29,7 +29,7 @@ use crate::Hasher;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use bytes::{Buf, BufMut};
-use commonware_codec::{DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
 use commonware_utils::{hex, Array, Span};
 use core::{
@@ -75,12 +75,6 @@ impl Crc32 {
     #[inline]
     pub fn checksum(data: &[u8]) -> u32 {
         crc_fast::checksum(ALGORITHM, data) as u32
-    }
-
-    /// Convenience function for testing that creates an easily recognizable digest by repeating a
-    /// single byte.
-    pub fn fill(b: u8) -> <Self as Hasher>::Digest {
-        <Self as Hasher>::Digest::decode(vec![b; SIZE].as_ref()).unwrap()
     }
 }
 
