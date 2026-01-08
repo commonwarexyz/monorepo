@@ -288,9 +288,7 @@ impl<T: Ord> Quorum for Set<T> {
     }
 
     fn index(&self, key: &Self::Item) -> Option<Participant> {
-        self.position(key).map(|position| {
-            Participant::new(u32::try_from(position).expect("too many participants"))
-        })
+        self.position(key).map(Participant::from_usize)
     }
 }
 
