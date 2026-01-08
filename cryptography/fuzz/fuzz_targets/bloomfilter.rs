@@ -34,17 +34,17 @@ impl<'a> Arbitrary<'a> for Constructor {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         if u.arbitrary::<bool>()? {
             let hashers = u.arbitrary()?;
-            let bits = NonZeroU16::new(u.arbitrary::<u16>()?.max(1).next_power_of_two()).unwrap();
+            // Fallback to highest power of two in u16 on overflow
+            let bits = u
+                .arbitrary::<u16>()?
+                .checked_next_power_of_two()
+                .and_then(NonZeroU16::new)
+                .unwrap_or(NonZeroU16::new(1 << 15).unwrap());
             Ok(Constructor::New { hashers, bits })
         } else {
             let expected_items = u.arbitrary()?;
             // Generate f64 in range (0.0, 1.0) exclusive
-            let fp_rate = u
-                .arbitrary::<f64>()?
-                .abs()
-                .fract()
-                .clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
-
+            let fp_rate = u.int_in_range(1u32..=u32::MAX - 1)? as f64 / u32::MAX as f64;
             Ok(Constructor::WithRate {
                 expected_items,
                 fp_rate,
