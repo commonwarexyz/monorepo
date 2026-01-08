@@ -376,28 +376,10 @@ impl<B: Blob> Append<B> {
             return Ok(());
         }
 
-        // Drain the provided buffer of the full pages that are now cached in the buffer pool and
-        // will be written to the blob.
+        // Calculate values needed for state updates, but don't update yet.
         let bytes_to_drain = buffer.data.len() - remaining_byte_count;
-        buffer.data.drain(0..bytes_to_drain);
-        buffer.offset += bytes_to_drain as u64;
-        let new_offset = buffer.offset;
-
-        // Acquire a write lock on the blob state so nobody tries to read or modify the blob while
-        // we're writing to it.
-        let mut blob_state = self.blob_state.write().await;
-
-        // Release the buffer lock to allow for concurrent reads & buffered writes while we write
-        // the physical pages.
-        drop(buf_guard);
-
         let logical_page_size = self.pool_ref.page_size() as usize;
         let physical_page_size = logical_page_size + CRC_RECORD_SIZE as usize;
-        let write_at_offset = blob_state.current_page * physical_page_size as u64;
-
-        // Count only FULL pages for advancing current_page. A partial page (if included) takes
-        // up a full physical page on disk, but it's not complete - the next byte still goes to
-        // that same logical page.
         let total_pages_in_buffer = physical_pages.len() / physical_page_size;
         let full_pages_written = if partial_page_state.is_some() {
             total_pages_in_buffer.saturating_sub(1)
@@ -408,17 +390,18 @@ impl<B: Blob> Append<B> {
         // Identify protected regions based on the OLD partial page state
         let protected_regions = Self::identify_protected_regions(old_partial_page_state.as_ref());
 
-        blob_state.current_page += full_pages_written as u64;
-        blob_state.partial_page_state = partial_page_state;
+        // Acquire a write lock on the blob state so nobody tries to read or modify the blob while
+        // we're writing to it.
+        let mut blob_state = self.blob_state.write().await;
 
-        // Make sure the buffer offset and underlying blob agree on the state of the tip.
-        assert_eq!(
-            blob_state.current_page * self.pool_ref.page_size(),
-            new_offset
-        );
+        // Release the buffer lock to allow for concurrent reads & buffered writes while we write
+        // the physical pages. Note: we haven't modified the buffer yet.
+        drop(buf_guard);
 
-        // Write the physical pages to the blob.
-        // If there are protected regions in the first page, we need to write around them.
+        let write_at_offset = blob_state.current_page * physical_page_size as u64;
+
+        // Write the physical pages to the blob FIRST, before updating any state.
+        // If writes fail, no state has been modified.
         if let Some((prefix_len, protected_crc)) = protected_regions {
             match protected_crc {
                 ProtectedCrc::First => {
@@ -475,6 +458,21 @@ impl<B: Blob> Append<B> {
                 .write_at(physical_pages, write_at_offset)
                 .await?;
         }
+
+        // Writes succeeded - now update blob state.
+        blob_state.current_page += full_pages_written as u64;
+        blob_state.partial_page_state = partial_page_state;
+
+        // Update buffer state. We need to reacquire the buffer lock since we released it.
+        let mut buf_guard = self.buffer.write().await;
+        buf_guard.data.drain(0..bytes_to_drain);
+        buf_guard.offset += bytes_to_drain as u64;
+
+        // Make sure the buffer offset and underlying blob agree on the state of the tip.
+        assert_eq!(
+            blob_state.current_page * self.pool_ref.page_size(),
+            buf_guard.offset
+        );
 
         Ok(())
     }
@@ -835,20 +833,11 @@ impl<B: Blob> Blob for Append<B> {
             full_pages * physical_page_size
         };
 
-        // Resize the underlying blob.
-        blob_guard.blob.resize(new_physical_size).await?;
-        blob_guard.partial_page_state = None;
-
-        // Update blob state and buffer based on the desired logical size. The partial page data is
-        // read with CRC validation; the validated length may exceed partial_bytes (reflecting the
-        // old data length), but we only load the prefix we need. The next sync will write the
-        // correct CRC for the new length.
-
-        blob_guard.current_page = full_pages;
-        buf_guard.offset = full_pages * logical_page_size;
-
-        if partial_bytes > 0 {
-            // There's a partial page. Read its data from disk with CRC validation.
+        // Validate the target partial page BEFORE modifying any state.
+        // This ensures we don't leave state inconsistent if validation fails.
+        let validated_partial_data = if partial_bytes > 0 {
+            // Read and validate the page that will become the new partial page.
+            // This page already exists (we're shrinking), so we can read it now.
             let page_data =
                 super::get_page_from_blob(&blob_guard.blob, full_pages, logical_page_size).await?;
 
@@ -857,9 +846,23 @@ impl<B: Blob> Blob for Append<B> {
                 return Err(Error::InvalidChecksum);
             }
 
+            Some(page_data)
+        } else {
+            None
+        };
+
+        // Validation passed - now safe to modify state.
+        // Resize the underlying blob.
+        blob_guard.blob.resize(new_physical_size).await?;
+
+        // Update all state together.
+        blob_guard.partial_page_state = None;
+        blob_guard.current_page = full_pages;
+        buf_guard.offset = full_pages * logical_page_size;
+
+        if let Some(page_data) = validated_partial_data {
             buf_guard.data = page_data.as_ref()[..partial_bytes as usize].to_vec();
         } else {
-            // No partial page - all pages are full or blob is empty.
             buf_guard.data = vec![];
         }
 
@@ -1931,6 +1934,235 @@ mod tests {
             // Verify data is still readable.
             let data: Vec<u8> = append.read_at(vec![0u8; 5], 0).await.unwrap().into();
             assert_eq!(data, vec![1, 2, 3, 4, 5]);
+        });
+    }
+
+    /// Regression test: Verify that resize() failure leaves blob in a usable state.
+    ///
+    /// Bug: resize() updates state (current_page, offset, partial_page_state) BEFORE
+    /// validating the partial page CRC. If validation fails, an error is returned but
+    /// the state has already been modified, leaving the blob in an inconsistent state.
+    ///
+    /// Expected behavior: After resize() fails, the original data should still be readable
+    /// and the blob should remain usable for further operations.
+    #[test]
+    fn test_resize_failure_leaves_blob_usable() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let physical_page_size = PAGE_SIZE.get() as usize + CRC_RECORD_SIZE as usize;
+
+            // Step 1: Create blob with data across 3 pages (250 bytes = 103 + 103 + 44)
+            let (blob, size) = context
+                .open("test_partition", b"resize_state_test")
+                .await
+                .unwrap();
+
+            let append = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
+                .await
+                .unwrap();
+
+            let original_data: Vec<u8> = (0..=249).collect();
+            append.append(&original_data).await.unwrap();
+            append.sync().await.unwrap();
+            assert_eq!(append.size().await, 250);
+            drop(append);
+
+            // Step 2: Corrupt page 1's CRC (middle page)
+            let (blob, size) = context
+                .open("test_partition", b"resize_state_test")
+                .await
+                .unwrap();
+            assert_eq!(size as usize, physical_page_size * 3);
+
+            let page1_crc_offset = (physical_page_size * 2 - CRC_RECORD_SIZE as usize) as u64;
+            blob.write_at(vec![0xFF; CRC_RECORD_SIZE as usize], page1_crc_offset)
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+
+            // Step 3: Open blob (should succeed - only validates last page)
+            let append = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 250);
+
+            // Step 4: Try resize to corrupted page - should fail
+            let result = append.resize(150).await;
+            assert!(
+                matches!(result, Err(crate::Error::InvalidChecksum)),
+                "Expected InvalidChecksum, got: {:?}",
+                result
+            );
+
+            // REGRESSION CHECK: After failure, the blob should still be usable.
+            // The original size should be intact and data should be readable.
+            let current_size = append.size().await;
+            assert_eq!(
+                current_size, 250,
+                "BUG: Blob size changed after failed resize! State is inconsistent."
+            );
+
+            // Try to read the original data (first page should still be valid)
+            let read_data: Vec<u8> = append.read_at(vec![0u8; 103], 0).await.unwrap().into();
+            assert_eq!(
+                read_data,
+                original_data[..103],
+                "BUG: Original data corrupted after failed resize!"
+            );
+
+            // Try to append new data - should succeed if state is consistent
+            let new_data = vec![0xAA; 10];
+            let append_result = append.append(&new_data).await;
+            assert!(
+                append_result.is_ok(),
+                "BUG: Cannot append after failed resize! State is inconsistent. Error: {:?}",
+                append_result
+            );
+        });
+    }
+
+    /// Regression test: Verify that corrupted CRC with len > page_size is handled gracefully.
+    ///
+    /// Bug: In read_last_valid_page(), if a corrupted CRC record has len > page_size,
+    /// the slice operation `buf[..(len as usize)]` could panic instead of being detected
+    /// as corruption.
+    ///
+    /// Note: validate_page() checks `len > crc_start_idx` which should catch this,
+    /// so this test verifies that defense is working.
+    #[test]
+    fn test_corrupted_crc_len_too_large() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let physical_page_size = PAGE_SIZE.get() as usize + CRC_RECORD_SIZE as usize;
+
+            // Step 1: Create blob with valid data
+            let (blob, size) = context
+                .open("test_partition", b"crc_len_test")
+                .await
+                .unwrap();
+
+            let append = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
+                .await
+                .unwrap();
+
+            append.append(&vec![0x42; 50]).await.unwrap();
+            append.sync().await.unwrap();
+            drop(append);
+
+            // Step 2: Corrupt the CRC record to have len > page_size
+            let (blob, size) = context
+                .open("test_partition", b"crc_len_test")
+                .await
+                .unwrap();
+            assert_eq!(size as usize, physical_page_size);
+
+            // CRC record is at the end of the physical page
+            let crc_offset = PAGE_SIZE.get() as u64;
+
+            // Create a CRC record with len1 = 0xFFFF (65535), which is >> page_size (103)
+            // Format: [len1_hi, len1_lo, crc1 (4 bytes), len2_hi, len2_lo, crc2 (4 bytes)]
+            let bad_crc_record: [u8; 12] = [
+                0xFF, 0xFF, // len1 = 65535 (way too large)
+                0xDE, 0xAD, 0xBE, 0xEF, // crc1 (garbage)
+                0x00, 0x00, // len2 = 0
+                0x00, 0x00, 0x00, 0x00, // crc2 = 0
+            ];
+            blob.write_at(bad_crc_record.to_vec(), crc_offset)
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+
+            // Step 3: Try to open the blob - should NOT panic, should return error or handle gracefully
+            let result = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone()).await;
+
+            // Either returns InvalidChecksum error OR truncates the corrupted data
+            // (both are acceptable behaviors - panicking is NOT acceptable)
+            match result {
+                Ok(append) => {
+                    // If it opens successfully, the corrupted page should have been truncated
+                    let recovered_size = append.size().await;
+                    assert_eq!(
+                        recovered_size, 0,
+                        "Corrupted page should be truncated, size should be 0"
+                    );
+                }
+                Err(e) => {
+                    // Error is also acceptable (for immutable blobs)
+                    assert!(
+                        matches!(e, crate::Error::InvalidChecksum),
+                        "Expected InvalidChecksum error, got: {:?}",
+                        e
+                    );
+                }
+            }
+        });
+    }
+
+    /// Regression test: Verify that both CRC slots having len > page_size is handled.
+    ///
+    /// Tests that validate_page() properly rejects pages where both CRC slots
+    /// have invalid (too large) lengths, rather than falling through to slice operations.
+    #[test]
+    fn test_corrupted_crc_both_slots_len_too_large() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+
+            // Step 1: Create blob with valid data
+            let (blob, size) = context
+                .open("test_partition", b"crc_both_bad")
+                .await
+                .unwrap();
+
+            let append = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
+                .await
+                .unwrap();
+
+            append.append(&vec![0x42; 50]).await.unwrap();
+            append.sync().await.unwrap();
+            drop(append);
+
+            // Step 2: Corrupt BOTH CRC slots to have len > page_size
+            let (blob, size) = context
+                .open("test_partition", b"crc_both_bad")
+                .await
+                .unwrap();
+
+            let crc_offset = PAGE_SIZE.get() as u64;
+
+            // Both slots have len > page_size
+            let bad_crc_record: [u8; 12] = [
+                0x01, 0x00, // len1 = 256 (> 103)
+                0xDE, 0xAD, 0xBE, 0xEF, // crc1 (garbage)
+                0x02, 0x00, // len2 = 512 (> 103)
+                0xCA, 0xFE, 0xBA, 0xBE, // crc2 (garbage)
+            ];
+            blob.write_at(bad_crc_record.to_vec(), crc_offset)
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+
+            // Step 3: Try to open - should NOT panic
+            let result = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone()).await;
+
+            match result {
+                Ok(append) => {
+                    // Corrupted page truncated
+                    assert_eq!(append.size().await, 0);
+                }
+                Err(e) => {
+                    assert!(
+                        matches!(e, crate::Error::InvalidChecksum),
+                        "Expected InvalidChecksum, got: {:?}",
+                        e
+                    );
+                }
+            }
         });
     }
 }
