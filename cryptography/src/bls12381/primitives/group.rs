@@ -887,15 +887,6 @@ impl Space<Scalar> for G1 {
         // Give all points to Pippenger at once for O(n/log n) efficiency
         Self::msm_inner(&filtered)
     }
-
-    /// MSM optimized for random scalars using 128-bit processing.
-    ///
-    /// Uses batch affine conversion + Pippenger with 128-bit scalars for ~2x speedup.
-    /// Safe for batch verification where scalars are random (no algebraic structure).
-    fn rand_msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
-        let affine = Self::batch_to_affine(points);
-        Self::msm_affine_batch(&affine, scalars)
-    }
 }
 
 impl G1 {
@@ -1305,15 +1296,6 @@ impl Space<Scalar> for G2 {
 
         // Give all points to Pippenger at once for O(n/log n) efficiency
         Self::msm_inner(&filtered)
-    }
-
-    /// MSM optimized for random scalars using 128-bit processing.
-    ///
-    /// Uses batch affine conversion + Pippenger with 128-bit scalars for ~2x speedup.
-    /// Safe for batch verification where scalars are random (no algebraic structure).
-    fn rand_msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
-        let affine = Self::batch_to_affine(points);
-        Self::msm_affine_batch(&affine, scalars)
     }
 }
 
