@@ -122,7 +122,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
                 .participants()
                 .iter()
                 .enumerate()
-                .filter(|(index, _)| Participant::new(*index as u32) != self.scheme.me().unwrap())
+                .filter(|(index, _)| Participant::from_usize(*index) != self.scheme.me().unwrap())
                 .choose(&mut self.context)
                 .unwrap();
 
@@ -167,7 +167,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
                 .iter()
                 .enumerate()
                 .filter(|(index, key)| {
-                    Participant::new(*index as u32) != self.scheme.me().unwrap() && *key != victim
+                    Participant::from_usize(*index) != self.scheme.me().unwrap() && *key != victim
                 })
                 .map(|(_, key)| key.clone())
                 .collect();

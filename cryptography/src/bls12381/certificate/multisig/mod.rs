@@ -61,7 +61,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .values()
             .iter()
             .position(|p| p == &public_key)
-            .map(|index| (Participant::new(index as u32), private_key))?;
+            .map(|index| (Participant::from_usize(index), private_key))?;
 
         Some(Self {
             participants,
@@ -1229,7 +1229,7 @@ mod tests {
 
         // Certificate containing more signers than the participant set is rejected
         let mut signers = certificate.signers.iter().collect::<Vec<_>>();
-        signers.push(Participant::new(participants_len as u32));
+        signers.push(Participant::from_usize(participants_len));
         let extended = Certificate::<V> {
             signers: Signers::from(participants_len + 1, signers),
             signature: certificate.signature,
@@ -1263,7 +1263,7 @@ mod tests {
 
         // Add an unknown signer (out of range)
         let mut signers: Vec<Participant> = certificate.signers.iter().collect();
-        signers.push(Participant::new(participants_len as u32));
+        signers.push(Participant::from_usize(participants_len));
         certificate.signers = Signers::from(participants_len + 1, signers);
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(

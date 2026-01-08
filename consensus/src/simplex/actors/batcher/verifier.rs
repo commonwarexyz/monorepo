@@ -645,7 +645,7 @@ mod tests {
         let mut faulty_vote = create_notarize(&schemes[1], round2, View::new(1), 10);
         verifier2.set_leader(leader_vote.signer());
         verifier2.add(Vote::Notarize(leader_vote.clone()), false);
-        faulty_vote.attestation.signer = Participant::new((schemes.len() as u32) + 10);
+        faulty_vote.attestation.signer = Participant::from_usize(schemes.len() + 10);
         verifier2.add(Vote::Notarize(faulty_vote.clone()), false);
 
         for scheme in schemes.iter().skip(2).take(quorum as usize - 2) {

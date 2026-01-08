@@ -377,7 +377,7 @@ impl Signers {
         self.bitmap
             .iter()
             .enumerate()
-            .filter_map(|(index, bit)| bit.then_some(Participant::new(index as u32)))
+            .filter_map(|(index, bit)| bit.then_some(Participant::from_usize(index)))
     }
 }
 

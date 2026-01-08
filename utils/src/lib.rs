@@ -50,6 +50,15 @@ impl Participant {
         Self(index)
     }
 
+    /// Creates a new participant from a usize index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` exceeds `u32::MAX`.
+    pub fn from_usize(index: usize) -> Self {
+        Self(u32::try_from(index).expect("participant index exceeds u32::MAX"))
+    }
+
     /// Returns the underlying u32 index.
     pub const fn get(self) -> u32 {
         self.0
@@ -679,6 +688,15 @@ mod tests {
     fn test_participant_constructors() {
         assert_eq!(Participant::new(0).get(), 0);
         assert_eq!(Participant::new(42).get(), 42);
+        assert_eq!(Participant::from_usize(0).get(), 0);
+        assert_eq!(Participant::from_usize(42).get(), 42);
+        assert_eq!(Participant::from_usize(u32::MAX as usize).get(), u32::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "participant index exceeds u32::MAX")]
+    fn test_participant_from_usize_overflow() {
+        Participant::from_usize((u32::MAX as usize) + 1);
     }
 
     #[test]

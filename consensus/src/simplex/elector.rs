@@ -181,7 +181,7 @@ impl Random {
         };
 
         // Use the seed signature as a source of randomness
-        Participant::new(modulo(seed_signature.encode().as_ref(), u64::from(n)) as u32)
+        Participant::new(modulo(seed_signature.encode().as_ref(), n as u64) as u32)
     }
 }
 
@@ -254,7 +254,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
-        let n = participants.len();
+        let n = participants.len() as u32;
         let elector: RoundRobinElector<ed25519::Scheme> =
             RoundRobin::<Sha256>::default().build(&participants);
         let epoch = Epoch::new(0);
@@ -268,10 +268,7 @@ mod tests {
 
         // Verify leaders cycle: consecutive leaders differ by 1 (mod n)
         for i in 0..leaders.len() - 1 {
-            assert_eq!(
-                Participant::new((leaders[i].get() + 1) % n as u32),
-                leaders[i + 1]
-            );
+            assert_eq!(Participant::new((leaders[i].get() + 1) % n), leaders[i + 1]);
         }
     }
 
