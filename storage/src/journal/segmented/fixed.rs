@@ -261,18 +261,19 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 
                         // Check for trailing bytes
                         let trailing = available % Self::CHUNK_SIZE;
-                        let blob_size = if trailing > 0 && offset + trailing as u64 >= blob_size {
-                            warn!(
-                                section,
-                                position = offset / Self::CHUNK_SIZE_U64,
-                                new_size = valid_size,
-                                "trailing bytes detected: truncating"
-                            );
-                            blob.resize(valid_size).await.ok()?;
-                            valid_size
-                        } else {
-                            blob_size
-                        };
+                        let effective_blob_size =
+                            if trailing > 0 && offset + trailing as u64 >= blob_size {
+                                warn!(
+                                    section,
+                                    position = offset / Self::CHUNK_SIZE_U64,
+                                    new_size = valid_size,
+                                    "trailing bytes detected: truncating"
+                                );
+                                blob.resize(valid_size).await.ok()?;
+                                valid_size
+                            } else {
+                                blob_size
+                            };
 
                         if batch.is_empty() {
                             return None;
@@ -286,7 +287,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
                                 reader,
                                 offset,
                                 valid_size,
-                                blob_size,
+                                effective_blob_size,
                                 batch_buffer_size,
                             ),
                         ))

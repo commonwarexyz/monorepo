@@ -279,9 +279,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 if section == start_section && offset != 0 {
                     if let Err(err) = reader.seek_to(offset) {
                         warn!(section, offset, ?err, "failed to seek to offset");
-                        return stream::once(async move { stream::iter(vec![Err(err.into())]) })
-                            .flatten()
-                            .left_stream();
+                        return stream::once(async move { Err(err.into()) }).left_stream();
                     }
                 } else {
                     offset = 0;
