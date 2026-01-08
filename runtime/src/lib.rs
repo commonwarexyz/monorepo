@@ -52,7 +52,7 @@ mod network;
 mod process;
 mod storage;
 pub mod telemetry;
-mod utils;
+pub mod utils;
 pub use utils::*;
 #[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
 mod iouring;

@@ -195,7 +195,7 @@ mod tests {
         };
 
         // Create the resolver
-        let mut control = oracle.control(validator.clone());
+        let control = oracle.control(validator.clone());
         let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),

@@ -194,6 +194,62 @@ impl ArcWake for Blocker {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+/// Count the number of running tasks whose name starts with the given prefix.
+///
+/// This function encodes metrics and counts tasks that are currently running
+/// (have a value of 1) and whose name starts with the specified prefix.
+///
+/// This is useful for verifying that all child tasks under a given label hierarchy
+/// have been properly shut down.
+///
+/// # Example
+///
+/// ```rust
+/// use commonware_runtime::{Clock, Metrics, Runner, Spawner, deterministic};
+/// use commonware_runtime::utils::count_running_tasks;
+/// use std::time::Duration;
+///
+/// let executor = deterministic::Runner::default();
+/// executor.start(|context| async move {
+///     // Spawn a task under a labeled context
+///     let handle = context.with_label("worker").spawn(|ctx| async move {
+///         ctx.sleep(Duration::from_secs(100)).await;
+///     });
+///
+///     // Allow the task to start
+///     context.sleep(Duration::from_millis(10)).await;
+///
+///     // Count running tasks with "worker" prefix
+///     let count = count_running_tasks(&context, "worker");
+///     assert!(count > 0, "worker task should be running");
+///
+///     // Abort the task
+///     handle.abort();
+///     let _ = handle.await;
+///     context.sleep(Duration::from_millis(10)).await;
+///
+///     // Verify task is stopped
+///     let count = count_running_tasks(&context, "worker");
+///     assert_eq!(count, 0, "worker task should be stopped");
+/// });
+/// ```
+pub fn count_running_tasks(metrics: &impl crate::Metrics, prefix: &str) -> usize {
+    let encoded = metrics.encode();
+    encoded
+        .lines()
+        .filter(|line| {
+            line.starts_with("runtime_tasks_running{")
+                && line.contains("kind=\"Task\"")
+                && line.trim_end().ends_with(" 1")
+                && line
+                    .split("name=\"")
+                    .nth(1)
+                    .is_some_and(|s| s.split('"').next().unwrap_or("").starts_with(prefix))
+        })
+        .count()
+}
+
 /// Validates that a label matches Prometheus metric name format: `[a-zA-Z][a-zA-Z0-9_]*`.
 ///
 /// # Panics
@@ -335,5 +391,66 @@ mod tests {
 
         handle.join().unwrap();
         assert_eq!(completed.load(Ordering::SeqCst), 2);
+    }
+
+    #[test_traced]
+    fn test_count_running_tasks() {
+        use crate::{Metrics, Runner, Spawner};
+        use futures::future;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initially no tasks with "worker" prefix
+            assert_eq!(
+                count_running_tasks(&context, "worker"),
+                0,
+                "no worker tasks initially"
+            );
+
+            // Spawn a task under a labeled context that stays running
+            let worker_ctx = context.with_label("worker");
+            let handle1 = worker_ctx.clone().spawn(|_| async move {
+                future::pending::<()>().await;
+            });
+
+            // Count running tasks with "worker" prefix
+            let count = count_running_tasks(&context, "worker");
+            assert_eq!(count, 1, "worker task should be running");
+
+            // Non-matching prefix should return 0
+            assert_eq!(
+                count_running_tasks(&context, "other"),
+                0,
+                "no tasks with 'other' prefix"
+            );
+
+            // Spawn a nested task (worker_child)
+            let handle2 = worker_ctx.with_label("child").spawn(|_| async move {
+                future::pending::<()>().await;
+            });
+
+            // Count should include both parent and nested tasks
+            let count = count_running_tasks(&context, "worker");
+            assert_eq!(count, 2, "both worker and worker_child should be counted");
+
+            // Abort parent task
+            handle1.abort();
+            let _ = handle1.await;
+
+            // Only nested task remains
+            let count = count_running_tasks(&context, "worker");
+            assert_eq!(count, 1, "only worker_child should remain");
+
+            // Abort nested task
+            handle2.abort();
+            let _ = handle2.await;
+
+            // All tasks stopped
+            assert_eq!(
+                count_running_tasks(&context, "worker"),
+                0,
+                "all worker tasks should be stopped"
+            );
+        });
     }
 }

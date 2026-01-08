@@ -349,7 +349,7 @@ mod test {
                 return;
             };
 
-            let mut control = oracle.control(pk.clone());
+            let control = oracle.control(pk.clone());
             let votes = control.register(VOTE_CHANNEL, TEST_QUOTA).await.unwrap();
             let certificates = control
                 .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
