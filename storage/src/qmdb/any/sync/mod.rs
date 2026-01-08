@@ -1,6 +1,5 @@
 //! Shared synchronization logic for any databases.
 
-pub(crate) mod fixed;
 pub(crate) mod impls;
 
 #[cfg(test)]

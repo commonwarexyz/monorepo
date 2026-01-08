@@ -47,12 +47,8 @@ where
             buffer_pool: config.buffer_pool.clone(),
         };
 
-        super::fixed::init_journal(
-            context.with_label("log"),
-            journal_config,
-            *range.start..*range.end,
-        )
-        .await
+        fixed::Journal::init_sync(context.with_label("log"), journal_config, *range.start..*range.end)
+            .await
     }
 
     async fn from_sync_result(
