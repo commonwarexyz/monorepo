@@ -32,7 +32,7 @@ pub enum Error {
     DuplicateValue,
 }
 
-use crate::TryFromIterator;
+use crate::{Participant, TryFromIterator};
 
 /// An ordered, deduplicated collection of items.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -262,14 +262,14 @@ pub trait Quorum {
     fn max_faults(&self) -> u32;
 
     /// Returns the participant key at the given index.
-    fn key(&self, index: u32) -> Option<&Self::Item>;
+    fn key(&self, index: Participant) -> Option<&Self::Item>;
 
     /// Returns the index for the given participant key, if present.
     ///
     /// ## Panics
     ///
     /// Panics if the participant index exceeds `u32::MAX`.
-    fn index(&self, key: &Self::Item) -> Option<u32>;
+    fn index(&self, key: &Self::Item) -> Option<Participant>;
 }
 
 impl<T: Ord> Quorum for Set<T> {
@@ -283,13 +283,14 @@ impl<T: Ord> Quorum for Set<T> {
         crate::max_faults(u32::try_from(self.len()).expect("too many participants"))
     }
 
-    fn key(&self, index: u32) -> Option<&Self::Item> {
-        self.get(index as usize)
+    fn key(&self, index: Participant) -> Option<&Self::Item> {
+        self.get(index.get() as usize)
     }
 
-    fn index(&self, key: &Self::Item) -> Option<u32> {
-        self.position(key)
-            .map(|position| u32::try_from(position).expect("too many participants"))
+    fn index(&self, key: &Self::Item) -> Option<Participant> {
+        self.position(key).map(|position| {
+            Participant::new(u32::try_from(position).expect("too many participants"))
+        })
     }
 }
 
