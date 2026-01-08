@@ -1,7 +1,7 @@
 use commonware_cryptography::{blake3::Blake3, sha256::Sha256, BloomFilter, Hasher};
 use criterion::{criterion_group, measurement::Measurement, Criterion, Throughput};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::{collections::HashSet, hint::black_box};
+use std::{collections::HashSet, hint::black_box, num::NonZeroUsize};
 
 const ITEM_SIZES: [usize; 3] = [32, 2048, 4096];
 const NUM_ITEMS: usize = 10000;
@@ -17,7 +17,8 @@ fn run_contains_bench<H: Hasher>(
             let mut rng = StdRng::seed_from_u64(42);
 
             // Create and populate the bloom filter
-            let mut bf = BloomFilter::<H>::with_rate(NUM_ITEMS, fp_rate);
+            let mut bf =
+                BloomFilter::<H>::with_rate(NonZeroUsize::new(NUM_ITEMS).unwrap(), fp_rate);
             let mut inserted_set = HashSet::new();
 
             let inserted: Vec<Vec<u8>> = (0..NUM_ITEMS)

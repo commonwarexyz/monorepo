@@ -80,9 +80,9 @@ impl<H: Hasher> BloomFilter<H> {
     ///
     /// Panics if `false_positive_rate` is not between 0.0 and 1.0 (exclusive).
     #[cfg(feature = "std")]
-    pub fn with_rate(expected_items: usize, false_positive_rate: f64) -> Self {
-        let bits = Self::optimal_bits(expected_items, false_positive_rate);
-        let hashers = Self::optimal_hashers(expected_items, bits);
+    pub fn with_rate(expected_items: NonZeroUsize, false_positive_rate: f64) -> Self {
+        let bits = Self::optimal_bits(expected_items.get(), false_positive_rate);
+        let hashers = Self::optimal_hashers(expected_items.get(), bits);
         Self {
             hashers,
             bits: BitMap::zeroes(bits as u64),
@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn test_with_rate() {
         // Create a filter for 1000 items with 1% false positive rate
-        let mut bf = BloomFilter::<Sha256>::with_rate(1000, 0.01);
+        let mut bf = BloomFilter::<Sha256>::with_rate(NZUsize!(1000), 0.01);
 
         // Verify getters return expected values
         let expected_bits = BloomFilter::<Sha256>::optimal_bits(1000, 0.01);

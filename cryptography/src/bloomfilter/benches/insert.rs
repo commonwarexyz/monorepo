@@ -1,7 +1,7 @@
 use commonware_cryptography::{blake3::Blake3, sha256::Sha256, BloomFilter, Hasher};
 use criterion::{criterion_group, measurement::Measurement, Criterion, Throughput};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::hint::black_box;
+use std::{hint::black_box, num::NonZeroUsize};
 
 const ITEM_SIZES: [usize; 3] = [32, 2048, 4096];
 const NUM_ITEMS: usize = 10000;
@@ -28,7 +28,8 @@ fn run_insert_bench<H: Hasher>(
             group.bench_function(
                 format!("{hasher_name}/size={item_size} fp={fp_rate}"),
                 |b| {
-                    let mut bf = BloomFilter::<H>::with_rate(NUM_ITEMS, fp_rate);
+                    let mut bf =
+                        BloomFilter::<H>::with_rate(NonZeroUsize::new(NUM_ITEMS).unwrap(), fp_rate);
                     let mut idx = 0;
                     b.iter(|| {
                         bf.insert(black_box(&items[idx]));
