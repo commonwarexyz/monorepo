@@ -244,19 +244,10 @@ impl Variant for MinPk {
             return true;
         }
 
-        // Run batch_to_affine + MSM in parallel for both groups
-        // Uses 128-bit scalars for ~2x faster MSM (sufficient security for batch verification)
+        // Run rand_msm in parallel for both groups (128-bit scalar processing)
         let (pk_agg, sig_agg) = strategy.join(
-            || {
-                // G1 public keys (faster)
-                let pks_affine = G1::batch_to_affine(publics);
-                G1::msm_affine_batch(&pks_affine, scalars)
-            },
-            || {
-                // G2 signatures (slower)
-                let sigs_affine = G2::batch_to_affine(signatures);
-                G2::msm_affine_batch(&sigs_affine, scalars)
-            },
+            || G1::rand_msm(publics, scalars, strategy),
+            || G2::rand_msm(signatures, scalars, strategy),
         );
 
         // Verify: e(pk_agg, H(m)) == e(sig_agg, G)
@@ -429,19 +420,10 @@ impl Variant for MinSig {
             return true;
         }
 
-        // Run batch_to_affine + MSM in parallel for both groups
-        // Uses 128-bit scalars for ~2x faster MSM (sufficient security for batch verification)
+        // Run rand_msm in parallel for both groups (128-bit scalar processing)
         let (pk_agg, sig_agg) = strategy.join(
-            || {
-                // G2 public keys (slower)
-                let pks_affine = G2::batch_to_affine(publics);
-                G2::msm_affine_batch(&pks_affine, scalars)
-            },
-            || {
-                // G1 signatures (faster)
-                let sigs_affine = G1::batch_to_affine(signatures);
-                G1::msm_affine_batch(&sigs_affine, scalars)
-            },
+            || G2::rand_msm(publics, scalars, strategy),
+            || G1::rand_msm(signatures, scalars, strategy),
         );
 
         // Verify: e(pk_agg, H(m)) == e(sig_agg, G)

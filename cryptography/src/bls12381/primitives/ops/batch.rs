@@ -20,7 +20,7 @@ use super::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
-use commonware_math::algebra::{Additive, Random, Space};
+use commonware_math::algebra::{Additive, Space};
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 
@@ -71,9 +71,9 @@ where
 
     let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
-    // Generate random scalars once for all entries
+    // Generate 128-bit random scalars for batch verification
     let scalars: Vec<Scalar> = (0..entries.len())
-        .map(|_| Scalar::random(&mut *rng))
+        .map(|_| Scalar::random_batch(&mut *rng))
         .collect();
 
     // Split entries into pks and sigs
@@ -150,9 +150,9 @@ where
         return Ok(());
     }
 
-    // Generate random scalars for each message/signature pair
+    // Generate 128-bit random scalars for batch verification
     let scalars: Vec<Scalar> = (0..entries.len())
-        .map(|_| Scalar::random(&mut *rng))
+        .map(|_| Scalar::random_batch(&mut *rng))
         .collect();
 
     // Hash all messages and collect signatures
@@ -162,9 +162,9 @@ where
         .collect();
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
 
-    // Compute weighted sums using MSM
-    let weighted_hm = V::Signature::msm(&hms, &scalars, strategy);
-    let weighted_sig = V::Signature::msm(&sigs, &scalars, strategy);
+    // Compute weighted sums using rand_msm (128-bit scalar processing)
+    let weighted_hm = V::Signature::rand_msm(&hms, &scalars, strategy);
+    let weighted_sig = V::Signature::rand_msm(&sigs, &scalars, strategy);
 
     // Verify: e(pk, weighted_hm) == e(weighted_sig, G)
     V::verify(public, &weighted_hm, &weighted_sig)

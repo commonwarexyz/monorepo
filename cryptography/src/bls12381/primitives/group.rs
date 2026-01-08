@@ -25,7 +25,7 @@ use blst::{
     blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress,
     blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_to_affine,
     blst_scalar, blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
-    blst_sk_check, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_scalar_from_lendian, blst_sk_check, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -541,6 +541,28 @@ impl Random for Scalar {
     }
 }
 
+impl Scalar {
+    /// Returns a random 128-bit scalar for batch verification.
+    ///
+    /// This is faster than [`Random::random`] because it only generates 128 bits
+    /// of randomness instead of 256 bits. Sufficient for batch verification where
+    /// scalars are used as random weights (128-bit security).
+    pub fn random_batch(mut rng: impl CryptoRngCore) -> Self {
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes[..16]);
+
+        let mut sc = blst_scalar::default();
+        let mut ret = blst_fr::default();
+        // SAFETY: bytes is a valid 32-byte buffer; blst_scalar_from_lendian reads little-endian.
+        unsafe {
+            blst_scalar_from_lendian(&mut sc, bytes.as_ptr());
+            blst_fr_from_scalar(&mut ret, &sc);
+        }
+
+        Self(ret)
+    }
+}
+
 /// A share of a threshold signing key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Share {
@@ -864,6 +886,15 @@ impl Space<Scalar> for G1 {
 
         // Give all points to Pippenger at once for O(n/log n) efficiency
         Self::msm_inner(&filtered)
+    }
+
+    /// MSM optimized for random scalars using 128-bit processing.
+    ///
+    /// Uses batch affine conversion + Pippenger with 128-bit scalars for ~2x speedup.
+    /// Safe for batch verification where scalars are random (no algebraic structure).
+    fn rand_msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
+        let affine = Self::batch_to_affine(points);
+        Self::msm_affine_batch(&affine, scalars)
     }
 }
 
@@ -1274,6 +1305,15 @@ impl Space<Scalar> for G2 {
 
         // Give all points to Pippenger at once for O(n/log n) efficiency
         Self::msm_inner(&filtered)
+    }
+
+    /// MSM optimized for random scalars using 128-bit processing.
+    ///
+    /// Uses batch affine conversion + Pippenger with 128-bit scalars for ~2x speedup.
+    /// Safe for batch verification where scalars are random (no algebraic structure).
+    fn rand_msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
+        let affine = Self::batch_to_affine(points);
+        Self::msm_affine_batch(&affine, scalars)
     }
 }
 

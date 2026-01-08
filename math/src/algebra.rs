@@ -204,6 +204,16 @@ pub trait Space<R>:
     fn msm(points: &[Self], scalars: &[R], _strategy: &impl ParStrategy) -> Self {
         msm_naive(points, scalars)
     }
+
+    /// MSM optimized for random scalars (batch verification).
+    ///
+    /// For cryptographic batch verification, scalars are random and only need
+    /// 128 bits of security. Implementations can exploit this for ~2x speedup.
+    ///
+    /// Default implementation falls back to [`Self::msm`].
+    fn rand_msm(points: &[Self], scalars: &[R], strategy: &impl ParStrategy) -> Self {
+        Self::msm(points, scalars, strategy)
+    }
 }
 
 /// A naive implementation of [`Space::msm`].

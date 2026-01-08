@@ -12,6 +12,7 @@ mod evaluate_point;
 mod msm;
 mod msm_affine;
 mod pairing_verify;
+mod rand_msm;
 mod scheme_batch_verify_same_message;
 mod scheme_batch_verify_same_signer;
 mod signature_generation;
@@ -21,7 +22,6 @@ mod threshold_batch_verify_same_message_precomputed;
 mod threshold_recover;
 mod tle_decrypt;
 mod tle_encrypt;
-mod verify_same_message_msm;
 
 criterion_main!(
     dkg::benches,
@@ -45,5 +45,5 @@ criterion_main!(
     msm::benches,
     msm_affine::benches,
     pairing_verify::benches,
-    verify_same_message_msm::benches,
+    rand_msm::benches,
 );
