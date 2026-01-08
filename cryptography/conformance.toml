@@ -102,6 +102,10 @@ hash = "42867052b1619b912d08f0a6bf5f964f587897a0eed8612732fd27813f6c03bd"
 n_cases = 65536
 hash = "41ef7a306dd2032d7d1b73fe2799cff6f2e8fb1edcd02a0b9798f18f900a19fa"
 
+["commonware_cryptography::crc32::tests::conformance::CodecConformance<Digest>"]
+n_cases = 65536
+hash = "7e51d52b48539110acf575de847ef8d0c0029c877815f50b6a151db0621f2240"
+
 ["commonware_cryptography::ed25519::certificate::tests::conformance::CodecConformance<Certificate>"]
 n_cases = 65536
 hash = "eab4ff22bb7ed99fd73107c8b067e39bd25813b65614df95b4b5c46a312557ad"
