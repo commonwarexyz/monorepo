@@ -1,38 +1,57 @@
-use commonware_cryptography::{sha256::Sha256, BloomFilter};
-use commonware_utils::{NZUsize, NZU8};
+use commonware_cryptography::{blake3::Blake3, sha256::Sha256, BloomFilter, Hasher};
 use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-fn benchmark_insert(c: &mut Criterion) {
-    let mut group = c.benchmark_group("bloomfilter/insert");
+const ITEM_SIZES: [usize; 4] = [32, 256, 2048, 4096];
+const NUM_ITEMS: [usize; 3] = [1000, 10000, 100000];
+const FP_RATES: [f64; 3] = [0.1, 0.01, 0.001];
 
-    let filter_bits = [1 << 10, 1 << 14, 1 << 17, 1 << 20]; // 1024, 16384, 131072, 1048576
-    let hashers = [3, 7, 10];
-    let item_size = 32;
+fn benchmark_insert_with_hasher<H: Hasher>(c: &mut Criterion, hasher_name: &str) {
+    let mut group = c.benchmark_group(format!("bloomfilter/insert/{hasher_name}"));
 
-    let mut rng = StdRng::seed_from_u64(42);
+    for &num_items in &NUM_ITEMS {
+        for &item_size in &ITEM_SIZES {
+            for &fp_rate in &FP_RATES {
+                let mut rng = StdRng::seed_from_u64(42);
 
-    for &bits in &filter_bits {
-        for &k in &hashers {
-            let mut bf = BloomFilter::<Sha256>::new(NZU8!(k), NZUsize!(bits));
+                // Pre-generate items
+                let items: Vec<Vec<u8>> = (0..num_items)
+                    .map(|_| {
+                        let mut item = vec![0u8; item_size];
+                        rng.fill_bytes(&mut item);
+                        item
+                    })
+                    .collect();
 
-            let mut item = vec![0u8; item_size];
-            rng.fill_bytes(&mut item);
-
-            group.throughput(Throughput::Elements(1));
-            group.bench_with_input(
-                BenchmarkId::new(format!("bits={bits}"), format!("k={k}")),
-                &item,
-                |b, item| {
-                    b.iter(|| {
-                        bf.insert(item);
-                    });
-                },
-            );
+                group.throughput(Throughput::Elements(1));
+                group.bench_with_input(
+                    BenchmarkId::new(
+                        format!("items={num_items}/size={item_size}"),
+                        format!("fp={fp_rate}"),
+                    ),
+                    &items,
+                    |b, items| {
+                        let mut bf = BloomFilter::<H>::with_rate(num_items, fp_rate);
+                        let mut idx = 0;
+                        b.iter(|| {
+                            bf.insert(&items[idx]);
+                            idx = (idx + 1) % items.len();
+                        });
+                    },
+                );
+            }
         }
     }
 
     group.finish();
 }
 
-criterion_group!(benches, benchmark_insert);
+fn benchmark_insert_sha256(c: &mut Criterion) {
+    benchmark_insert_with_hasher::<Sha256>(c, "sha256");
+}
+
+fn benchmark_insert_blake3(c: &mut Criterion) {
+    benchmark_insert_with_hasher::<Blake3>(c, "blake3");
+}
+
+criterion_group!(benches, benchmark_insert_sha256, benchmark_insert_blake3);
