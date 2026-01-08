@@ -12,6 +12,7 @@ use commonware_runtime::{
     telemetry::metrics::status::{CounterExt, GaugeExt, Status},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
+use commonware_utils::channels::fallible::OneshotExt;
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
@@ -237,7 +238,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
                 error!(?err, "failed to send message");
                 vec![]
             });
-        let _ = responder.send(sent_to);
+        responder.send_lossy(sent_to);
     }
 
     /// Searches through all maintained messages for a match.
