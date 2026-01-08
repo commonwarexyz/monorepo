@@ -1016,19 +1016,22 @@ mod tests {
                 .unwrap();
 
             // Insert keys to trigger resize
+            // key0 -> entry 0, key2 -> entry 1
             freezer.put(test_key("key0"), 0).await.unwrap();
-            freezer.put(test_key("key1"), 1).await.unwrap();
+            freezer.put(test_key("key2"), 1).await.unwrap();
             freezer.sync().await.unwrap(); // should start resize
 
             // Verify resize started
             assert!(freezer.resizing().is_some());
 
             // Insert during resize (to first entry)
-            freezer.put(test_key("key2"), 2).await.unwrap();
+            // key6 -> entry 0
+            freezer.put(test_key("key6"), 2).await.unwrap();
             assert!(context.encode().contains("unnecessary_writes_total 1"));
             assert_eq!(freezer.resizable(), 3);
 
             // Insert another key (to unmodified entry)
+            // key3 -> entry 1
             freezer.put(test_key("key3"), 3).await.unwrap();
             assert!(context.encode().contains("unnecessary_writes_total 1"));
             assert_eq!(freezer.resizable(), 3);
@@ -1039,17 +1042,21 @@ mod tests {
             assert_eq!(freezer.resizable(), 2);
 
             // More inserts
+            // key4 -> entry 1, key7 -> entry 0
             freezer.put(test_key("key4"), 4).await.unwrap();
-            freezer.put(test_key("key5"), 5).await.unwrap();
+            freezer.put(test_key("key7"), 5).await.unwrap();
             freezer.sync().await.unwrap();
 
             // Another resize should've started
             assert!(freezer.resizing().is_some());
 
             // Verify all can be retrieved during resize
-            for i in 0..6 {
-                let key = test_key(&format!("key{i}"));
-                assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(i));
+            let keys = ["key0", "key2", "key6", "key3", "key4", "key7"];
+            for (i, k) in keys.iter().enumerate() {
+                assert_eq!(
+                    freezer.get(Identifier::Key(&test_key(k))).await.unwrap(),
+                    Some(i as i32)
+                );
             }
 
             // Sync until resize completes
@@ -1090,8 +1097,9 @@ mod tests {
                         .unwrap();
 
                 // Insert keys to trigger resize
+                // key0 -> entry 0, key2 -> entry 1
                 freezer.put(test_key("key0"), 0).await.unwrap();
-                freezer.put(test_key("key1"), 1).await.unwrap();
+                freezer.put(test_key("key2"), 1).await.unwrap();
                 let checkpoint = freezer.sync().await.unwrap();
 
                 // Verify resize started
