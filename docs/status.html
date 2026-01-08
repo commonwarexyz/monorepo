@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Status</title>
+    <meta name="description" content="Module maturity status for the Commonware Library.">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <link rel="canonical" href="https://commonware.xyz/status" />
+
+    <meta property="og:url" content="https://commonware.xyz/status" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="commonware > Status" />
+    <meta property="og:title" content="commonware > Status" />
+    <meta property="og:description" content="Module maturity status for the Commonware Library." />
+    <meta property="og:image" content="https://commonware.xyz/card.png" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/status" />
+    <meta property="twitter:title" content="commonware > Status" />
+    <meta property="twitter:description" content="Module maturity status for the Commonware Library." />
+    <meta property="twitter:image" content="https://commonware.xyz/card.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    <meta property="twitter:creator" content="@commonwarexyz" />
+    <meta property="twitter:creator:id" content="@commonwarexyz" />
+
+    <link rel="stylesheet" type="text/css" href="/style.css">
+    <style>
+        .stage-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.85em;
+            font-weight: bold;
+        }
+        .stage-alpha { background: #f0f0f0; color: #666; }
+        .stage-beta { background: #fff3cd; color: #856404; }
+        .stage-gamma { background: #d4edda; color: #155724; }
+        .lts-badge { background: #cce5ff; color: #004085; margin-left: 4px; }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .summary-card {
+            padding: 15px;
+            border: 1px solid #ddd;
+            text-align: center;
+        }
+        .summary-card .count {
+            font-size: 2em;
+            font-weight: bold;
+        }
+        .summary-card .label {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .filter-bar {
+            margin: 20px 0;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .filter-bar select, .filter-bar input {
+            font-family: monospace;
+            padding: 5px 10px;
+            border: 1px solid #ddd;
+        }
+
+        .module-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9em;
+        }
+        .module-table th, .module-table td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        .module-table th {
+            background: #f9f9f9;
+            font-weight: bold;
+        }
+        .module-table tr:hover {
+            background: #f5f5f5;
+        }
+        .module-path {
+            font-family: monospace;
+            font-size: 0.85em;
+        }
+        .inherited {
+            color: #888;
+            font-style: italic;
+        }
+
+        .conflicts-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #f5c6cb;
+            background: #f8d7da;
+        }
+        .conflicts-section h3 {
+            color: #721c24;
+            margin-top: 0;
+        }
+        .conflict-item {
+            margin: 10px 0;
+            padding: 10px;
+            background: white;
+            border-left: 3px solid #dc3545;
+        }
+
+        .warnings-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ffeeba;
+            background: #fff3cd;
+        }
+        .warnings-section h3 {
+            color: #856404;
+            margin-top: 0;
+        }
+        .warning-item {
+            margin: 10px 0;
+            padding: 10px;
+            background: white;
+            border-left: 3px solid #ffc107;
+        }
+
+        .crate-section {
+            margin: 20px 0;
+        }
+        .crate-header {
+            cursor: pointer;
+            padding: 10px;
+            background: #f9f9f9;
+            border: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .crate-header:hover {
+            background: #f0f0f0;
+        }
+        .crate-stats {
+            display: flex;
+            gap: 10px;
+        }
+        .crate-content {
+            border: 1px solid #ddd;
+            border-top: none;
+            padding: 10px;
+            display: none;
+        }
+        .crate-content.open {
+            display: block;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Module Status</h1>
+        <div class="meta" id="meta-section" style="display: none;">
+            <div class="date">Last Updated: <span id="last-update"></span></div>
+        </div>
+
+        <p>Track the maturity of modules in the Commonware Library. Stages progress from
+           <span class="stage-badge stage-alpha">alpha</span> (default) to
+           <span class="stage-badge stage-beta">beta</span> to
+           <span class="stage-badge stage-gamma">gamma</span>.
+           Modules marked <span class="stage-badge lts-badge">LTS</span> have frozen wire formats.</p>
+
+        <div id="summary"></div>
+        <div id="conflicts"></div>
+        <div id="warnings"></div>
+
+        <h2>Modules by Crate</h2>
+        <div class="filter-bar">
+            <select id="stage-filter">
+                <option value="all">All Stages</option>
+                <option value="alpha">Alpha Only</option>
+                <option value="beta">Beta+</option>
+                <option value="gamma">Gamma Only</option>
+                <option value="lts">LTS Only</option>
+            </select>
+            <input type="text" id="search-filter" placeholder="Search modules...">
+        </div>
+        <div id="crates"></div>
+    </div>
+
+    <div id="footer-placeholder"></div>
+    <script>
+        'use strict';
+
+        let statusData = null;
+
+        function getStageBadge(status) {
+            let stage = 'alpha';
+            if (status.gamma) stage = 'gamma';
+            else if (status.beta) stage = 'beta';
+
+            let html = `<span class="stage-badge stage-${stage}">${stage}</span>`;
+            if (status.lts) {
+                html += `<span class="stage-badge lts-badge">LTS ${status.lts}</span>`;
+            }
+            return html;
+        }
+
+        function getStageVersion(status) {
+            if (status.gamma) return status.gamma;
+            if (status.beta) return status.beta;
+            return '-';
+        }
+
+        function getCurrentStage(status) {
+            if (status.gamma) return 'gamma';
+            if (status.beta) return 'beta';
+            return 'alpha';
+        }
+
+        function renderSummary(data) {
+            const summary = data.summary;
+            const html = `
+                <div class="summary-grid">
+                    <div class="summary-card">
+                        <div class="count">${summary.total_modules}</div>
+                        <div class="label">Total Modules</div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="count" style="color: #666">${summary.by_stage.alpha}</div>
+                        <div class="label">Alpha</div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="count" style="color: #856404">${summary.by_stage.beta}</div>
+                        <div class="label">Beta</div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="count" style="color: #155724">${summary.by_stage.gamma}</div>
+                        <div class="label">Gamma</div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="count" style="color: #004085">${summary.lts_count}</div>
+                        <div class="label">LTS</div>
+                    </div>
+                </div>
+            `;
+            document.getElementById('summary').innerHTML = html;
+        }
+
+        function renderConflicts(data) {
+            if (!data.conflicts || data.conflicts.length === 0) {
+                document.getElementById('conflicts').innerHTML = '';
+                return;
+            }
+
+            const items = data.conflicts.map(c => `
+                <div class="conflict-item">
+                    <strong>${c.path}</strong><br>
+                    ${c.message}
+                </div>
+            `).join('');
+
+            document.getElementById('conflicts').innerHTML = `
+                <div class="conflicts-section">
+                    <h3>Errors (${data.conflicts.length})</h3>
+                    ${items}
+                </div>
+            `;
+        }
+
+        function renderWarnings(data) {
+            if (!data.warnings || data.warnings.length === 0) {
+                document.getElementById('warnings').innerHTML = '';
+                return;
+            }
+
+            const items = data.warnings.map(c => `
+                <div class="warning-item">
+                    <strong>${c.path}</strong><br>
+                    ${c.message}
+                </div>
+            `).join('');
+
+            document.getElementById('warnings').innerHTML = `
+                <div class="warnings-section">
+                    <h3>Warnings (${data.warnings.length})</h3>
+                    ${items}
+                </div>
+            `;
+        }
+
+        function getCrateStats(modules) {
+            let alpha = 0, beta = 0, gamma = 0, lts = 0;
+            for (const [path, status] of Object.entries(modules)) {
+                const stage = getCurrentStage(status);
+                if (stage === 'alpha') alpha++;
+                else if (stage === 'beta') beta++;
+                else if (stage === 'gamma') gamma++;
+                if (status.lts) lts++;
+            }
+            return { alpha, beta, gamma, lts, total: Object.keys(modules).length };
+        }
+
+        function filterModules(modules, stageFilter, searchFilter) {
+            return Object.entries(modules).filter(([path, status]) => {
+                // Stage filter
+                const stage = getCurrentStage(status);
+                if (stageFilter === 'alpha' && stage !== 'alpha') return false;
+                if (stageFilter === 'beta' && stage !== 'beta' && stage !== 'gamma') return false;
+                if (stageFilter === 'gamma' && stage !== 'gamma') return false;
+                if (stageFilter === 'lts' && !status.lts) return false;
+
+                // Search filter
+                if (searchFilter && !path.toLowerCase().includes(searchFilter.toLowerCase())) {
+                    return false;
+                }
+
+                return true;
+            });
+        }
+
+        function renderCrates(data) {
+            const stageFilter = document.getElementById('stage-filter').value;
+            const searchFilter = document.getElementById('search-filter').value;
+
+            const cratesHtml = Object.entries(data.crates).sort().map(([crateName, crateData]) => {
+                const filtered = filterModules(crateData.modules, stageFilter, searchFilter);
+                if (filtered.length === 0) return '';
+
+                const stats = getCrateStats(crateData.modules);
+                const rows = filtered.map(([path, status]) => `
+                    <tr>
+                        <td class="module-path ${status.inherited_from ? 'inherited' : ''}">${path}</td>
+                        <td>${getStageBadge(status)}</td>
+                        <td>${getStageVersion(status)}</td>
+                        <td class="inherited">${status.inherited_from || ''}</td>
+                    </tr>
+                `).join('');
+
+                return `
+                    <div class="crate-section" data-crate="${crateName}">
+                        <div class="crate-header" onclick="toggleCrate('${crateName}')">
+                            <strong>${crateName}</strong>
+                            <div class="crate-stats">
+                                <span class="stage-badge stage-alpha">${stats.alpha}</span>
+                                <span class="stage-badge stage-beta">${stats.beta}</span>
+                                <span class="stage-badge stage-gamma">${stats.gamma}</span>
+                                <span class="stage-badge lts-badge">${stats.lts}</span>
+                            </div>
+                        </div>
+                        <div class="crate-content" id="crate-${crateName}">
+                            <table class="module-table">
+                                <thead>
+                                    <tr>
+                                        <th>Module</th>
+                                        <th>Stage</th>
+                                        <th>Since</th>
+                                        <th>Inherited From</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${rows}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            document.getElementById('crates').innerHTML = cratesHtml;
+        }
+
+        function toggleCrate(crateName) {
+            const content = document.getElementById(`crate-${crateName}`);
+            content.classList.toggle('open');
+        }
+
+        function setupFilters() {
+            document.getElementById('stage-filter').addEventListener('change', () => renderCrates(statusData));
+            document.getElementById('search-filter').addEventListener('input', () => renderCrates(statusData));
+        }
+
+        function init(data) {
+            statusData = data;
+
+            // Show meta section
+            document.getElementById('meta-section').style.display = '';
+            document.getElementById('last-update').textContent = new Date(data.generated).toLocaleString();
+
+            renderSummary(data);
+            renderConflicts(data);
+            renderWarnings(data);
+            renderCrates(data);
+            setupFilters();
+        }
+
+        // Load status data
+        fetch('/status.json', { cache: 'no-store' })
+            .then(response => response.json())
+            .then(data => init(data))
+            .catch(error => {
+                console.error('Failed to load status data:', error);
+                document.getElementById('crates').innerHTML = '<p style="color: red;">Failed to load status data. Please check your connection and try again.</p>';
+            });
+    </script>
+    <script src="/shared.js"></script>
+</body>
+
+</html>

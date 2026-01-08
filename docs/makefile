@@ -33,14 +33,18 @@ mirror:
 sitemap:
 	python3 generate_sitemap.py
 
+# Generate module status
+status:
+	python3 generate_status.py
+
 # Deploy: mirror code and generate sitemap
-deploy: mirror sitemap
+deploy: mirror sitemap status
 
 # Build everything: markdown, mirror, and sitemap
-all: markdown mirror sitemap
+all: markdown mirror sitemap status
 
 # Clean all generated files
 clean:
-	rm -rf code $(MD_TARGETS) $(SITEMAP)
+	rm -rf code $(MD_TARGETS) $(SITEMAP) status.json
 
-.PHONY: markdown mirror sitemap deploy all clean
+.PHONY: markdown mirror sitemap status deploy all clean
