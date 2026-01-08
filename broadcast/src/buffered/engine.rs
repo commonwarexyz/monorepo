@@ -393,8 +393,8 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
 
     /// Respond to a waiter with an optional message.
     /// Increments the appropriate metric based on the result.
-    fn respond_get(&mut self, responder: oneshot::Sender<Vec<M>>, msg: Vec<M>) {
-        let found = !msg.is_empty();
+    fn respond_get(&mut self, responder: oneshot::Sender<Option<M>>, msg: Option<M>) {
+        let found = msg.is_some();
         self.metrics.get.inc(if responder.send_lossy(msg) {
             if found {
                 Status::Success
