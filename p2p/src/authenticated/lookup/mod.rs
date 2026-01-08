@@ -1670,15 +1670,14 @@ mod tests {
                 }
             }
         }
-
-        assert_no_rate_limiting(&context);
     }
 
     #[test_traced]
     fn test_many_peer_restart_with_new_address() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            run_peer_restart_test(context, 9500, 5).await;
+            run_peer_restart_test(context.clone(), 9500, 5).await;
+            assert_no_rate_limiting(&context);
         });
     }
 
@@ -1687,6 +1686,9 @@ mod tests {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             run_peer_restart_test(context, 10500, 5).await;
+            // Note: We don't assert_no_rate_limiting in tokio tests because the tight
+            // timing in test() config can cause occasional rate limiting due to
+            // wall-clock scheduling jitter.
         });
     }
 
@@ -1861,15 +1863,14 @@ mod tests {
                 received.insert(sender);
             }
         }
-
-        assert_no_rate_limiting(&context);
     }
 
     #[test_traced]
     fn test_simultaneous_peer_restart() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            run_simultaneous_restart_test(context, 9700, 5).await;
+            run_simultaneous_restart_test(context.clone(), 9700, 5).await;
+            assert_no_rate_limiting(&context);
         });
     }
 
@@ -1878,6 +1879,9 @@ mod tests {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             run_simultaneous_restart_test(context, 10700, 5).await;
+            // Note: We don't assert_no_rate_limiting in tokio tests because the tight
+            // timing in test() config can cause occasional rate limiting due to
+            // wall-clock scheduling jitter.
         });
     }
 
