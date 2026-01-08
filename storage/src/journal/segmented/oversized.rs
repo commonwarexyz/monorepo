@@ -1923,7 +1923,10 @@ mod tests {
             // (checksum mismatch can occur because we read wrong bytes as the checksum)
             let result = oversized.get_value(1, offset, correct_size - 1).await;
             assert!(
-                matches!(result, Err(Error::Codec(_)) | Err(Error::ChecksumMismatch(_, _))),
+                matches!(
+                    result,
+                    Err(Error::Codec(_)) | Err(Error::ChecksumMismatch(_, _))
+                ),
                 "expected Codec or ChecksumMismatch error, got: {:?}",
                 result
             );

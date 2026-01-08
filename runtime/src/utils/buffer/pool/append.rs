@@ -408,6 +408,9 @@ impl<B: Blob> Append<B> {
         // Identify protected regions based on the OLD partial page state
         let protected_regions = Self::identify_protected_regions(old_partial_page_state.as_ref());
 
+        // Update state before writing. This may appear to risk data loss if writes fail,
+        // but write failures are fatal per this codebase's design - callers must not use
+        // the blob after any mutable method returns an error.
         blob_state.current_page += full_pages_written as u64;
         blob_state.partial_page_state = partial_page_state;
 
@@ -843,6 +846,10 @@ impl<B: Blob> Blob for Append<B> {
         // read with CRC validation; the validated length may exceed partial_bytes (reflecting the
         // old data length), but we only load the prefix we need. The next sync will write the
         // correct CRC for the new length.
+        //
+        // Note: This updates state before validation completes, which could leave state
+        // inconsistent if validation fails. This is acceptable because failures from mutable
+        // methods are fatal - callers must not use the blob after any error.
 
         blob_guard.current_page = full_pages;
         buf_guard.offset = full_pages * logical_page_size;
@@ -1931,6 +1938,137 @@ mod tests {
             // Verify data is still readable.
             let data: Vec<u8> = append.read_at(vec![0u8; 5], 0).await.unwrap().into();
             assert_eq!(data, vec![1, 2, 3, 4, 5]);
+        });
+    }
+
+    #[test]
+    fn test_corrupted_crc_len_too_large() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let physical_page_size = PAGE_SIZE.get() as usize + CRC_RECORD_SIZE as usize;
+
+            // Step 1: Create blob with valid data
+            let (blob, size) = context
+                .open("test_partition", b"crc_len_test")
+                .await
+                .unwrap();
+
+            let append = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
+                .await
+                .unwrap();
+
+            append.append(&[0x42; 50]).await.unwrap();
+            append.sync().await.unwrap();
+            drop(append);
+
+            // Step 2: Corrupt the CRC record to have len > page_size
+            let (blob, size) = context
+                .open("test_partition", b"crc_len_test")
+                .await
+                .unwrap();
+            assert_eq!(size as usize, physical_page_size);
+
+            // CRC record is at the end of the physical page
+            let crc_offset = PAGE_SIZE.get() as u64;
+
+            // Create a CRC record with len1 = 0xFFFF (65535), which is >> page_size (103)
+            // Format: [len1_hi, len1_lo, crc1 (4 bytes), len2_hi, len2_lo, crc2 (4 bytes)]
+            let bad_crc_record: [u8; 12] = [
+                0xFF, 0xFF, // len1 = 65535 (way too large)
+                0xDE, 0xAD, 0xBE, 0xEF, // crc1 (garbage)
+                0x00, 0x00, // len2 = 0
+                0x00, 0x00, 0x00, 0x00, // crc2 = 0
+            ];
+            blob.write_at(bad_crc_record.to_vec(), crc_offset)
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+
+            // Step 3: Try to open the blob - should NOT panic, should return error or handle gracefully
+            let result = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone()).await;
+
+            // Either returns InvalidChecksum error OR truncates the corrupted data
+            // (both are acceptable behaviors - panicking is NOT acceptable)
+            match result {
+                Ok(append) => {
+                    // If it opens successfully, the corrupted page should have been truncated
+                    let recovered_size = append.size().await;
+                    assert_eq!(
+                        recovered_size, 0,
+                        "Corrupted page should be truncated, size should be 0"
+                    );
+                }
+                Err(e) => {
+                    // Error is also acceptable (for immutable blobs)
+                    assert!(
+                        matches!(e, crate::Error::InvalidChecksum),
+                        "Expected InvalidChecksum error, got: {:?}",
+                        e
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_corrupted_crc_both_slots_len_too_large() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+
+            // Step 1: Create blob with valid data
+            let (blob, size) = context
+                .open("test_partition", b"crc_both_bad")
+                .await
+                .unwrap();
+
+            let append = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
+                .await
+                .unwrap();
+
+            append.append(&[0x42; 50]).await.unwrap();
+            append.sync().await.unwrap();
+            drop(append);
+
+            // Step 2: Corrupt BOTH CRC slots to have len > page_size
+            let (blob, size) = context
+                .open("test_partition", b"crc_both_bad")
+                .await
+                .unwrap();
+
+            let crc_offset = PAGE_SIZE.get() as u64;
+
+            // Both slots have len > page_size
+            let bad_crc_record: [u8; 12] = [
+                0x01, 0x00, // len1 = 256 (> 103)
+                0xDE, 0xAD, 0xBE, 0xEF, // crc1 (garbage)
+                0x02, 0x00, // len2 = 512 (> 103)
+                0xCA, 0xFE, 0xBA, 0xBE, // crc2 (garbage)
+            ];
+            blob.write_at(bad_crc_record.to_vec(), crc_offset)
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+
+            // Step 3: Try to open - should NOT panic
+            let result = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone()).await;
+
+            match result {
+                Ok(append) => {
+                    // Corrupted page truncated
+                    assert_eq!(append.size().await, 0);
+                }
+                Err(e) => {
+                    assert!(
+                        matches!(e, crate::Error::InvalidChecksum),
+                        "Expected InvalidChecksum, got: {:?}",
+                        e
+                    );
+                }
+            }
         });
     }
 }
