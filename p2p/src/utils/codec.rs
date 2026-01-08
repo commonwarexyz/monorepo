@@ -83,17 +83,12 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
 pub struct WrappedReceiver<R: Receiver, V: Codec> {
     config: V::Cfg,
     receiver: R,
-    _phantom_v: std::marker::PhantomData<V>,
 }
 
 impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
     /// Create a new [WrappedReceiver] with the given [Receiver].
     pub const fn new(config: V::Cfg, receiver: R) -> Self {
-        Self {
-            config,
-            receiver,
-            _phantom_v: std::marker::PhantomData,
-        }
+        Self { config, receiver }
     }
 
     /// Receive a message from an arbitrary recipient.
