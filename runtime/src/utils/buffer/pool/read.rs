@@ -213,7 +213,8 @@ impl<B: Blob> Read<B> {
                 }
                 // Compact: move logical data to remove CRC record gap
                 if write_offset != read_offset {
-                    self.buffer.copy_within(read_offset..read_offset + len, write_offset);
+                    self.buffer
+                        .copy_within(read_offset..read_offset + len, write_offset);
                 }
                 write_offset += len;
                 read_offset += self.page_size;
