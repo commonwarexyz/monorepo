@@ -2619,4 +2619,256 @@ mod tests {
             oversized.destroy().await.expect("Failed to destroy");
         });
     }
+
+    #[test_traced]
+    fn test_recovery_maximum_section_numbers() {
+        // Test recovery with very large section numbers near u64::MAX to check
+        // for overflow edge cases in section arithmetic.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Use section numbers near u64::MAX
+            let large_sections = [u64::MAX - 3, u64::MAX - 2, u64::MAX - 1];
+
+            // Create and populate with large section numbers
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            let mut locations = Vec::new();
+            for &section in &large_sections {
+                let value: TestValue = [(section & 0xFF) as u8; 16];
+                let entry = TestEntry::new(section, 0, 0);
+                let loc = oversized
+                    .append(section, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                locations.push((section, loc));
+                oversized.sync(section).await.expect("Failed to sync");
+            }
+            drop(oversized);
+
+            // Simulate crash: truncate glob for middle section
+            let middle_section = large_sections[1];
+            let (blob, size) = context
+                .open(&cfg.value_partition, &middle_section.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            blob.resize(size / 2).await.expect("Failed to truncate");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Reinitialize - should recover without overflow panics
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to reinit");
+
+            // First and last sections should still be valid
+            let entry = oversized
+                .get(large_sections[0], 0)
+                .await
+                .expect("Failed to get first section");
+            assert_eq!(entry.id, large_sections[0]);
+
+            let entry = oversized
+                .get(large_sections[2], 0)
+                .await
+                .expect("Failed to get last section");
+            assert_eq!(entry.id, large_sections[2]);
+
+            // Middle section should have been rewound (no entries)
+            assert!(oversized.get(middle_section, 0).await.is_err());
+
+            // Verify we can still append to these large sections
+            let new_value: TestValue = [0xAB; 16];
+            let new_entry = TestEntry::new(999, 0, 0);
+            let mut oversized = oversized;
+            oversized
+                .append(middle_section, new_entry, &new_value)
+                .await
+                .expect("Failed to append after recovery");
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_crash_during_recovery_rewind() {
+        // Tests a nested crash scenario: initial crash leaves inconsistent state,
+        // then a second crash occurs during recovery's rewind operation.
+        // This simulates the worst-case where recovery itself is interrupted.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Phase 1: Create valid data with 5 entries
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            let mut locations = Vec::new();
+            for i in 0..5u8 {
+                let value: TestValue = [i; 16];
+                let entry = TestEntry::new(i as u64, 0, 0);
+                let loc = oversized
+                    .append(1, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                locations.push(loc);
+            }
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Phase 2: Simulate first crash - truncate glob to lose last 2 entries
+            let (blob, _) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            let keep_size = byte_end(locations[2].1, locations[2].2);
+            blob.resize(keep_size).await.expect("Failed to truncate");
+            blob.sync().await.expect("Failed to sync");
+            drop(blob);
+
+            // Phase 3: Simulate crash during recovery's rewind
+            // Recovery would try to rewind index from 5 entries to 3 entries.
+            // Simulate partial rewind by manually truncating index to 4 entries
+            // (as if crash occurred mid-rewind).
+            let chunk_size = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            let (index_blob, _) = context
+                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open index blob");
+            let partial_rewind_size = 4 * chunk_size; // 4 entries instead of 3
+            index_blob
+                .resize(partial_rewind_size)
+                .await
+                .expect("Failed to resize");
+            index_blob.sync().await.expect("Failed to sync");
+            drop(index_blob);
+
+            // Phase 4: Second recovery attempt should handle the inconsistent state
+            // Index has 4 entries, but glob only supports 3.
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to reinit after nested crash");
+
+            // Only first 3 entries should be valid (recovery should rewind again)
+            for i in 0..3u8 {
+                let entry = oversized.get(1, i as u64).await.expect("Failed to get");
+                assert_eq!(entry.id, i as u64);
+
+                let (_, offset, size) = locations[i as usize];
+                let value = oversized
+                    .get_value(1, offset, size)
+                    .await
+                    .expect("Failed to get value");
+                assert_eq!(value, [i; 16]);
+            }
+
+            // Entry 3 should not exist (index was rewound to match glob)
+            assert!(oversized.get(1, 3).await.is_err());
+
+            // Verify append works after nested crash recovery
+            let new_value: TestValue = [0xFF; 16];
+            let new_entry = TestEntry::new(100, 0, 0);
+            let mut oversized = oversized;
+            let (pos, offset, _size) = oversized
+                .append(1, new_entry, &new_value)
+                .await
+                .expect("Failed to append");
+            assert_eq!(pos, 3); // Should be position 3 (after the 3 valid entries)
+
+            // Verify the offset starts where entry 2 ended (no gaps)
+            assert_eq!(offset, byte_end(locations[2].1, locations[2].2));
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_crash_during_orphan_cleanup() {
+        // Tests crash during orphan section cleanup: recovery starts removing
+        // orphan value sections, but crashes mid-cleanup.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+
+            // Phase 1: Create valid data in section 1
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            let value: TestValue = [1; 16];
+            let entry = TestEntry::new(1, 0, 0);
+            let (_, offset1, size1) = oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Phase 2: Create orphan value sections 2, 3, 4 (no index entries)
+            let glob_cfg = GlobConfig {
+                partition: cfg.value_partition.clone(),
+                compression: cfg.compression,
+                codec_config: (),
+                write_buffer: cfg.value_write_buffer,
+            };
+            let mut glob: Glob<_, TestValue> = Glob::init(context.with_label("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob");
+
+            for section in 2u64..=4 {
+                let orphan_value: TestValue = [section as u8; 16];
+                glob.append(section, &orphan_value)
+                    .await
+                    .expect("Failed to append orphan");
+                glob.sync(section).await.expect("Failed to sync glob");
+            }
+            drop(glob);
+
+            // Phase 3: Simulate partial orphan cleanup (section 2 removed, 3 and 4 remain)
+            // This simulates a crash during cleanup_orphan_value_sections()
+            context
+                .remove(&cfg.value_partition, Some(&2u64.to_be_bytes()))
+                .await
+                .expect("Failed to remove section 2");
+
+            // Phase 4: Recovery should complete the cleanup
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to reinit");
+
+            // Section 1 should still be valid
+            let entry = oversized.get(1, 0).await.expect("Failed to get");
+            assert_eq!(entry.id, 1);
+            let value = oversized
+                .get_value(1, offset1, size1)
+                .await
+                .expect("Failed to get value");
+            assert_eq!(value, [1; 16]);
+
+            // No orphan sections should remain
+            assert_eq!(oversized.oldest_section(), Some(1));
+            assert_eq!(oversized.newest_section(), Some(1));
+
+            // Should be able to append to section 2 (now clean)
+            let new_value: TestValue = [42; 16];
+            let new_entry = TestEntry::new(42, 0, 0);
+            let (pos, _, _) = oversized
+                .append(2, new_entry, &new_value)
+                .await
+                .expect("Failed to append to section 2");
+            assert_eq!(pos, 0); // First entry in new section
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
 }
