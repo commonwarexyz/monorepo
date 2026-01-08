@@ -566,7 +566,7 @@ impl<H: Hasher> CheckingData<H> {
         let mut hasher = H::new();
         if reshard
             .inclusion_proof
-            .verify(&mut hasher, &proof_elements, &self.root)
+            .verify_multi_inclusion(&mut hasher, &proof_elements, &self.root)
             .is_err()
         {
             return Err(Error::InvalidReShard);

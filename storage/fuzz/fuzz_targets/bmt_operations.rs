@@ -118,9 +118,8 @@ fn fuzz(input: FuzzInput) {
                 if let (Some(ref p), Some(ref t)) = (&proof, &tree) {
                     let mut hasher = Sha256::default();
                     let leaf_digest = Sha256::hash(&leaf_value.to_be_bytes());
-                    let elements = [(leaf_digest, *position)];
                     let root = t.root();
-                    let _ = p.verify(&mut hasher, &elements, &root);
+                    let _ = p.verify_element_inclusion(&mut hasher, &leaf_digest, *position, &root);
                 }
             }
 

@@ -74,8 +74,9 @@ impl<H: Hasher> Chunk<H> {
         let shard_digest = hasher.finalize();
 
         // Verify proof
-        let elements = [(shard_digest, self.index as u32)];
-        self.proof.verify(&mut hasher, &elements, root).is_ok()
+        self.proof
+            .verify_element_inclusion(&mut hasher, &shard_digest, self.index as u32, root)
+            .is_ok()
     }
 }
 
