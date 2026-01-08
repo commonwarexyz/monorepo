@@ -7,7 +7,7 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_conformance::{conformance_tests, Conformance};
 use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
-use commonware_utils::{sequence::FixedBytes, NZU16, NZU64, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::Rng;
 

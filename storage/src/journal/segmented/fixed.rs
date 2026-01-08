@@ -23,10 +23,7 @@
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, DecodeExt as _};
-use commonware_runtime::{
-    buffer::PoolRef,
-    Blob, Error as RError, Metrics, Storage,
-};
+use commonware_runtime::{buffer::PoolRef, Blob, Error as RError, Metrics, Storage};
 use futures::{
     stream::{self, Stream},
     StreamExt,
@@ -291,7 +288,7 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
-    use commonware_utils::{NZU16, NZUsize};
+    use commonware_utils::{NZUsize, NZU16};
     use core::num::NonZeroU16;
     use futures::{pin_mut, StreamExt};
 

@@ -444,7 +444,7 @@ mod tests {
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
-    use commonware_utils::{NZU16, NZUsize};
+    use commonware_utils::{NZUsize, NZU16};
 
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {

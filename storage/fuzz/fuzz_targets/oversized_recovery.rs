@@ -10,7 +10,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner, Storage as _};
 use commonware_storage::journal::segmented::oversized::{Config, Oversized, Record};
-use commonware_utils::{NZU16, NZUsize};
+use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
