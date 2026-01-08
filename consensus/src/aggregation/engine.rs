@@ -39,7 +39,7 @@ use rand_core::CryptoRngCore;
 use std::{
     cmp::max,
     collections::BTreeMap,
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -137,7 +137,7 @@ pub struct Engine<
     journal_partition: String,
     journal_write_buffer: NonZeroUsize,
     journal_replay_buffer: NonZeroUsize,
-    journal_heights_per_section: u64,
+    journal_heights_per_section: NonZeroU64,
     journal_compression: Option<u8>,
     journal_buffer_pool: PoolRef,
 
@@ -187,7 +187,7 @@ impl<
             journal_partition: cfg.journal_partition,
             journal_write_buffer: cfg.journal_write_buffer,
             journal_replay_buffer: cfg.journal_replay_buffer,
-            journal_heights_per_section: cfg.journal_heights_per_section.into(),
+            journal_heights_per_section: cfg.journal_heights_per_section,
             journal_compression: cfg.journal_compression,
             journal_buffer_pool: cfg.journal_buffer_pool,
             priority_acks: cfg.priority_acks,
@@ -786,7 +786,7 @@ impl<
 
     /// Returns the section of the journal for the given `height`.
     const fn get_journal_section(&self, height: Height) -> u64 {
-        height.get() / self.journal_heights_per_section
+        height.get() / self.journal_heights_per_section.get()
     }
 
     /// Replays the journal, updating the state of the engine.
