@@ -28,7 +28,7 @@
 
 use crate::{
     buffer::{
-        pool::{Checksum, PoolRef, Read, CRC_RECORD_SIZE},
+        pool::{Checksum, PoolRef, Read, CHECKSUM_SIZE},
         tip::Buffer,
     },
     Blob, Error, RwLock, RwLockWriteGuard,
@@ -105,7 +105,7 @@ impl<B: Blob> Append<B> {
             Self::read_last_valid_page(&blob, original_blob_size, pool_ref.page_size()).await?;
         if invalid_data_found {
             // Invalid data was detected, trim it from the blob.
-            let new_blob_size = pages * (pool_ref.page_size() + CRC_RECORD_SIZE);
+            let new_blob_size = pages * (pool_ref.page_size() + CHECKSUM_SIZE);
             warn!(
                 original_blob_size,
                 new_blob_size, "truncating blob to remove invalid data"
@@ -275,7 +275,7 @@ impl<B: Blob> Append<B> {
         blob_size: u64,
         page_size: u64,
     ) -> Result<(Option<(Vec<u8>, Checksum)>, u64, bool), Error> {
-        let physical_page_size = page_size + CRC_RECORD_SIZE;
+        let physical_page_size = page_size + CHECKSUM_SIZE;
         let partial_bytes = blob_size % physical_page_size;
         let mut last_page_end = blob_size - partial_bytes;
 
@@ -392,7 +392,7 @@ impl<B: Blob> Append<B> {
         drop(buf_guard);
 
         let logical_page_size = self.pool_ref.page_size() as usize;
-        let physical_page_size = logical_page_size + CRC_RECORD_SIZE as usize;
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
         let write_at_offset = blob_state.current_page * physical_page_size as u64;
 
         // Count only FULL pages for advancing current_page. A partial page (if included) takes
@@ -617,7 +617,7 @@ impl<B: Blob> Append<B> {
         old_crc_record: Option<&Checksum>,
     ) -> (Vec<u8>, Option<Checksum>) {
         let logical_page_size = self.pool_ref.page_size() as usize;
-        let physical_page_size = logical_page_size + CRC_RECORD_SIZE as usize;
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
         let pages_to_write = buffer.data.len() / logical_page_size;
         let mut write_buffer = Vec::with_capacity(pages_to_write * physical_page_size);
 
@@ -720,7 +720,7 @@ impl<B: Blob> Append<B> {
             }
         }
 
-        let physical_page_size = logical_page_size + CRC_RECORD_SIZE;
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE;
         let blob_guard = self.blob_state.read().await;
 
         // Compute both physical and logical blob sizes.
@@ -814,7 +814,7 @@ impl<B: Blob> Blob for Append<B> {
         // page, if any old data hasn't expired naturally by then.
 
         let logical_page_size = self.pool_ref.page_size();
-        let physical_page_size = logical_page_size + CRC_RECORD_SIZE;
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE;
 
         // Flush any buffered data first to ensure we have a consistent state on disk.
         self.sync().await?;
@@ -1046,7 +1046,7 @@ mod tests {
 
     /// Helper to read the CRC record from raw blob bytes at the end of a physical page.
     fn read_crc_record_from_page(page_bytes: &[u8]) -> Checksum {
-        let crc_start = page_bytes.len() - CRC_RECORD_SIZE as usize;
+        let crc_start = page_bytes.len() - CHECKSUM_SIZE as usize;
         Checksum::read(&mut &page_bytes[crc_start..]).unwrap()
     }
 
@@ -1127,7 +1127,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let physical_page_size = PAGE_SIZE.get() as usize + CRC_RECORD_SIZE as usize;
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             let slot0_offset = PAGE_SIZE.get() as u64;
             let slot1_offset = PAGE_SIZE.get() as u64 + 6;
 
@@ -1243,7 +1243,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let physical_page_size = PAGE_SIZE.get() as usize + CRC_RECORD_SIZE as usize;
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             let slot0_offset = PAGE_SIZE.get() as u64;
             let slot1_offset = PAGE_SIZE.get() as u64 + 6;
 
@@ -1371,7 +1371,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let physical_page_size = PAGE_SIZE.get() as usize + CRC_RECORD_SIZE as usize;
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
 
             // === Step 1: Write 20 bytes ===
             let (blob, _) = context
@@ -1440,7 +1440,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let physical_page_size = PAGE_SIZE.get() as usize + CRC_RECORD_SIZE as usize;
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             let slot0_offset = PAGE_SIZE.get() as u64;
             let slot1_offset = PAGE_SIZE.get() as u64 + 6;
 
@@ -1560,7 +1560,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let physical_page_size = PAGE_SIZE.get() as usize + CRC_RECORD_SIZE as usize;
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             // crc2 is at offset: PAGE_SIZE + 6 (for len2) + 2 (skip len2 bytes) = PAGE_SIZE + 8
             let crc2_offset = PAGE_SIZE.get() as u64 + 8;
 
@@ -1680,7 +1680,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let physical_page_size = PAGE_SIZE.get() as usize + CRC_RECORD_SIZE as usize;
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             // crc2 for page 0 is at offset: PAGE_SIZE + 8
             let page0_crc2_offset = PAGE_SIZE.get() as u64 + 8;
 
@@ -1831,7 +1831,7 @@ mod tests {
 
         executor.start(|context| async move {
             let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let physical_page_size = PAGE_SIZE.get() as usize + CRC_RECORD_SIZE as usize;
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
 
             let (blob, size) = context
                 .open("test_partition", b"resize_crc_test")
@@ -1858,8 +1858,8 @@ mod tests {
             assert_eq!(size as usize, physical_page_size * 3);
 
             // Page 1 CRC record is at the end of the second physical page.
-            let page1_crc_offset = (physical_page_size * 2 - CRC_RECORD_SIZE as usize) as u64;
-            blob.write_at(vec![0xFF; CRC_RECORD_SIZE as usize], page1_crc_offset)
+            let page1_crc_offset = (physical_page_size * 2 - CHECKSUM_SIZE as usize) as u64;
+            blob.write_at(vec![0xFF; CHECKSUM_SIZE as usize], page1_crc_offset)
                 .await
                 .unwrap();
             blob.sync().await.unwrap();
@@ -1947,7 +1947,7 @@ mod tests {
 
         executor.start(|context| async move {
             let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let physical_page_size = PAGE_SIZE.get() as usize + CRC_RECORD_SIZE as usize;
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
 
             // Step 1: Create blob with valid data
             let (blob, size) = context

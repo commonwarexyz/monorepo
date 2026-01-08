@@ -1453,7 +1453,7 @@ mod tests {
             drop(journal);
 
             // Open the blob directly and truncate to a page boundary.
-            // Physical page size = PAGE_SIZE + CRC_RECORD_SIZE = 44 + 12 = 56
+            // Physical page size = PAGE_SIZE + CHECKSUM_SIZE = 44 + 12 = 56
             let physical_page_size = PAGE_SIZE.get() as u64 + 12;
             let (blob, size) = context
                 .open(&cfg.partition, &0u64.to_be_bytes())

@@ -417,7 +417,7 @@ impl Pool {
 #[cfg(test)]
 mod tests {
     use super::{super::Checksum, *};
-    use crate::{buffer::pool::CRC_RECORD_SIZE, deterministic, Runner as _, Storage as _};
+    use crate::{buffer::pool::CHECKSUM_SIZE, deterministic, Runner as _, Storage as _};
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
     use std::num::NonZeroU16;
@@ -478,7 +478,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Physical page size = logical + CRC record.
-            let physical_page_size = PAGE_SIZE_U64 + CRC_RECORD_SIZE;
+            let physical_page_size = PAGE_SIZE_U64 + CHECKSUM_SIZE;
 
             // Populate a blob with 11 consecutive pages of CRC-protected data.
             let (blob, size) = context
@@ -559,8 +559,8 @@ mod tests {
     fn test_pool_cache_at_high_offset() {
         let executor = deterministic::Runner::default();
         executor.start(|_context| async move {
-            // Use the minimum page size (CRC_RECORD_SIZE + 1 = 13) with high offset.
-            const MIN_PAGE_SIZE: u64 = CRC_RECORD_SIZE + 1;
+            // Use the minimum page size (CHECKSUM_SIZE + 1 = 13) with high offset.
+            const MIN_PAGE_SIZE: u64 = CHECKSUM_SIZE + 1;
             let pool_ref = PoolRef::new(NZU16!(MIN_PAGE_SIZE as u16), NZUsize!(2));
 
             // Create two pages worth of logical data (no CRCs - PoolRef::cache expects logical only).

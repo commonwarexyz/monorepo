@@ -37,8 +37,8 @@ pub use page_cache::PoolRef;
 pub use read::Read;
 use tracing::{debug, error};
 
-// A CRC record contains two u16 lengths and two CRCs (each 4 bytes).
-const CRC_RECORD_SIZE: u64 = 12;
+// A checksum record contains two u16 lengths and two CRCs (each 4 bytes).
+const CHECKSUM_SIZE: u64 = 12;
 
 /// Read the designated page from the underlying blob and return its logical bytes as a vector if it
 /// passes the integrity check, returning error otherwise. Safely handles partial pages. Caller can
@@ -48,7 +48,7 @@ async fn get_page_from_blob(
     page_num: u64,
     logical_page_size: u64,
 ) -> Result<StableBuf, Error> {
-    let physical_page_size = logical_page_size + CRC_RECORD_SIZE;
+    let physical_page_size = logical_page_size + CHECKSUM_SIZE;
     let physical_page_start = page_num * physical_page_size;
 
     let mut page = blob
@@ -96,16 +96,16 @@ impl Checksum {
     /// zeroed and the other CRC used as a fallback.
     fn validate_page(buf: &[u8]) -> Option<Self> {
         let page_size = buf.len() as u64;
-        if page_size < CRC_RECORD_SIZE {
+        if page_size < CHECKSUM_SIZE {
             error!(
                 page_size,
-                required = CRC_RECORD_SIZE,
+                required = CHECKSUM_SIZE,
                 "read page smaller than CRC record"
             );
             return None;
         }
 
-        let crc_start_idx = (page_size - CRC_RECORD_SIZE) as usize;
+        let crc_start_idx = (page_size - CHECKSUM_SIZE) as usize;
         let mut crc_bytes = &buf[crc_start_idx..];
         let mut crc_record = Self::read(&mut crc_bytes).expect("CRC record read should not fail");
         let (len, crc) = crc_record.get_crc();
@@ -197,7 +197,7 @@ impl Checksum {
     }
 
     /// Returns the CRC record in its storage representation.
-    fn to_bytes(&self) -> [u8; CRC_RECORD_SIZE as usize] {
+    fn to_bytes(&self) -> [u8; CHECKSUM_SIZE as usize] {
         self.encode_fixed()
     }
 }
@@ -225,7 +225,7 @@ impl CodecRead for Checksum {
 }
 
 impl FixedSize for Checksum {
-    const SIZE: usize = CRC_RECORD_SIZE as usize;
+    const SIZE: usize = CHECKSUM_SIZE as usize;
 }
 
 #[cfg(feature = "arbitrary")]
@@ -244,7 +244,7 @@ impl arbitrary::Arbitrary<'_> for Checksum {
 mod tests {
     use super::*;
 
-    const CRC_RECORD_USIZE: usize = 12;
+    const CHECKSUM_SIZE_USIZE: usize = CHECKSUM_SIZE as usize;
 
     #[test]
     fn test_crc_record_encode_read_roundtrip() {
@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn test_validate_page_valid() {
         let logical_page_size = 64usize;
-        let physical_page_size = logical_page_size + CRC_RECORD_USIZE;
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE_USIZE;
         let mut page = vec![0u8; physical_page_size];
 
         // Write some data
@@ -339,7 +339,7 @@ mod tests {
         let record = Checksum::new(data.len() as u16, crc);
 
         // Write the CRC record at the end
-        let crc_start = physical_page_size - CRC_RECORD_USIZE;
+        let crc_start = physical_page_size - CHECKSUM_SIZE_USIZE;
         page[crc_start..].copy_from_slice(&record.to_bytes());
 
         // Validate - should return Some with the Checksum
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn test_validate_page_invalid_crc() {
         let logical_page_size = 64usize;
-        let physical_page_size = logical_page_size + CRC_RECORD_USIZE;
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE_USIZE;
         let mut page = vec![0u8; physical_page_size];
 
         // Write some data
@@ -363,7 +363,7 @@ mod tests {
         let wrong_crc = 0xBADBADBA;
         let record = Checksum::new(data.len() as u16, wrong_crc);
 
-        let crc_start = physical_page_size - CRC_RECORD_USIZE;
+        let crc_start = physical_page_size - CHECKSUM_SIZE_USIZE;
         page[crc_start..].copy_from_slice(&record.to_bytes());
 
         // Should fail validation (return None)
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn test_validate_page_corrupted_data() {
         let logical_page_size = 64usize;
-        let physical_page_size = logical_page_size + CRC_RECORD_USIZE;
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE_USIZE;
         let mut page = vec![0u8; physical_page_size];
 
         // Write some data and compute correct CRC
@@ -383,7 +383,7 @@ mod tests {
         let crc = crc32fast::hash(&page[..data.len()]);
         let record = Checksum::new(data.len() as u16, crc);
 
-        let crc_start = physical_page_size - CRC_RECORD_USIZE;
+        let crc_start = physical_page_size - CHECKSUM_SIZE_USIZE;
         page[crc_start..].copy_from_slice(&record.to_bytes());
 
         // Corrupt the data
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn test_validate_page_uses_larger_len() {
         let logical_page_size = 64usize;
-        let physical_page_size = logical_page_size + CRC_RECORD_USIZE;
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE_USIZE;
         let mut page = vec![0u8; physical_page_size];
 
         // Write data and compute CRC for the larger portion
@@ -413,7 +413,7 @@ mod tests {
             crc2: crc,
         };
 
-        let crc_start = physical_page_size - CRC_RECORD_USIZE;
+        let crc_start = physical_page_size - CHECKSUM_SIZE_USIZE;
         page[crc_start..].copy_from_slice(&record.to_bytes());
 
         // Should validate using len2/crc2 since len2 > len1
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn test_validate_page_uses_fallback() {
         let logical_page_size = 64usize;
-        let physical_page_size = logical_page_size + CRC_RECORD_USIZE;
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE_USIZE;
         let mut page = vec![0u8; physical_page_size];
 
         // Write data
@@ -445,7 +445,7 @@ mod tests {
             crc2: valid_crc,      // Valid CRC
         };
 
-        let crc_start = physical_page_size - CRC_RECORD_USIZE;
+        let crc_start = physical_page_size - CHECKSUM_SIZE_USIZE;
         page[crc_start..].copy_from_slice(&record.to_bytes());
 
         // Should validate using the fallback (len2)
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn test_validate_page_no_fallback_available() {
         let logical_page_size = 64usize;
-        let physical_page_size = logical_page_size + CRC_RECORD_USIZE;
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE_USIZE;
         let mut page = vec![0u8; physical_page_size];
 
         // Write some data
@@ -482,7 +482,7 @@ mod tests {
             crc2: 0,
         };
 
-        let crc_start = physical_page_size - CRC_RECORD_USIZE;
+        let crc_start = physical_page_size - CHECKSUM_SIZE_USIZE;
         page[crc_start..].copy_from_slice(&record.to_bytes());
 
         // Should fail validation since primary is invalid and no fallback exists
