@@ -63,6 +63,9 @@ fn scan_directory(
         let path = entry.path();
 
         if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "benches") {
+                continue;
+            }
             scan_directory(base_path, &path, modules)?;
         } else if path.extension().is_some_and(|ext| ext == "rs") {
             let rel_path = path

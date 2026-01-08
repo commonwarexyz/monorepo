@@ -1,5 +1,5 @@
 {
-  "generated": "2026-01-08T12:04:27.111213+00:00",
+  "generated": "2026-01-08T12:08:02.496289+00:00",
   "crates": {
     "broadcast": {
       "modules": {
@@ -40,11 +40,6 @@
     "coding": {
       "modules": {
         "(root)": {},
-        "benches::bench": {},
-        "benches::bench_size": {},
-        "benches::no_coding": {},
-        "benches::reed_solomon": {},
-        "benches::zoda": {},
         "no_coding": {},
         "reed_solomon": {},
         "zoda": {}
@@ -164,27 +159,8 @@
           "lts": "0.1.0"
         },
         "blake3": {},
-        "blake3::benches::bench": {},
-        "blake3::benches::hash_message": {},
         "bloomfilter": {},
         "bls12381": {},
-        "bls12381::benches::aggregate_verify_same_message": {},
-        "bls12381::benches::aggregate_verify_same_signer": {},
-        "bls12381::benches::batch_verify_same_signer": {},
-        "bls12381::benches::bench": {},
-        "bls12381::benches::combine_public_keys": {},
-        "bls12381::benches::combine_signatures": {},
-        "bls12381::benches::dkg": {},
-        "bls12381::benches::evaluate_point": {},
-        "bls12381::benches::scheme_batch_verify_same_message": {},
-        "bls12381::benches::scheme_batch_verify_same_signer": {},
-        "bls12381::benches::signature_generation": {},
-        "bls12381::benches::signature_verification": {},
-        "bls12381::benches::threshold_batch_verify_same_message": {},
-        "bls12381::benches::threshold_batch_verify_same_message_precomputed": {},
-        "bls12381::benches::threshold_recover": {},
-        "bls12381::benches::tle_decrypt": {},
-        "bls12381::benches::tle_encrypt": {},
         "bls12381::certificate": {},
         "bls12381::certificate::multisig": {},
         "bls12381::certificate::multisig::mocks": {},
@@ -203,33 +179,16 @@
         "bls12381::tle": {},
         "certificate": {},
         "ed25519": {},
-        "ed25519::benches::batch_verify_same_message": {},
-        "ed25519::benches::batch_verify_same_signer": {},
-        "ed25519::benches::bench": {},
-        "ed25519::benches::signature_generation": {},
-        "ed25519::benches::signature_verification": {},
         "ed25519::certificate": {},
         "ed25519::certificate::mocks": {},
         "ed25519::scheme": {},
         "handshake": {},
-        "handshake::benches::bench": {},
-        "handshake::benches::handshake": {},
-        "handshake::benches::transport": {},
         "handshake::cipher": {},
         "handshake::conformance": {},
         "handshake::error": {},
         "handshake::key_exchange": {},
         "lthash": {},
-        "lthash::benches::add": {},
-        "lthash::benches::bench": {},
-        "lthash::benches::checksum": {},
-        "lthash::benches::combine": {},
-        "lthash::benches::subtract": {},
-        "lthash::benches::update": {},
         "secp256r1": {},
-        "secp256r1::benches::bench": {},
-        "secp256r1::benches::signature_generation": {},
-        "secp256r1::benches::signature_verification": {},
         "secp256r1::certificate": {},
         "secp256r1::certificate::mocks": {},
         "secp256r1::common": {},
@@ -237,8 +196,6 @@
         "secp256r1::standard": {},
         "secret": {},
         "sha256": {},
-        "sha256::benches::bench": {},
-        "sha256::benches::hash_message": {},
         "transcript": {}
       }
     },
@@ -438,11 +395,6 @@
       "modules": {
         "(root)": {},
         "archive": {},
-        "archive::benches::bench": {},
-        "archive::benches::get": {},
-        "archive::benches::put": {},
-        "archive::benches::restart": {},
-        "archive::benches::utils": {},
         "archive::conformance": {},
         "archive::immutable": {},
         "archive::immutable::storage": {},
@@ -451,25 +403,11 @@
         "bitmap": {},
         "bitmap::authenticated": {},
         "bmt": {},
-        "bmt::benches::bench": {},
-        "bmt::benches::build": {},
-        "bmt::benches::prove_range": {},
-        "bmt::benches::prove_single": {},
         "cache": {},
         "cache::storage": {},
         "freezer": {},
-        "freezer::benches::bench": {},
-        "freezer::benches::get": {},
-        "freezer::benches::put": {},
-        "freezer::benches::restart": {},
-        "freezer::benches::utils": {},
         "freezer::storage": {},
         "index": {},
-        "index::benches::bench": {},
-        "index::benches::hashmap_insert": {},
-        "index::benches::hashmap_insert_fixed": {},
-        "index::benches::hashmap_iteration": {},
-        "index::benches::insert": {},
         "index::ordered": {},
         "index::partitioned": {},
         "index::partitioned::ordered": {},
@@ -481,31 +419,6 @@
           "lts": "0.1.0"
         },
         "journal::authenticated": {
-          "beta": "0.1.0",
-          "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs"
-        },
-        "journal::benches::bench": {
-          "beta": "0.1.0",
-          "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs"
-        },
-        "journal::benches::fixed_append": {
-          "beta": "0.1.0",
-          "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs"
-        },
-        "journal::benches::fixed_read_random": {
-          "beta": "0.1.0",
-          "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs"
-        },
-        "journal::benches::fixed_read_sequential": {
-          "beta": "0.1.0",
-          "lts": "0.1.0",
-          "inherited_from": "src/journal/mod.rs"
-        },
-        "journal::benches::fixed_replay": {
           "beta": "0.1.0",
           "lts": "0.1.0",
           "inherited_from": "src/journal/mod.rs"
@@ -568,18 +481,8 @@
         "kv": {},
         "kv::batch": {},
         "metadata": {},
-        "metadata::benches::bench": {},
-        "metadata::benches::restart": {},
-        "metadata::benches::sync": {},
-        "metadata::benches::utils": {},
         "metadata::storage": {},
         "mmr": {},
-        "mmr::benches::append": {},
-        "mmr::benches::append_additional": {},
-        "mmr::benches::bench": {},
-        "mmr::benches::prove_many_elements": {},
-        "mmr::benches::prove_single_element": {},
-        "mmr::benches::update": {},
         "mmr::grafting": {},
         "mmr::hasher": {},
         "mmr::iterator": {},
@@ -592,11 +495,6 @@
         "mmr::storage": {},
         "mmr::verification": {},
         "ordinal": {},
-        "ordinal::benches::bench": {},
-        "ordinal::benches::get": {},
-        "ordinal::benches::put": {},
-        "ordinal::benches::restart": {},
-        "ordinal::benches::utils": {},
         "ordinal::storage": {},
         "qmdb": {},
         "qmdb::any": {},
@@ -618,14 +516,6 @@
         "qmdb::any::unordered::variable": {},
         "qmdb::any::unordered::variable::sync": {},
         "qmdb::any::value": {},
-        "qmdb::benches::bench": {},
-        "qmdb::benches::fixed": {},
-        "qmdb::benches::fixed::generate": {},
-        "qmdb::benches::fixed::init": {},
-        "qmdb::benches::keyless_generate": {},
-        "qmdb::benches::variable": {},
-        "qmdb::benches::variable::generate": {},
-        "qmdb::benches::variable::init": {},
         "qmdb::current": {},
         "qmdb::current::ordered": {},
         "qmdb::current::ordered::fixed": {},
@@ -652,8 +542,6 @@
         "qmdb::sync::target": {},
         "qmdb::verify": {},
         "rmap": {},
-        "rmap::benches::bench": {},
-        "rmap::benches::insert": {},
         "translator": {}
       }
     },
@@ -671,8 +559,6 @@
           "lts": "0.1.0"
         },
         "acknowledgement": {},
-        "benches::bench": {},
-        "benches::log2_ceil": {},
         "bitmap": {},
         "bitmap::historical": {},
         "bitmap::historical::batch": {},
@@ -708,12 +594,12 @@
     }
   },
   "summary": {
-    "total_modules": 539,
+    "total_modules": 445,
     "by_stage": {
-      "alpha": 512,
-      "beta": 27,
+      "alpha": 423,
+      "beta": 22,
       "gamma": 0
     },
-    "lts_count": 27
+    "lts_count": 22
   }
 }
