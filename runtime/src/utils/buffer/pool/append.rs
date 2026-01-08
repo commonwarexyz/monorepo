@@ -1959,7 +1959,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            append.append(&vec![0x42; 50]).await.unwrap();
+            append.append(&[0x42; 50]).await.unwrap();
             append.sync().await.unwrap();
             drop(append);
 
@@ -2029,7 +2029,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            append.append(&vec![0x42; 50]).await.unwrap();
+            append.append(&[0x42; 50]).await.unwrap();
             append.sync().await.unwrap();
             drop(append);
 
