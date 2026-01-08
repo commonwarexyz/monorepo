@@ -95,7 +95,7 @@ impl<H: Hasher> Read for Chunk<H> {
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let shard = Vec::<u8>::read_range(reader, ..=cfg.maximum_shard_size)?;
         let index = u16::read(reader)?;
-        let proof = bmt::Proof::<H>::read_cfg(reader, &bmt::MAX_LEVELS)?;
+        let proof = bmt::Proof::<H>::read_cfg(reader, &1)?;
         Ok(Self {
             shard,
             index,

@@ -549,15 +549,18 @@ impl<H: Hasher> Write for Proof<H> {
 }
 
 impl<H: Hasher> Read for Proof<H> {
-    /// The maximum number of siblings in the proof.
+    /// The maximum number of items being proven.
+    ///
+    /// The upper bound on sibling hashes is derived as `max_items * MAX_LEVELS`.
     type Cfg = usize;
 
     fn read_cfg(
         reader: &mut impl Buf,
-        max_len: &Self::Cfg,
+        max_items: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let leaf_count = u32::read(reader)?;
-        let siblings = Vec::<H::Digest>::read_range(reader, ..=*max_len)?;
+        let max_siblings = max_items.saturating_mul(MAX_LEVELS);
+        let siblings = Vec::<H::Digest>::read_range(reader, ..=max_siblings)?;
         Ok(Self {
             leaf_count,
             siblings,
@@ -851,8 +854,7 @@ mod tests {
 
             // Serialize and deserialize the proof
             let serialized = proof.encode();
-            let max_siblings = proof.siblings.len();
-            let deserialized = Proof::<Sha256>::decode_cfg(serialized, &max_siblings).unwrap();
+            let deserialized = Proof::<Sha256>::decode_cfg(serialized, &1).unwrap();
             assert!(
                 deserialized
                     .verify_element_inclusion(&mut hasher, leaf, i as u32, &root)
@@ -1261,12 +1263,11 @@ mod tests {
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.proof(1).unwrap();
-        let max_siblings = proof.siblings.len();
         let mut serialized = proof.encode();
 
         // Truncate one byte.
         serialized.truncate(serialized.len() - 1);
-        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &max_siblings).is_err());
+        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &1).is_err());
     }
 
     #[test]
@@ -1284,12 +1285,11 @@ mod tests {
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.proof(1).unwrap();
-        let max_siblings = proof.siblings.len();
         let mut serialized = proof.encode_mut();
 
         // Append an extra byte.
         serialized.extend_from_slice(&[0u8]);
-        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &max_siblings).is_err());
+        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &1).is_err());
     }
 
     #[test]
@@ -2413,8 +2413,7 @@ mod tests {
 
         // Serialize and deserialize
         let serialized = multi_proof.encode();
-        let max_siblings = multi_proof.siblings.len();
-        let deserialized = Proof::<Sha256>::decode_cfg(serialized, &max_siblings).unwrap();
+        let deserialized = Proof::<Sha256>::decode_cfg(serialized, &positions.len()).unwrap();
 
         assert_eq!(multi_proof, deserialized);
 
@@ -2443,14 +2442,13 @@ mod tests {
         // Generate proof
         let positions = [0, 3, 5];
         let multi_proof = tree.multi_proof(&positions).unwrap();
-        let max_siblings = multi_proof.siblings.len();
 
         // Serialize and truncate
         let mut serialized = multi_proof.encode();
         serialized.truncate(serialized.len() - 1);
 
         // Should fail to deserialize
-        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &max_siblings).is_err());
+        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &positions.len()).is_err());
     }
 
     #[test]
@@ -2468,14 +2466,13 @@ mod tests {
         // Generate proof
         let positions = [0, 3, 5];
         let multi_proof = tree.multi_proof(&positions).unwrap();
-        let max_siblings = multi_proof.siblings.len();
 
         // Serialize and add extra byte
         let mut serialized = multi_proof.encode_mut();
         serialized.extend_from_slice(&[0u8]);
 
         // Should fail to deserialize
-        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &max_siblings).is_err());
+        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &positions.len()).is_err());
     }
 
     #[test]
@@ -2485,8 +2482,7 @@ mod tests {
         serialized.extend_from_slice(&1usize.encode()); // claims 1 sibling but no data follows
 
         // Should fail because the buffer claims 1 sibling but doesn't have the data
-        let max_siblings = 1;
-        let err = Proof::<Sha256>::decode_cfg(serialized.as_slice(), &max_siblings).unwrap_err();
+        let err = Proof::<Sha256>::decode_cfg(serialized.as_slice(), &1).unwrap_err();
         assert!(matches!(err, commonware_codec::Error::EndOfBuffer));
     }
 

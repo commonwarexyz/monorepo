@@ -23,6 +23,13 @@ use core::ops::Range;
 #[cfg(feature = "std")]
 use tracing::debug;
 
+/// The maximum number of digests in a proof per element being proven.
+///
+/// This accounts for both the path from a leaf to its peak (max 62 nodes) and
+/// peak digests for mountains not containing the element (max 63 peaks).
+/// The value 128 provides a safe upper bound with room for future growth.
+pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 128;
+
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
 #[derive(Error, Debug)]
 pub enum ReconstructionError {
@@ -85,16 +92,21 @@ impl<D: Digest> Write for Proof<D> {
 }
 
 impl<D: Digest> Read for Proof<D> {
-    /// The maximum number of digests in the proof.
+    /// The maximum number of items being proven.
+    ///
+    /// The upper bound on digests is derived as `max_items * MAX_PROOF_DIGESTS_PER_ELEMENT`.
     type Cfg = usize;
 
-    fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(
+        buf: &mut impl Buf,
+        max_items: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
         // Read the number of nodes in the MMR
         let size = Position::new(UInt::<u64>::read(buf)?.into());
 
         // Read the digests
-        let range = ..=max_len;
-        let digests = Vec::<D>::read_range(buf, range)?;
+        let max_digests = max_items.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
+        let digests = Vec::<D>::read_range(buf, ..=max_digests)?;
         Ok(Self { size, digests })
     }
 }
@@ -1089,8 +1101,9 @@ mod tests {
                     expected_size,
                     "serialized proof should have expected size"
                 );
-                let max_digests = proof.digests.len();
-                let deserialized_proof = Proof::decode_cfg(serialized_proof, &max_digests).unwrap();
+                // max_items is the number of elements in the range
+                let max_items = j - i;
+                let deserialized_proof = Proof::decode_cfg(serialized_proof, &max_items).unwrap();
                 assert_eq!(
                     proof, deserialized_proof,
                     "deserialized proof should match source proof"
@@ -1101,7 +1114,7 @@ mod tests {
                 let serialized_proof = proof.encode();
                 let serialized_proof: Bytes = serialized_proof.slice(0..serialized_proof.len() - 1);
                 assert!(
-                    Proof::<Digest>::decode_cfg(serialized_proof, &max_digests).is_err(),
+                    Proof::<Digest>::decode_cfg(serialized_proof, &max_items).is_err(),
                     "proof should not deserialize with truncated data"
                 );
 
@@ -1112,16 +1125,21 @@ mod tests {
                 let serialized_proof = serialized_proof;
 
                 assert!(
-                    Proof::<Digest>::decode_cfg(serialized_proof, &max_digests).is_err(),
+                    Proof::<Digest>::decode_cfg(serialized_proof, &max_items).is_err(),
                     "proof should not deserialize with extra data"
                 );
 
-                // Confirm deserialization fails when max length is exceeded.
-                if max_digests > 0 {
+                // Confirm deserialization fails when max_items is too small.
+                let actual_digests = proof.digests.len();
+                if actual_digests > 0 {
+                    // Find the minimum max_items that would allow this many digests
+                    let min_max_items = actual_digests.div_ceil(MAX_PROOF_DIGESTS_PER_ELEMENT);
+                    // Using one less should fail
+                    let too_small = min_max_items - 1;
                     let serialized_proof = proof.encode();
                     assert!(
-                        Proof::<Digest>::decode_cfg(serialized_proof, &(max_digests - 1)).is_err(),
-                        "proof should not deserialize with max length exceeded"
+                        Proof::<Digest>::decode_cfg(serialized_proof, &too_small).is_err(),
+                        "proof should not deserialize with max_items too small"
                     );
                 }
             }

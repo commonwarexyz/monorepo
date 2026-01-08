@@ -130,10 +130,8 @@ fn fuzz(input: FuzzInput) {
             }
 
             BmtOperation::DeserializeProof { data } => {
-                let _ = Proof::<Sha256>::decode_cfg(
-                    &mut data.as_slice(),
-                    &commonware_storage::bmt::MAX_LEVELS,
-                );
+                // Use max_items=1 since we're fuzzing single-element proofs
+                let _ = Proof::<Sha256>::decode_cfg(&mut data.as_slice(), &1);
             }
 
             BmtOperation::BuildEmptyTree => {
