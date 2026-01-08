@@ -90,6 +90,16 @@ impl<H: Hasher> BloomFilter<H> {
         }
     }
 
+    /// Returns the number of hashers used by the filter.
+    pub const fn hashers(&self) -> NonZeroU8 {
+        NonZeroU8::new(self.hashers).expect("hashers is never zero")
+    }
+
+    /// Returns the number of bits used by the filter.
+    pub const fn bits(&self) -> NonZeroUsize {
+        NonZeroUsize::new(self.bits.len() as usize).expect("bits is never zero")
+    }
+
     /// Generate `num_hashers` bit indices for a given item.
     fn indices(&self, item: &[u8]) -> impl Iterator<Item = u64> {
         #[allow(path_statements)]
@@ -397,6 +407,12 @@ mod tests {
     fn test_with_rate() {
         // Create a filter for 1000 items with 1% false positive rate
         let mut bf = BloomFilter::<Sha256>::with_rate(1000, 0.01);
+
+        // Verify getters return expected values
+        let expected_bits = BloomFilter::<Sha256>::optimal_bits(1000, 0.01);
+        let expected_hashers = BloomFilter::<Sha256>::optimal_hashers(1000, expected_bits);
+        assert_eq!(bf.bits().get(), expected_bits);
+        assert_eq!(bf.hashers().get(), expected_hashers);
 
         // Insert 1000 items
         for i in 0..1000usize {
