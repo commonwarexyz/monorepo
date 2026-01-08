@@ -8,6 +8,3 @@ pub mod glob;
 mod manager;
 pub mod oversized;
 pub mod variable;
-
-#[cfg(test)]
-mod send_test;

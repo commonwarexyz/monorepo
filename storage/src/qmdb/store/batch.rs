@@ -5,7 +5,7 @@ pub mod tests {
     use crate::{
         kv::{Batchable, Deletable as _, Gettable, Updatable as _},
         qmdb::{
-            any::states::{MutableAny, UnmerkleizedDurableAny as _},
+            any::states::{MutableAny, UnmerkleizedDurableAny},
             Error,
         },
         Persistable as _,
@@ -21,11 +21,11 @@ pub mod tests {
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::collections::HashSet;
 
-    pub trait TestKey: Array + Copy {
+    pub trait TestKey: Array + Copy + Send + Sync {
         fn from_seed(seed: u8) -> Self;
     }
 
-    pub trait TestValue: Codec + Eq + PartialEq + Debug {
+    pub trait TestValue: Codec + Eq + PartialEq + Debug + Send + Sync {
         fn from_seed(seed: u8) -> Self;
     }
 
@@ -53,9 +53,12 @@ pub mod tests {
     where
         F: FnMut(Context) -> Fut + Clone,
         Fut: Future<Output = D>,
-        D: MutableAny,
+        D: MutableAny + Send + Sync,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        D::Durable: Send + Sync,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable:
+            MutableAny<Durable = D::Durable> + Send + Sync,
     {
         let executor = deterministic::Runner::default();
         let mut new_db_clone = new_db.clone();
@@ -81,9 +84,12 @@ pub mod tests {
     pub async fn run_batch_tests<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDb<D>,
-        D: MutableAny,
+        D: MutableAny + Send + Sync,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        D::Durable: Send + Sync,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable:
+            MutableAny<Durable = D::Durable> + Send + Sync,
     {
         test_overlay_reads(new_db).await?;
         test_create(new_db).await?;
@@ -98,9 +104,12 @@ pub mod tests {
     async fn test_overlay_reads<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDb<D>,
-        D: MutableAny,
+        D: MutableAny + Send + Sync,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        D::Durable: Send + Sync,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable:
+            MutableAny<Durable = D::Durable> + Send + Sync,
     {
         let mut db = new_db().await;
         let key = TestKey::from_seed(1);
@@ -118,9 +127,12 @@ pub mod tests {
     async fn test_create<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDb<D>,
-        D: MutableAny,
+        D: MutableAny + Send + Sync,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        D::Durable: Send + Sync,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable:
+            MutableAny<Durable = D::Durable> + Send + Sync,
     {
         let mut db = new_db().await;
         let mut batch = db.start_batch();
@@ -144,9 +156,12 @@ pub mod tests {
     async fn test_delete<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDb<D>,
-        D: MutableAny,
+        D: MutableAny + Send + Sync,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        D::Durable: Send + Sync,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable:
+            MutableAny<Durable = D::Durable> + Send + Sync,
     {
         let mut db = new_db().await;
         let base_key = TestKey::from_seed(4);
@@ -169,9 +184,12 @@ pub mod tests {
     async fn test_delete_unchecked<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDb<D>,
-        D: MutableAny,
+        D: MutableAny + Send + Sync,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        D::Durable: Send + Sync,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable:
+            MutableAny<Durable = D::Durable> + Send + Sync,
     {
         let mut db = new_db().await;
         let key = TestKey::from_seed(6);
@@ -192,9 +210,12 @@ pub mod tests {
     async fn test_write_batch_from_to_empty<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDb<D>,
-        D: MutableAny,
+        D: MutableAny + Send + Sync,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        D::Durable: Send + Sync,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable:
+            MutableAny<Durable = D::Durable> + Send + Sync,
     {
         let mut db = new_db().await;
         let mut batch = db.start_batch();
@@ -216,9 +237,12 @@ pub mod tests {
     async fn test_write_batch<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDb<D>,
-        D: MutableAny,
+        D: MutableAny + Send + Sync,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        D::Durable: Send + Sync,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable:
+            MutableAny<Durable = D::Durable> + Send + Sync,
     {
         let mut db = new_db().await;
         for i in 0..100 {
@@ -256,9 +280,12 @@ pub mod tests {
     async fn test_update_delete_update<D, F>(new_db: &mut F) -> Result<(), Error>
     where
         F: NewDb<D>,
-        D: MutableAny,
+        D: MutableAny + Send + Sync,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        D::Durable: Send + Sync,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable:
+            MutableAny<Durable = D::Durable> + Send + Sync,
     {
         let mut db = new_db().await;
         // Create 100 keys and commit them.

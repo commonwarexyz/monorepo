@@ -931,7 +931,7 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync,
     H: Hasher,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -951,7 +951,7 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync,
     H: Hasher,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -978,7 +978,7 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync,
     H: Hasher,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -1005,7 +1005,7 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync,
     H: Hasher,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -1137,9 +1137,9 @@ mod test {
             let (durable_db, _) = db.commit(None).await.unwrap();
             let clean_db = durable_db.into_merkleized().await.unwrap();
             assert_eq!(clean_db.op_count() - 1, clean_db.inactivity_floor_loc());
-            db = clean_db.into_mutable();
+            let mutable: <D as CleanAny>::Mutable = clean_db.into_mutable();
+            db = mutable;
         }
-
         db.commit(None)
             .await
             .unwrap()
