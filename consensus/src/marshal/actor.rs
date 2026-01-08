@@ -101,7 +101,7 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<E, B, P, FC, FB, ES, A = Exact>
+pub struct Actor<E, B, P, FC, FB, ES, T, A = Exact>
 where
     E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
     B: Block,
@@ -109,6 +109,7 @@ where
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
     ES: Epocher,
+    T: commonware_parallel::Strategy,
     A: Acknowledgement,
 {
     // ---------- Context ----------
@@ -129,6 +130,8 @@ where
     max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: B::Cfg,
+    // Strategy for parallel verification operations
+    strategy: T,
 
     // ---------- State ----------
     // Last view processed
@@ -159,7 +162,7 @@ where
     processed_height: Gauge,
 }
 
-impl<E, B, P, FC, FB, ES, A> Actor<E, B, P, FC, FB, ES, A>
+impl<E, B, P, FC, FB, ES, T, A> Actor<E, B, P, FC, FB, ES, T, A>
 where
     E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
     B: Block,
@@ -167,6 +170,7 @@ where
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
     FB: Blocks<Block = B>,
     ES: Epocher,
+    T: commonware_parallel::Strategy,
     A: Acknowledgement,
 {
     /// Create a new application actor.
@@ -174,7 +178,7 @@ where
         context: E,
         finalizations_by_height: FC,
         finalized_blocks: FB,
-        config: Config<B, P, ES>,
+        config: Config<B, P, ES, T>,
     ) -> (Self, Mailbox<P::Scheme, B>, Height) {
         // Initialize cache
         let prunable_config = cache::Config {
@@ -233,6 +237,7 @@ where
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
+                strategy: config.strategy,
                 last_processed_round: Round::zero(),
                 last_processed_height,
                 pending_ack: None.into(),
@@ -645,7 +650,7 @@ where
                                     // Validation
                                     if block.height() != height
                                         || finalization.proposal.payload != block.commitment()
-                                        || !finalization.verify(&mut self.context, &scheme, &commonware_parallel::Sequential)
+                                        || !finalization.verify(&mut self.context, &scheme, &self.strategy)
                                     {
                                         response.send_lossy(false);
                                         continue;
@@ -685,7 +690,7 @@ where
                                     // Validation
                                     if notarization.round() != round
                                         || notarization.proposal.payload != block.commitment()
-                                        || !notarization.verify(&mut self.context, &scheme, &commonware_parallel::Sequential)
+                                        || !notarization.verify(&mut self.context, &scheme, &self.strategy)
                                     {
                                         response.send_lossy(false);
                                         continue;

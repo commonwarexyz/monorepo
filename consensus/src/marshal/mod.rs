@@ -193,6 +193,7 @@ mod tests {
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            strategy: Sequential,
         };
 
         // Create the resolver
