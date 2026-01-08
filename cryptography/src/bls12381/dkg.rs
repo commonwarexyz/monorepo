@@ -2404,8 +2404,6 @@ mod test {
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
     use core::num::NonZeroI32;
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha8Rng;
 
     #[test]
     fn single_round() -> anyhow::Result<()> {
@@ -2549,21 +2547,12 @@ mod test {
             vec![sk.public_key()].try_into().unwrap(),
         )?;
         let mut log0 = {
-            let (dealer, _, _) = Dealer::start(
-                &mut ChaCha8Rng::seed_from_u64(0),
-                info.clone(),
-                sk.clone(),
-                None,
-            )?;
+            let (dealer, _, _) = Dealer::start(&mut test_rng(), info.clone(), sk.clone(), None)?;
             dealer.finalize()
         };
         let mut log1 = {
-            let (mut dealer, pub_msg, priv_msgs) = Dealer::start(
-                &mut ChaCha8Rng::seed_from_u64(0),
-                info.clone(),
-                sk.clone(),
-                None,
-            )?;
+            let (mut dealer, pub_msg, priv_msgs) =
+                Dealer::start(&mut test_rng(), info.clone(), sk.clone(), None)?;
             let mut player = Player::new(info.clone(), sk)?;
             let ack = player
                 .dealer_message(pk.clone(), pub_msg, priv_msgs[0].1.clone())

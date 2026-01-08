@@ -16,9 +16,9 @@ pub mod tests {
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::Array;
+    use commonware_utils::{test_rng, Array};
     use core::{fmt::Debug, future::Future};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::Rng;
     use std::collections::HashSet;
 
     pub trait TestKey: Array + Copy {
@@ -272,7 +272,7 @@ pub mod tests {
         let mut db = durable.into_mutable();
 
         // Delete half of the keys at random.
-        let mut rng = StdRng::seed_from_u64(1337);
+        let mut rng = test_rng();
         let mut deleted = HashSet::new();
         let mut batch = db.start_batch();
         for i in 0..100 {

@@ -137,8 +137,8 @@ mod tests {
         buffer::PoolRef,
         deterministic::{self, Context},
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
-    use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use commonware_utils::{test_rng, NZUsize, NZU16, NZU64};
+    use rand::RngCore as _;
     use rstest::rstest;
     use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
@@ -182,7 +182,7 @@ mod tests {
 
     /// Create n random operations. Some portion of the updates are deletes.
     fn create_test_ops(n: usize) -> Vec<Operation<Digest, Vec<u8>>> {
-        let mut rng = StdRng::seed_from_u64(1337);
+        let mut rng = test_rng();
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
