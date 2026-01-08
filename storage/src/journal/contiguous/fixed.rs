@@ -1651,10 +1651,13 @@ mod tests {
             // Initialize journal with sync boundaries when no existing data exists
             let lower_bound = 10;
             let upper_bound = 26;
-            let mut sync_journal =
-                Journal::<_, Digest>::init_sync(context.clone(), cfg.clone(), lower_bound..upper_bound)
-                    .await
-                    .expect("Failed to initialize journal with sync boundaries");
+            let mut sync_journal = Journal::<_, Digest>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with sync boundaries");
 
             // Verify the journal is initialized at the lower bound
             assert_eq!(sync_journal.size(), lower_bound);
@@ -1716,10 +1719,13 @@ mod tests {
             // Upper bound: 31 (beyond existing data, so existing data should be kept)
             let lower_bound = 8;
             let upper_bound = 31;
-            let mut journal =
-                Journal::<_, Digest>::init_sync(context.clone(), cfg.clone(), lower_bound..upper_bound)
-                    .await
-                    .expect("Failed to initialize journal with overlap");
+            let mut journal = Journal::<_, Digest>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with overlap");
 
             // Verify the journal size matches the original (no rewind needed)
             assert_eq!(journal.size(), journal_size);
@@ -1783,10 +1789,13 @@ mod tests {
             // Upper bound: 20 (last populated location is 19, so no rewinding needed)
             let lower_bound = 6;
             let upper_bound = 20;
-            let mut journal =
-                Journal::<_, Digest>::init_sync(context.clone(), cfg.clone(), lower_bound..upper_bound)
-                    .await
-                    .expect("Failed to initialize journal with exact match");
+            let mut journal = Journal::<_, Digest>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with exact match");
 
             // Verify the journal size remains the same (no rewinding needed)
             assert_eq!(journal.size(), initial_size);
@@ -1855,10 +1864,7 @@ mod tests {
                 )
                 .await;
 
-                assert!(matches!(
-                    result,
-                    Err(crate::qmdb::Error::UnexpectedData(_))
-                ));
+                assert!(matches!(result, Err(crate::qmdb::Error::UnexpectedData(_))));
             }
             context.remove(&cfg.partition, None).await.unwrap();
         });
@@ -1901,9 +1907,10 @@ mod tests {
 
             // Test 1: Initialize at size 0 (empty journal)
             {
-                let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 0)
-                    .await
-                    .expect("Failed to initialize journal at size 0");
+                let mut journal =
+                    Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 0)
+                        .await
+                        .expect("Failed to initialize journal at size 0");
 
                 assert_eq!(journal.size(), 0);
                 assert_eq!(journal.tail_index, 0);
@@ -1919,9 +1926,10 @@ mod tests {
 
             // Test 2: Initialize at size exactly at blob boundary (10 with items_per_blob=5)
             {
-                let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 10)
-                    .await
-                    .expect("Failed to initialize journal at size 10");
+                let mut journal =
+                    Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 10)
+                        .await
+                        .expect("Failed to initialize journal at size 10");
 
                 assert_eq!(journal.size(), 10);
                 assert_eq!(journal.tail_index, 2); // 10 / 5 = 2
@@ -1944,9 +1952,10 @@ mod tests {
 
             // Test 3: Initialize at size in middle of blob (7 with items_per_blob=5)
             {
-                let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
-                    .await
-                    .expect("Failed to initialize journal at size 7");
+                let mut journal =
+                    Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
+                        .await
+                        .expect("Failed to initialize journal at size 7");
 
                 assert_eq!(journal.size(), 7);
                 assert_eq!(journal.tail_index, 1); // 7 / 5 = 1
@@ -1976,9 +1985,10 @@ mod tests {
 
             // Test 4: Initialize at larger size spanning multiple pruned blobs
             {
-                let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 23)
-                    .await
-                    .expect("Failed to initialize journal at size 23");
+                let mut journal =
+                    Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 23)
+                        .await
+                        .expect("Failed to initialize journal at size 23");
 
                 assert_eq!(journal.size(), 23);
                 assert_eq!(journal.tail_index, 4); // 23 / 5 = 4
