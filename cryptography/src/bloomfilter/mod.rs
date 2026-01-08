@@ -254,8 +254,12 @@ impl<H: Hasher> arbitrary::Arbitrary<'_> for BloomFilter<H> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         // Ensure at least 1 hasher
         let hashers = u8::arbitrary(u)?.max(1);
-        // Ensure at least 1 bit to avoid empty bitmap, and a power of 2
-        let bits_len = u.arbitrary_len::<u64>()?.max(1).next_power_of_two();
+        // Fallback to highest power of two in u16 on overflow,
+        // we restrict to u16 to avoid OOM
+        let bits_len = u
+            .arbitrary::<u16>()?
+            .checked_next_power_of_two()
+            .unwrap_or(1 << 15) as usize;
         let mut bits = BitMap::with_capacity(bits_len as u64);
         for _ in 0..bits_len {
             bits.push(u.arbitrary::<bool>()?);
