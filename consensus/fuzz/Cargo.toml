@@ -17,6 +17,7 @@ commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-p2p.workspace = true
+commonware-parallel.workspace = true
 commonware-runtime.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
