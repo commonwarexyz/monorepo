@@ -144,7 +144,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
-                    subscriber.try_send_lossy((index, peer_keys.clone(), self.directory.tracked()))
+                    subscriber.send_lossy((index, peer_keys.clone(), self.directory.tracked()))
                 });
             }
             Message::PeerSet { index, responder } => {

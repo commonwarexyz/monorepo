@@ -35,12 +35,8 @@ impl<T> Mailbox<T> {
 }
 
 impl<T: Send> AsyncFallibleExt<T> for Mailbox<T> {
-    async fn send_lossy(&mut self, msg: T) {
-        self.0.send_lossy(msg).await;
-    }
-
-    async fn try_send_lossy(&mut self, msg: T) -> bool {
-        self.0.try_send_lossy(msg).await
+    async fn send_lossy(&mut self, msg: T) -> bool {
+        self.0.send_lossy(msg).await
     }
 
     async fn request<R, F>(&mut self, make_msg: F) -> Option<R>
@@ -87,12 +83,8 @@ impl<T> Clone for UnboundedMailbox<T> {
 }
 
 impl<T: Send> FallibleExt<T> for UnboundedMailbox<T> {
-    fn send_lossy(&self, msg: T) {
-        self.0.send_lossy(msg);
-    }
-
-    fn try_send_lossy(&self, msg: T) -> bool {
-        self.0.try_send_lossy(msg)
+    fn send_lossy(&self, msg: T) -> bool {
+        self.0.send_lossy(msg)
     }
 
     async fn request<R, F>(&self, make_msg: F) -> Option<R>

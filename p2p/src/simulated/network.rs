@@ -313,7 +313,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let all = self.all_tracked_peers();
                 let notification = (id, peers, all);
                 self.subscribers
-                    .retain(|subscriber| subscriber.try_send_lossy(notification.clone()));
+                    .retain(|subscriber| subscriber.send_lossy(notification.clone()));
 
                 // Broadcast updated peer list to LimitedSender subscribers
                 self.broadcast_peer_list().await;

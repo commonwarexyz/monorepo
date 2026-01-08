@@ -23,17 +23,13 @@ use futures::channel::{mpsc, oneshot};
 /// Use these methods when the receiver may be dropped during shutdown
 /// and you want to handle that gracefully rather than panicking.
 pub trait FallibleExt<T> {
-    /// Send a message, silently ignoring disconnection errors.
-    ///
-    /// Use this for fire-and-forget messages where the receiver
-    /// may have been dropped during shutdown.
-    fn send_lossy(&self, msg: T);
-
     /// Send a message, returning `true` if successful.
     ///
-    /// Like [`send_lossy`](Self::send_lossy), this silently handles disconnection
-    /// but returns a bool indicating whether the send succeeded.
-    fn try_send_lossy(&self, msg: T) -> bool;
+    /// Use this for fire-and-forget messages where the receiver
+    /// may have been dropped during shutdown. The return value can
+    /// be ignored if the caller doesn't need to know whether the
+    /// send succeeded.
+    fn send_lossy(&self, msg: T) -> bool;
 
     /// Send a request message containing a oneshot responder and await the response.
     ///
@@ -77,11 +73,7 @@ pub trait FallibleExt<T> {
 }
 
 impl<T: Send> FallibleExt<T> for mpsc::UnboundedSender<T> {
-    fn send_lossy(&self, msg: T) {
-        let _ = self.unbounded_send(msg);
-    }
-
-    fn try_send_lossy(&self, msg: T) -> bool {
+    fn send_lossy(&self, msg: T) -> bool {
         self.unbounded_send(msg).is_ok()
     }
 
@@ -118,17 +110,13 @@ impl<T: Send> FallibleExt<T> for mpsc::UnboundedSender<T> {
 ///
 /// Similar to [`FallibleExt`] but for bounded channels where send operations are async.
 pub trait AsyncFallibleExt<T> {
-    /// Send a message asynchronously, silently ignoring disconnection errors.
-    ///
-    /// Use this for fire-and-forget messages where the receiver
-    /// may have been dropped during shutdown.
-    fn send_lossy(&mut self, msg: T) -> impl std::future::Future<Output = ()> + Send;
-
     /// Send a message asynchronously, returning `true` if successful.
     ///
-    /// Like [`send_lossy`](Self::send_lossy), this silently handles disconnection
-    /// but returns a bool indicating whether the send succeeded.
-    fn try_send_lossy(&mut self, msg: T) -> impl std::future::Future<Output = bool> + Send;
+    /// Use this for fire-and-forget messages where the receiver
+    /// may have been dropped during shutdown. The return value can
+    /// be ignored if the caller doesn't need to know whether the
+    /// send succeeded.
+    fn send_lossy(&mut self, msg: T) -> impl std::future::Future<Output = bool> + Send;
 
     /// Send a request message containing a oneshot responder and await the response.
     ///
@@ -161,11 +149,7 @@ pub trait AsyncFallibleExt<T> {
 }
 
 impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
-    async fn send_lossy(&mut self, msg: T) {
-        let _ = futures::SinkExt::send(self, msg).await;
-    }
-
-    async fn try_send_lossy(&mut self, msg: T) -> bool {
+    async fn send_lossy(&mut self, msg: T) -> bool {
         futures::SinkExt::send(self, msg).await.is_ok()
     }
 
@@ -221,7 +205,7 @@ mod tests {
     #[test]
     fn test_send_lossy_success() {
         let (tx, mut rx) = mpsc::unbounded();
-        tx.send_lossy(TestMessage::FireAndForget(42));
+        assert!(tx.send_lossy(TestMessage::FireAndForget(42)));
 
         // Message should be received
         assert!(matches!(
@@ -235,21 +219,8 @@ mod tests {
         let (tx, rx) = mpsc::unbounded::<TestMessage>();
         drop(rx);
 
-        // Should not panic
-        tx.send_lossy(TestMessage::FireAndForget(42));
-    }
-
-    #[test]
-    fn test_try_send_lossy_success() {
-        let (tx, _rx) = mpsc::unbounded();
-        assert!(tx.try_send_lossy(TestMessage::FireAndForget(42)));
-    }
-
-    #[test]
-    fn test_try_send_lossy_disconnected() {
-        let (tx, rx) = mpsc::unbounded::<TestMessage>();
-        drop(rx);
-        assert!(!tx.try_send_lossy(TestMessage::FireAndForget(42)));
+        // Should not panic, returns false
+        assert!(!tx.send_lossy(TestMessage::FireAndForget(42)));
     }
 
     #[test_async]
@@ -293,7 +264,7 @@ mod tests {
     #[test_async]
     async fn test_async_send_lossy_success() {
         let (mut tx, mut rx) = mpsc::channel(1);
-        tx.send_lossy(TestMessage::FireAndForget(42)).await;
+        assert!(tx.send_lossy(TestMessage::FireAndForget(42)).await);
 
         // Message should be received
         assert!(matches!(
@@ -307,21 +278,8 @@ mod tests {
         let (mut tx, rx) = mpsc::channel::<TestMessage>(1);
         drop(rx);
 
-        // Should not panic
-        tx.send_lossy(TestMessage::FireAndForget(42)).await;
-    }
-
-    #[test_async]
-    async fn test_async_try_send_lossy_success() {
-        let (mut tx, _rx) = mpsc::channel(1);
-        assert!(tx.try_send_lossy(TestMessage::FireAndForget(42)).await);
-    }
-
-    #[test_async]
-    async fn test_async_try_send_lossy_disconnected() {
-        let (mut tx, rx) = mpsc::channel::<TestMessage>(1);
-        drop(rx);
-        assert!(!tx.try_send_lossy(TestMessage::FireAndForget(42)).await);
+        // Should not panic, returns false
+        assert!(!tx.send_lossy(TestMessage::FireAndForget(42)).await);
     }
 
     #[test_async]
