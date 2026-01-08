@@ -182,7 +182,7 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
     }
 
     /// Helper to initialize an archive.
-    async fn init_archive<T: Codec>(
+    async fn init_archive<T: Codec + Send + Sync>(
         &self,
         epoch: Epoch,
         name: &str,
