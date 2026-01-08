@@ -229,14 +229,11 @@ impl<B: Blob> Append<B> {
             return Ok(());
         }
         buf_guard.immutable = true;
-        self.flush_internal(buf_guard, true).await?;
+        self.flush_internal(&mut buf_guard, true).await?;
 
-        // Shrink the buffer capacity to minimum since we won't be adding to it. This requires
-        // re-acquiring the write lock.
-        {
-            let mut buf_guard = self.buffer.write().await;
-            buf_guard.data.shrink_to_fit();
-        }
+        // Shrink the buffer capacity to minimum since we won't be adding to it.
+        buf_guard.data.shrink_to_fit();
+        drop(buf_guard);
 
         // Sync the underlying blob to ensure new_immutable on restart will succeed even in the
         // event of a crash.
@@ -335,7 +332,7 @@ impl<B: Blob> Append<B> {
         }
 
         // Buffer is over capacity, so we need to write data to the blob.
-        self.flush_internal(buffer, false).await
+        self.flush_internal(&mut buffer, false).await
     }
 
     /// Flush all full pages from the buffer to disk, resetting the buffer to contain only the bytes
@@ -343,10 +340,10 @@ impl<B: Blob> Append<B> {
     /// to the blob as well along with a CRC record.
     async fn flush_internal(
         &self,
-        mut buf_guard: RwLockWriteGuard<'_, Buffer>,
+        buf_guard: &mut RwLockWriteGuard<'_, Buffer>,
         write_partial_page: bool,
     ) -> Result<(), Error> {
-        let buffer = &mut *buf_guard;
+        let buffer = &mut **buf_guard;
 
         // Cache the pages we are writing in the buffer pool so they remain cached for concurrent
         // reads while we flush the buffer.
@@ -386,10 +383,6 @@ impl<B: Blob> Append<B> {
         // Acquire a write lock on the blob state so nobody tries to read or modify the blob while
         // we're writing to it.
         let mut blob_state = self.blob_state.write().await;
-
-        // Release the buffer lock to allow for concurrent reads & buffered writes while we write
-        // the physical pages.
-        drop(buf_guard);
 
         let logical_page_size = self.pool_ref.page_size() as usize;
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
@@ -725,9 +718,9 @@ impl<B: Blob> Append<B> {
         // We don't need fsync here since we just want to ensure data has been written to the
         // underlying blob, not durably persisted.
         {
-            let buf_guard = self.buffer.write().await;
+            let mut buf_guard = self.buffer.write().await;
             if !buf_guard.immutable {
-                self.flush_internal(buf_guard, true).await?;
+                self.flush_internal(&mut buf_guard, true).await?;
             }
         }
 
@@ -779,11 +772,14 @@ impl<B: Blob> Blob for Append<B> {
     async fn sync(&self) -> Result<(), Error> {
         // Flush any buffered data, including any partial page. When flush_internal returns,
         // write_at has completed and data has been written to the underlying blob.
-        let buf_guard = self.buffer.write().await;
+        let mut buf_guard = self.buffer.write().await;
         if buf_guard.immutable {
             return Ok(());
         }
-        self.flush_internal(buf_guard, true).await?;
+        self.flush_internal(&mut buf_guard, true).await?;
+
+        // Release the buffer lock to allow concurrent operations during blob sync.
+        drop(buf_guard);
 
         // Sync the underlying blob. We need the blob read lock here since sync() requires access
         // to the blob, but only a read lock since we're not modifying blob state.
@@ -805,14 +801,20 @@ impl<B: Blob> Blob for Append<B> {
     ///
     /// # Warning
     ///
-    /// - Concurrent mutable operations (append, resize) are not supported and will cause data loss.
     /// - Concurrent readers which try to read past the new size during the resize may error.
     /// - The resize is not guaranteed durable until the next sync.
     async fn resize(&self, size: u64) -> Result<(), Error> {
-        let current_size = self.size().await;
+        // Acquire buffer lock first to prevent concurrent operations.
+        let mut buf_guard = self.buffer.write().await;
+        if buf_guard.immutable {
+            return Err(Error::ImmutableBlob);
+        }
+
+        let current_size = buf_guard.size();
 
         // Handle growing by appending zero bytes.
         if size > current_size {
+            drop(buf_guard);
             let zeros_needed = (size - current_size) as usize;
             let zeros = vec![0u8; zeros_needed];
             self.append(&zeros).await?;
@@ -829,13 +831,10 @@ impl<B: Blob> Blob for Append<B> {
         let physical_page_size = logical_page_size + CHECKSUM_SIZE;
 
         // Flush any buffered data first to ensure we have a consistent state on disk.
-        self.sync().await?;
+        // We hold the buffer lock throughout to prevent concurrent appends.
+        self.flush_internal(&mut buf_guard, true).await?;
 
-        // Acquire both locks to prevent concurrent operations.
-        let mut buf_guard = self.buffer.write().await;
-        if buf_guard.immutable {
-            return Err(Error::ImmutableBlob);
-        }
+        // Acquire blob state lock (still holding buffer lock).
         let mut blob_guard = self.blob_state.write().await;
 
         // Calculate the physical size needed for the new logical size.
