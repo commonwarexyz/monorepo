@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_storage::bmt::{Builder, Proof, RangeProof};
 use libfuzzer_sys::fuzz_target;
@@ -131,7 +131,10 @@ fn fuzz(input: FuzzInput) {
             }
 
             BmtOperation::DeserializeProof { data } => {
-                let _ = Proof::<Sha256>::decode(&mut data.as_slice());
+                let _ = Proof::<Sha256>::decode_cfg(
+                    &mut data.as_slice(),
+                    &commonware_storage::bmt::MAX_LEVELS,
+                );
             }
 
             BmtOperation::BuildEmptyTree => {

@@ -43,14 +43,14 @@
 
 use alloc::collections::{btree_map::BTreeMap, btree_set::BTreeSet};
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
 /// There should never be more than 255 levels in a proof (would mean the Binary Merkle Tree
 /// has more than 2^255 leaves).
-const MAX_LEVELS: usize = u8::MAX as usize;
+pub const MAX_LEVELS: usize = u8::MAX as usize;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]
@@ -550,18 +550,12 @@ impl<H: Hasher> Write for Proof<H> {
 }
 
 impl<H: Hasher> Read for Proof<H> {
-    type Cfg = ();
+    /// The maximum number of siblings in the proof.
+    type Cfg = usize;
 
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(reader: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let leaf_count = u32::read(reader)?;
-        // A binary tree with n leaves has at most n-1 internal nodes, so total nodes = 2n-1.
-        // The maximum siblings needed is bounded by the total non-leaf nodes, which is < n.
-        // We use 2*n as a safe upper bound to allow for any valid proof structure.
-        let max_siblings = 2usize.saturating_mul(leaf_count as usize);
-        // Cap by remaining bytes to avoid allocating far beyond the encoded input size.
-        let max_siblings_by_bytes = reader.remaining() / H::Digest::SIZE;
-        let max_siblings = max_siblings.min(max_siblings_by_bytes);
-        let siblings = Vec::<H::Digest>::read_range(reader, ..=max_siblings)?;
+        let siblings = Vec::<H::Digest>::read_range(reader, ..=*max_len)?;
         Ok(Self {
             leaf_count,
             siblings,
@@ -756,7 +750,7 @@ impl<H: Hasher> Proof<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::sha256::{Digest, Sha256};
     use commonware_utils::hex;
     use rstest::rstest;
@@ -785,8 +779,9 @@ mod tests {
             );
 
             // Serialize and deserialize the proof
-            let mut serialized = proof.encode();
-            let deserialized = Proof::<Sha256>::decode(&mut serialized).unwrap();
+            let serialized = proof.encode();
+            let max_siblings = proof.siblings.len();
+            let deserialized = Proof::<Sha256>::decode_cfg(serialized, &max_siblings).unwrap();
             assert!(
                 deserialized.verify(&mut hasher, &elements, &root).is_ok(),
                 "deserialize fail for size={n} leaf={i}"
@@ -1182,11 +1177,12 @@ mod tests {
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.proof(1).unwrap();
+        let max_siblings = proof.siblings.len();
         let mut serialized = proof.encode();
 
         // Truncate one byte.
         serialized.truncate(serialized.len() - 1);
-        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
+        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &max_siblings).is_err());
     }
 
     #[test]
@@ -1204,11 +1200,12 @@ mod tests {
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.proof(1).unwrap();
+        let max_siblings = proof.siblings.len();
         let mut serialized = proof.encode_mut();
 
         // Append an extra byte.
         serialized.extend_from_slice(&[0u8]);
-        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
+        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &max_siblings).is_err());
     }
 
     #[test]
@@ -2308,8 +2305,9 @@ mod tests {
         let multi_proof = tree.multi_proof(&positions).unwrap();
 
         // Serialize and deserialize
-        let mut serialized = multi_proof.encode();
-        let deserialized = Proof::<Sha256>::decode(&mut serialized).unwrap();
+        let serialized = multi_proof.encode();
+        let max_siblings = multi_proof.siblings.len();
+        let deserialized = Proof::<Sha256>::decode_cfg(serialized, &max_siblings).unwrap();
 
         assert_eq!(multi_proof, deserialized);
 
@@ -2336,13 +2334,14 @@ mod tests {
         // Generate proof
         let positions = [0, 3, 5];
         let multi_proof = tree.multi_proof(&positions).unwrap();
+        let max_siblings = multi_proof.siblings.len();
 
         // Serialize and truncate
         let mut serialized = multi_proof.encode();
         serialized.truncate(serialized.len() - 1);
 
         // Should fail to deserialize
-        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
+        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &max_siblings).is_err());
     }
 
     #[test]
@@ -2360,23 +2359,26 @@ mod tests {
         // Generate proof
         let positions = [0, 3, 5];
         let multi_proof = tree.multi_proof(&positions).unwrap();
+        let max_siblings = multi_proof.siblings.len();
 
         // Serialize and add extra byte
         let mut serialized = multi_proof.encode_mut();
         serialized.extend_from_slice(&[0u8]);
 
         // Should fail to deserialize
-        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
+        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &max_siblings).is_err());
     }
 
     #[test]
-    fn test_multi_proof_decode_length_exceeds_buffer() {
+    fn test_multi_proof_decode_insufficient_data() {
         let mut serialized = Vec::new();
-        serialized.extend_from_slice(&u32::MAX.encode());
-        serialized.extend_from_slice(&1usize.encode());
+        serialized.extend_from_slice(&8u32.encode()); // leaf_count
+        serialized.extend_from_slice(&1usize.encode()); // claims 1 sibling but no data follows
 
-        let err = Proof::<Sha256>::decode(serialized.as_slice()).unwrap_err();
-        assert!(matches!(err, commonware_codec::Error::InvalidLength(_)));
+        // Should fail because the buffer claims 1 sibling but doesn't have the data
+        let max_siblings = 1;
+        let err = Proof::<Sha256>::decode_cfg(serialized.as_slice(), &max_siblings).unwrap_err();
+        assert!(matches!(err, commonware_codec::Error::EndOfBuffer));
     }
 
     #[test]

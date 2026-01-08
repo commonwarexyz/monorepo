@@ -126,7 +126,7 @@ use commonware_math::{
     ntt::{EvaluationVector, Matrix},
 };
 use commonware_parallel::Strategy;
-use commonware_storage::bmt::{Builder as BmtBuilder, Error as BmtError, Proof};
+use commonware_storage::bmt::{self, Builder as BmtBuilder, Error as BmtError, Proof};
 use rand::seq::SliceRandom as _;
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
@@ -375,7 +375,7 @@ impl<H: Hasher> Read for Shard<H> {
         Ok(Self {
             data_bytes,
             root: ReadExt::read(buf)?,
-            inclusion_proof: ReadExt::read(buf)?,
+            inclusion_proof: Read::read_cfg(buf, &(max_els * bmt::MAX_LEVELS))?,
             rows: Read::read_cfg(buf, &max_els)?,
             checksum: Arc::new(Read::read_cfg(buf, &max_els)?),
         })
@@ -436,7 +436,7 @@ impl<H: Hasher> Read for ReShard<H> {
         let max_data_els = F::bits_to_elements(max_data_bits).max(1);
         Ok(Self {
             // Worst case: every row is one data element, and the sample size is all rows.
-            inclusion_proof: ReadExt::read(buf)?,
+            inclusion_proof: Read::read_cfg(buf, &(max_data_els * bmt::MAX_LEVELS))?,
             shard: Read::read_cfg(buf, &max_data_els)?,
         })
     }
