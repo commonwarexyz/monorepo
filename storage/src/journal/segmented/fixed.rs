@@ -125,7 +125,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         }
 
         let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        Self::decode_item(buf.as_ref())
+        A::decode(buf.as_ref()).map_err(Error::Codec)
     }
 
     /// Read the last item in a section, if any.
@@ -143,12 +143,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         let last_position = (size / Self::CHUNK_SIZE_U64) - 1;
         let offset = last_position * Self::CHUNK_SIZE_U64;
         let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        Self::decode_item(buf.as_ref()).map(Some)
-    }
-
-    /// Decode an item from the buffer.
-    fn decode_item(buf: &[u8]) -> Result<A, Error> {
-        A::decode(buf).map_err(Error::Codec)
+        A::decode(buf.as_ref()).map_err(Error::Codec).map(Some)
     }
 
     /// Returns a stream of all items starting from the given section.
@@ -186,7 +181,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
                         match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
                             Ok(()) => {
                                 let next_offset = offset + Self::CHUNK_SIZE_U64;
-                                match Self::decode_item(&buf) {
+                                match A::decode(buf.as_slice()).map_err(Error::Codec) {
                                     Ok(item) => Some((
                                         Ok((section, position, item)),
                                         (section, buf, blob, reader, next_offset, next_offset, blob_size),
