@@ -203,19 +203,25 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     }
 
     /// Helper function to read an item from a [Read].
+    ///
+    /// The `varint_buf` parameter is a reusable buffer for reading the varint header to avoid
+    /// allocating a new buffer for every item.
     async fn read_buffered(
         reader: &mut Read<E::Blob>,
         offset: u64,
         cfg: &V::Cfg,
         compressed: bool,
+        varint_buf: &mut Vec<u8>,
     ) -> Result<(u64, u64, u32, V), Error> {
         // If we're not at the right position, seek to it
         if reader.position() != offset {
             reader.seek_to(offset).map_err(Error::Runtime)?;
         }
 
-        // Read varint header (max 5 bytes for u32)
-        let buf = vec![0u8; MAX_VARINT_SIZE];
+        // Read varint header (max 5 bytes for u32). Reuse the provided buffer.
+        varint_buf.clear();
+        varint_buf.resize(MAX_VARINT_SIZE, 0);
+        let buf = std::mem::take(varint_buf);
         let (buf, available) = reader.read_up_to(buf).await?;
         let (size, varint_len) = parse_length_prefix(&buf.as_ref()[..available])?;
 
@@ -251,6 +257,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         } else {
             V::decode_cfg(item_data.as_ref(), cfg).map_err(Error::Codec)?
         };
+
+        // Restore the buffer for reuse in the next iteration
+        *varint_buf = buf.into();
 
         Ok((next_offset, next_offset, size as u32, item))
     }
@@ -303,7 +312,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                     offset = 0;
                 }
 
-                // Read over the blob
+                // Read over the blob. Include a reusable buffer for varint parsing.
                 stream::unfold(
                     (
                         section,
@@ -314,6 +323,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                         blob_size,
                         codec_config,
                         compressed,
+                        Vec::with_capacity(MAX_VARINT_SIZE),
                     ),
                     move |(
                         section,
@@ -324,6 +334,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                         blob_size,
                         codec_config,
                         compressed,
+                        mut varint_buf,
                     )| async move {
                         // Check if we are at the end of the blob
                         if offset >= blob_size {
@@ -331,8 +342,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                         }
 
                         // Read an item from the buffer
-                        match Self::read_buffered(&mut reader, offset, &codec_config, compressed)
-                            .await
+                        match Self::read_buffered(
+                            &mut reader,
+                            offset,
+                            &codec_config,
+                            compressed,
+                            &mut varint_buf,
+                        )
+                        .await
                         {
                             Ok((next_offset, next_valid_size, size, item)) => {
                                 trace!(blob = section, cursor = offset, "replayed item");
@@ -347,6 +364,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                         blob_size,
                                         codec_config,
                                         compressed,
+                                        varint_buf,
                                     ),
                                 ))
                             }
@@ -378,6 +396,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                         blob_size,
                                         codec_config,
                                         compressed,
+                                        varint_buf,
                                     ),
                                 ))
                             }

@@ -20,8 +20,8 @@ const ITEMS_PER_SECTION: u64 = 16_384;
 /// Number of bytes to buffer when replaying a [commonware_runtime::Blob].
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
-/// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: NonZeroU16 = NZU16!(16_384);
+/// Page size for the buffer pool.
+const PAGE_SIZE: NonZeroU16 = NZU16!(4_096);
 
 /// The number of pages to cache in the buffer pool (8,192 × 4KB = 32MB).
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8_192);
