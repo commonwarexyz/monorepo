@@ -417,7 +417,8 @@ impl Pool {
 #[cfg(test)]
 mod tests {
     use super::{super::Checksum, *};
-    use crate::{buffer::pool::CHECKSUM_SIZE, deterministic, Crc32, Runner as _, Storage as _};
+    use crate::{buffer::pool::CHECKSUM_SIZE, deterministic, Runner as _, Storage as _};
+    use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
     use std::num::NonZeroU16;

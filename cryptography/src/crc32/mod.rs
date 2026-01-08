@@ -1,7 +1,41 @@
-//! CRC32 checksum utilities.
+//! CRC32C implementation of the `Hasher` trait.
 //!
-//! This module provides CRC32C checksum computation using the iSCSI polynomial
-//! (0x1EDC6F41) as specified in RFC 3720.
+//! This implementation uses the `crc-fast` crate to generate CRC32C (iSCSI/Castagnoli)
+//! checksums as specified in RFC 3720. CRC32C uses polynomial 0x1EDC6F41.
+//!
+//! Note: CRC32 is not a cryptographic hash function. It is designed for error detection,
+//! not security. Use SHA-256 or Blake3 for cryptographic purposes.
+//!
+//! # Example
+//! ```rust
+//! use commonware_cryptography::{Hasher, Crc32};
+//!
+//! // One-shot checksum (returns u32 directly)
+//! let checksum: u32 = Crc32::checksum(b"hello world");
+//!
+//! // Using the Hasher trait
+//! let mut hasher = Crc32::new();
+//! hasher.update(b"hello ");
+//! hasher.update(b"world");
+//! let digest = hasher.finalize();
+//!
+//! // Convert digest to u32
+//! assert_eq!(digest.as_u32(), checksum);
+//! ```
+
+use crate::Hasher;
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+use bytes::{Buf, BufMut};
+use commonware_codec::{DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
+use commonware_utils::{hex, Array, Span};
+use core::{
+    fmt::{Debug, Display},
+    ops::Deref,
+};
+use rand_core::CryptoRngCore;
+use zeroize::Zeroize;
 
 /// Size of a CRC32 checksum in bytes.
 pub const SIZE: usize = 4;
@@ -9,48 +43,160 @@ pub const SIZE: usize = 4;
 /// The CRC32 algorithm used (CRC32C/iSCSI/Castagnoli).
 const ALGORITHM: crc_fast::CrcAlgorithm = crc_fast::CrcAlgorithm::Crc32Iscsi;
 
-/// Incremental CRC32 hasher for computing checksums over multiple data chunks.
+/// CRC32C hasher.
+///
+/// Uses the iSCSI polynomial (0x1EDC6F41) as specified in RFC 3720.
+#[derive(Debug)]
 pub struct Crc32 {
     inner: crc_fast::Digest,
 }
 
 impl Default for Crc32 {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Crc32 {
-    /// Create a new incremental hasher.
-    #[inline]
-    pub fn new() -> Self {
         Self {
             inner: crc_fast::Digest::new(ALGORITHM),
         }
     }
+}
 
-    /// Add data to the checksum computation.
-    #[inline]
-    pub fn update(&mut self, data: &[u8]) {
-        self.inner.update(data);
+impl Clone for Crc32 {
+    fn clone(&self) -> Self {
+        // We manually implement `Clone` to avoid cloning the hasher state.
+        Self::default()
     }
+}
 
-    /// Finalize and return the checksum.
-    #[inline]
-    pub fn finalize(self) -> u32 {
-        self.inner.finalize() as u32
-    }
-
-    /// Compute a CRC32 checksum of the given data.
+impl Crc32 {
+    /// Compute a CRC32 checksum of the given data (one-shot).
+    ///
+    /// Returns the checksum as a `u32` directly.
     #[inline]
     pub fn checksum(data: &[u8]) -> u32 {
         crc_fast::checksum(ALGORITHM, data) as u32
+    }
+
+    /// Convenience function for testing that creates an easily recognizable digest by repeating a
+    /// single byte.
+    pub fn fill(b: u8) -> <Self as Hasher>::Digest {
+        <Self as Hasher>::Digest::decode(vec![b; SIZE].as_ref()).unwrap()
+    }
+}
+
+impl Hasher for Crc32 {
+    type Digest = Digest;
+
+    fn update(&mut self, message: &[u8]) -> &mut Self {
+        self.inner.update(message);
+        self
+    }
+
+    fn finalize(&mut self) -> Self::Digest {
+        Self::Digest::from(self.inner.finalize_reset() as u32)
+    }
+
+    fn reset(&mut self) -> &mut Self {
+        self.inner = crc_fast::Digest::new(ALGORITHM);
+        self
+    }
+}
+
+/// Digest of a CRC32 hashing operation (4 bytes).
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[repr(transparent)]
+pub struct Digest(pub [u8; SIZE]);
+
+impl Digest {
+    /// Get the digest as a `u32` value.
+    #[inline]
+    pub const fn as_u32(&self) -> u32 {
+        u32::from_be_bytes(self.0)
+    }
+}
+
+impl Write for Digest {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
+    }
+}
+
+impl Read for Digest {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let array = <[u8; SIZE]>::read(buf)?;
+        Ok(Self(array))
+    }
+}
+
+impl FixedSize for Digest {
+    const SIZE: usize = SIZE;
+}
+
+impl Span for Digest {}
+
+impl Array for Digest {}
+
+impl From<[u8; SIZE]> for Digest {
+    fn from(value: [u8; SIZE]) -> Self {
+        Self(value)
+    }
+}
+
+impl From<u32> for Digest {
+    fn from(value: u32) -> Self {
+        Self(value.to_be_bytes())
+    }
+}
+
+impl AsRef<[u8]> for Digest {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Deref for Digest {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Debug for Digest {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", hex(&self.0))
+    }
+}
+
+impl Display for Digest {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", hex(&self.0))
+    }
+}
+
+impl crate::Digest for Digest {
+    const EMPTY: Self = Self([0u8; SIZE]);
+}
+
+impl Random for Digest {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
+        let mut array = [0u8; SIZE];
+        rng.fill_bytes(&mut array);
+        Self(array)
+    }
+}
+
+impl Zeroize for Digest {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Hasher;
+    use commonware_codec::{DecodeExt, Encode};
     use crc::{Crc, CRC_32_ISCSI};
 
     /// Reference CRC32C implementation from the [`crc`](https://crates.io/crates/crc) crate.
@@ -199,7 +345,7 @@ mod tests {
             for chunk in data.chunks(chunk_size) {
                 hasher.update(chunk);
             }
-            assert_eq!(hasher.finalize(), expected);
+            assert_eq!(hasher.finalize().as_u32(), expected);
         }
     }
 
@@ -223,5 +369,76 @@ mod tests {
 
         // Also verify that the first 64 bytes always produce the reference CRC
         verify(&base_data[..test_len], reference);
+    }
+
+    #[test]
+    fn test_crc32_hasher_trait() {
+        let msg = b"hello world";
+
+        // Generate initial hash using Hasher trait
+        let mut hasher = Crc32::new();
+        hasher.update(msg);
+        let digest = hasher.finalize();
+        assert!(Digest::decode(digest.as_ref()).is_ok());
+
+        // Verify against reference
+        let expected = CRC32C_REF.checksum(msg);
+        assert_eq!(digest.as_u32(), expected);
+
+        // Reuse hasher (should auto-reset after finalize)
+        hasher.update(msg);
+        let digest2 = hasher.finalize();
+        assert_eq!(digest, digest2);
+
+        // Test Hasher::hash convenience method
+        let hash = Crc32::hash(msg);
+        assert_eq!(hash.as_u32(), expected);
+    }
+
+    #[test]
+    fn test_crc32_len() {
+        assert_eq!(Digest::SIZE, SIZE);
+        assert_eq!(SIZE, 4);
+    }
+
+    #[test]
+    fn test_codec() {
+        let msg = b"hello world";
+        let mut hasher = Crc32::new();
+        hasher.update(msg);
+        let digest = hasher.finalize();
+
+        let encoded = digest.encode();
+        assert_eq!(encoded.len(), SIZE);
+        assert_eq!(encoded, digest.as_ref());
+
+        let decoded = Digest::decode(encoded).unwrap();
+        assert_eq!(digest, decoded);
+    }
+
+    #[test]
+    fn test_digest_from_u32() {
+        let value: u32 = 0xDEADBEEF;
+        let digest = Digest::from(value);
+        assert_eq!(digest.as_u32(), value);
+        assert_eq!(digest.0, [0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn test_checksum_returns_u32() {
+        // Verify the one-shot checksum returns u32 directly
+        let checksum: u32 = Crc32::checksum(b"test");
+        let expected = CRC32C_REF.checksum(b"test");
+        assert_eq!(checksum, expected);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Digest>,
+        }
     }
 }

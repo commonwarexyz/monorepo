@@ -23,9 +23,10 @@
 //! full or partial. A partial page's logical bytes are immutable on commit, and if it's re-written,
 //! it's only to add more bytes after the existing ones.
 
-use crate::{crc32, Blob, Crc32, Error};
+use crate::{Blob, Error};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
+use commonware_cryptography::{crc32, Crc32};
 use commonware_utils::StableBuf;
 
 mod append;

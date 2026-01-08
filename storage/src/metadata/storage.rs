@@ -1,9 +1,9 @@
 use super::{Config, Error};
 use bytes::BufMut;
 use commonware_codec::{Codec, FixedSize, ReadExt};
+use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
-    crc32, telemetry::metrics::status::GaugeExt, Blob, Clock, Crc32, Error as RError, Metrics,
-    Storage,
+    telemetry::metrics::status::GaugeExt, Blob, Clock, Error as RError, Metrics, Storage,
 };
 use commonware_utils::Span;
 use futures::future::try_join_all;

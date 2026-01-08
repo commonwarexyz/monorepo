@@ -31,8 +31,9 @@ use crate::{
         pool::{Checksum, PoolRef, Read, CHECKSUM_SIZE},
         tip::Buffer,
     },
-    Blob, Crc32, Error, RwLock, RwLockWriteGuard,
+    Blob, Error, RwLock, RwLockWriteGuard,
 };
+use commonware_cryptography::Crc32;
 use commonware_utils::StableBuf;
 use std::{num::NonZeroUsize, sync::Arc};
 use tracing::warn;

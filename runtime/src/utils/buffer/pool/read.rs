@@ -282,7 +282,8 @@ impl<B: Blob> Read<B> {
 #[cfg(test)]
 mod tests {
     use super::super::{append::Append, PoolRef};
-    use crate::{deterministic, Blob, Crc32, Error, Runner as _, Storage as _};
+    use crate::{deterministic, Blob, Error, Runner as _, Storage as _};
+    use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
     use std::num::NonZeroU16;

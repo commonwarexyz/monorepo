@@ -7,7 +7,8 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
-use commonware_runtime::{buffer, crc32, Blob, Clock, Crc32, Metrics, Storage};
+use commonware_cryptography::{crc32, Crc32, Hasher};
+use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
@@ -202,7 +203,7 @@ impl Entry {
         hasher.update(&section.to_be_bytes());
         hasher.update(&position.to_be_bytes());
         hasher.update(&added.to_be_bytes());
-        hasher.finalize()
+        hasher.finalize().as_u32()
     }
 
     /// Create a new [Entry].
