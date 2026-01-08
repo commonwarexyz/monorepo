@@ -182,6 +182,28 @@ impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
     }
 }
 
+/// Extension trait for oneshot sender operations that may fail due to disconnection.
+///
+/// Use this when the receiver may have been dropped during shutdown
+/// and you want to handle that gracefully rather than panicking.
+pub trait OneshotExt<T> {
+    /// Send a value, returning `true` if successful.
+    ///
+    /// Use this for fire-and-forget responses where the requester
+    /// may have been dropped during shutdown. The return value can
+    /// be ignored if the caller doesn't need to know whether the
+    /// send succeeded.
+    ///
+    /// Consumes the sender.
+    fn send_lossy(self, msg: T) -> bool;
+}
+
+impl<T> OneshotExt<T> for oneshot::Sender<T> {
+    fn send_lossy(self, msg: T) -> bool {
+        self.send(msg).is_ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +342,22 @@ mod tests {
         .await;
 
         assert!(result.is_empty());
+    }
+
+    // OneshotExt tests
+
+    #[test]
+    fn test_oneshot_send_lossy_success() {
+        use futures::FutureExt;
+        let (tx, rx) = oneshot::channel::<u32>();
+        assert!(tx.send_lossy(42));
+        assert_eq!(rx.now_or_never(), Some(Ok(42)));
+    }
+
+    #[test]
+    fn test_oneshot_send_lossy_disconnected() {
+        let (tx, rx) = oneshot::channel::<u32>();
+        drop(rx);
+        assert!(!tx.send_lossy(42));
     }
 }

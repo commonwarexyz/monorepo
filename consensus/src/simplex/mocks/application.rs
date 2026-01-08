@@ -12,6 +12,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
+use commonware_utils::channels::fallible::OneshotExt;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -336,16 +337,16 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 match message {
                     Message::Genesis { epoch, response } => {
                         let digest = self.genesis(epoch);
-                        let _ = response.send(digest);
+                        response.send_lossy(digest);
                     }
                     Message::Propose { context, response } => {
                         let digest = self.propose(context).await;
-                        let _ = response.send(digest);
+                        response.send_lossy(digest);
                     }
                     Message::Verify { context, payload, response } => {
                         if let Some(contents) = seen.get(&payload) {
                             let verified = self.verify(context, payload, contents.clone()).await;
-                            let _ = response.send(verified);
+                            response.send_lossy(verified);
                         } else {
                             waiters
                                 .entry(payload)
@@ -356,7 +357,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                     Message::Certify { payload, response } => {
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
                         let certified = self.certify(payload, contents).await;
-                        let _ = response.send(certified);
+                        response.send_lossy(certified);
                     }
                     Message::Broadcast { payload } => {
                         self.broadcast(payload).await;
@@ -372,7 +373,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 if let Some(waiters) = waiters.remove(&digest) {
                     for (context, sender) in waiters {
                         let verified = self.verify(context, digest, contents.clone()).await;
-                        sender.send(verified).expect("Failed to send verification");
+                        sender.send_lossy(verified);
                     }
                 }
             }
