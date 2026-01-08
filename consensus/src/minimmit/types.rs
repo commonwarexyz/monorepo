@@ -186,9 +186,19 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         self.notarizes.get(signer).is_some()
     }
 
+    /// Returns the notarize vote for the given signer, if one exists.
+    pub fn get_notarize(&self, signer: u32) -> Option<&Notarize<S, D>> {
+        self.notarizes.get(signer)
+    }
+
     /// Checks if the given signer has already submitted a nullify vote.
     pub fn has_nullify(&self, signer: u32) -> bool {
         self.nullifies.get(signer).is_some()
+    }
+
+    /// Returns the nullify vote for the given signer, if one exists.
+    pub fn get_nullify(&self, signer: u32) -> Option<&Nullify<S>> {
+        self.nullifies.get(signer)
     }
 
     /// Clears all votes, preparing the tracker for a new view.
@@ -823,19 +833,36 @@ pub struct Notarization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
-    /// Builds a notarization certificate from notarize votes for the same proposal.
+    /// Builds a notarization certificate from notarize votes for a specific proposal.
+    ///
+    /// Only includes votes that match the given proposal. This ensures
+    /// the certificate is valid even when Byzantine nodes send conflicting votes.
+    pub fn from_notarizes_for_proposal<'a>(
+        scheme: &S,
+        proposal: Proposal<D>,
+        notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
+    ) -> Option<Self> {
+        // Filter to only include votes for the specified proposal
+        let certificate =
+            scheme.assemble(notarizes.into_iter().filter(|n| n.proposal == proposal).map(|n| n.attestation.clone()))?;
+
+        Some(Self {
+            proposal,
+            certificate,
+        })
+    }
+
+    /// Builds a notarization certificate from notarize votes.
+    ///
+    /// Uses the first vote's proposal and filters all votes to match it.
+    /// Prefer `from_notarizes_for_proposal` when the expected proposal is known.
     pub fn from_notarizes<'a>(
         scheme: &S,
         notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
     ) -> Option<Self> {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
-        let certificate = scheme.assemble(iter.map(|n| n.attestation.clone()))?;
-
-        Some(Self {
-            proposal,
-            certificate,
-        })
+        Self::from_notarizes_for_proposal(scheme, proposal, iter)
     }
 
     /// Verifies the notarization certificate against the provided signing scheme.

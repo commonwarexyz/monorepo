@@ -10,8 +10,8 @@ use crate::{
         elector::{Config as ElectorConfig, Elector},
         scheme::Scheme,
         types::{
-            Artifact, Attributable, Certificate, Context, Notarization, Notarize, Nullification,
-            Nullify,
+            Artifact, Attributable, Certificate, ConflictingNotarize, Context, Notarization,
+            Notarize, Nullification, Nullify,
         },
     },
     types::{Epoch, Round as Rnd, View, ViewDelta},
@@ -582,32 +582,44 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Adds a notarize vote from the network.
     ///
-    /// Returns `(added, equivocator)` where:
+    /// Returns `(added, equivocator, conflict)` where:
     /// - `added`: true if the vote was new (not duplicate)
-    /// - `equivocator`: the signer's public key if they already voted differently
+    /// - `equivocator`: the signer's public key if they voted differently
+    /// - `conflict`: the conflicting notarize if equivocation was detected
     pub fn add_notarize_vote(
         &mut self,
         view: View,
         vote: Notarize<S, D>,
-    ) -> (bool, Option<S::PublicKey>) {
+    ) -> (bool, Option<S::PublicKey>, Option<ConflictingNotarize<S, D>>) {
         let signer = vote.signer();
+
+        // Get equivocator key upfront to avoid borrow conflicts
+        let equivocator_key = self.scheme.participants().key(signer).cloned();
+
         let round = self.create_round(view);
 
         // Check for equivocation (already voted nullify)
         if round.votes().has_nullify(signer) {
-            let equivocator = self.scheme.participants().key(signer).cloned();
-            return (false, equivocator);
+            return (false, equivocator_key, None);
         }
 
         // Check for duplicate notarize (same signer, same or different payload)
-        if round.votes().has_notarize(signer) {
-            // Already voted notarize - could be equivocation if different payload
-            // For now, just reject duplicates
-            return (false, None);
+        if let Some(existing) = round.votes().get_notarize(signer) {
+            // Already voted notarize - check if it's for a different payload
+            if existing.proposal.payload != vote.proposal.payload {
+                // Equivocation detected: same signer voted for different payloads
+                let conflict = ConflictingNotarize {
+                    first: existing.clone(),
+                    second: vote,
+                };
+                return (false, equivocator_key, Some(conflict));
+            }
+            // Same vote, just a duplicate
+            return (false, None, None);
         }
 
         let added = round.votes_mut().insert_notarize(vote);
-        (added, None)
+        (added, None, None)
     }
 
     /// Adds a nullify vote from the network.
@@ -637,6 +649,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Tries to assemble a notarization certificate if M threshold is reached.
     ///
     /// Returns `Some(notarization)` if we have enough votes and haven't assembled yet.
+    /// Uses the stored leader's proposal for filtering votes to handle Byzantine conflicting votes.
     pub fn try_assemble_notarization(
         &mut self,
         view: View,
@@ -654,8 +667,16 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             return None;
         }
 
-        // Assemble the notarization
-        let notarization = Notarization::from_notarizes(&self.scheme, round.votes().notarizes())?;
+        // Use the stored proposal (from leader) if available, otherwise fall back to first vote
+        let notarization = if let Some(proposal) = round.proposal() {
+            Notarization::from_notarizes_for_proposal(
+                &self.scheme,
+                proposal.clone(),
+                round.votes().notarizes(),
+            )
+        } else {
+            Notarization::from_notarizes(&self.scheme, round.votes().notarizes())
+        }?;
         Some(notarization)
     }
 

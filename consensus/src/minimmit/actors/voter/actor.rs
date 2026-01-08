@@ -23,8 +23,8 @@ use crate::{
         metrics::{self, Inbound, Outbound},
         scheme::Scheme,
         types::{
-            Activity, Artifact, Attributable, Certificate, Context, Notarization, Notarize,
-            Nullification, Nullify, Proposal, Vote,
+            Activity, Artifact, Attributable, Certificate, ConflictingNotarize, Context,
+            Notarization, Notarize, Nullification, Nullify, Proposal, Vote,
         },
     },
     types::{Epoch, Round as Rnd, View, ViewDelta},
@@ -413,6 +413,11 @@ impl<
             // Add local vote to VoteTracker for certificate assembly
             self.state.add_nullify_vote(nullify.view(), nullify.clone());
 
+            // Report local vote activity
+            self.reporter
+                .report(Activity::Nullify(nullify.clone()))
+                .await;
+
             // Broadcast nullify
             debug!(round=?nullify.round(), "broadcasting nullify");
             self.broadcast_vote(vote_sender, Vote::Nullify(nullify))
@@ -500,11 +505,19 @@ impl<
                     .await;
 
                 // Add to vote tracker
-                let (added, equivocator) = self.state.add_notarize_vote(view, notarize);
+                let (added, equivocator, conflict) = self.state.add_notarize_vote(view, notarize);
+
+                // Report and handle conflict if detected
+                if let Some(conflicting) = conflict {
+                    self.reporter
+                        .report(Activity::ConflictingNotarize(conflicting))
+                        .await;
+                }
+
                 if !added {
+                    self.block_equivocator(equivocator).await;
                     return;
                 }
-                self.block_equivocator(equivocator).await;
             }
             Vote::Nullify(nullify) => {
                 // Verify signature
@@ -665,7 +678,13 @@ impl<
         self.sync_journal(view).await;
 
         // Add local vote to VoteTracker for certificate assembly
-        self.state.add_notarize_vote(view, notarize.clone());
+        // Local votes won't conflict with themselves, so we ignore the return value
+        let _ = self.state.add_notarize_vote(view, notarize.clone());
+
+        // Report local vote activity
+        self.reporter
+            .report(Activity::Notarize(notarize.clone()))
+            .await;
 
         // Broadcast the notarize vote
         debug!(
@@ -697,6 +716,11 @@ impl<
 
         // Add local vote to VoteTracker for certificate assembly
         self.state.add_nullify_vote(view, nullify.clone());
+
+        // Report local vote activity
+        self.reporter
+            .report(Activity::Nullify(nullify.clone()))
+            .await;
 
         // Broadcast the nullify vote
         debug!(

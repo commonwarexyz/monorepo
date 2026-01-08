@@ -145,7 +145,7 @@ where
                     },
                     &notarization.certificate,
                 ) {
-                    assert!(!verified);
+                    assert!(verified);
                     *self.invalid.lock().expect("invalid lock poisoned") += 1;
                     return;
                 }
@@ -197,7 +197,7 @@ where
                     },
                     &nullification.certificate,
                 ) {
-                    assert!(!verified);
+                    assert!(verified);
                     *self.invalid.lock().expect("invalid lock poisoned") += 1;
                     return;
                 }
