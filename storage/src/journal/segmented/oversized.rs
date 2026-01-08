@@ -2442,8 +2442,6 @@ mod tests {
     fn test_recovery_entry_with_overflow_offset() {
         // Tests that an entry with offset near u64::MAX that would overflow
         // when added to size is detected as invalid during recovery.
-        // This tests semantic validation, not just integrity - the page CRC is valid
-        // but the entry's value_offset + value_size would overflow.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Use page size = entry size so one entry per page
