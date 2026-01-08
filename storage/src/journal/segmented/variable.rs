@@ -113,7 +113,7 @@ pub struct Config<C> {
 /// Maximum size of a varint for u32 (also the minimum useful read size for parsing item headers).
 const MAX_VARINT_SIZE: usize = 5;
 
-/// Parses a varint length prefix from a buffer.
+/// Decodes a varint length prefix from a buffer.
 /// Returns (item_size, varint_len).
 #[inline]
 fn decode_length_prefix(buf: &[u8]) -> Result<(usize, usize), Error> {
@@ -123,7 +123,7 @@ fn decode_length_prefix(buf: &[u8]) -> Result<(usize, usize), Error> {
     Ok((size, varint_len))
 }
 
-/// Result of parsing and extracting item data from a buffer.
+/// Result of finding an item in a buffer.
 enum Item<'a> {
     /// All item data is available in the buffer.
     Complete(&'a [u8]),
@@ -136,7 +136,7 @@ enum Item<'a> {
     },
 }
 
-/// Parse item header and extract available data from the buffer.
+/// Find an item in a buffer by decoding its length prefix.
 ///
 /// Returns (next_offset, size, item).
 fn find_item(buf: &[u8], available: usize, offset: u64) -> Result<(u64, u32, Item<'_>), Error> {
@@ -148,7 +148,7 @@ fn find_item(buf: &[u8], available: usize, offset: u64) -> Result<(u64, u32, Ite
         .ok_or(Error::OffsetOverflow)?;
     let buffered = available.saturating_sub(varint_len);
 
-    let extract = if buffered >= size {
+    let item = if buffered >= size {
         Item::Complete(&buf[varint_len..varint_len + size])
     } else {
         let mut buffer = vec![0u8; size];
@@ -160,7 +160,7 @@ fn find_item(buf: &[u8], available: usize, offset: u64) -> Result<(u64, u32, Ite
         }
     };
 
-    Ok((next_offset, size as u32, extract))
+    Ok((next_offset, size as u32, item))
 }
 
 /// Decode item data with optional decompression.
