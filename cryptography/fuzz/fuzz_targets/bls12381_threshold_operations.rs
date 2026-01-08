@@ -9,6 +9,7 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig, PartialSignature},
 };
 use commonware_parallel::{Rayon, Sequential};
+use commonware_utils::Participant;
 use libfuzzer_sys::fuzz_target;
 use rand::thread_rng;
 use std::num::NonZeroUsize;
@@ -45,25 +46,25 @@ enum FuzzOperation {
     },
     BatchVerifySameSignerMinPk {
         public: Sharing<MinPk>,
-        index: u32,
+        index: Participant,
         entries: Vec<(Vec<u8>, Vec<u8>, G2)>,
     },
     BatchVerifySameSignerMinSig {
         public: Sharing<MinSig>,
-        index: u32,
+        index: Participant,
         entries: Vec<(Vec<u8>, Vec<u8>, G1)>,
     },
     BatchVerifySameMessageMinPk {
         public: Sharing<MinPk>,
         namespace: Vec<u8>,
         message: Vec<u8>,
-        partials: Vec<(u32, G2)>,
+        partials: Vec<(Participant, G2)>,
     },
     BatchVerifySameMessageMinSig {
         public: Sharing<MinSig>,
         namespace: Vec<u8>,
         message: Vec<u8>,
-        partials: Vec<(u32, G1)>,
+        partials: Vec<(Participant, G1)>,
     },
     RecoverMinPk {
         sharing: Sharing<MinPk>,
@@ -143,7 +144,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                     .collect();
                 Ok(FuzzOperation::BatchVerifySameSignerMinPk {
                     public: u.arbitrary()?,
-                    index: u.int_in_range(1..=100)?,
+                    index: Participant::new(u.int_in_range(1..=100)?),
                     entries,
                 })
             }
@@ -157,7 +158,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                     .collect();
                 Ok(FuzzOperation::BatchVerifySameSignerMinSig {
                     public: u.arbitrary()?,
-                    index: u.int_in_range(1..=100)?,
+                    index: Participant::new(u.int_in_range(1..=100)?),
                     entries,
                 })
             }
@@ -165,13 +166,19 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 public: u.arbitrary()?,
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
-                partials: arbitrary_vec_indexed_g2(u, 0, 10)?,
+                partials: arbitrary_vec_indexed_g2(u, 0, 10)?
+                    .into_iter()
+                    .map(|(idx, sig)| (Participant::new(idx), sig))
+                    .collect(),
             }),
             7 => Ok(FuzzOperation::BatchVerifySameMessageMinSig {
                 public: u.arbitrary()?,
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
-                partials: arbitrary_vec_indexed_g1(u, 0, 10)?,
+                partials: arbitrary_vec_indexed_g1(u, 0, 10)?
+                    .into_iter()
+                    .map(|(idx, sig)| (Participant::new(idx), sig))
+                    .collect(),
             }),
             8 => Ok(FuzzOperation::RecoverMinSig {
                 sharing: u.arbitrary()?,
@@ -228,7 +235,7 @@ fn fuzz(op: FuzzOperation) {
             share,
             namespace,
         } => {
-            if share.index <= public.required() {
+            if share.index.get() <= public.required() {
                 let _ = threshold::sign_proof_of_possession::<MinPk>(&public, &share, &namespace);
             }
         }
@@ -238,7 +245,7 @@ fn fuzz(op: FuzzOperation) {
             share,
             namespace,
         } => {
-            if share.index <= public.required() {
+            if share.index.get() <= public.required() {
                 let _ = threshold::sign_proof_of_possession::<MinSig>(&public, &share, &namespace);
             }
         }
@@ -248,7 +255,7 @@ fn fuzz(op: FuzzOperation) {
             namespace,
             partial,
         } => {
-            if partial.index <= public.required() {
+            if partial.index.get() <= public.required() {
                 let _ =
                     threshold::verify_proof_of_possession::<MinPk>(&public, &namespace, &partial);
             }
@@ -259,7 +266,7 @@ fn fuzz(op: FuzzOperation) {
             namespace,
             partial,
         } => {
-            if partial.index <= public.required() {
+            if partial.index.get() <= public.required() {
                 let _ =
                     threshold::verify_proof_of_possession::<MinSig>(&public, &namespace, &partial);
             }
@@ -270,7 +277,7 @@ fn fuzz(op: FuzzOperation) {
             index,
             entries,
         } => {
-            if index <= public.required() && !entries.is_empty() {
+            if index.get() <= public.required() && !entries.is_empty() {
                 let entries_refs: Vec<(&[u8], &[u8], PartialSignature<MinPk>)> = entries
                     .iter()
                     .enumerate()
@@ -279,7 +286,7 @@ fn fuzz(op: FuzzOperation) {
                             ns.as_slice(),
                             msg.as_slice(),
                             PartialSignature {
-                                index: index + i as u32,
+                                index: Participant::new(index.get() + i as u32),
                                 value: *sig,
                             },
                         )
@@ -300,7 +307,7 @@ fn fuzz(op: FuzzOperation) {
             index,
             entries,
         } => {
-            if index <= public.required() && !entries.is_empty() {
+            if index.get() <= public.required() && !entries.is_empty() {
                 let entries_refs: Vec<(&[u8], &[u8], PartialSignature<MinSig>)> = entries
                     .iter()
                     .enumerate()
@@ -309,7 +316,7 @@ fn fuzz(op: FuzzOperation) {
                             ns.as_slice(),
                             msg.as_slice(),
                             PartialSignature {
-                                index: index + i as u32,
+                                index: Participant::new(index.get() + i as u32),
                                 value: *sig,
                             },
                         )

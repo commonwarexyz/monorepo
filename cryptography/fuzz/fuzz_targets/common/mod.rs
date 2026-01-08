@@ -101,7 +101,7 @@ pub fn arbitrary_scalar(u: &mut Unstructured) -> Result<Scalar, arbitrary::Error
 
 #[allow(unused)]
 pub fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> {
-    Ok(Share::new(u.int_in_range(1..=100)?, arbitrary_scalar(u)?))
+    Ok(Share::new(u.arbitrary()?, arbitrary_scalar(u)?))
 }
 
 #[allow(unused)]
@@ -130,7 +130,7 @@ pub fn arbitrary_partial_sig_g1(
     u: &mut Unstructured,
 ) -> Result<PartialSignature<MinSig>, arbitrary::Error> {
     Ok(PartialSignature {
-        index: u.int_in_range(1..=100)?,
+        index: u.arbitrary()?,
         value: arbitrary_g1(u)?,
     })
 }
@@ -140,7 +140,7 @@ pub fn arbitrary_partial_sig_g2(
     u: &mut Unstructured,
 ) -> Result<PartialSignature<MinPk>, arbitrary::Error> {
     Ok(PartialSignature {
-        index: u.int_in_range(1..=100)?,
+        index: u.arbitrary()?,
         value: arbitrary_g2(u)?,
     })
 }

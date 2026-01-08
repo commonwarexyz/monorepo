@@ -14,11 +14,10 @@ use blst::{
     BLS12_381_NEG_G2,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
-};
+use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
 use commonware_math::algebra::{HashToGroup, Random as _, Space};
 use commonware_parallel::Strategy;
+use commonware_utils::Participant;
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
@@ -370,13 +369,13 @@ impl Debug for MinSig {
 /// c.f. [`super::ops`] for how to manipulate these.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PartialSignature<V: Variant> {
-    pub index: u32,
+    pub index: Participant,
     pub value: V::Signature,
 }
 
 impl<V: Variant> Write for PartialSignature<V> {
     fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.index).write(buf);
+        self.index.write(buf);
         self.value.write(buf);
     }
 }
@@ -385,7 +384,7 @@ impl<V: Variant> Read for PartialSignature<V> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let index = UInt::read(buf)?.into();
+        let index = Participant::read(buf)?;
         let value = V::Signature::read(buf)?;
         Ok(Self { index, value })
     }
@@ -393,7 +392,7 @@ impl<V: Variant> Read for PartialSignature<V> {
 
 impl<V: Variant> EncodeSize for PartialSignature<V> {
     fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + V::Signature::SIZE
+        self.index.encode_size() + V::Signature::SIZE
     }
 }
 
