@@ -2243,4 +2243,85 @@ mod tests {
             journal.destroy().await.unwrap();
         });
     }
+
+    /// Test replay with optimized batched reading.
+    #[test_traced]
+    fn test_variable_replay_optimized() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "replay_optimized".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append items across multiple sections
+            for i in 0..50u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+
+            // Collect items using replay
+            let replay_items = {
+                let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+                futures::pin_mut!(stream);
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    items.push(result.unwrap());
+                }
+                items
+            };
+
+            // Verify correctness
+            assert_eq!(replay_items.len(), 50);
+            for (i, (pos, value)) in replay_items.iter().enumerate() {
+                assert_eq!(*pos, i as u64);
+                assert_eq!(*value, (i as u64) * 100);
+            }
+
+            // Test replay from middle position
+            let from_middle = {
+                let stream = journal.replay(25, NZUsize!(1024)).await.unwrap();
+                futures::pin_mut!(stream);
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    items.push(result.unwrap());
+                }
+                items
+            };
+
+            assert_eq!(from_middle.len(), 25);
+            for (i, (pos, value)) in from_middle.iter().enumerate() {
+                assert_eq!(*pos, (25 + i) as u64);
+                assert_eq!(*value, ((25 + i) as u64) * 100);
+            }
+
+            // Test replay after pruning
+            journal.prune(20).await.unwrap();
+
+            let after_prune = {
+                let stream = journal.replay(20, NZUsize!(1024)).await.unwrap();
+                futures::pin_mut!(stream);
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    items.push(result.unwrap());
+                }
+                items
+            };
+
+            assert_eq!(after_prune.len(), 30);
+            for (i, (pos, value)) in after_prune.iter().enumerate() {
+                assert_eq!(*pos, (20 + i) as u64);
+                assert_eq!(*value, ((20 + i) as u64) * 100);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
 }
