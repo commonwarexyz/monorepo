@@ -117,8 +117,8 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
     fn build(self, participants: &Set<S::PublicKey>) -> RoundRobinElector<S> {
         assert!(!participants.is_empty(), "no participants");
 
-        let mut permutation: Vec<Participant> = (0..participants.len() as u32)
-            .map(Participant::new)
+        let mut permutation: Vec<Participant> = (0..participants.len())
+            .map(Participant::from_usize)
             .collect();
 
         if let Some(seed) = &self.seed {
