@@ -17,7 +17,7 @@ fn benchmark_msm_affine(c: &mut Criterion) {
                     let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
                     (affine, scalars)
                 },
-                |(affine, scalars)| black_box(G1::msm_affine(&affine, &scalars)),
+                |(affine, scalars)| black_box(G1::msm_affine(&affine, &scalars, 255)),
                 BatchSize::SmallInput,
             );
         });
@@ -33,7 +33,7 @@ fn benchmark_msm_affine(c: &mut Criterion) {
                     let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
                     (affine, scalars)
                 },
-                |(affine, scalars)| black_box(G2::msm_affine(&affine, &scalars)),
+                |(affine, scalars)| black_box(G2::msm_affine(&affine, &scalars, 255)),
                 BatchSize::SmallInput,
             );
         });

@@ -69,20 +69,6 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
 
     /// Compute the pairing `e(G1, G2) -> GT`.
     fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT;
-
-    /// Optimized batch verification for same-message signatures using MSM.
-    ///
-    /// All signatures are over the same pre-hashed message `hm`. Uses batch affine conversion
-    /// and MSM with Pippenger's algorithm for O(n/log n) complexity.
-    ///
-    /// Returns true if all signatures are valid.
-    fn verify_same_message_msm<S: Strategy>(
-        publics: &[Self::Public],
-        hm: &Self::Signature,
-        signatures: &[Self::Signature],
-        scalars: &[Scalar],
-        strategy: &S,
-    ) -> bool;
 }
 
 /// A [Variant] with a public key of type [G1] and a signature of type [G2].
@@ -229,36 +215,6 @@ impl Variant for MinPk {
         }
 
         GT::from_blst_fp12(result)
-    }
-
-    fn verify_same_message_msm<S: Strategy>(
-        publics: &[Self::Public],
-        hm: &Self::Signature,
-        signatures: &[Self::Signature],
-        scalars: &[Scalar],
-        strategy: &S,
-    ) -> bool {
-        assert_eq!(publics.len(), signatures.len());
-        assert_eq!(publics.len(), scalars.len());
-        if publics.is_empty() {
-            return true;
-        }
-
-        // Run batch_to_affine + MSM in parallel for both groups
-        // Uses 128-bit scalars for ~2x faster MSM (sufficient security for batch verification)
-        let (pk_agg, sig_agg) = strategy.join(
-            || {
-                let pks_affine = G1::batch_to_affine(publics);
-                G1::msm_affine_batch(&pks_affine, scalars)
-            },
-            || {
-                let sigs_affine = G2::batch_to_affine(signatures);
-                G2::msm_affine_batch(&sigs_affine, scalars)
-            },
-        );
-
-        // Verify: e(pk_agg, H(m)) == e(sig_agg, G)
-        Self::verify(&pk_agg, hm, &sig_agg).is_ok()
     }
 }
 
@@ -412,36 +368,6 @@ impl Variant for MinSig {
         }
 
         GT::from_blst_fp12(result)
-    }
-
-    fn verify_same_message_msm<S: Strategy>(
-        publics: &[Self::Public],
-        hm: &Self::Signature,
-        signatures: &[Self::Signature],
-        scalars: &[Scalar],
-        strategy: &S,
-    ) -> bool {
-        assert_eq!(publics.len(), signatures.len());
-        assert_eq!(publics.len(), scalars.len());
-        if publics.is_empty() {
-            return true;
-        }
-
-        // Run batch_to_affine + MSM in parallel for both groups
-        // Uses 128-bit scalars for ~2x faster MSM (sufficient security for batch verification)
-        let (pk_agg, sig_agg) = strategy.join(
-            || {
-                let pks_affine = G2::batch_to_affine(publics);
-                G2::msm_affine_batch(&pks_affine, scalars)
-            },
-            || {
-                let sigs_affine = G1::batch_to_affine(signatures);
-                G1::msm_affine_batch(&sigs_affine, scalars)
-            },
-        );
-
-        // Verify: e(pk_agg, H(m)) == e(sig_agg, G)
-        Self::verify(&pk_agg, hm, &sig_agg).is_ok()
     }
 }
 

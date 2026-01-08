@@ -10,7 +10,7 @@
 //! [`aggregate`](super::aggregate) verification. Without weights, an attacker could forge invalid
 //! signatures that cancel out when aggregated (e.g., one signature "too high" and another "too low"
 //! by the same amount). With random weights `r_i`, the errors must satisfy `sum(r_i * err_i) = 0`,
-//! which requires predicting the weights before they're generated (probability ~1/2^255 per invalid
+//! which requires predicting the weights before they're generated (probability ~1/2^128 per invalid
 //! signature). Note, the weights must be unpredictable to the attacker for this to work (i.e. they
 //! must be generated securely).
 
@@ -20,7 +20,7 @@ use super::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
-use commonware_math::algebra::{Additive, Space as _};
+use commonware_math::algebra::{Additive, Random as _, Space as _};
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 
@@ -71,17 +71,15 @@ where
 
     let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
-    // Generate 128-bit random scalars for batch verification
-    let scalars: Vec<Scalar> = (0..entries.len())
-        .map(|_| Scalar::random_batch(&mut *rng))
-        .collect();
-
     // Split entries into pks and sigs
     let pks: Vec<V::Public> = entries.iter().map(|(pk, _)| *pk).collect();
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, sig)| *sig).collect();
 
-    // Use optimized MSM with batch affine conversion (happy path)
-    if V::verify_same_message_msm(&pks, &hm, &sigs, &scalars, strategy) {
+    // Use rand_msm for optimized batch verification (happy path)
+    // This generates random scalars internally and uses 128-bit MSM
+    let (pk_agg, scalars) = V::Public::rand_msm(rng, &pks, strategy);
+    let sig_agg = V::Signature::msm(&sigs, &scalars, strategy);
+    if V::verify(&pk_agg, &hm, &sig_agg).is_ok() {
         return Vec::new(); // All valid!
     }
 
@@ -150,9 +148,9 @@ where
         return Ok(());
     }
 
-    // Generate 128-bit random scalars for batch verification
+    // Generate random scalars for batch verification
     let scalars: Vec<Scalar> = (0..entries.len())
-        .map(|_| Scalar::random_batch(&mut *rng))
+        .map(|_| Scalar::random(&mut *rng))
         .collect();
 
     // Hash all messages and collect signatures

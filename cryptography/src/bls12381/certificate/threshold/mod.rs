@@ -422,7 +422,7 @@ mod macros {
                 rng: &mut R,
                 namespace: &[u8],
                 n: u32,
-            ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
+            ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V, commonware_parallel::Sequential>>
             where
                 V: $crate::bls12381::primitives::variant::Variant,
                 R: rand::RngCore + rand::CryptoRng,
@@ -431,8 +431,8 @@ mod macros {
                     rng,
                     namespace,
                     n,
-                    Scheme::signer,
-                    Scheme::verifier,
+                    |ns, participants, polynomial, share| Scheme::signer(ns, participants, polynomial, share, commonware_parallel::Sequential),
+                    |ns, participants, polynomial| Scheme::verifier(ns, participants, polynomial, commonware_parallel::Sequential),
                 )
             }
 
@@ -441,20 +441,24 @@ mod macros {
             pub struct Scheme<
                 P: $crate::PublicKey,
                 V: $crate::bls12381::primitives::variant::Variant,
+                S: commonware_parallel::Strategy = commonware_parallel::Sequential,
             > {
                 generic: $crate::bls12381::certificate::threshold::Generic<P, V, $namespace>,
+                strategy: S,
             }
 
             impl<
                 P: $crate::PublicKey,
                 V: $crate::bls12381::primitives::variant::Variant,
-            > Scheme<P, V> {
+                S: commonware_parallel::Strategy,
+            > Scheme<P, V, S> {
                 /// Creates a new signer instance with a private share and evaluated public polynomial.
                 pub fn signer(
                     namespace: &[u8],
                     participants: commonware_utils::ordered::Set<P>,
                     polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
                     share: $crate::bls12381::primitives::group::Share,
+                    strategy: S,
                 ) -> Option<Self> {
                     Some(Self {
                         generic: $crate::bls12381::certificate::threshold::Generic::signer(
@@ -463,6 +467,7 @@ mod macros {
                             polynomial,
                             share,
                         )?,
+                        strategy,
                     })
                 }
 
@@ -471,6 +476,7 @@ mod macros {
                     namespace: &[u8],
                     participants: commonware_utils::ordered::Set<P>,
                     polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
+                    strategy: S,
                 ) -> Self {
                     Self {
                         generic: $crate::bls12381::certificate::threshold::Generic::verifier(
@@ -478,16 +484,18 @@ mod macros {
                             participants,
                             polynomial,
                         ),
+                        strategy,
                     }
                 }
 
                 /// Creates a lightweight verifier that only checks recovered certificates.
-                pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
+                pub fn certificate_verifier(namespace: &[u8], identity: V::Public, strategy: S) -> Self {
                     Self {
                         generic: $crate::bls12381::certificate::threshold::Generic::certificate_verifier(
                             namespace,
                             identity,
                         ),
+                        strategy,
                     }
                 }
 
@@ -505,7 +513,8 @@ mod macros {
             impl<
                 P: $crate::PublicKey,
                 V: $crate::bls12381::primitives::variant::Variant,
-            > $crate::certificate::Scheme for Scheme<P, V> {
+                S: commonware_parallel::Strategy,
+            > $crate::certificate::Scheme for Scheme<P, V, S> {
                 type Subject<'a, D: $crate::Digest> = $subject;
                 type PublicKey = P;
                 type Signature = V::Signature;
@@ -552,7 +561,7 @@ mod macros {
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
                     self.generic
-                        .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, &commonware_parallel::Sequential)
+                        .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, &self.strategy)
                 }
 
                 fn assemble<I>(&self, attestations: I) -> Option<Self::Certificate>
@@ -656,8 +665,8 @@ mod tests {
         rng: &mut impl CryptoRngCore,
         n: u32,
     ) -> (
-        Vec<Scheme<ed25519::PublicKey, V>>,
-        Scheme<ed25519::PublicKey, V>,
+        Vec<Scheme<ed25519::PublicKey, V, commonware_parallel::Sequential>>,
+        Scheme<ed25519::PublicKey, V, commonware_parallel::Sequential>,
         Sharing<V>,
     ) {
         // Generate identity keys (ed25519)
@@ -677,11 +686,23 @@ mod tests {
         let signers = shares
             .into_iter()
             .map(|share| {
-                Scheme::signer(NAMESPACE, participants.clone(), polynomial.clone(), share).unwrap()
+                Scheme::signer(
+                    NAMESPACE,
+                    participants.clone(),
+                    polynomial.clone(),
+                    share,
+                    commonware_parallel::Sequential,
+                )
+                .unwrap()
             })
             .collect();
 
-        let verifier = Scheme::verifier(NAMESPACE, participants, polynomial.clone());
+        let verifier = Scheme::verifier(
+            NAMESPACE,
+            participants,
+            polynomial.clone(),
+            commonware_parallel::Sequential,
+        );
 
         (signers, verifier, polynomial)
     }
@@ -1057,8 +1078,11 @@ mod tests {
 
         // Create a certificate-only verifier using the identity from the polynomial
         let identity = polynomial.public();
-        let cert_verifier =
-            Scheme::<ed25519::PublicKey, V>::certificate_verifier(NAMESPACE, *identity);
+        let cert_verifier = Scheme::<ed25519::PublicKey, V, _>::certificate_verifier(
+            NAMESPACE,
+            *identity,
+            commonware_parallel::Sequential,
+        );
 
         // Should be able to verify certificates
         assert!(cert_verifier.verify_certificate::<_, Sha256Digest>(
@@ -1158,9 +1182,10 @@ mod tests {
     fn certificate_verifier_panics_on_vote<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
-        let certificate_verifier = Scheme::<ed25519::PublicKey, V>::certificate_verifier(
+        let certificate_verifier = Scheme::<ed25519::PublicKey, V, _>::certificate_verifier(
             NAMESPACE,
             *schemes[0].identity(),
+            commonware_parallel::Sequential,
         );
 
         let vote = schemes[1]
@@ -1207,11 +1232,12 @@ mod tests {
         let (polynomial, mut shares) =
             dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
         shares[0].index = 999;
-        Scheme::<ed25519::PublicKey, V>::signer(
+        Scheme::<ed25519::PublicKey, V, _>::signer(
             NAMESPACE,
             participants,
             polynomial,
             shares[0].clone(),
+            commonware_parallel::Sequential,
         );
     }
 
@@ -1245,11 +1271,12 @@ mod tests {
         // quorum(5) = 4, but polynomial.required() = 2, so this should panic
         let (polynomial, shares) =
             dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(2));
-        Scheme::<ed25519::PublicKey, V>::signer(
+        Scheme::<ed25519::PublicKey, V, _>::signer(
             NAMESPACE,
             participants,
             polynomial,
             shares[0].clone(),
+            commonware_parallel::Sequential,
         );
     }
 
@@ -1271,7 +1298,12 @@ mod tests {
         // Create a polynomial with threshold 2, but quorum of 5 participants is 4
         // quorum(5) = 4, but polynomial.required() = 2, so this should panic
         let (polynomial, _) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(2));
-        Scheme::<ed25519::PublicKey, V>::verifier(NAMESPACE, participants, polynomial);
+        Scheme::<ed25519::PublicKey, V, _>::verifier(
+            NAMESPACE,
+            participants,
+            polynomial,
+            commonware_parallel::Sequential,
+        );
     }
 
     #[test]

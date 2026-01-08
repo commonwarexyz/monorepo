@@ -1,8 +1,9 @@
 use commonware_cryptography::bls12381::primitives::{
     self,
-    group::{Scalar, G1, G2},
+    group::{G1, G2},
     variant::{MinSig, Variant},
 };
+use commonware_math::algebra::Space;
 use commonware_parallel::Sequential;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
@@ -30,18 +31,12 @@ fn benchmark_rand_msm(c: &mut Criterion) {
                             (public, sig)
                         })
                         .unzip();
-                    let scalars: Vec<Scalar> =
-                        (0..n).map(|_| Scalar::random_batch(&mut rng)).collect();
-                    (publics, hm, sigs, scalars)
+                    (StdRng::seed_from_u64(0), publics, hm, sigs)
                 },
-                |(publics, hm, sigs, scalars)| {
-                    black_box(MinSig::verify_same_message_msm(
-                        &publics,
-                        &hm,
-                        &sigs,
-                        &scalars,
-                        &Sequential,
-                    ))
+                |(mut rng, publics, hm, sigs)| {
+                    let (pk_agg, scalars) = G2::rand_msm(&mut rng, &publics, &Sequential);
+                    let sig_agg = G1::msm(&sigs, &scalars, &Sequential);
+                    black_box(MinSig::verify(&pk_agg, &hm, &sig_agg))
                 },
                 BatchSize::SmallInput,
             );

@@ -391,7 +391,7 @@ mod macros {
                 rng: &mut R,
                 namespace: &[u8],
                 n: u32,
-            ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
+            ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V, commonware_parallel::Sequential>>
             where
                 V: $crate::bls12381::primitives::variant::Variant,
                 R: rand::RngCore + rand::CryptoRng,
@@ -400,8 +400,8 @@ mod macros {
                     rng,
                     namespace,
                     n,
-                    Scheme::signer,
-                    Scheme::verifier,
+                    |ns, participants, private_key| Scheme::signer(ns, participants, private_key, commonware_parallel::Sequential),
+                    |ns, participants| Scheme::verifier(ns, participants, commonware_parallel::Sequential),
                 )
             }
 
@@ -410,19 +410,23 @@ mod macros {
             pub struct Scheme<
                 P: $crate::PublicKey,
                 V: $crate::bls12381::primitives::variant::Variant,
+                S: commonware_parallel::Strategy = commonware_parallel::Sequential,
             > {
                 generic: $crate::bls12381::certificate::multisig::Generic<P, V, $namespace>,
+                strategy: S,
             }
 
             impl<
                 P: $crate::PublicKey,
                 V: $crate::bls12381::primitives::variant::Variant,
-            > Scheme<P, V> {
+                S: commonware_parallel::Strategy,
+            > Scheme<P, V, S> {
                 /// Creates a new scheme instance with the provided key material.
                 pub fn signer(
                     namespace: &[u8],
                     participants: commonware_utils::ordered::BiMap<P, V::Public>,
                     private_key: $crate::bls12381::primitives::group::Private,
+                    strategy: S,
                 ) -> Option<Self> {
                     Some(Self {
                         generic: $crate::bls12381::certificate::multisig::Generic::signer(
@@ -430,6 +434,7 @@ mod macros {
                             participants,
                             private_key,
                         )?,
+                        strategy,
                     })
                 }
 
@@ -437,12 +442,14 @@ mod macros {
                 pub fn verifier(
                     namespace: &[u8],
                     participants: commonware_utils::ordered::BiMap<P, V::Public>,
+                    strategy: S,
                 ) -> Self {
                     Self {
                         generic: $crate::bls12381::certificate::multisig::Generic::verifier(
                             namespace,
                             participants,
                         ),
+                        strategy,
                     }
                 }
             }
@@ -450,7 +457,8 @@ mod macros {
             impl<
                 P: $crate::PublicKey,
                 V: $crate::bls12381::primitives::variant::Variant,
-            > $crate::certificate::Scheme for Scheme<P, V> {
+                S: commonware_parallel::Strategy,
+            > $crate::certificate::Scheme for Scheme<P, V, S> {
                 type Subject<'a, D: $crate::Digest> = $subject;
                 type PublicKey = P;
                 type Signature = V::Signature;
@@ -497,7 +505,7 @@ mod macros {
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
                     self.generic
-                        .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, &commonware_parallel::Sequential)
+                        .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, &self.strategy)
                 }
 
                 fn assemble<I>(&self, attestations: I) -> Option<Self::Certificate>
@@ -596,12 +604,13 @@ mod tests {
     // Use the macro to generate the test scheme
     impl_certificate_bls12381_multisig!(TestSubject, Vec<u8>);
 
+    #[allow(clippy::type_complexity)]
     fn setup_signers<V: Variant>(
         rng: &mut impl CryptoRngCore,
         n: u32,
     ) -> (
-        Vec<Scheme<ed25519::PublicKey, V>>,
-        Scheme<ed25519::PublicKey, V>,
+        Vec<Scheme<ed25519::PublicKey, V, commonware_parallel::Sequential>>,
+        Scheme<ed25519::PublicKey, V, commonware_parallel::Sequential>,
     ) {
         // Generate identity keys (ed25519) and consensus keys (BLS)
         let identity_keys: Vec<_> = (0..n)
@@ -619,10 +628,18 @@ mod tests {
 
         let signers = consensus_keys
             .into_iter()
-            .map(|sk| Scheme::signer(NAMESPACE, participants.clone(), sk).unwrap())
+            .map(|sk| {
+                Scheme::signer(
+                    NAMESPACE,
+                    participants.clone(),
+                    sk,
+                    commonware_parallel::Sequential,
+                )
+                .unwrap()
+            })
             .collect();
 
-        let verifier = Scheme::verifier(NAMESPACE, participants);
+        let verifier = Scheme::verifier(NAMESPACE, participants, commonware_parallel::Sequential);
 
         (signers, verifier)
     }

@@ -25,7 +25,7 @@ use blst::{
     blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress,
     blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_to_affine,
     blst_scalar, blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
-    blst_scalar_from_lendian, blst_sk_check, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_sk_check, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -541,28 +541,6 @@ impl Random for Scalar {
     }
 }
 
-impl Scalar {
-    /// Returns a random 128-bit scalar for batch verification.
-    ///
-    /// This is faster than [`Random::random`] because it only generates 128 bits
-    /// of randomness instead of 256 bits. Sufficient for batch verification where
-    /// scalars are used as random weights (128-bit security).
-    pub fn random_batch(mut rng: impl CryptoRngCore) -> Self {
-        let mut bytes = [0u8; 32];
-        rng.fill_bytes(&mut bytes[..16]);
-
-        let mut sc = blst_scalar::default();
-        let mut ret = blst_fr::default();
-        // SAFETY: bytes is a valid 32-byte buffer; blst_scalar_from_lendian reads little-endian.
-        unsafe {
-            blst_scalar_from_lendian(&mut sc, bytes.as_ptr());
-            blst_fr_from_scalar(&mut ret, &sc);
-        }
-
-        Self(ret)
-    }
-}
-
 /// A share of a threshold signing key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Share {
@@ -887,6 +865,26 @@ impl Space<Scalar> for G1 {
         // Give all points to Pippenger at once for O(n/log n) efficiency
         Self::msm_inner(&filtered)
     }
+
+    /// MSM with random scalars optimized for batch verification.
+    ///
+    /// Uses 128-bit MSM internally which roughly halves computation time
+    /// while providing sufficient security (2^-128 collision probability).
+    fn rand_msm<R: CryptoRngCore>(
+        rng: &mut R,
+        points: &[Self],
+        _strategy: &impl Strategy,
+    ) -> (Self, Vec<Scalar>) {
+        let scalars: Vec<Scalar> = (0..points.len())
+            .map(|_| Scalar::random(&mut *rng))
+            .collect();
+        if points.is_empty() {
+            return (Self::zero(), scalars);
+        }
+        let affine = Self::batch_to_affine(points);
+        let result = Self::msm_affine(&affine, &scalars, BATCH_SCALAR_BITS);
+        (result, scalars)
+    }
 }
 
 impl G1 {
@@ -929,6 +927,10 @@ impl G1 {
     /// 1. Points are already in affine form (avoids per-point conversion)
     /// 2. Points are known to be valid (skips zero-filtering)
     ///
+    /// The `bits` parameter specifies how many bits of each scalar to process.
+    /// Use `SCALAR_BITS` (255) for full precision, or `BATCH_SCALAR_BITS` (128)
+    /// for batch verification where reduced precision roughly halves computation time.
+    ///
     /// # Panics
     ///
     /// Panics if `points.len() != scalars.len()`.
@@ -937,7 +939,7 @@ impl G1 {
     ///
     /// This function does NOT filter out identity points or zero scalars.
     /// Passing such values may cause undefined behavior in BLST.
-    pub fn msm_affine(points: &[G1Affine], scalars: &[Scalar]) -> Self {
+    pub fn msm_affine(points: &[G1Affine], scalars: &[Scalar], bits: usize) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
         if points.is_empty() {
             return Self::zero();
@@ -967,49 +969,7 @@ impl G1 {
                 points_ptr.as_ptr(),
                 points.len(),
                 scalars_ptr.as_ptr(),
-                SCALAR_BITS,
-                scratch.as_mut_ptr() as *mut _,
-            );
-        }
-
-        Self::from_blst_p1(result)
-    }
-
-    /// Computes MSM using only the lower 128 bits of each scalar.
-    ///
-    /// This is optimized for batch verification where 128-bit randomness
-    /// provides sufficient security (2^-128 collision probability).
-    /// Processing fewer bits roughly halves the MSM computation time.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `points.len() != scalars.len()`.
-    pub fn msm_affine_batch(points: &[G1Affine], scalars: &[Scalar]) -> Self {
-        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-        if points.is_empty() {
-            return Self::zero();
-        }
-
-        let points_ptr: Vec<*const blst_p1_affine> =
-            points.iter().map(|p| p.inner() as *const _).collect();
-
-        let blst_scalars: Vec<blst_scalar> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
-        let scalars_ptr: Vec<*const u8> = blst_scalars.iter().map(|s| s.b.as_ptr()).collect();
-
-        // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof is a pure function with no side effects.
-        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
-        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
-        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
-
-        let mut result = blst_p1::default();
-        // SAFETY: All pointers are valid. Using BATCH_SCALAR_BITS (128) for faster batch verification.
-        unsafe {
-            blst_p1s_mult_pippenger(
-                &mut result,
-                points_ptr.as_ptr(),
-                points.len(),
-                scalars_ptr.as_ptr(),
-                BATCH_SCALAR_BITS,
+                bits,
                 scratch.as_mut_ptr() as *mut _,
             );
         }
@@ -1297,6 +1257,26 @@ impl Space<Scalar> for G2 {
         // Give all points to Pippenger at once for O(n/log n) efficiency
         Self::msm_inner(&filtered)
     }
+
+    /// MSM with random scalars optimized for batch verification.
+    ///
+    /// Uses 128-bit MSM internally which roughly halves computation time
+    /// while providing sufficient security (2^-128 collision probability).
+    fn rand_msm<R: CryptoRngCore>(
+        rng: &mut R,
+        points: &[Self],
+        _strategy: &impl Strategy,
+    ) -> (Self, Vec<Scalar>) {
+        let scalars: Vec<Scalar> = (0..points.len())
+            .map(|_| Scalar::random(&mut *rng))
+            .collect();
+        if points.is_empty() {
+            return (Self::zero(), scalars);
+        }
+        let affine = Self::batch_to_affine(points);
+        let result = Self::msm_affine(&affine, &scalars, BATCH_SCALAR_BITS);
+        (result, scalars)
+    }
 }
 
 impl G2 {
@@ -1339,6 +1319,10 @@ impl G2 {
     /// 1. Points are already in affine form (avoids per-point conversion)
     /// 2. Points are known to be valid (skips zero-filtering)
     ///
+    /// The `bits` parameter specifies how many bits of each scalar to process.
+    /// Use `SCALAR_BITS` (255) for full precision, or `BATCH_SCALAR_BITS` (128)
+    /// for batch verification where reduced precision roughly halves computation time.
+    ///
     /// # Panics
     ///
     /// Panics if `points.len() != scalars.len()`.
@@ -1347,7 +1331,7 @@ impl G2 {
     ///
     /// This function does NOT filter out identity points or zero scalars.
     /// Passing such values may cause undefined behavior in BLST.
-    pub fn msm_affine(points: &[G2Affine], scalars: &[Scalar]) -> Self {
+    pub fn msm_affine(points: &[G2Affine], scalars: &[Scalar], bits: usize) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
         if points.is_empty() {
             return Self::zero();
@@ -1377,49 +1361,7 @@ impl G2 {
                 points_ptr.as_ptr(),
                 points.len(),
                 scalars_ptr.as_ptr(),
-                SCALAR_BITS,
-                scratch.as_mut_ptr() as *mut _,
-            );
-        }
-
-        Self::from_blst_p2(result)
-    }
-
-    /// Computes MSM using only the lower 128 bits of each scalar.
-    ///
-    /// This is optimized for batch verification where 128-bit randomness
-    /// provides sufficient security (2^-128 collision probability).
-    /// Processing fewer bits roughly halves the MSM computation time.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `points.len() != scalars.len()`.
-    pub fn msm_affine_batch(points: &[G2Affine], scalars: &[Scalar]) -> Self {
-        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-        if points.is_empty() {
-            return Self::zero();
-        }
-
-        let points_ptr: Vec<*const blst_p2_affine> =
-            points.iter().map(|p| p.inner() as *const _).collect();
-
-        let blst_scalars: Vec<blst_scalar> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
-        let scalars_ptr: Vec<*const u8> = blst_scalars.iter().map(|s| s.b.as_ptr()).collect();
-
-        // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof is a pure function with no side effects.
-        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
-        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
-        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
-
-        let mut result = blst_p2::default();
-        // SAFETY: All pointers are valid. Using BATCH_SCALAR_BITS (128) for faster batch verification.
-        unsafe {
-            blst_p2s_mult_pippenger(
-                &mut result,
-                points_ptr.as_ptr(),
-                points.len(),
-                scalars_ptr.as_ptr(),
-                BATCH_SCALAR_BITS,
+                bits,
                 scratch.as_mut_ptr() as *mut _,
             );
         }

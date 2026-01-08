@@ -4,6 +4,9 @@
 //! so that the familiar `+`, `+=`, etc. operators can be used. The traits are also
 //! designed with performant implementations in mind, so implementations try to
 //! use methods which don't require copying unnecessarily.
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use commonware_parallel::Strategy as ParStrategy;
 use core::{
     fmt::Debug,
@@ -203,6 +206,27 @@ pub trait Space<R>:
     /// For empty slices, the result should be [`Additive::zero`];
     fn msm(points: &[Self], scalars: &[R], _strategy: &impl ParStrategy) -> Self {
         msm_naive(points, scalars)
+    }
+
+    /// MSM with random scalars for batch verification.
+    ///
+    /// Generates random scalars internally and returns both the MSM result and
+    /// the scalars used, so callers can reuse them (e.g., for bisection in batch
+    /// verification).
+    ///
+    /// The default implementation uses [`Random::random`] for scalar generation
+    /// and delegates to [`Space::msm`]. Implementations may override this to use
+    /// optimizations like reduced-bit scalars for faster MSM computation.
+    fn rand_msm<Rng: CryptoRngCore>(
+        rng: &mut Rng,
+        points: &[Self],
+        strategy: &impl ParStrategy,
+    ) -> (Self, Vec<R>)
+    where
+        R: Random,
+    {
+        let scalars: Vec<R> = (0..points.len()).map(|_| R::random(&mut *rng)).collect();
+        (Self::msm(points, &scalars, strategy), scalars)
     }
 }
 
