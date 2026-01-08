@@ -9,6 +9,7 @@
 //! detection, not security. Use SHA-256 or Blake3 for cryptographic purposes.
 //!
 //! # Example
+//!
 //! ```rust
 //! use commonware_cryptography::{Hasher, Crc32};
 //!
@@ -37,7 +38,6 @@ use core::{
     ops::Deref,
 };
 use rand_core::CryptoRngCore;
-use zeroize::Zeroize;
 
 /// Size of a CRC32 checksum in bytes.
 const SIZE: usize = 4;
@@ -179,12 +179,6 @@ impl Random for Digest {
         let mut array = [0u8; SIZE];
         rng.fill_bytes(&mut array);
         Self(array)
-    }
-}
-
-impl Zeroize for Digest {
-    fn zeroize(&mut self) {
-        self.0.zeroize();
     }
 }
 
