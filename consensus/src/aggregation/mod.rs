@@ -103,7 +103,9 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{channels::fallible::OneshotExt, test_rng, NZUsize, NonZeroDuration, NZU16};
+    use commonware_utils::{
+        channels::fallible::OneshotExt, test_rng, NZUsize, NonZeroDuration, NZU16,
+    };
     use futures::{channel::oneshot, future::join_all};
     use rand::{rngs::StdRng, Rng};
     use std::{
