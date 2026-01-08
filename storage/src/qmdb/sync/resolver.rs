@@ -68,41 +68,6 @@ pub trait Resolver: Send + Sync + Clone + 'static {
 }
 
 macro_rules! impl_resolver {
-    ($db:ident, $op:ident, $val_bound:ident, with_option) => {
-        impl_resolver!($db, $op, $val_bound);
-
-        impl<E, K, V, H, T> Resolver
-            for Arc<RwLock<Option<$db<E, K, V, H, T, Merkleized<H>, Durable>>>>
-        where
-            E: Storage + Clock + Metrics,
-            K: Array,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
-        {
-            type Digest = H::Digest;
-            type Op = $op<K, V>;
-            type Error = qmdb::Error;
-
-            async fn get_operations(
-                &self,
-                op_count: Location,
-                start_loc: Location,
-                max_ops: NonZeroU64,
-            ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
-                let guard = self.read().await;
-                let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-                db.historical_proof(op_count, start_loc, max_ops).await.map(
-                    |(proof, operations)| FetchResult {
-                        proof,
-                        operations,
-                        success_tx: oneshot::channel().0,
-                    },
-                )
-            }
-        }
-    };
     ($db:ident, $op:ident, $val_bound:ident) => {
         impl<E, K, V, H, T> Resolver for Arc<$db<E, K, V, H, T, Merkleized<H>, Durable>>
         where
@@ -162,32 +127,54 @@ macro_rules! impl_resolver {
                 )
             }
         }
+
+        impl<E, K, V, H, T> Resolver
+            for Arc<RwLock<Option<$db<E, K, V, H, T, Merkleized<H>, Durable>>>>
+        where
+            E: Storage + Clock + Metrics,
+            K: Array,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+        {
+            type Digest = H::Digest;
+            type Op = $op<K, V>;
+            type Error = qmdb::Error;
+
+            async fn get_operations(
+                &self,
+                op_count: Location,
+                start_loc: Location,
+                max_ops: NonZeroU64,
+            ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
+                let guard = self.read().await;
+                let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
+                db.historical_proof(op_count, start_loc, max_ops).await.map(
+                    |(proof, operations)| FetchResult {
+                        proof,
+                        operations,
+                        success_tx: oneshot::channel().0,
+                    },
+                )
+            }
+        }
     };
 }
 
 // Unordered Fixed
-impl_resolver!(FixedDb, FixedOperation, FixedValue, with_option);
+impl_resolver!(FixedDb, FixedOperation, FixedValue);
 
 // Unordered Variable
-impl_resolver!(VariableDb, VariableOperation, VariableValue, with_option);
+impl_resolver!(VariableDb, VariableOperation, VariableValue);
 
 // Ordered Fixed
-impl_resolver!(
-    OrderedFixedDb,
-    OrderedFixedOperation,
-    FixedValue,
-    with_option
-);
+impl_resolver!(OrderedFixedDb, OrderedFixedOperation, FixedValue);
 
 // Ordered Variable
-impl_resolver!(
-    OrderedVariableDb,
-    OrderedVariableOperation,
-    VariableValue,
-    with_option
-);
+impl_resolver!(OrderedVariableDb, OrderedVariableOperation, VariableValue);
 
-// Immutable (no Option variant)
+// Immutable
 impl_resolver!(Immutable, ImmutableOp, VariableValue);
 
 #[cfg(test)]
