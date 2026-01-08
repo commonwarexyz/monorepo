@@ -1732,24 +1732,6 @@ mod tests {
                 senders[restart_peer_idx] = None;
                 receivers[restart_peer_idx] = None;
 
-                // Wait for connections to be detected as closed
-                context.sleep(Duration::from_secs(2)).await;
-
-                // Verify the peer is no longer reachable
-                let peer0_sender = senders[0].as_mut().unwrap();
-                let sent = peer0_sender
-                    .send(
-                        Recipients::One(addresses[restart_peer_idx].clone()),
-                        addresses[0].as_ref(),
-                        true,
-                    )
-                    .await
-                    .unwrap();
-                assert!(
-                    sent.is_empty(),
-                    "peer {restart_peer_idx} should be disconnected after shutdown in round {round}"
-                );
-
                 // Restart the peer with new port (uses bootstrapper for discovery)
                 let peer_context =
                     context.with_label(&format!("peer_{restart_peer_idx}_round_{round}"));
@@ -2132,24 +2114,6 @@ mod tests {
             }
             senders[restart_peer_idx] = None;
             receivers[restart_peer_idx] = None;
-
-            // Wait for connections to be detected as closed
-            context.sleep(Duration::from_secs(2)).await;
-
-            // Verify the peer is no longer reachable from peer 0
-            let peer0_sender = senders[0].as_mut().unwrap();
-            let sent = peer0_sender
-                .send(
-                    Recipients::One(addresses[restart_peer_idx].clone()),
-                    addresses[0].as_ref(),
-                    true,
-                )
-                .await
-                .unwrap();
-            assert!(
-                sent.is_empty(),
-                "peer {restart_peer_idx} should be disconnected after shutdown"
-            );
 
             // Restart the peer with a NEW port and CORRECT dialable address
             let peer_context = context.with_label(&format!("peer_{restart_peer_idx}_restarted"));

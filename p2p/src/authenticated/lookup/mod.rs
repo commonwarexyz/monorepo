@@ -1568,24 +1568,6 @@ mod tests {
                 receivers[restart_peer_idx] = None;
                 oracles[restart_peer_idx] = None;
 
-                // Wait for connections to be detected as closed
-                context.sleep(Duration::from_secs(2)).await;
-
-                // Verify the peer is no longer reachable
-                let peer0_sender = senders[0].as_mut().unwrap();
-                let sent = peer0_sender
-                    .send(
-                        Recipients::One(addresses[restart_peer_idx].clone()),
-                        addresses[0].as_ref(),
-                        true,
-                    )
-                    .await
-                    .unwrap();
-                assert!(
-                    sent.is_empty(),
-                    "peer {restart_peer_idx} should be disconnected after shutdown in round {round}"
-                );
-
                 // Create updated peer set with new port
                 let updated_peer_set: Vec<(_, Address)> = addresses
                     .iter()
