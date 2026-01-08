@@ -87,7 +87,7 @@ cfg_if::cfg_if! {
 pub use hasher::Standard as StandardHasher;
 pub use location::{Location, LocationError, MAX_LOCATION};
 pub use position::{Position, MAX_POSITION};
-pub use proof::Proof;
+pub use proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with an MMR.
