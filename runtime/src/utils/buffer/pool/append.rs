@@ -805,6 +805,7 @@ impl<B: Blob> Blob for Append<B> {
     ///
     /// # Warning
     ///
+    /// - Concurrent mutable operations (append, resize) are not supported and will cause data loss.
     /// - Concurrent readers which try to read past the new size during the resize may error.
     /// - The resize is not guaranteed durable until the next sync.
     async fn resize(&self, size: u64) -> Result<(), Error> {
