@@ -33,18 +33,18 @@ mirror:
 sitemap:
 	python3 generate_sitemap.py
 
-# Generate module status
+# Generate module status (run locally, commit status.json)
 status:
 	cargo run -p commonware-status --manifest-path ../Cargo.toml -- --repo-root .. --output status.json
 
-# Deploy: mirror code and generate sitemap
-deploy: mirror sitemap status
+# Deploy: mirror code and generate sitemap (status.json is pre-committed)
+deploy: mirror sitemap
 
 # Build everything: markdown, mirror, and sitemap
 all: markdown mirror sitemap status
 
 # Clean all generated files
 clean:
-	rm -rf code $(MD_TARGETS) $(SITEMAP) status.json
+	rm -rf code $(MD_TARGETS) $(SITEMAP)
 
 .PHONY: markdown mirror sitemap status deploy all clean
