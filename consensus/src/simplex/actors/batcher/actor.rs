@@ -21,7 +21,10 @@ use commonware_runtime::{
     },
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::ordered::{Quorum, Set};
+use commonware_utils::{
+    channels::fallible::OneshotExt,
+    ordered::{Quorum, Set},
+};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
@@ -214,7 +217,7 @@ impl<
                                 work.len() < skip_timeout
                                 // Leader active in at least one recent round
                                 || work.iter().rev().take(skip_timeout).any(|(_, round)| round.is_active(leader));
-                            active.send(is_active).unwrap();
+                            active.send_lossy(is_active);
 
                             // Setting leader may enable batch verification
                             updated_view = current;

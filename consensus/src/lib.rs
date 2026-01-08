@@ -52,6 +52,7 @@ pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + '
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         use commonware_cryptography::Digest;
+        use commonware_utils::channels::fallible::OneshotExt;
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
         use commonware_runtime::{Spawner, Metrics, Clock};
@@ -126,7 +127,7 @@ cfg_if::cfg_if! {
                 #[allow(clippy::async_yields_async)]
                 async move {
                     let (sender, receiver) = oneshot::channel();
-                    let _ = sender.send(true);
+                    sender.send_lossy(true);
                     receiver
                 }
             }

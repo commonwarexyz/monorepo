@@ -11,7 +11,7 @@ use commonware_storage::{
         Durable, Merkleized,
     },
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
@@ -36,7 +36,7 @@ pub fn create_config() -> Config<Translator, ()> {
         log_write_buffer: NZUsize!(1024),
         translator: commonware_storage::translator::EightCap,
         thread_pool: None,
-        buffer_pool: commonware_runtime::buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+        buffer_pool: commonware_runtime::buffer::PoolRef::new(NZU16!(1024), NZUsize!(10)),
     }
 }
 

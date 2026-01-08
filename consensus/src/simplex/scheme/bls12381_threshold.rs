@@ -29,6 +29,7 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Subject as CertificateSubject, Verification},
     Digest, PublicKey,
 };
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::ordered::Set;
 use rand_core::CryptoRngCore;
 use std::{
@@ -36,13 +37,9 @@ use std::{
     fmt::Debug,
 };
 
-/// BLS12-381 threshold implementation of the [`Scheme`] trait.
-///
-/// It is possible for a node to play one of the following roles: a signer (with its share),
-/// a verifier (with evaluated public polynomial), or an external verifier that
-/// only checks recovered certificates.
+/// The role-specific data for a BLS12-381 threshold scheme participant.
 #[derive(Clone, Debug)]
-pub enum Scheme<P: PublicKey, V: Variant> {
+enum Role<P: PublicKey, V: Variant> {
     Signer {
         /// Participants in the committee.
         participants: Set<P>,
@@ -69,7 +66,21 @@ pub enum Scheme<P: PublicKey, V: Variant> {
     },
 }
 
-impl<P: PublicKey, V: Variant> Scheme<P, V> {
+/// BLS12-381 threshold implementation of the [`certificate::Scheme`] trait.
+///
+/// It is possible for a node to play one of the following roles: a signer (with its share),
+/// a verifier (with evaluated public polynomial), or an external verifier that
+/// only checks recovered certificates.
+///
+/// The scheme is generic over a [`Strategy`] which determines whether cryptographic
+/// operations such as signature recovery and batch verification run sequentially or in parallel.
+#[derive(Clone, Debug)]
+pub struct Scheme<P: PublicKey, V: Variant, S: Strategy = Sequential> {
+    role: Role<P, V>,
+    strategy: S,
+}
+
+impl<P: PublicKey, V: Variant, S: Strategy> Scheme<P, V, S> {
     /// Constructs a signer instance with a private share and evaluated public polynomial.
     ///
     /// The participant identity keys are used for committee ordering and indexing.
@@ -82,11 +93,13 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
+    /// * `strategy` - execution strategy for parallel cryptographic operations
     pub fn signer(
         namespace: &[u8],
         participants: Set<P>,
         polynomial: Sharing<V>,
         share: Share,
+        strategy: S,
     ) -> Option<Self> {
         assert_eq!(
             polynomial.total().get() as usize,
@@ -98,11 +111,14 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             .partial_public(share.index)
             .expect("share index must match participant indices");
         if partial_public == share.public::<V>() {
-            Some(Self::Signer {
-                participants,
-                polynomial,
-                share,
-                namespace: Namespace::new(namespace),
+            Some(Self {
+                role: Role::Signer {
+                    participants,
+                    polynomial,
+                    share,
+                    namespace: Namespace::new(namespace),
+                },
+                strategy,
             })
         } else {
             None
@@ -118,7 +134,13 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
-    pub fn verifier(namespace: &[u8], participants: Set<P>, polynomial: Sharing<V>) -> Self {
+    /// * `strategy` - execution strategy for parallel cryptographic operations
+    pub fn verifier(
+        namespace: &[u8],
+        participants: Set<P>,
+        polynomial: Sharing<V>,
+        strategy: S,
+    ) -> Self {
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
@@ -126,10 +148,13 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         );
         polynomial.precompute_partial_publics();
 
-        Self::Verifier {
-            participants,
-            polynomial,
-            namespace: Namespace::new(namespace),
+        Self {
+            role: Role::Verifier {
+                participants,
+                polynomial,
+                namespace: Namespace::new(namespace),
+            },
+            strategy,
         }
     }
 
@@ -140,54 +165,62 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     ///
     /// * `namespace` - base namespace for domain separation
     /// * `identity` - public identity of the committee (constant across reshares)
-    pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
-        Self::CertificateVerifier {
-            identity,
-            namespace: Namespace::new(namespace),
+    /// * `strategy` - execution strategy for parallel cryptographic operations
+    pub fn certificate_verifier(namespace: &[u8], identity: V::Public, strategy: S) -> Self {
+        Self {
+            role: Role::CertificateVerifier {
+                identity,
+                namespace: Namespace::new(namespace),
+            },
+            strategy,
         }
     }
 
     /// Returns the ordered set of participant public identity keys in the committee.
     pub fn participants(&self) -> &Set<P> {
-        match self {
-            Self::Signer { participants, .. } => participants,
-            Self::Verifier { participants, .. } => participants,
-            _ => panic!("can only be called for signer and verifier"),
+        match &self.role {
+            Role::Signer { participants, .. } => participants,
+            Role::Verifier { participants, .. } => participants,
+            Role::CertificateVerifier { .. } => {
+                panic!("can only be called for signer and verifier")
+            }
         }
     }
 
     /// Returns the public identity of the committee (constant across reshares).
     pub fn identity(&self) -> &V::Public {
-        match self {
-            Self::Signer { polynomial, .. } => polynomial.public(),
-            Self::Verifier { polynomial, .. } => polynomial.public(),
-            Self::CertificateVerifier { identity, .. } => identity,
+        match &self.role {
+            Role::Signer { polynomial, .. } => polynomial.public(),
+            Role::Verifier { polynomial, .. } => polynomial.public(),
+            Role::CertificateVerifier { identity, .. } => identity,
         }
     }
 
     /// Returns the local share if this instance can generate partial signatures.
     pub const fn share(&self) -> Option<&Share> {
-        match self {
-            Self::Signer { share, .. } => Some(share),
+        match &self.role {
+            Role::Signer { share, .. } => Some(share),
             _ => None,
         }
     }
 
     /// Returns the evaluated public polynomial for validating partial signatures produced by committee members.
     pub fn polynomial(&self) -> &Sharing<V> {
-        match self {
-            Self::Signer { polynomial, .. } => polynomial,
-            Self::Verifier { polynomial, .. } => polynomial,
-            _ => panic!("can only be called for signer and verifier"),
+        match &self.role {
+            Role::Signer { polynomial, .. } => polynomial,
+            Role::Verifier { polynomial, .. } => polynomial,
+            Role::CertificateVerifier { .. } => {
+                panic!("can only be called for signer and verifier")
+            }
         }
     }
 
     /// Returns the pre-computed namespaces.
     const fn namespace(&self) -> &Namespace {
-        match self {
-            Self::Signer { namespace, .. } => namespace,
-            Self::Verifier { namespace, .. } => namespace,
-            Self::CertificateVerifier { namespace, .. } => namespace,
+        match &self.role {
+            Role::Signer { namespace, .. } => namespace,
+            Role::Verifier { namespace, .. } => namespace,
+            Role::CertificateVerifier { namespace, .. } => namespace,
         }
     }
 
@@ -251,8 +284,12 @@ where
         rng,
         namespace,
         n,
-        Scheme::signer,
-        Scheme::verifier,
+        |namespace, participants, polynomial, share| {
+            Scheme::signer(namespace, participants, polynomial, share, Sequential)
+        },
+        |namespace, participants, polynomial| {
+            Scheme::verifier(namespace, participants, polynomial, Sequential)
+        },
     )
 }
 
@@ -431,15 +468,15 @@ fn seed_message_from_subject<D: Digest>(subject: &Subject<'_, D>) -> bytes::Byte
     }
 }
 
-impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
+impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V, S> {
     type Subject<'a, D: Digest> = Subject<'a, D>;
     type PublicKey = P;
     type Signature = Signature<V>;
     type Certificate = Signature<V>;
 
     fn me(&self) -> Option<u32> {
-        match self {
-            Self::Signer { share, .. } => Some(share.index),
+        match &self.role {
+            Role::Signer { share, .. } => Some(share.index),
             _ => None,
         }
     }
@@ -491,24 +528,19 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let vote_message = subject.message();
         let seed_message = seed_message_from_subject(&subject);
 
-        batch::verify_same_signer::<_, V, _>(
-            rng,
-            &evaluated,
-            &[
-                (
-                    vote_namespace,
-                    vote_message.as_ref(),
-                    attestation.signature.vote_signature,
-                ),
-                (
-                    &namespace.seed,
-                    seed_message.as_ref(),
-                    attestation.signature.seed_signature,
-                ),
-            ],
-            1,
-        )
-        .is_ok()
+        let entries = &[
+            (
+                vote_namespace,
+                vote_message.as_ref(),
+                attestation.signature.vote_signature,
+            ),
+            (
+                &namespace.seed,
+                seed_message.as_ref(),
+                attestation.signature.seed_signature,
+            ),
+        ];
+        batch::verify_same_signer::<_, V, _, _>(rng, &evaluated, entries, &self.strategy).is_ok()
     }
 
     fn verify_attestations<R, D, I>(
@@ -611,9 +643,13 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             return None;
         }
 
-        let (vote_signature, seed_signature) =
-            threshold::recover_pair::<V, _>(quorum, vote_partials.iter(), seed_partials.iter())
-                .ok()?;
+        let (vote_signature, seed_signature) = threshold::recover_pair::<V, _, _>(
+            quorum,
+            vote_partials.iter(),
+            seed_partials.iter(),
+            &self.strategy,
+        )
+        .ok()?;
 
         Some(Signature {
             vote_signature,
@@ -634,24 +670,19 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let vote_message = subject.message();
         let seed_message = seed_message_from_subject(&subject);
 
-        batch::verify_same_signer::<_, V, _>(
-            rng,
-            identity,
-            &[
-                (
-                    vote_namespace,
-                    vote_message.as_ref(),
-                    certificate.vote_signature,
-                ),
-                (
-                    &namespace.seed,
-                    seed_message.as_ref(),
-                    certificate.seed_signature,
-                ),
-            ],
-            1,
-        )
-        .is_ok()
+        let entries = &[
+            (
+                vote_namespace,
+                vote_message.as_ref(),
+                certificate.vote_signature,
+            ),
+            (
+                &namespace.seed,
+                seed_message.as_ref(),
+                certificate.seed_signature,
+            ),
+        ];
+        batch::verify_same_signer::<_, V, _, _>(rng, identity, entries, &self.strategy).is_ok()
     }
 
     fn verify_certificates<'a, R, D, I>(&self, rng: &mut R, certificates: I) -> bool
@@ -693,7 +724,8 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             .iter()
             .map(|(ns, msg, sig)| (*ns, msg.as_ref(), *sig))
             .collect();
-        batch::verify_same_signer::<_, V, _>(rng, identity, &entries_refs, 1).is_ok()
+        batch::verify_same_signer::<_, V, _, _>(rng, identity, &entries_refs, &self.strategy)
+            .is_ok()
     }
 
     fn is_attributable() -> bool {
@@ -772,6 +804,7 @@ mod tests {
             participants.keys().clone(),
             polynomial,
             shares[0].clone(),
+            Sequential,
         );
     }
 
@@ -795,6 +828,7 @@ mod tests {
             participants.keys().clone(),
             polynomial,
             shares[0].clone(),
+            Sequential,
         );
     }
 
@@ -814,7 +848,12 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 5);
         let (polynomial, _) = deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
-        Scheme::<V>::verifier(NAMESPACE, participants.keys().clone(), polynomial);
+        Scheme::<V>::verifier(
+            NAMESPACE,
+            participants.keys().clone(),
+            polynomial,
+            Sequential,
+        );
     }
 
     #[test]
@@ -1268,7 +1307,7 @@ mod tests {
         let certificate = schemes[0].assemble(votes).expect("assemble certificate");
 
         let certificate_verifier =
-            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity());
+            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity(), Sequential);
         assert!(
             certificate_verifier
                 .sign(Subject::Finalize {
@@ -1295,7 +1334,7 @@ mod tests {
     fn certificate_verifier_panics_on_vote<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 37);
         let certificate_verifier =
-            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity());
+            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity(), Sequential);
         let proposal = sample_proposal(Epoch::new(0), View::new(15), 8);
         let vote = schemes[1]
             .sign(Subject::Finalize {

@@ -97,11 +97,11 @@ pub(crate) mod test {
         buffer::PoolRef,
         deterministic::{self, Context},
     };
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
 
     // Janky page & cache sizes to exercise boundary conditions.
-    const PAGE_SIZE: usize = 103;
+    const PAGE_SIZE: u16 = 103;
     const PAGE_CACHE_SIZE: usize = 13;
 
     pub(crate) type VarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
@@ -125,7 +125,7 @@ pub(crate) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         }
     }
 

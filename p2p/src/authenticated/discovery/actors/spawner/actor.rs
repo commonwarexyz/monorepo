@@ -151,8 +151,12 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: Public
                                     },
                                 );
 
-                                // Register peer with the router
-                                let channels = router.ready(peer.clone(), messenger).await;
+                                // Register peer with the router (may fail during shutdown)
+                                let Some(channels) = router.ready(peer.clone(), messenger).await else {
+                                    debug!(?peer, "router shut down during peer setup");
+                                    connections.dec();
+                                    return;
+                                };
 
                                 // Run peer (greeting is sent first before main loop)
                                 let result = peer_actor

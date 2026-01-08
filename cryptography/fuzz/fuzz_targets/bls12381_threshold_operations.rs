@@ -8,8 +8,10 @@ use commonware_cryptography::bls12381::primitives::{
     sharing::Sharing,
     variant::{MinPk, MinSig, PartialSignature},
 };
+use commonware_parallel::{Rayon, Sequential};
 use libfuzzer_sys::fuzz_target;
 use rand::thread_rng;
+use std::num::NonZeroUsize;
 
 mod common;
 use common::{
@@ -283,12 +285,12 @@ fn fuzz(op: FuzzOperation) {
                         )
                     })
                     .collect();
-                let _ = threshold::batch_verify_same_signer::<_, MinPk, _>(
+                let _ = threshold::batch_verify_same_signer::<_, MinPk, _, _>(
                     &mut thread_rng(),
                     &public,
                     index,
                     &entries_refs,
-                    1,
+                    &Sequential,
                 );
             }
         }
@@ -313,12 +315,12 @@ fn fuzz(op: FuzzOperation) {
                         )
                     })
                     .collect();
-                let _ = threshold::batch_verify_same_signer::<_, MinSig, _>(
+                let _ = threshold::batch_verify_same_signer::<_, MinSig, _, _>(
                     &mut thread_rng(),
                     &public,
                     index,
                     &entries_refs,
-                    1,
+                    &Sequential,
                 );
             }
         }
@@ -384,12 +386,14 @@ fn fuzz(op: FuzzOperation) {
             signature_groups,
             concurrency,
         } => {
-            if concurrency > 0 && !signature_groups.is_empty() {
+            if !signature_groups.is_empty() {
                 let groups_refs: Vec<Vec<&PartialSignature<MinPk>>> = signature_groups
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();
-                let _ = threshold::recover_multiple::<MinPk, _>(&sharing, groups_refs, concurrency);
+                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                let _ =
+                    threshold::recover_multiple::<MinPk, _, _>(&sharing, groups_refs, &strategy);
             }
         }
 
@@ -398,13 +402,14 @@ fn fuzz(op: FuzzOperation) {
             signature_groups,
             concurrency,
         } => {
-            if concurrency > 0 && !signature_groups.is_empty() {
+            if !signature_groups.is_empty() {
                 let groups_refs: Vec<Vec<&PartialSignature<MinSig>>> = signature_groups
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();
+                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
                 let _ =
-                    threshold::recover_multiple::<MinSig, _>(&sharing, groups_refs, concurrency);
+                    threshold::recover_multiple::<MinSig, _, _>(&sharing, groups_refs, &strategy);
             }
         }
 
@@ -413,7 +418,12 @@ fn fuzz(op: FuzzOperation) {
             partials_1,
             partials_2,
         } => {
-            let _ = threshold::recover_pair::<MinPk, _>(&sharing, &partials_1, &partials_2);
+            let _ = threshold::recover_pair::<MinPk, _, _>(
+                &sharing,
+                &partials_1,
+                &partials_2,
+                &Sequential,
+            );
         }
 
         FuzzOperation::RecoverPairMinSig {
@@ -421,7 +431,12 @@ fn fuzz(op: FuzzOperation) {
             partials_1,
             partials_2,
         } => {
-            let _ = threshold::recover_pair::<MinSig, _>(&sharing, &partials_1, &partials_2);
+            let _ = threshold::recover_pair::<MinSig, _, _>(
+                &sharing,
+                &partials_1,
+                &partials_2,
+                &Sequential,
+            );
         }
 
         FuzzOperation::SignMessageMinPk {

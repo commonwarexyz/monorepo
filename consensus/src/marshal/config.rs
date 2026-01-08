@@ -39,8 +39,11 @@ where
     /// The size of the replay buffer for storage archives.
     pub replay_buffer: NonZeroUsize,
 
-    /// The size of the write buffer for storage archives.
-    pub write_buffer: NonZeroUsize,
+    /// The size of the write buffer for the key journal of storage archives.
+    pub key_write_buffer: NonZeroUsize,
+
+    /// The size of the write buffer for the value journal of storage archives.
+    pub value_write_buffer: NonZeroUsize,
 
     /// Codec configuration for block type.
     pub block_codec_config: B::Cfg,

@@ -1,7 +1,7 @@
 use crate::Resolver;
 use commonware_cryptography::PublicKey;
-use commonware_utils::{vec::NonEmptyVec, Span};
-use futures::{channel::mpsc, SinkExt};
+use commonware_utils::{channels::fallible::AsyncFallibleExt, vec::NonEmptyVec, Span};
+use futures::channel::mpsc;
 
 type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 
@@ -54,12 +54,11 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// If a fetch is already in progress for this key, this clears any existing
     /// targets for that key (the fetch will try any available peer).
     ///
-    /// Panics if the send fails.
+    /// If the engine has shut down, this is a no-op.
     async fn fetch(&mut self, key: Self::Key) {
         self.sender
-            .send(Message::Fetch(vec![FetchRequest { key, targets: None }]))
-            .await
-            .expect("Failed to send fetch");
+            .send_lossy(Message::Fetch(vec![FetchRequest { key, targets: None }]))
+            .await;
     }
 
     /// Send a fetch request to the peer actor for a batch of keys.
@@ -67,34 +66,38 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// If a fetch is already in progress for any key, this clears any existing
     /// targets for that key (the fetch will try any available peer).
     ///
-    /// Panics if the send fails.
+    /// If the engine has shut down, this is a no-op.
     async fn fetch_all(&mut self, keys: Vec<Self::Key>) {
         self.sender
-            .send(Message::Fetch(
+            .send_lossy(Message::Fetch(
                 keys.into_iter()
                     .map(|key| FetchRequest { key, targets: None })
                     .collect(),
             ))
-            .await
-            .expect("Failed to send fetch_all");
+            .await;
     }
 
+    /// Send a targeted fetch request to the peer actor.
+    ///
+    /// If the engine has shut down, this is a no-op.
     async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
         self.sender
-            .send(Message::Fetch(vec![FetchRequest {
+            .send_lossy(Message::Fetch(vec![FetchRequest {
                 key,
                 targets: Some(targets),
             }]))
-            .await
-            .expect("Failed to send fetch_targeted");
+            .await;
     }
 
+    /// Send targeted fetch requests to the peer actor for a batch of keys.
+    ///
+    /// If the engine has shut down, this is a no-op.
     async fn fetch_all_targeted(
         &mut self,
         requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
     ) {
         self.sender
-            .send(Message::Fetch(
+            .send_lossy(Message::Fetch(
                 requests
                     .into_iter()
                     .map(|(key, targets)| FetchRequest {
@@ -103,39 +106,31 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
                     })
                     .collect(),
             ))
-            .await
-            .expect("Failed to send fetch_all_targeted");
+            .await;
     }
 
     /// Send a cancel request to the peer actor.
     ///
-    /// Panics if the send fails.
+    /// If the engine has shut down, this is a no-op.
     async fn cancel(&mut self, key: Self::Key) {
-        self.sender
-            .send(Message::Cancel { key })
-            .await
-            .expect("Failed to send cancel_fetch");
+        self.sender.send_lossy(Message::Cancel { key }).await;
     }
 
-    /// Send a cancel all request to the peer actor.
+    /// Send a retain request to the peer actor.
     ///
-    /// Panics if the send fails.
+    /// If the engine has shut down, this is a no-op.
     async fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {
         self.sender
-            .send(Message::Retain {
+            .send_lossy(Message::Retain {
                 predicate: Box::new(predicate),
             })
-            .await
-            .expect("Failed to send retain");
+            .await;
     }
 
     /// Send a clear request to the peer actor.
     ///
-    /// Panics if the send fails.
+    /// If the engine has shut down, this is a no-op.
     async fn clear(&mut self) {
-        self.sender
-            .send(Message::Clear)
-            .await
-            .expect("Failed to send cancel_all");
+        self.sender.send_lossy(Message::Clear).await;
     }
 }

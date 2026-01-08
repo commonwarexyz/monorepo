@@ -141,6 +141,7 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, Encode, Error as CodecError, ReadExt};
     use commonware_math::algebra::CryptoGroup;
+    use commonware_parallel::Sequential;
     use commonware_utils::{from_hex_formatted, test_rng, union_unique};
     use rand::rngs::OsRng;
     use rstest::rstest;
@@ -318,10 +319,12 @@ mod tests {
             assert!(verify::<MinSig>(&public, DST, &message, &signature).is_err());
         }
 
-        assert!(MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_ok());
+        assert!(MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures, &Sequential).is_ok());
 
         signatures[0] += &<MinSig as Variant>::Signature::generator();
-        assert!(MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_err());
+        assert!(
+            MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures, &Sequential).is_err()
+        );
     }
 
     // Source: https://github.com/paulmillr/noble-curves/blob/bee1ffe0000095f95b982a969d06baaa3dd8ce73/test/bls12-381/bls12-381-g2-test-vectors.txt
@@ -357,10 +360,10 @@ mod tests {
             assert!(verify::<MinPk>(&public, DST, &message, &signature).is_err());
         }
 
-        assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_ok());
+        assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures, &Sequential).is_ok());
 
         signatures[0] += &<MinPk as Variant>::Signature::generator();
-        assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_err());
+        assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures, &Sequential).is_err());
     }
 
     fn parse_sign_vector(
@@ -494,9 +497,14 @@ mod tests {
 
             // Verify using batch verification
             let hm = hash::<MinPk>(MinPk::MESSAGE, &message);
-            let batch_result =
-                MinPk::batch_verify(&mut rand::thread_rng(), &[public_key], &[hm], &[signature])
-                    .is_ok();
+            let batch_result = MinPk::batch_verify(
+                &mut rand::thread_rng(),
+                &[public_key],
+                &[hm],
+                &[signature],
+                &Sequential,
+            )
+            .is_ok();
 
             single_result && batch_result
         };
@@ -567,6 +575,7 @@ mod tests {
             &valid_publics,
             &valid_hms,
             &valid_signatures,
+            &Sequential,
         )
         .expect("batch verify of valid vectors should succeed");
 
@@ -574,7 +583,8 @@ mod tests {
             &mut rand::thread_rng(),
             &all_publics,
             &all_hms,
-            &all_signatures
+            &all_signatures,
+            &Sequential,
         )
         .is_err());
     }

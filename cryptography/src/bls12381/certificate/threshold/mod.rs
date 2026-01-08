@@ -24,6 +24,7 @@ use crate::{
 use ::core::fmt::Debug;
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
+use commonware_parallel::Sequential;
 use commonware_utils::ordered::Set;
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
@@ -362,7 +363,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .map(|(ns, msg, sig)| (ns.as_ref(), msg.as_ref(), *sig))
             .collect();
 
-        batch::verify_same_signer::<_, V, _>(rng, self.identity(), &entries_refs, 1).is_ok()
+        batch::verify_same_signer::<_, V, _, _>(rng, self.identity(), &entries_refs, &Sequential)
+            .is_ok()
     }
 
     pub const fn is_attributable() -> bool {

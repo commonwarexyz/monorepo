@@ -1,3 +1,4 @@
+use super::Header;
 use crate::Error;
 use commonware_utils::{hex, StableBuf};
 use std::{io::SeekFrom, sync::Arc};
@@ -35,6 +36,9 @@ impl crate::Blob for Blob {
     ) -> Result<StableBuf, Error> {
         let mut file = self.file.lock().await;
         let mut buf = buf.into();
+        let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
         file.seek(SeekFrom::Start(offset))
             .await
             .map_err(|_| Error::ReadFailed)?;
@@ -46,6 +50,9 @@ impl crate::Blob for Blob {
 
     async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
         let mut file = self.file.lock().await;
+        let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
         file.seek(SeekFrom::Start(offset))
             .await
             .map_err(|_| Error::WriteFailed)?;
@@ -57,6 +64,9 @@ impl crate::Blob for Blob {
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let file = self.file.lock().await;
+        let len = len
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
         file.set_len(len)
             .await
             .map_err(|e| Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e))?;

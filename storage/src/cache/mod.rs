@@ -42,7 +42,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
 //! use commonware_storage::cache::{Cache, Config};
-//! use commonware_utils::{NZUsize, NZU64};
+//! use commonware_utils::{NZUsize, NZU16, NZU64};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -54,7 +54,7 @@
 //!         items_per_blob: NZU64!(1024),
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!         replay_buffer: NZUsize!(4096),
-//!         buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!         buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
 //!     };
 //!     let mut cache = Cache::init(context, cfg).await.unwrap();
 //!
@@ -126,17 +126,16 @@ pub struct Config<C> {
 mod tests {
     use super::*;
     use crate::journal::Error as JournalError;
-    use commonware_codec::{varint::UInt, EncodeSize};
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::Rng;
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, num::NonZeroU16};
 
     const DEFAULT_ITEMS_PER_BLOB: u64 = 65536;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     #[test_traced]
@@ -182,72 +181,6 @@ mod tests {
                 result,
                 Err(Error::Journal(JournalError::Codec(_)))
             ));
-        });
-    }
-
-    #[test_traced]
-    fn test_cache_record_corruption() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Initialize the cache
-            let cfg = Config {
-                partition: "test_partition".into(),
-                codec_config: (),
-                compression: None,
-                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-            let mut cache = Cache::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize cache");
-
-            let index = 1u64;
-            let data = 1;
-
-            // Put the data
-            cache
-                .put(index, data)
-                .await
-                .expect("Failed to put data");
-
-            // Sync and drop the cache
-            cache.sync().await.expect("Failed to sync cache");
-            drop(cache);
-
-            // Corrupt the value
-            let section = (index / DEFAULT_ITEMS_PER_BLOB) * DEFAULT_ITEMS_PER_BLOB;
-            let (blob, _) = context
-                .open("test_partition", &section.to_be_bytes())
-                .await
-                .unwrap();
-            let value_location = 4 /* journal size */ + UInt(1u64).encode_size() as u64 /* index */ + 4 /* value length */;
-            blob.write_at(b"testdaty".to_vec(), value_location).await.unwrap();
-            blob.sync().await.unwrap();
-
-            // Initialize the cache again
-            let cache = Cache::<_, i32>::init(
-                context,
-                Config {
-                    partition: "test_partition".into(),
-                    codec_config: (),
-                    compression: None,
-                    write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                    replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                    items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                },
-            )
-            .await.expect("Failed to initialize cache");
-
-            // Check that the cache is empty
-            let retrieved: Option<i32> = cache
-                .get(index)
-                .await
-                .expect("Failed to get data");
-            assert!(retrieved.is_none());
         });
     }
 

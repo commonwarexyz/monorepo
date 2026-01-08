@@ -1,5 +1,6 @@
 use crate::Span;
 use bytes::Bytes;
+use commonware_utils::channels::fallible::OneshotExt;
 use futures::channel::oneshot;
 use std::collections::HashMap;
 
@@ -27,7 +28,7 @@ impl<K: Span, V: Into<Bytes> + Clone + Send + 'static> crate::p2p::Producer for 
     async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (sender, receiver) = oneshot::channel();
         if let Some(value) = self.data.get(&key) {
-            let _ = sender.send(value.clone().into());
+            sender.send_lossy(value.clone().into());
         }
         receiver
     }

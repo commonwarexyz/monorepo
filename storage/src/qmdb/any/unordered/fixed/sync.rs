@@ -141,14 +141,14 @@ mod tests {
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use rstest::rstest;
-    use std::num::NonZeroU64;
+    use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
     use sync_tests::SyncTestHarness;
 
     // Janky sizes to test boundary conditions.
-    const PAGE_SIZE: usize = 99;
-    const PAGE_CACHE_SIZE: usize = 3;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(99);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
 
     fn test_digest(value: u64) -> Digest {
         Sha256::hash(&value.to_be_bytes())
@@ -307,7 +307,7 @@ mod tests {
                 partition: "test_fresh_start".into(),
                 items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Initialize journal with sync boundaries when no existing data exists
@@ -357,7 +357,7 @@ mod tests {
                 partition: "test_overlap".into(),
                 items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Create initial journal with 20 operations
@@ -423,7 +423,7 @@ mod tests {
                 partition: "test_exact_match".into(),
                 items_per_blob: NZU64!(3),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Create initial journal with 20 operations (0-19)
@@ -489,7 +489,7 @@ mod tests {
                 partition: "test_unexpected_data".into(),
                 items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Create initial journal with 30 operations (0-29)
@@ -530,7 +530,7 @@ mod tests {
                 partition: "test_invalid_range".into(),
                 items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             let lower_bound = 6;
@@ -553,7 +553,7 @@ mod tests {
                 partition: "test_init_at_size".into(),
                 items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Test 1: Initialize at size 0 (empty journal)
@@ -620,7 +620,7 @@ mod tests {
                 // Operations 5-6 should be unreadable (dummy data in tail blob)
                 for i in 5..7 {
                     let result = journal.read(i).await;
-                    assert!(result.is_err()); // Should fail due to invalid data
+                    assert_eq!(result.unwrap(), Sha256::fill(0)); // dummy data is all 0s
                 }
 
                 // Should be able to append from position 7
@@ -648,10 +648,10 @@ mod tests {
                     assert!(matches!(result, Err(journal::Error::ItemPruned(_))));
                 }
 
-                // Operations 20-22 should be unreadable (dummy data in tail blob)
+                // Operations 20-22 should be all 0s (dummy data in tail blob)
                 for i in 20..23 {
-                    let result = journal.read(i).await;
-                    assert!(result.is_err()); // Should fail due to invalid data
+                    let result = journal.read(i).await.unwrap();
+                    assert_eq!(result, Sha256::fill(0));
                 }
 
                 // Should be able to append from position 23

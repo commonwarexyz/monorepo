@@ -15,7 +15,7 @@ use commonware_cryptography::Digest;
 use core::{mem, ops::Range};
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        use commonware_runtime::ThreadPool;
+        use commonware_parallel::ThreadPool;
         use rayon::prelude::*;
     } else {
         struct ThreadPool;
@@ -808,8 +808,8 @@ mod tests {
         stability::ROOTS,
     };
     use commonware_cryptography::{sha256, Hasher, Sha256};
-    use commonware_runtime::{create_pool, deterministic, tokio, Runner};
-    use commonware_utils::hex;
+    use commonware_runtime::{deterministic, tokio, RayonPoolSpawner, Runner};
+    use commonware_utils::{hex, NZUsize};
 
     /// Build the MMR corresponding to the stability test `ROOTS` and confirm the roots match.
     fn build_and_check_test_roots_mmr(mmr: &mut CleanMmr<sha256::Digest>) {
@@ -1071,7 +1071,7 @@ mod tests {
     fn test_mem_mmr_root_stability_parallel() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let pool = commonware_runtime::create_pool(context, 4).unwrap();
+            let pool = context.create_pool(NZUsize!(4)).unwrap();
             let mut hasher: Standard<Sha256> = Standard::new();
 
             let mmr = Mmr::init(
@@ -1243,14 +1243,14 @@ mod tests {
         });
     }
 
-    #[test]
     /// Same test as above only using a thread pool to trigger parallelization. This requires we use
     /// tokio runtime instead of the deterministic one.
+    #[test]
     fn test_mem_mmr_batch_parallel_update_leaf() {
         let mut hasher: Standard<Sha256> = Standard::new();
         let executor = tokio::Runner::default();
         executor.start(|ctx| async move {
-            let pool = create_pool(ctx, 4).unwrap();
+            let pool = ctx.create_pool(NZUsize!(4)).unwrap();
             let mmr = Mmr::init(
                 Config {
                     nodes: Vec::new(),

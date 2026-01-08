@@ -38,6 +38,7 @@ use commonware_storage::{
 };
 use commonware_utils::{
     acknowledgement::Exact,
+    channels::fallible::OneshotExt,
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
     Acknowledgement, BoxedError,
@@ -180,8 +181,9 @@ where
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
             prunable_items_per_section: config.prunable_items_per_section,
             replay_buffer: config.replay_buffer,
-            write_buffer: config.write_buffer,
-            freezer_journal_buffer_pool: config.buffer_pool.clone(),
+            key_write_buffer: config.key_write_buffer,
+            value_write_buffer: config.value_write_buffer,
+            key_buffer_pool: config.buffer_pool.clone(),
         };
         let cache = cache::Manager::init(
             context.with_label("cache"),
@@ -361,7 +363,7 @@ where
                                     .map(|f| (height, f.proposal.payload)),
                                 BlockID::Latest => self.get_latest().await,
                             };
-                            let _ = response.send(info);
+                            response.send_lossy(info);
                         }
                         Message::Proposed { round, block } => {
                             self.cache_verified(round, block.commitment(), block.clone()).await;
@@ -417,24 +419,24 @@ where
                             match identifier {
                                 BlockID::Commitment(commitment) => {
                                     let result = self.find_block(&mut buffer, commitment).await;
-                                    let _ = response.send(result);
+                                    response.send_lossy(result);
                                 }
                                 BlockID::Height(height) => {
                                     let result = self.get_finalized_block(height).await;
-                                    let _ = response.send(result);
+                                    response.send_lossy(result);
                                 }
                                 BlockID::Latest => {
                                     let block = match self.get_latest().await {
                                         Some((_, commitment)) => self.find_block(&mut buffer, commitment).await,
                                         None => None,
                                     };
-                                    let _ = response.send(block);
+                                    response.send_lossy(block);
                                 }
                             }
                         }
                         Message::GetFinalization { height, response } => {
                             let finalization = self.get_finalization_by_height(height).await;
-                            let _ = response.send(finalization);
+                            response.send_lossy(finalization);
                         }
                         Message::HintFinalized { height, targets } => {
                             // Skip if height is at or below the floor
@@ -454,7 +456,7 @@ where
                         Message::Subscribe { round, commitment, response } => {
                             // Check for block locally
                             if let Some(block) = self.find_block(&mut buffer, commitment).await {
-                                let _ = response.send(block);
+                                response.send_lossy(block);
                                 continue;
                             }
 
@@ -553,7 +555,7 @@ where
                                         debug!(?commitment, "block missing on request");
                                         continue;
                                     };
-                                    let _ = response.send(block.encode());
+                                    response.send_lossy(block.encode());
                                 }
                                 Request::Finalized { height } => {
                                     // Get finalization
@@ -569,7 +571,7 @@ where
                                     };
 
                                     // Send finalization
-                                    let _ = response.send((finalization, block).encode());
+                                    response.send_lossy((finalization, block).encode());
                                 }
                                 Request::Notarized { round } => {
                                     // Get notarization
@@ -584,7 +586,7 @@ where
                                         debug!(?commitment, "block missing on request");
                                         continue;
                                     };
-                                    let _ = response.send((notarization, block).encode());
+                                    response.send_lossy((notarization, block).encode());
                                 }
                             }
                         },
@@ -593,13 +595,13 @@ where
                                 Request::Block(commitment) => {
                                     // Parse block
                                     let Ok(block) = B::decode_cfg(value.as_ref(), &self.block_codec_config) else {
-                                        let _ = response.send(false);
+                                        response.send_lossy(false);
                                         continue;
                                     };
 
                                     // Validation
                                     if block.commitment() != commitment {
-                                        let _ = response.send(false);
+                                        response.send_lossy(false);
                                         continue;
                                     }
 
@@ -617,15 +619,15 @@ where
                                     )
                                     .await;
                                     debug!(?commitment, %height, "received block");
-                                    let _ = response.send(true);
+                                    response.send_lossy(true);
                                 },
                                 Request::Finalized { height } => {
                                     let Some(bounds) = self.epocher.containing(height) else {
-                                        let _ = response.send(false);
+                                        response.send_lossy(false);
                                         continue;
                                     };
                                     let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
-                                        let _ = response.send(false);
+                                        response.send_lossy(false);
                                         continue;
                                     };
 
@@ -636,7 +638,7 @@ where
                                             &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
                                         )
                                     else {
-                                        let _ = response.send(false);
+                                        response.send_lossy(false);
                                         continue;
                                     };
 
@@ -645,13 +647,13 @@ where
                                         || finalization.proposal.payload != block.commitment()
                                         || !finalization.verify(&mut self.context, &scheme)
                                     {
-                                        let _ = response.send(false);
+                                        response.send_lossy(false);
                                         continue;
                                     }
 
                                     // Valid finalization received
                                     debug!(%height, "received finalization");
-                                    let _ = response.send(true);
+                                    response.send_lossy(true);
                                     self.finalize(
                                         height,
                                         block.commitment(),
@@ -665,7 +667,7 @@ where
                                 },
                                 Request::Notarized { round } => {
                                     let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
-                                        let _ = response.send(false);
+                                        response.send_lossy(false);
                                         continue;
                                     };
 
@@ -676,7 +678,7 @@ where
                                             &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
                                         )
                                     else {
-                                        let _ = response.send(false);
+                                        response.send_lossy(false);
                                         continue;
                                     };
 
@@ -685,12 +687,12 @@ where
                                         || notarization.proposal.payload != block.commitment()
                                         || !notarization.verify(&mut self.context, &scheme)
                                     {
-                                        let _ = response.send(false);
+                                        response.send_lossy(false);
                                         continue;
                                     }
 
                                     // Valid notarization received
-                                    let _ = response.send(true);
+                                    response.send_lossy(true);
                                     let commitment = block.commitment();
                                     debug!(?round, ?commitment, "received notarization");
 
@@ -740,7 +742,7 @@ where
     async fn notify_subscribers(&mut self, commitment: B::Commitment, block: &B) {
         if let Some(mut bs) = self.block_subscriptions.remove(&commitment) {
             for subscriber in bs.subscribers.drain(..) {
-                let _ = subscriber.send(block.clone());
+                subscriber.send_lossy(block.clone());
             }
         }
     }

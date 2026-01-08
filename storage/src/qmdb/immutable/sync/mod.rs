@@ -168,13 +168,13 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::{channel::mpsc, SinkExt as _};
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use rstest::rstest;
     use std::{
         collections::HashMap,
-        num::{NonZeroU64, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU64, NonZeroUsize},
         sync::Arc,
     };
 
@@ -200,7 +200,7 @@ mod tests {
 
     /// Create a simple config for sync tests
     fn create_sync_config(suffix: &str) -> immutable::Config<crate::translator::TwoCap, ()> {
-        const PAGE_SIZE: NonZeroUsize = NZUsize!(77);
+        const PAGE_SIZE: NonZeroU16 = NZU16!(77);
         const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 

@@ -3,7 +3,7 @@
 use crate::{journal::contiguous::fixed, qmdb};
 use commonware_codec::CodecFixed;
 use commonware_runtime::{
-    buffer::Append, telemetry::metrics::status::GaugeExt, Blob, Metrics, Storage,
+    buffer::pool::Append, telemetry::metrics::status::GaugeExt, Blob, Metrics, Storage,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
@@ -111,7 +111,13 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
         "Expected empty blob for fresh initialization"
     );
 
-    let tail = Append::new(tail_blob, 0, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
+    let tail = Append::new(
+        tail_blob,
+        0,
+        cfg.write_buffer.into(),
+        cfg.buffer_pool.clone(),
+    )
+    .await?;
     if tail_items > 0 {
         tail.resize(tail_size).await?;
     }

@@ -2,6 +2,7 @@ use super::{Config, Error};
 use crate::{kv, rmap::RMap, Persistable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
@@ -24,17 +25,17 @@ struct Record<V: CodecFixed<Cfg = ()>> {
 
 impl<V: CodecFixed<Cfg = ()>> Record<V> {
     fn new(value: V) -> Self {
-        let crc = crc32fast::hash(&value.encode());
+        let crc = Crc32::checksum(&value.encode());
         Self { value, crc }
     }
 
     fn is_valid(&self) -> bool {
-        self.crc == crc32fast::hash(&self.value.encode())
+        self.crc == Crc32::checksum(&self.value.encode())
     }
 }
 
 impl<V: CodecFixed<Cfg = ()>> FixedSize for Record<V> {
-    const SIZE: usize = V::SIZE + u32::SIZE;
+    const SIZE: usize = V::SIZE + crc32::Digest::SIZE;
 }
 
 impl<V: CodecFixed<Cfg = ()>> CodecWrite for Record<V> {

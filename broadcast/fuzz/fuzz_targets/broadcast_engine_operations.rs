@@ -189,7 +189,7 @@ fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         // Create network
-        let (network, mut oracle) = Network::<deterministic::Context, PublicKey>::new(
+        let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,

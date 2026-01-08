@@ -13,6 +13,7 @@ use bytes::{Buf, Bytes};
 use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_utils::channels::fallible::FallibleExt;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -278,7 +279,7 @@ impl<R: Receiver> Drop for SubReceiver<R> {
             .expect("SubReceiver::drop called twice");
 
         // Deregister the subchannel immediately.
-        let _ = control_tx.unbounded_send(Control::Deregister {
+        control_tx.send_lossy(Control::Deregister {
             subchannel: self.subchannel,
         });
     }

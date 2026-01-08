@@ -11,7 +11,15 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the store.
+#[cfg(not(full_bench))]
+const ITEMS: u64 = 10_000;
+#[cfg(full_bench)]
 const ITEMS: u64 = 250_000;
+
+#[cfg(not(full_bench))]
+const READS: [usize; 1] = [1_000];
+#[cfg(full_bench)]
+const READS: [usize; 3] = [1_000, 10_000, 50_000];
 
 /// Select random keys for benchmarking.
 pub fn select_keys(count: usize, keys: &[Key]) -> Vec<Key> {
@@ -65,7 +73,7 @@ fn bench_get(c: &mut Criterion) {
     let runner = tokio::Runner::new(cfg.clone());
     for pattern in ["random", "recent"] {
         for mode in ["serial", "concurrent"] {
-            for reads in [1_000, 10_000, 50_000] {
+            for reads in READS {
                 let label = format!(
                     "{}/pattern={} mode={} reads={}",
                     module_path!(),

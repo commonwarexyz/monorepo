@@ -24,20 +24,21 @@ use commonware_cryptography::{
     transcript::{Summary, Transcript},
     PublicKey, Signer,
 };
+use commonware_parallel::Strategy;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage as RuntimeStorage};
 use commonware_storage::journal::{
     contiguous::variable::{Config as CVConfig, Journal as CVJournal},
     segmented::variable::{Config as SVConfig, Journal as SVJournal},
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::StreamExt;
 use std::{
     collections::BTreeMap,
-    num::{NonZeroU32, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
 };
 use tracing::debug;
 
-const PAGE_SIZE: NonZeroUsize = NZUsize!(1 << 12);
+const PAGE_SIZE: NonZeroU16 = NZU16!(1 << 12);
 const POOL_CAPACITY: NonZeroUsize = NZUsize!(1 << 20);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1 << 12);
 const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20);
@@ -655,9 +656,9 @@ impl<V: Variant, C: Signer> Player<V, C> {
     pub fn finalize(
         self,
         logs: BTreeMap<C::PublicKey, DealerLog<V, C::PublicKey>>,
-        threshold: usize,
+        strategy: &impl Strategy,
     ) -> Result<(Output<V, C::PublicKey>, Share), commonware_cryptography::bls12381::dkg::Error>
     {
-        self.player.finalize(logs, threshold)
+        self.player.finalize(logs, strategy)
     }
 }

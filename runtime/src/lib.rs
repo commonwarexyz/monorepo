@@ -24,12 +24,15 @@
 
 use bytes::{Buf, BufMut};
 use commonware_macros::select;
+use commonware_parallel::{Rayon, ThreadPool};
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
+use rayon::ThreadPoolBuildError;
 use std::{
     future::Future,
     io::Error as IoError,
     net::SocketAddr,
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
@@ -49,13 +52,16 @@ mod network;
 mod process;
 mod storage;
 pub mod telemetry;
-mod utils;
+pub mod utils;
 pub use utils::*;
 #[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
 mod iouring;
 
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
+
+/// Default [`Blob`] version used when no version is specified via [`Storage::open`].
+pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
 /// Errors that can occur when interacting with the runtime.
 #[derive(Error, Debug)]
@@ -98,8 +104,19 @@ pub enum Error {
     BlobSyncFailed(String, String, IoError),
     #[error("blob insufficient length")]
     BlobInsufficientLength,
+    #[error("blob corrupt: {0}/{1} reason: {2}")]
+    BlobCorrupt(String, String, String),
+    #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
+    BlobVersionMismatch {
+        expected: std::ops::RangeInclusive<u16>,
+        found: u16,
+    },
+    #[error("invalid or missing checksum")]
+    InvalidChecksum,
     #[error("offset overflow")]
     OffsetOverflow,
+    #[error("immutable blob")]
+    ImmutableBlob,
     #[error("io error: {0}")]
     Io(#[from] IoError),
 }
@@ -219,6 +236,32 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// immediately. The [signal::Signal] returned will always resolve to the value of the
     /// first [Spawner::stop] call.
     fn stopped(&self) -> signal::Signal;
+}
+
+/// Trait for creating [rayon]-compatible thread pools with each worker thread
+/// placed on dedicated threads via [Spawner].
+pub trait RayonPoolSpawner: Spawner + Metrics {
+    /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
+    ///
+    /// # Arguments
+    /// - `concurrency`: The number of tasks to execute concurrently in the pool.
+    ///
+    /// # Returns
+    /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot
+    /// be built.
+    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError>;
+
+    /// Creates a clone-able [Rayon] strategy for use with [commonware_parallel].
+    ///
+    /// # Arguments
+    /// - `concurrency`: The number of tasks to execute concurrently in the pool.
+    ///
+    /// # Returns
+    /// A `Result` containing the configured [Rayon] strategy or a [rayon::ThreadPoolBuildError] if the pool cannot be
+    /// built.
+    fn create_strategy(&self, concurrency: NonZeroUsize) -> Result<Rayon, ThreadPoolBuildError> {
+        self.create_pool(concurrency).map(Rayon::with_pool)
+    }
 }
 
 /// Interface to register and encode metrics.
@@ -507,6 +550,27 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// The readable/writeable storage buffer that can be opened by this Storage.
     type Blob: Blob;
 
+    /// [`Storage::open_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only value
+    /// in the versions range. The blob version is omitted from the return value.
+    fn open(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
+        let partition = partition.to_string();
+        let name = name.to_vec();
+        async move {
+            let (blob, size, _) = self
+                .open_versioned(
+                    &partition,
+                    &name,
+                    DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION,
+                )
+                .await?;
+            Ok((blob, size))
+        }
+    }
+
     /// Open an existing blob in a given partition or create a new one, returning
     /// the blob and its length.
     ///
@@ -514,11 +578,21 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// writing to the same blob concurrently may lead to undefined behavior.
     ///
     /// An Ok result indicates the blob is durably created (or already exists).
-    fn open(
+    ///
+    /// # Versions
+    ///
+    /// Blobs are versioned. If the blob's version is not in `versions`, returns
+    /// [Error::BlobVersionMismatch].
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (blob, logical_size, blob_version).
+    fn open_versioned(
         &self,
         partition: &str,
         name: &[u8],
-    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send;
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send;
 
     /// Remove a blob from a given partition.
     ///
@@ -584,12 +658,14 @@ mod tests {
     use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};
+    use commonware_utils::NZUsize;
     use futures::{
         channel::{mpsc, oneshot},
         future::{pending, ready},
         join, pin_mut, FutureExt, SinkExt, StreamExt,
     };
     use prometheus_client::metrics::counter::Counter;
+    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     use std::{
         collections::HashMap,
         net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -892,10 +968,11 @@ mod tests {
             let name = b"test_blob";
 
             // Open a new blob
-            let (blob, _) = context
+            let (blob, size) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
+            assert_eq!(size, 0, "new blob should have size 0");
 
             // Write data to the blob
             let data = b"Hello, Storage!";
@@ -2825,6 +2902,40 @@ mod tests {
                         || addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
                 );
             }
+        });
+    }
+
+    #[test]
+    fn test_create_pool_tokio() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            // Create a thread pool with 4 threads
+            let pool = context.with_label("pool").create_pool(NZUsize!(4)).unwrap();
+
+            // Create a vector of numbers
+            let v: Vec<_> = (0..10000).collect();
+
+            // Use the thread pool to sum the numbers
+            pool.install(|| {
+                assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
+            });
+        });
+    }
+
+    #[test]
+    fn test_create_pool_deterministic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a thread pool with 4 threads
+            let pool = context.with_label("pool").create_pool(NZUsize!(4)).unwrap();
+
+            // Create a vector of numbers
+            let v: Vec<_> = (0..10000).collect();
+
+            // Use the thread pool to sum the numbers
+            pool.install(|| {
+                assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
+            });
         });
     }
 }

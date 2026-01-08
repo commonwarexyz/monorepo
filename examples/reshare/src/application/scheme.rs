@@ -11,38 +11,47 @@ use commonware_cryptography::{
     certificate::{self, Scheme},
     ed25519, PublicKey, Signer,
 };
+use commonware_parallel::Strategy;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
 /// The BLS12-381 threshold signing scheme used in simplex.
-pub type ThresholdScheme<V> = simplex::scheme::bls12381_threshold::Scheme<ed25519::PublicKey, V>;
+pub type ThresholdScheme<V, S> =
+    simplex::scheme::bls12381_threshold::Scheme<ed25519::PublicKey, V, S>;
 
 /// The ED25519 signing scheme used in simplex.
 pub type EdScheme = simplex::scheme::ed25519::Scheme;
 
 /// Provides signing schemes for different epochs.
 #[derive(Clone)]
-pub struct Provider<S: Scheme, C: Signer> {
+pub struct Provider<S: Scheme, C: Signer, St: Strategy> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
     namespace: Vec<u8>,
     certificate_verifier: Option<Arc<S>>,
     signer: C,
+    strategy: St,
 }
 
-impl<S: Scheme, C: Signer> Provider<S, C> {
-    pub fn new(namespace: Vec<u8>, signer: C, certificate_verifier: Option<S>) -> Self {
+impl<S: Scheme, C: Signer, St: Strategy> Provider<S, C, St> {
+    pub fn new(
+        namespace: Vec<u8>,
+        signer: C,
+        certificate_verifier: Option<S>,
+        strategy: St,
+    ) -> Self {
         Self {
             schemes: Arc::new(Mutex::new(HashMap::new())),
             namespace,
             certificate_verifier: certificate_verifier.map(Arc::new),
             signer,
+            strategy,
         }
     }
 }
 
-impl<S: Scheme, C: Signer> Provider<S, C> {
+impl<S: Scheme, C: Signer, St: Strategy> Provider<S, C, St> {
     /// Registers a new signing scheme for the given epoch.
     ///
     /// Returns `false` if a scheme was already registered for the epoch.
@@ -60,7 +69,7 @@ impl<S: Scheme, C: Signer> Provider<S, C> {
     }
 }
 
-impl<S: Scheme, C: Signer> certificate::Provider for Provider<S, C> {
+impl<S: Scheme, C: Signer, St: Strategy> certificate::Provider for Provider<S, C, St> {
     type Scope = Epoch;
     type Scheme = S;
 
@@ -78,6 +87,7 @@ pub trait EpochProvider {
     type Variant: Variant;
     type PublicKey: PublicKey;
     type Scheme: Scheme;
+    type Strategy: Strategy;
 
     /// Returns a [Scheme] for the given [EpochTransition].
     fn scheme_for_epoch(
@@ -92,13 +102,17 @@ pub trait EpochProvider {
     fn certificate_verifier(
         namespace: &[u8],
         output: &dkg::Output<Self::Variant, Self::PublicKey>,
+        strategy: Self::Strategy,
     ) -> Option<Self::Scheme>;
 }
 
-impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::PrivateKey> {
+impl<V: Variant, St: Strategy> EpochProvider
+    for Provider<ThresholdScheme<V, St>, ed25519::PrivateKey, St>
+{
     type Variant = V;
     type PublicKey = ed25519::PublicKey;
-    type Scheme = ThresholdScheme<V>;
+    type Scheme = ThresholdScheme<V, St>;
+    type Strategy = St;
 
     fn scheme_for_epoch(
         &self,
@@ -113,6 +127,7 @@ impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::Private
                         .poly
                         .clone()
                         .expect("group polynomial must exist"),
+                    self.strategy.clone(),
                 )
             },
             |share| {
@@ -124,6 +139,7 @@ impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::Private
                         .clone()
                         .expect("group polynomial must exist"),
                     share.clone(),
+                    self.strategy.clone(),
                 )
                 .expect("share must be in dealers")
             },
@@ -133,18 +149,21 @@ impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::Private
     fn certificate_verifier(
         namespace: &[u8],
         output: &dkg::Output<Self::Variant, Self::PublicKey>,
+        strategy: Self::Strategy,
     ) -> Option<Self::Scheme> {
         Some(ThresholdScheme::certificate_verifier(
             namespace,
             *output.public().public(),
+            strategy,
         ))
     }
 }
 
-impl EpochProvider for Provider<EdScheme, ed25519::PrivateKey> {
+impl<St: Strategy> EpochProvider for Provider<EdScheme, ed25519::PrivateKey, St> {
     type Variant = MinSig;
     type PublicKey = ed25519::PublicKey;
     type Scheme = EdScheme;
+    type Strategy = St;
 
     fn scheme_for_epoch(
         &self,
@@ -161,6 +180,7 @@ impl EpochProvider for Provider<EdScheme, ed25519::PrivateKey> {
     fn certificate_verifier(
         _namespace: &[u8],
         _output: &dkg::Output<Self::Variant, Self::PublicKey>,
+        _strategy: Self::Strategy,
     ) -> Option<Self::Scheme> {
         // Ed25519 doesn't support epoch-independent certificate verification
         // since certificates require the full participant list which changes per epoch.

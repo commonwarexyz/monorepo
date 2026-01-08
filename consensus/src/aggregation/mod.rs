@@ -103,19 +103,21 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{test_rng, NZUsize, NonZeroDuration};
+    use commonware_utils::{
+        channels::fallible::OneshotExt, test_rng, NZUsize, NonZeroDuration, NZU16,
+    };
     use futures::{channel::oneshot, future::join_all};
     use rand::{rngs::StdRng, Rng};
     use std::{
         collections::BTreeMap,
-        num::{NonZeroU32, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         time::Duration,
     };
     use tracing::debug;
 
     type Registrations<P> = BTreeMap<P, (Sender<P, deterministic::Context>, Receiver<P>)>;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     const TEST_NAMESPACE: &[u8] = b"my testing namespace";
@@ -292,7 +294,7 @@ mod tests {
                                 ?reporter,
                                 "reporter reached threshold, signaling completion"
                             );
-                            let _ = tx.send(reporter.clone());
+                            tx.send_lossy(reporter.clone());
                             break;
                         }
                         context.sleep(Duration::from_millis(100)).await;

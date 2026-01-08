@@ -11,6 +11,7 @@ use commonware_math::{
     algebra::{Additive, CryptoGroup, Field, HashToGroup, Ring, Space},
     poly::Poly,
 };
+use commonware_parallel::Sequential;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -347,10 +348,7 @@ fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
 }
 
 fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> {
-    Ok(Share {
-        index: u.int_in_range(1..=100)?,
-        private: arbitrary_scalar(u)?,
-    })
+    Ok(Share::new(u.int_in_range(1..=100)?, arbitrary_scalar(u)?))
 }
 
 fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbitrary::Error> {
@@ -429,7 +427,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::G1Msm { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let _ = G1::msm(&points[..len], &scalars[..len], 1);
+                let _ = G1::msm(&points[..len], &scalars[..len], &Sequential);
             }
         }
 
@@ -448,7 +446,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::G2Msm { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let _ = G2::msm(&points[..len], &scalars[..len], 1);
+                let _ = G2::msm(&points[..len], &scalars[..len], &Sequential);
             }
         }
 

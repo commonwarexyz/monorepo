@@ -1,6 +1,7 @@
 use criterion::criterion_main;
 
 mod aggregate_verify_same_message;
+mod aggregate_verify_same_signer;
 mod batch_verify_same_signer;
 mod combine_public_keys;
 mod combine_signatures;
@@ -25,6 +26,7 @@ criterion_main!(
     signature_verification::benches,
     batch_verify_same_signer::benches,
     aggregate_verify_same_message::benches,
+    aggregate_verify_same_signer::benches,
     scheme_batch_verify_same_signer::benches,
     scheme_batch_verify_same_message::benches,
     evaluate_point::benches,

@@ -18,9 +18,11 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{signal::Stopper, supervision::Tree, Panicker},
-    validate_label, Clock, Error, Execution, Handle, SinkOf, StreamOf, METRICS_PREFIX,
+    validate_label, Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf,
+    METRICS_PREFIX,
 };
 use commonware_macros::select;
+use commonware_parallel::ThreadPool;
 use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -29,10 +31,12 @@ use prometheus_client::{
     registry::{Metric, Registry},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
+use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     env,
     future::Future,
     net::{IpAddr, SocketAddr},
+    num::NonZeroUsize,
     path::PathBuf,
     sync::{Arc, Mutex},
     thread,
@@ -516,6 +520,23 @@ impl crate::Spawner for Context {
     }
 }
 
+impl crate::RayonPoolSpawner for Context {
+    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+        ThreadPoolBuilder::new()
+            .num_threads(concurrency.get())
+            .spawn_handler(move |thread| {
+                // Tasks spawned in a thread pool are expected to run longer than any single
+                // task and thus should be provisioned as a dedicated thread.
+                self.with_label("rayon_thread")
+                    .dedicated()
+                    .spawn(move |_| async move { thread.run() });
+                Ok(())
+            })
+            .build()
+            .map(Arc::new)
+    }
+}
+
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
         // Ensure the label is well-formatted
@@ -663,8 +684,13 @@ impl CryptoRng for Context {}
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
-        self.storage.open(partition, name).await
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        self.storage.open_versioned(partition, name, versions).await
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {

@@ -175,13 +175,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "cache_operations"
-path = "fuzz_targets/cache_operations.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "qmdb_immutable"
 path = "fuzz_targets/qmdb_immutable.rs"
 test = false
@@ -219,6 +212,20 @@ bench = false
 [[bin]]
 name = "proof_store"
 path = "fuzz_targets/proof_store.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache_operations"
+path = "fuzz_targets/cache_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oversized_recovery"
+path = "fuzz_targets/oversized_recovery.rs"
 test = false
 doc = false
 bench = false

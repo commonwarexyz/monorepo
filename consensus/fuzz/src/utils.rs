@@ -110,7 +110,7 @@ pub async fn register<P: PublicKey, E: Clock>(
 > {
     let mut registrations = HashMap::new();
     for validator in validators.iter() {
-        let mut control = oracle.control(validator.clone());
+        let control = oracle.control(validator.clone());
         let pending = control.register(0, TEST_QUOTA).await.unwrap();
         let recovered = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver = control.register(2, TEST_QUOTA).await.unwrap();

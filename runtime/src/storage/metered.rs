@@ -4,7 +4,10 @@ use prometheus_client::{
     metrics::{counter::Counter, gauge::Gauge},
     registry::Registry,
 };
-use std::{ops::Deref, sync::Arc};
+use std::{
+    ops::{Deref, RangeInclusive},
+    sync::Arc,
+};
 
 pub struct Metrics {
     pub open_blobs: Gauge,
@@ -69,20 +72,32 @@ impl<S> Storage<S> {
             metrics: Metrics::new(registry).into(),
         }
     }
+
+    /// Get a reference to the inner storage.
+    pub const fn inner(&self) -> &S {
+        &self.inner
+    }
 }
 
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
         self.metrics.open_blobs.inc();
-        let (inner, len) = self.inner.open(partition, name).await?;
+        let (inner, len, blob_version) =
+            self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             Blob {
                 inner,
                 metrics: Arc::new(MetricsHandle(self.metrics.clone())),
             },
             len,
+            blob_version,
         ))
     }
 

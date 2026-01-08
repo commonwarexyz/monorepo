@@ -14,7 +14,10 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::ordered::{Quorum, Set};
+use commonware_utils::{
+    channels::fallible::AsyncFallibleExt,
+    ordered::{Quorum, Set},
+};
 use futures::channel::mpsc::{Receiver, Sender};
 use rand_core::CryptoRngCore;
 use std::{
@@ -242,7 +245,7 @@ where
                 *self.latest.lock().unwrap() = finalization.view();
                 let mut subscribers = self.subscribers.lock().unwrap();
                 for subscriber in subscribers.iter_mut() {
-                    let _ = subscriber.try_send(finalization.view());
+                    subscriber.try_send_lossy(finalization.view());
                 }
             }
             Activity::ConflictingNotarize(conflicting) => {

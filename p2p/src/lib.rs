@@ -59,10 +59,18 @@ pub trait UnlimitedSender: Clone + Send + Sync + 'static {
     /// # Returns
     ///
     /// A vector of recipients that the message was sent to, or an error if the
-    /// message could not be sent (e.g., too large).
+    /// message could not be sent due to a validation failure (e.g., too large).
     ///
     /// Note: a successful send does not guarantee that the recipient will
     /// receive the message.
+    ///
+    /// # Graceful Shutdown
+    ///
+    /// Implementations must handle internal channel closures gracefully during
+    /// shutdown. If the underlying network is shutting down, this method should
+    /// return `Ok` (possibly with an empty or partial recipient list) rather
+    /// than an error. Errors should only be returned for validation failures
+    /// that the caller can act upon.
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
@@ -120,10 +128,18 @@ pub trait CheckedSender: Send {
     /// # Returns
     ///
     /// A vector of recipients that the message was sent to, or an error if the
-    /// message could not be sent (e.g., too large).
+    /// message could not be sent due to a validation failure (e.g., too large).
     ///
     /// Note: a successful send does not guarantee that the recipient will
     /// receive the message.
+    ///
+    /// # Graceful Shutdown
+    ///
+    /// Implementations must handle internal channel closures gracefully during
+    /// shutdown. If the underlying network is shutting down, this method should
+    /// return `Ok` (possibly with an empty or partial recipient list) rather
+    /// than an error. Errors should only be returned for validation failures
+    /// that the caller can act upon.
     fn send(
         self,
         message: impl Buf + Send,
@@ -150,10 +166,18 @@ pub trait Sender: LimitedSender {
     /// # Returns
     ///
     /// A vector of recipients that the message was sent to, or an error if the
-    /// message could not be sent (e.g., too large).
+    /// message could not be sent due to a validation failure (e.g., too large).
     ///
     /// Note: a successful send does not guarantee that the recipient will
     /// receive the message.
+    ///
+    /// # Graceful Shutdown
+    ///
+    /// Implementations must handle internal channel closures gracefully during
+    /// shutdown. If the underlying network is shutting down, this method should
+    /// return `Ok` (possibly with an empty or partial recipient list) rather
+    /// than an error. Errors should only be returned for validation failures
+    /// that the caller can act upon.
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,

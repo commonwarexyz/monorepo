@@ -1,5 +1,6 @@
 use super::types::{Request, Response};
 use commonware_cryptography::ed25519::PublicKey;
+use commonware_utils::channels::fallible::OneshotExt;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -84,9 +85,9 @@ impl crate::Handler for Handler {
 
         // Send response if configured
         if let Some(response) = self.responses.get(&request_id) {
-            let _ = responder.send(response.clone());
+            responder.send_lossy(response.clone());
         } else if self.respond_by_default {
-            let _ = responder.send(Response {
+            responder.send_lossy(Response {
                 id: request_id,
                 result: request.data.wrapping_mul(2) as u64,
             });
