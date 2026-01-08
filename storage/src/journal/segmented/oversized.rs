@@ -1423,7 +1423,18 @@ mod tests {
     fn test_recovery_glob_synced_but_index_not() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            // Use page size = entry size so each entry is exactly one page.
+            // This allows truncating by entry count to equal truncating by full pages,
+            // maintaining page-level integrity.
+            let cfg = Config {
+                index_partition: "test_index".to_string(),
+                value_partition: "test_values".to_string(),
+                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                compression: None,
+                codec_config: (),
+            };
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1452,9 +1463,10 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
 
-            // Keep only first 2 index entries
-            let chunk_size = (TestEntry::SIZE + u32::SIZE) as u64; // entry + CRC32
-            blob.resize(2 * chunk_size)
+            // Keep only first 2 index entries (2 full pages)
+            // Physical page size = logical (20) + CRC record (12) = 32 bytes
+            let physical_page_size = (TestEntry::SIZE + 12) as u64;
+            blob.resize(2 * physical_page_size)
                 .await
                 .expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
@@ -1692,7 +1704,18 @@ mod tests {
         // Simulates crash where index was rewound but glob wasn't
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            // Use page size = entry size so each entry is exactly one page.
+            // This allows truncating by entry count to equal truncating by full pages,
+            // maintaining page-level integrity.
+            let cfg = Config {
+                index_partition: "test_index".to_string(),
+                value_partition: "test_values".to_string(),
+                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                compression: None,
+                codec_config: (),
+            };
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1719,8 +1742,9 @@ mod tests {
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            let chunk_size = (TestEntry::SIZE + u32::SIZE) as u64;
-            blob.resize(2 * chunk_size)
+            // Physical page size = logical (20) + CRC record (12) = 32 bytes
+            let physical_page_size = (TestEntry::SIZE + 12) as u64;
+            blob.resize(2 * physical_page_size)
                 .await
                 .expect("Failed to truncate");
             blob.sync().await.expect("Failed to sync");
