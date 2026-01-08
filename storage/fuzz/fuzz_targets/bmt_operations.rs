@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::{Hasher as _, Sha256};
+use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher as _, Sha256};
 use commonware_storage::bmt::{Builder, Proof, RangeProof};
 use libfuzzer_sys::fuzz_target;
 
@@ -93,9 +93,9 @@ struct FuzzInput {
 fn fuzz(input: FuzzInput) {
     let mut builder: Option<Builder<Sha256>> = None;
     let mut tree = None;
-    let mut proof: Option<Proof<Sha256>> = None;
+    let mut proof: Option<Proof<Sha256Digest>> = None;
     let mut range_proof = None;
-    let mut multi_proof: Option<Proof<Sha256>> = None;
+    let mut multi_proof: Option<Proof<Sha256Digest>> = None;
     let mut multi_proof_positions: Vec<u32> = Vec::new();
     let mut leaf_values = Vec::new();
 
@@ -155,7 +155,7 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::DeserializeProof { data } => {
                 // Use max_items=1 since we're fuzzing single-element proofs
-                let _ = Proof::<Sha256>::decode_cfg(&mut data.as_slice(), &1);
+                let _ = Proof::<Sha256Digest>::decode_cfg(&mut data.as_slice(), &1);
             }
 
             BmtOperation::BuildEmptyTree => {
@@ -211,7 +211,7 @@ fn fuzz(input: FuzzInput) {
             }
 
             BmtOperation::DeserializeRangeProof { data } => {
-                let _ = RangeProof::<Sha256>::decode(&mut data.as_slice());
+                let _ = RangeProof::<Sha256Digest>::decode(&mut data.as_slice());
             }
 
             // Range proof edge cases
@@ -311,7 +311,7 @@ fn fuzz(input: FuzzInput) {
             BmtOperation::DeserializeMultiProof { data, max_items } => {
                 // Use max_items from fuzz input, clamped to reasonable range
                 let max = (*max_items as usize).clamp(1, 100);
-                let _ = Proof::<Sha256>::decode_cfg(&mut data.as_slice(), &max);
+                let _ = Proof::<Sha256Digest>::decode_cfg(&mut data.as_slice(), &max);
             }
 
             BmtOperation::MultiProofDuplicatePositions { position, count } => {

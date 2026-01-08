@@ -163,7 +163,7 @@ impl<H: Hasher> Tree<H> {
     ///
     /// This is a single-element multi-proof, which includes the minimal siblings
     /// needed to reconstruct the root.
-    pub fn proof(&self, position: u32) -> Result<Proof<H>, Error> {
+    pub fn proof(&self, position: u32) -> Result<Proof<H::Digest>, Error> {
         self.multi_proof(&[position])
     }
 
@@ -173,7 +173,7 @@ impl<H: Hasher> Tree<H> {
     /// The proof contains the minimal set of sibling digests needed to reconstruct
     /// the root for all elements in the range. This is more efficient than individual
     /// proofs when proving multiple consecutive elements.
-    pub fn range_proof(&self, start: u32, end: u32) -> Result<RangeProof<H>, Error> {
+    pub fn range_proof(&self, start: u32, end: u32) -> Result<RangeProof<H::Digest>, Error> {
         // For empty trees, return an empty proof
         if self.empty && start == 0 && end == 0 {
             return Ok(RangeProof::default());
@@ -239,7 +239,7 @@ impl<H: Hasher> Tree<H> {
     /// are deduplicated.
     ///
     /// Positions are sorted internally; duplicate positions will return an error.
-    pub fn multi_proof(&self, positions: &[u32]) -> Result<Proof<H>, Error> {
+    pub fn multi_proof(&self, positions: &[u32]) -> Result<Proof<H::Digest>, Error> {
         // Handle empty positions first - can't prove zero elements
         if positions.is_empty() {
             return Err(Error::NoLeaves);
@@ -323,34 +323,25 @@ where
 }
 
 /// A Merkle range proof for a contiguous set of leaves in a Binary Merkle Tree.
-#[derive(Clone, Debug, Eq)]
-pub struct RangeProof<H: Hasher> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RangeProof<D: Digest> {
     /// The sibling digests needed to prove all elements in the range.
     ///
     /// Organized by level, from leaves to root. Each level can have at most
     /// 2 siblings (one on the left boundary and one on the right boundary).
-    pub siblings: Vec<Bounds<H::Digest>>,
+    pub siblings: Vec<Bounds<D>>,
 }
 
-impl<H: Hasher> PartialEq for RangeProof<H>
-where
-    H::Digest: PartialEq,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.siblings == other.siblings
-    }
-}
-
-impl<H: Hasher> Default for RangeProof<H> {
+impl<D: Digest> Default for RangeProof<D> {
     fn default() -> Self {
         Self { siblings: vec![] }
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<H: Hasher> arbitrary::Arbitrary<'_> for RangeProof<H>
+impl<D: Digest> arbitrary::Arbitrary<'_> for RangeProof<D>
 where
-    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -365,18 +356,18 @@ struct Node<D: Digest> {
     digest: D,
 }
 
-impl<H: Hasher> RangeProof<H> {
+impl<D: Digest> RangeProof<D> {
     /// Verifies that a given range of `leaves` starting at `position` are included
     /// in a Binary Merkle Tree with `root` using the provided `hasher`.
     ///
     /// The proof contains the set of sibling digests needed to reconstruct
     /// the root for all elements in the range.
-    pub fn verify(
+    pub fn verify<H: Hasher<Digest = D>>(
         &self,
         hasher: &mut H,
         position: u32,
-        leaves: &[H::Digest],
-        root: &H::Digest,
+        leaves: &[D],
+        root: &D,
     ) -> Result<(), Error> {
         // Handle empty tree case
         if position == 0 && leaves.is_empty() && self.siblings.is_empty() {
@@ -400,7 +391,7 @@ impl<H: Hasher> RangeProof<H> {
         }
 
         // Compute position-hashed leaves
-        let mut nodes: Vec<Node<H::Digest>> = Vec::new();
+        let mut nodes: Vec<Node<D>> = Vec::new();
         for (i, leaf) in leaves.iter().enumerate() {
             let leaf_position = position + i as u32;
             hasher.update(&leaf_position.to_be_bytes());
@@ -416,8 +407,8 @@ impl<H: Hasher> RangeProof<H> {
             // Check if we should have a left sibling
             let first_pos = nodes[0].position;
             let last_pos = nodes[nodes.len() - 1].position;
-            let needs_left = first_pos % 2 == 1;
-            let needs_right = last_pos % 2 == 0;
+            let needs_left = !first_pos.is_multiple_of(2);
+            let needs_right = last_pos.is_multiple_of(2);
             if needs_left != bounds.left.is_some() {
                 return Err(Error::UnalignedProof);
             }
@@ -488,22 +479,22 @@ impl<H: Hasher> RangeProof<H> {
     }
 }
 
-impl<H: Hasher> Write for RangeProof<H> {
+impl<D: Digest> Write for RangeProof<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.siblings.write(writer);
     }
 }
 
-impl<H: Hasher> Read for RangeProof<H> {
+impl<D: Digest> Read for RangeProof<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let siblings = Vec::<Bounds<H::Digest>>::read_range(reader, ..=MAX_LEVELS)?;
+        let siblings = Vec::<Bounds<D>>::read_range(reader, ..=MAX_LEVELS)?;
         Ok(Self { siblings })
     }
 }
 
-impl<H: Hasher> EncodeSize for RangeProof<H> {
+impl<D: Digest> EncodeSize for RangeProof<D> {
     fn encode_size(&self) -> usize {
         self.siblings.encode_size()
     }
@@ -514,25 +505,16 @@ impl<H: Hasher> EncodeSize for RangeProof<H> {
 /// This proof type is more space-efficient than generating individual proofs
 /// for each leaf because sibling nodes that are shared between multiple paths
 /// are deduplicated.
-#[derive(Clone, Debug, Eq)]
-pub struct Proof<H: Hasher> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Proof<D: Digest> {
     /// The total number of leaves in the tree.
     pub leaf_count: u32,
     /// The deduplicated sibling digests required to verify all elements,
     /// ordered by their position in the tree (level-major, then index within level).
-    pub siblings: Vec<H::Digest>,
+    pub siblings: Vec<D>,
 }
 
-impl<H: Hasher> PartialEq for Proof<H>
-where
-    H::Digest: PartialEq,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.leaf_count == other.leaf_count && self.siblings == other.siblings
-    }
-}
-
-impl<H: Hasher> Default for Proof<H> {
+impl<D: Digest> Default for Proof<D> {
     fn default() -> Self {
         Self {
             leaf_count: 0,
@@ -541,14 +523,14 @@ impl<H: Hasher> Default for Proof<H> {
     }
 }
 
-impl<H: Hasher> Write for Proof<H> {
+impl<D: Digest> Write for Proof<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.leaf_count.write(writer);
         self.siblings.write(writer);
     }
 }
 
-impl<H: Hasher> Read for Proof<H> {
+impl<D: Digest> Read for Proof<D> {
     /// The maximum number of items being proven.
     ///
     /// The upper bound on sibling hashes is derived as `max_items * MAX_LEVELS`.
@@ -560,7 +542,7 @@ impl<H: Hasher> Read for Proof<H> {
     ) -> Result<Self, commonware_codec::Error> {
         let leaf_count = u32::read(reader)?;
         let max_siblings = max_items.saturating_mul(MAX_LEVELS);
-        let siblings = Vec::<H::Digest>::read_range(reader, ..=max_siblings)?;
+        let siblings = Vec::<D>::read_range(reader, ..=max_siblings)?;
         Ok(Self {
             leaf_count,
             siblings,
@@ -568,16 +550,16 @@ impl<H: Hasher> Read for Proof<H> {
     }
 }
 
-impl<H: Hasher> EncodeSize for Proof<H> {
+impl<D: Digest> EncodeSize for Proof<D> {
     fn encode_size(&self) -> usize {
         self.leaf_count.encode_size() + self.siblings.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<H: Hasher> arbitrary::Arbitrary<'_> for Proof<H>
+impl<D: Digest> arbitrary::Arbitrary<'_> for Proof<D>
 where
-    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -648,7 +630,7 @@ fn siblings_required_for_multi_proof(
     Ok(sibling_positions)
 }
 
-impl<H: Hasher> Proof<H> {
+impl<D: Digest> Proof<D> {
     /// Verifies that a given `leaf` at `position` is included in a Binary Merkle Tree
     /// with `root` using the provided `hasher`.
     ///
@@ -656,12 +638,12 @@ impl<H: Hasher> Proof<H> {
     /// level, if the current node is a left child (even index), the sibling is combined
     /// to the right; if it is a right child (odd index), the sibling is combined to the
     /// left.
-    pub fn verify_element_inclusion(
+    pub fn verify_element_inclusion<H: Hasher<Digest = D>>(
         &self,
         hasher: &mut H,
-        leaf: &H::Digest,
+        leaf: &D,
         mut position: u32,
-        root: &H::Digest,
+        root: &D,
     ) -> Result<(), Error> {
         // Validate position
         if position >= self.leaf_count {
@@ -722,11 +704,11 @@ impl<H: Hasher> Proof<H> {
     ///
     /// Elements can be provided in any order; positions are sorted internally.
     /// Duplicate positions will cause verification to fail.
-    pub fn verify_multi_inclusion(
+    pub fn verify_multi_inclusion<H: Hasher<Digest = D>>(
         &self,
         hasher: &mut H,
-        elements: &[(H::Digest, u32)],
-        root: &H::Digest,
+        elements: &[(D, u32)],
+        root: &D,
     ) -> Result<(), Error> {
         // Handle empty case
         if elements.is_empty() {
@@ -831,7 +813,7 @@ mod tests {
     fn test_merkle_tree(n: usize) -> Digest {
         // Build tree
         let mut digests = Vec::with_capacity(n);
-        let mut builder = Builder::new(n);
+        let mut builder = Builder::<Sha256>::new(n);
         for i in 0..n {
             let digest = Sha256::hash(&i.to_be_bytes());
             builder.add(&digest);
@@ -854,7 +836,7 @@ mod tests {
 
             // Serialize and deserialize the proof
             let serialized = proof.encode();
-            let deserialized = Proof::<Sha256>::decode_cfg(serialized, &1).unwrap();
+            let deserialized = Proof::<Digest>::decode_cfg(serialized, &1).unwrap();
             assert!(
                 deserialized
                     .verify_element_inclusion(&mut hasher, leaf, i as u32, &root)
@@ -1127,7 +1109,7 @@ mod tests {
         let element = &digests[0];
 
         // Build tree
-        let mut builder = Builder::new(txs.len());
+        let mut builder = Builder::<Sha256>::new(txs.len());
         for digest in &digests {
             builder.add(digest);
         }
@@ -1155,7 +1137,7 @@ mod tests {
         let element = &digests[0];
 
         // Build tree
-        let mut builder = Builder::new(txs.len());
+        let mut builder = Builder::<Sha256>::new(txs.len());
         for digest in &digests {
             builder.add(digest);
         }
@@ -1182,7 +1164,7 @@ mod tests {
         let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(*tx)).collect();
 
         // Build tree
-        let mut builder = Builder::new(txs.len());
+        let mut builder = Builder::<Sha256>::new(txs.len());
         for digest in &digests {
             builder.add(digest);
         }
@@ -1207,7 +1189,7 @@ mod tests {
         let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(*tx)).collect();
 
         // Build tree
-        let mut builder = Builder::new(txs.len());
+        let mut builder = Builder::<Sha256>::new(txs.len());
         for digest in &digests {
             builder.add(digest);
         }
@@ -1231,7 +1213,7 @@ mod tests {
         let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(*tx)).collect();
 
         // Build tree
-        let mut builder = Builder::new(txs.len());
+        let mut builder = Builder::<Sha256>::new(txs.len());
         for digest in &digests {
             builder.add(digest);
         }
@@ -1267,7 +1249,7 @@ mod tests {
 
         // Truncate one byte.
         serialized.truncate(serialized.len() - 1);
-        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &1).is_err());
+        assert!(Proof::<Digest>::decode_cfg(&mut serialized, &1).is_err());
     }
 
     #[test]
@@ -1289,7 +1271,7 @@ mod tests {
 
         // Append an extra byte.
         serialized.extend_from_slice(&[0u8]);
-        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &1).is_err());
+        assert!(Proof::<Digest>::decode_cfg(&mut serialized, &1).is_err());
     }
 
     #[test]
@@ -1299,7 +1281,7 @@ mod tests {
         let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(*tx)).collect();
 
         // Build tree
-        let mut builder = Builder::new(txs.len());
+        let mut builder = Builder::<Sha256>::new(txs.len());
         for digest in &digests {
             builder.add(digest);
         }
@@ -1324,7 +1306,7 @@ mod tests {
         let digests: Vec<Digest> = txs.iter().map(|tx| Sha256::hash(*tx)).collect();
 
         // Build tree
-        let mut builder = Builder::new(txs.len());
+        let mut builder = Builder::<Sha256>::new(txs.len());
         for digest in &digests {
             builder.add(digest);
         }
@@ -1374,7 +1356,7 @@ mod tests {
 
         // Serialize and deserialize
         let mut serialized = range_proof.encode();
-        let deserialized = RangeProof::<Sha256>::decode(&mut serialized).unwrap();
+        let deserialized = RangeProof::<Digest>::decode(&mut serialized).unwrap();
         assert!(deserialized
             .verify(&mut hasher, 2, range_leaves, &root)
             .is_ok());
@@ -1834,9 +1816,9 @@ mod tests {
 
     #[test]
     fn test_empty_range_proof_serialization() {
-        let range_proof = RangeProof::<Sha256>::default();
+        let range_proof = RangeProof::<Digest>::default();
         let mut serialized = range_proof.encode();
-        let deserialized = RangeProof::<Sha256>::decode(&mut serialized).unwrap();
+        let deserialized = RangeProof::<Digest>::decode(&mut serialized).unwrap();
         assert_eq!(range_proof, deserialized);
     }
 
@@ -2413,7 +2395,7 @@ mod tests {
 
         // Serialize and deserialize
         let serialized = multi_proof.encode();
-        let deserialized = Proof::<Sha256>::decode_cfg(serialized, &positions.len()).unwrap();
+        let deserialized = Proof::<Digest>::decode_cfg(serialized, &positions.len()).unwrap();
 
         assert_eq!(multi_proof, deserialized);
 
@@ -2448,7 +2430,7 @@ mod tests {
         serialized.truncate(serialized.len() - 1);
 
         // Should fail to deserialize
-        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &positions.len()).is_err());
+        assert!(Proof::<Digest>::decode_cfg(&mut serialized, &positions.len()).is_err());
     }
 
     #[test]
@@ -2472,7 +2454,7 @@ mod tests {
         serialized.extend_from_slice(&[0u8]);
 
         // Should fail to deserialize
-        assert!(Proof::<Sha256>::decode_cfg(&mut serialized, &positions.len()).is_err());
+        assert!(Proof::<Digest>::decode_cfg(&mut serialized, &positions.len()).is_err());
     }
 
     #[test]
@@ -2482,7 +2464,7 @@ mod tests {
         serialized.extend_from_slice(&1usize.encode()); // claims 1 sibling but no data follows
 
         // Should fail because the buffer claims 1 sibling but doesn't have the data
-        let err = Proof::<Sha256>::decode_cfg(serialized.as_slice(), &1).unwrap_err();
+        let err = Proof::<Digest>::decode_cfg(serialized.as_slice(), &1).unwrap_err();
         assert!(matches!(err, commonware_codec::Error::EndOfBuffer));
     }
 
@@ -2596,7 +2578,7 @@ mod tests {
     fn test_multi_proof_default_verify() {
         // Default (empty) proof should only verify against empty tree
         let mut hasher = Sha256::default();
-        let default_proof = Proof::<Sha256>::default();
+        let default_proof = Proof::<Digest>::default();
 
         // Empty elements against default proof
         let empty_elements: &[(Digest, u32)] = &[];
@@ -2877,9 +2859,9 @@ mod tests {
         use commonware_cryptography::sha256::Digest as Sha256Digest;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<RangeProof<Sha256>>,
+            CodecConformance<RangeProof<Sha256Digest>>,
             CodecConformance<Bounds<Sha256Digest>>,
-            CodecConformance<Proof<Sha256>>,
+            CodecConformance<Proof<Sha256Digest>>,
         }
     }
 }

@@ -48,12 +48,12 @@ pub struct Chunk<H: Hasher> {
     index: u16,
 
     /// The multi-proof of the shard in the [bmt] at the given index.
-    proof: bmt::Proof<H>,
+    proof: bmt::Proof<H::Digest>,
 }
 
 impl<H: Hasher> Chunk<H> {
     /// Create a new [Chunk] from the given shard, index, and proof.
-    const fn new(shard: Vec<u8>, index: u16, proof: bmt::Proof<H>) -> Self {
+    const fn new(shard: Vec<u8>, index: u16, proof: bmt::Proof<H::Digest>) -> Self {
         Self {
             shard,
             index,
@@ -95,7 +95,7 @@ impl<H: Hasher> Read for Chunk<H> {
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let shard = Vec::<u8>::read_range(reader, ..=cfg.maximum_shard_size)?;
         let index = u16::read(reader)?;
-        let proof = bmt::Proof::<H>::read_cfg(reader, &1)?;
+        let proof = bmt::Proof::<H::Digest>::read_cfg(reader, &1)?;
         Ok(Self {
             shard,
             index,

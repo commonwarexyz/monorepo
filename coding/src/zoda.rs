@@ -326,7 +326,7 @@ use topology::Topology;
 pub struct Shard<H: Hasher> {
     data_bytes: usize,
     root: H::Digest,
-    inclusion_proof: Proof<H>,
+    inclusion_proof: Proof<H::Digest>,
     rows: Matrix,
     checksum: Arc<Matrix>,
 }
@@ -400,7 +400,7 @@ where
 
 #[derive(Clone, Debug)]
 pub struct ReShard<H: Hasher> {
-    inclusion_proof: Proof<H>,
+    inclusion_proof: Proof<H::Digest>,
     shard: Matrix,
 }
 

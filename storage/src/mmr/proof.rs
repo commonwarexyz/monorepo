@@ -25,8 +25,8 @@ use tracing::debug;
 
 /// The maximum number of digests in a proof per element being proven.
 ///
-/// This accounts for both the path from a leaf to its peak (max 62 nodes) and
-/// peak digests for mountains not containing the element (max 63 peaks).
+/// This accounts for both the path from a leaf to its peak (max 61 nodes) and
+/// peak digests for mountains not containing the element (max 62 peaks).
 /// The value 128 provides a safe upper bound with room for future growth.
 pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 128;
 
