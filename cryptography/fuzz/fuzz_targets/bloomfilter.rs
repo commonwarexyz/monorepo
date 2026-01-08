@@ -30,7 +30,7 @@ struct FuzzInput {
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let hashers = u.arbitrary()?;
-        let bits = u.arbitrary()?;
+        let bits = NonZeroU16::new(u.arbitrary::<u16>()?.max(1).next_power_of_two()).unwrap();
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let ops = (0..num_ops)
             .map(|_| Op::arbitrary(u))
