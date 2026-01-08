@@ -900,7 +900,18 @@ mod tests {
     fn test_recovery_corrupted_last_index_entry() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            // Use page size = entry size so each entry is on its own page.
+            // This allows corrupting just the last entry's page without affecting others.
+            // Physical page size = TestEntry::SIZE (20) + 12 (CRC record) = 32 bytes.
+            let cfg = Config {
+                index_partition: "test_index".to_string(),
+                value_partition: "test_values".to_string(),
+                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                compression: None,
+                codec_config: (),
+            };
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -908,7 +919,7 @@ mod tests {
                     .await
                     .expect("Failed to init");
 
-            // Append 5 entries
+            // Append 5 entries (each on its own page)
             for i in 0..5u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
@@ -920,34 +931,36 @@ mod tests {
             oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Corrupt the last index entry's checksum
+            // Corrupt the last page's CRC to trigger page-level integrity failure
             let (blob, size) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
 
-            // Each entry is TestEntry::SIZE (16) + 4 (CRC32) = 20 bytes
-            // Corrupt the CRC of the last entry
-            let last_entry_crc_offset = size - 4;
-            blob.write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], last_entry_crc_offset)
+            // Physical page size = 20 + 12 = 32 bytes
+            // 5 entries = 5 pages = 160 bytes total
+            // Last page CRC starts at offset 160 - 12 = 148
+            assert_eq!(size, 160);
+            let last_page_crc_offset = size - 12;
+            blob.write_at(vec![0xFF; 12], last_page_crc_offset)
                 .await
                 .expect("Failed to corrupt");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - should detect corruption and scan backwards
+            // Reinitialize - should detect page corruption and truncate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.clone(), cfg)
                     .await
                     .expect("Failed to reinit");
 
-            // First 4 entries should be valid
+            // First 4 entries should be valid (on pages 0-3)
             for i in 0..4u8 {
                 let entry = oversized.get(1, i as u64).await.expect("Failed to get");
                 assert_eq!(entry.id, i as u64);
             }
 
-            // Entry 4 should be gone (corrupted and rewound)
+            // Entry 4 should be gone (its page was corrupted)
             assert!(oversized.get(1, 4).await.is_err());
 
             // Should be able to append after recovery
