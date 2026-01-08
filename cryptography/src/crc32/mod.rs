@@ -98,9 +98,18 @@ impl Hasher for Crc32 {
 
 /// Digest of a CRC32 hashing operation (4 bytes).
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Digest(pub [u8; SIZE]);
+
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for Digest {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        // Generate random bytes and compute their CRC32 checksum
+        let len = u.int_in_range(0..=1024)?;
+        let data = u.bytes(len)?;
+        Ok(Crc32::hash(data))
+    }
+}
 
 impl Digest {
     /// Get the digest as a `u32` value.
