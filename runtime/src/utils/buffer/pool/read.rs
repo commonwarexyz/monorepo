@@ -282,7 +282,7 @@ impl<B: Blob> Read<B> {
 #[cfg(test)]
 mod tests {
     use super::super::{append::Append, PoolRef};
-    use crate::{deterministic, Blob, Error, Runner as _, Storage as _};
+    use crate::{deterministic, Blob, Crc32, Error, Runner as _, Storage as _};
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
     use std::num::NonZeroU16;
@@ -448,7 +448,7 @@ mod tests {
             // Corrupt page 0 to claim a shorter (partial) length with a valid CRC.
             let page_size = PAGE_SIZE.get() as u64;
             let short_len = page_size / 2;
-            let crc = crc32fast::hash(&data[..short_len as usize]);
+            let crc = Crc32::checksum(&data[..short_len as usize]);
             let record = super::Checksum::new(short_len as u16, crc);
             let crc_offset = page_size; // CRC record starts after logical page bytes
             blob.write_at(record.to_bytes().to_vec(), crc_offset)

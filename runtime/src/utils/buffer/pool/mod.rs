@@ -23,7 +23,7 @@
 //! full or partial. A partial page's logical bytes are immutable on commit, and if it's re-written,
 //! it's only to add more bytes after the existing ones.
 
-use crate::{Blob, Error};
+use crate::{crc32, Blob, Crc32, Error};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_utils::StableBuf;
@@ -38,7 +38,7 @@ pub use read::Read;
 use tracing::{debug, error};
 
 // A checksum record contains two u16 lengths and two CRCs (each 4 bytes).
-const CHECKSUM_SIZE: u64 = 12;
+const CHECKSUM_SIZE: u64 = (2 * u16::SIZE + 2 * crc32::SIZE) as u64;
 
 /// Read the designated page from the underlying blob and return its logical bytes as a vector if it
 /// passes the integrity check, returning error otherwise. Safely handles partial pages. Caller can
@@ -128,7 +128,7 @@ impl Checksum {
             return None;
         }
 
-        let computed_crc = crc32fast::hash(&buf[..len_usize]);
+        let computed_crc = Crc32::checksum(&buf[..len_usize]);
         if computed_crc != crc {
             debug!("Invalid CRC: doesn't match page contents. Using fallback CRC");
             if crc_record.validate_fallback(buf, crc_start_idx) {
@@ -159,7 +159,7 @@ impl Checksum {
             return false;
         }
 
-        let computed_crc = crc32fast::hash(&buf[..len_usize]);
+        let computed_crc = Crc32::checksum(&buf[..len_usize]);
         if computed_crc != crc {
             debug!("Invalid fallback CRC: doesn't match page contents.");
             return false;
@@ -335,7 +335,7 @@ mod tests {
         page[..data.len()].copy_from_slice(data);
 
         // Compute CRC of the data portion
-        let crc = crc32fast::hash(&page[..data.len()]);
+        let crc = Crc32::checksum(&page[..data.len()]);
         let record = Checksum::new(data.len() as u16, crc);
 
         // Write the CRC record at the end
@@ -380,7 +380,7 @@ mod tests {
         // Write some data and compute correct CRC
         let data = b"hello world";
         page[..data.len()].copy_from_slice(data);
-        let crc = crc32fast::hash(&page[..data.len()]);
+        let crc = Crc32::checksum(&page[..data.len()]);
         let record = Checksum::new(data.len() as u16, crc);
 
         let crc_start = physical_page_size - CHECKSUM_SIZE_USIZE;
@@ -403,7 +403,7 @@ mod tests {
         // Write data and compute CRC for the larger portion
         let data = b"hello world, this is longer";
         page[..data.len()].copy_from_slice(data);
-        let crc = crc32fast::hash(&page[..data.len()]);
+        let crc = Crc32::checksum(&page[..data.len()]);
 
         // Create a record where len2 has the valid CRC for longer data
         let record = Checksum {
@@ -432,7 +432,7 @@ mod tests {
         // Write data
         let data = b"fallback data";
         page[..data.len()].copy_from_slice(data);
-        let valid_crc = crc32fast::hash(&page[..data.len()]);
+        let valid_crc = Crc32::checksum(&page[..data.len()]);
         let valid_len = data.len() as u16;
 
         // Create a record where:
