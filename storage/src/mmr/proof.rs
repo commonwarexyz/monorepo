@@ -1644,6 +1644,86 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_max_proof_digests_per_element_sufficient() {
+        // Verify that MAX_PROOF_DIGESTS_PER_ELEMENT (128) is sufficient for any single-element
+        // proof in the largest valid MMR.
+        //
+        // MMR sizes follow: mmr_size(N) = 2*N - popcount(N) where N = leaf count.
+        // The number of peaks equals popcount(N).
+        //
+        // To maximize peaks, we want N with maximum popcount. N = 2^62 - 1 has 62 one-bits:
+        //   N = 0x3FFFFFFFFFFFFFFF = 2^0 + 2^1 + ... + 2^61
+        //
+        // This gives us 62 perfect binary trees with leaf counts 2^0, 2^1, ..., 2^61
+        // and corresponding heights 0, 1, ..., 61.
+        //
+        // mmr_size(2^62 - 1) = 2*(2^62 - 1) - 62 = 2^63 - 2 - 62 = 2^63 - 64
+        //
+        // For a single-element proof in a tree of height h:
+        //   - Path siblings from leaf to peak: h digests
+        //   - Other peaks (not containing the element): (62 - 1) = 61 digests
+        //   - Total: h + 61 digests
+        //
+        // Worst case: element in tallest tree (h = 61)
+        //   - Path siblings: 61
+        //   - Other peaks: 61
+        //   - Total: 61 + 61 = 122 digests
+        //
+        // This is comfortably below MAX_PROOF_DIGESTS_PER_ELEMENT = 128.
+
+        const NUM_PEAKS: usize = 62;
+        const MAX_TREE_HEIGHT: usize = 61;
+        const EXPECTED_WORST_CASE: usize = MAX_TREE_HEIGHT + (NUM_PEAKS - 1);
+
+        let many_peaks_size = Position::new((1u64 << 63) - 64);
+        assert!(
+            many_peaks_size.is_mmr_size(),
+            "Size {many_peaks_size} should be a valid MMR size",
+        );
+
+        let peak_count = PeakIterator::new(many_peaks_size).count();
+        assert_eq!(peak_count, NUM_PEAKS);
+
+        // Verify the peak heights are 61, 60, ..., 1, 0 (from left to right)
+        let peaks: Vec<_> = PeakIterator::new(many_peaks_size).collect();
+        for (i, &(_pos, height)) in peaks.iter().enumerate() {
+            let expected_height = (NUM_PEAKS - 1 - i) as u32;
+            assert_eq!(
+                height, expected_height,
+                "Peak {i} should have height {expected_height}, got {height}",
+            );
+        }
+
+        // Test location 0 (leftmost leaf, in tallest tree of height 61)
+        // Expected: 61 path siblings + 61 other peaks = 122 digests
+        let loc = Location::new_unchecked(0);
+        let positions = nodes_required_for_range_proof(many_peaks_size, loc..loc + 1)
+            .expect("should compute positions for location 0");
+
+        assert_eq!(
+            positions.len(),
+            EXPECTED_WORST_CASE,
+            "Location 0 proof should require exactly {EXPECTED_WORST_CASE} digests (61 path + 61 peaks)",
+        );
+
+        // Test the rightmost leaf (in smallest tree of height 0, which is itself a peak)
+        // Expected: 0 path siblings + 61 other peaks = 61 digests
+        let last_leaf_loc = (1u64 << 62) - 2; // Last leaf location
+        let positions = nodes_required_for_range_proof(
+            many_peaks_size,
+            Location::new_unchecked(last_leaf_loc)..Location::new_unchecked(last_leaf_loc + 1),
+        )
+        .expect("should compute positions for last leaf");
+
+        let expected_last_leaf = NUM_PEAKS - 1;
+        assert_eq!(
+            positions.len(),
+            expected_last_leaf,
+            "Last leaf proof should require exactly {expected_last_leaf} digests (0 path + 61 peaks)",
+        );
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
