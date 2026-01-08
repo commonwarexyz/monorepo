@@ -76,11 +76,12 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     /// and MSM with Pippenger's algorithm for O(n/log n) complexity.
     ///
     /// Returns true if all signatures are valid.
-    fn verify_same_message_msm(
+    fn verify_same_message_msm<S: Strategy>(
         publics: &[Self::Public],
         hm: &Self::Signature,
         signatures: &[Self::Signature],
         scalars: &[Scalar],
+        strategy: &S,
     ) -> bool;
 }
 
@@ -192,10 +193,8 @@ impl Variant for MinPk {
         }
 
         // Pre-compute r_i * pk_i in parallel
-        let scaled_pks: Vec<G1> = strategy.map_collect_vec(
-            publics.iter().zip(&scalars),
-            |(pk, s)| *pk * s,
-        );
+        let scaled_pks: Vec<G1> =
+            strategy.map_collect_vec(publics.iter().zip(&scalars), |(pk, s)| *pk * s);
 
         // Batch convert scaled_pks to affine (1 inversion instead of n)
         let scaled_pks_affine = G1::batch_to_affine(&scaled_pks);
@@ -232,11 +231,12 @@ impl Variant for MinPk {
         GT::from_blst_fp12(result)
     }
 
-    fn verify_same_message_msm(
+    fn verify_same_message_msm<S: Strategy>(
         publics: &[Self::Public],
         hm: &Self::Signature,
         signatures: &[Self::Signature],
         scalars: &[Scalar],
+        strategy: &S,
     ) -> bool {
         assert_eq!(publics.len(), signatures.len());
         assert_eq!(publics.len(), scalars.len());
@@ -246,18 +246,18 @@ impl Variant for MinPk {
 
         // Run batch_to_affine + MSM in parallel for both groups
         // Uses 128-bit scalars for ~2x faster MSM (sufficient security for batch verification)
-        let (pk_agg, sig_agg) = std::thread::scope(|s| {
-            // Thread 1: G1 public keys (faster, run on spawned thread)
-            let pk_handle = s.spawn(|| {
+        let (pk_agg, sig_agg) = strategy.join(
+            || {
+                // G1 public keys (faster)
                 let pks_affine = G1::batch_to_affine(publics);
                 G1::msm_affine_batch(&pks_affine, scalars)
-            });
-            // Main thread: G2 signatures (slower)
-            let sigs_affine = G2::batch_to_affine(signatures);
-            let sig_agg = G2::msm_affine_batch(&sigs_affine, scalars);
-            let pk_agg = pk_handle.join().unwrap();
-            (pk_agg, sig_agg)
-        });
+            },
+            || {
+                // G2 signatures (slower)
+                let sigs_affine = G2::batch_to_affine(signatures);
+                G2::msm_affine_batch(&sigs_affine, scalars)
+            },
+        );
 
         // Verify: e(pk_agg, H(m)) == e(sig_agg, G)
         Self::verify(&pk_agg, hm, &sig_agg).is_ok()
@@ -378,10 +378,8 @@ impl Variant for MinSig {
         }
 
         // Pre-compute r_i * pk_i in parallel
-        let scaled_pks: Vec<G2> = strategy.map_collect_vec(
-            publics.iter().zip(&scalars),
-            |(pk, s)| *pk * s,
-        );
+        let scaled_pks: Vec<G2> =
+            strategy.map_collect_vec(publics.iter().zip(&scalars), |(pk, s)| *pk * s);
 
         // Batch convert scaled_pks to affine (1 inversion instead of n)
         let scaled_pks_affine = G2::batch_to_affine(&scaled_pks);
@@ -418,11 +416,12 @@ impl Variant for MinSig {
         GT::from_blst_fp12(result)
     }
 
-    fn verify_same_message_msm(
+    fn verify_same_message_msm<S: Strategy>(
         publics: &[Self::Public],
         hm: &Self::Signature,
         signatures: &[Self::Signature],
         scalars: &[Scalar],
+        strategy: &S,
     ) -> bool {
         assert_eq!(publics.len(), signatures.len());
         assert_eq!(publics.len(), scalars.len());
@@ -432,18 +431,18 @@ impl Variant for MinSig {
 
         // Run batch_to_affine + MSM in parallel for both groups
         // Uses 128-bit scalars for ~2x faster MSM (sufficient security for batch verification)
-        let (pk_agg, sig_agg) = std::thread::scope(|s| {
-            // Thread 1: G2 public keys (slower, run on spawned thread)
-            let pk_handle = s.spawn(|| {
+        let (pk_agg, sig_agg) = strategy.join(
+            || {
+                // G2 public keys (slower)
                 let pks_affine = G2::batch_to_affine(publics);
                 G2::msm_affine_batch(&pks_affine, scalars)
-            });
-            // Main thread: G1 signatures (faster)
-            let sigs_affine = G1::batch_to_affine(signatures);
-            let sig_agg = G1::msm_affine_batch(&sigs_affine, scalars);
-            let pk_agg = pk_handle.join().unwrap();
-            (pk_agg, sig_agg)
-        });
+            },
+            || {
+                // G1 signatures (faster)
+                let sigs_affine = G1::batch_to_affine(signatures);
+                G1::msm_affine_batch(&sigs_affine, scalars)
+            },
+        );
 
         // Verify: e(pk_agg, H(m)) == e(sig_agg, G)
         Self::verify(&pk_agg, hm, &sig_agg).is_ok()

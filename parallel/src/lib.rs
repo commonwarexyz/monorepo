@@ -280,6 +280,40 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
             },
         )
     }
+
+    /// Executes two closures in parallel and returns their results.
+    ///
+    /// This method provides task parallelism, allowing two independent computations
+    /// to run concurrently. For [`Sequential`], closures are executed one after
+    /// another on the current thread. For [`Rayon`], closures may execute in parallel
+    /// on different threads.
+    ///
+    /// # Arguments
+    ///
+    /// - `a`: The first closure to execute
+    /// - `b`: The second closure to execute
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// let strategy = Sequential;
+    ///
+    /// let (sum, product) = strategy.join(
+    ///     || (1..=10).sum::<i32>(),
+    ///     || (1..=10).product::<i32>(),
+    /// );
+    ///
+    /// assert_eq!(sum, 55);
+    /// assert_eq!(product, 3628800);
+    /// ```
+    fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+    where
+        A: FnOnce() -> RA + Send,
+        B: FnOnce() -> RB + Send,
+        RA: Send,
+        RB: Send;
 }
 
 /// A sequential execution strategy.
@@ -327,6 +361,16 @@ impl Strategy for Sequential {
         let mut init_val = init();
         iter.into_iter()
             .fold(identity(), |acc, item| fold_op(acc, &mut init_val, item))
+    }
+
+    fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+    where
+        A: FnOnce() -> RA + Send,
+        B: FnOnce() -> RB + Send,
+        RA: Send,
+        RB: Send,
+    {
+        (a(), b())
     }
 }
 
@@ -434,6 +478,16 @@ cfg_if! {
                         .reduce(&identity, reduce_op)
                 })
             }
+
+            fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+            where
+                A: FnOnce() -> RA + Send,
+                B: FnOnce() -> RB + Send,
+                RA: Send,
+                RB: Send,
+            {
+                self.thread_pool.install(|| rayon::join(a, b))
+            }
         }
     }
 }
@@ -535,6 +589,25 @@ mod test {
             );
 
             prop_assert_eq!(via_map, via_fold_init);
+        }
+
+        #[test]
+        fn parallel_join_matches_sequential(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+
+            let (seq_sum, seq_product) = sequential.join(
+                || data.iter().fold(0i64, |acc, &x| acc.wrapping_add(x as i64)),
+                || data.iter().fold(1i64, |acc, &x| acc.wrapping_mul(x as i64)),
+            );
+
+            let (par_sum, par_product) = parallel.join(
+                || data.iter().fold(0i64, |acc, &x| acc.wrapping_add(x as i64)),
+                || data.iter().fold(1i64, |acc, &x| acc.wrapping_mul(x as i64)),
+            );
+
+            prop_assert_eq!(seq_sum, par_sum);
+            prop_assert_eq!(seq_product, par_product);
         }
     }
 }

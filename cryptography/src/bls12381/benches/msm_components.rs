@@ -17,9 +17,8 @@ fn benchmark_components(c: &mut Criterion) {
         b.iter_batched(
             || StdRng::seed_from_u64(0),
             |mut rng| {
-                let scalars: Vec<Scalar> = black_box(
-                    (0..n).map(|_| Scalar::random(&mut rng)).collect()
-                );
+                let scalars: Vec<Scalar> =
+                    black_box((0..n).map(|_| Scalar::random(&mut rng)).collect());
                 scalars
             },
             BatchSize::SmallInput,
@@ -35,9 +34,7 @@ fn benchmark_components(c: &mut Criterion) {
                     .map(|_| G1::generator() * &Scalar::random(&mut rng))
                     .collect::<Vec<_>>()
             },
-            |points| {
-                black_box(G1::batch_to_affine(&points))
-            },
+            |points| black_box(G1::batch_to_affine(&points)),
             BatchSize::SmallInput,
         );
     });
@@ -51,9 +48,7 @@ fn benchmark_components(c: &mut Criterion) {
                     .map(|_| G2::generator() * &Scalar::random(&mut rng))
                     .collect::<Vec<_>>()
             },
-            |points| {
-                black_box(G2::batch_to_affine(&points))
-            },
+            |points| black_box(G2::batch_to_affine(&points)),
             BatchSize::SmallInput,
         );
     });
@@ -66,14 +61,10 @@ fn benchmark_components(c: &mut Criterion) {
                 let points: Vec<G1> = (0..n)
                     .map(|_| G1::generator() * &Scalar::random(&mut rng))
                     .collect();
-                let scalars: Vec<Scalar> = (0..n)
-                    .map(|_| Scalar::random(&mut rng))
-                    .collect();
+                let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
                 (points, scalars)
             },
-            |(points, scalars)| {
-                black_box(G1::msm(&points, &scalars, &Sequential))
-            },
+            |(points, scalars)| black_box(G1::msm(&points, &scalars, &Sequential)),
             BatchSize::SmallInput,
         );
     });
@@ -86,14 +77,10 @@ fn benchmark_components(c: &mut Criterion) {
                 let points: Vec<G2> = (0..n)
                     .map(|_| G2::generator() * &Scalar::random(&mut rng))
                     .collect();
-                let scalars: Vec<Scalar> = (0..n)
-                    .map(|_| Scalar::random(&mut rng))
-                    .collect();
+                let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
                 (points, scalars)
             },
-            |(points, scalars)| {
-                black_box(G2::msm(&points, &scalars, &Sequential))
-            },
+            |(points, scalars)| black_box(G2::msm(&points, &scalars, &Sequential)),
             BatchSize::SmallInput,
         );
     });
@@ -107,14 +94,10 @@ fn benchmark_components(c: &mut Criterion) {
                     .map(|_| G1::generator() * &Scalar::random(&mut rng))
                     .collect();
                 let affine = G1::batch_to_affine(&points);
-                let scalars: Vec<Scalar> = (0..n)
-                    .map(|_| Scalar::random(&mut rng))
-                    .collect();
+                let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
                 (affine, scalars)
             },
-            |(affine, scalars)| {
-                black_box(G1::msm_affine(&affine, &scalars))
-            },
+            |(affine, scalars)| black_box(G1::msm_affine(&affine, &scalars)),
             BatchSize::SmallInput,
         );
     });
@@ -128,14 +111,10 @@ fn benchmark_components(c: &mut Criterion) {
                     .map(|_| G2::generator() * &Scalar::random(&mut rng))
                     .collect();
                 let affine = G2::batch_to_affine(&points);
-                let scalars: Vec<Scalar> = (0..n)
-                    .map(|_| Scalar::random(&mut rng))
-                    .collect();
+                let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
                 (affine, scalars)
             },
-            |(affine, scalars)| {
-                black_box(G2::msm_affine(&affine, &scalars))
-            },
+            |(affine, scalars)| black_box(G2::msm_affine(&affine, &scalars)),
             BatchSize::SmallInput,
         );
     });
@@ -147,11 +126,12 @@ fn benchmark_components(c: &mut Criterion) {
                 let mut rng = StdRng::seed_from_u64(0);
                 let (private, public) = primitives::ops::keypair::<_, MinSig>(&mut rng);
                 let sig = primitives::ops::sign_message::<MinSig>(&private, b"ns", b"msg");
-                let hm = primitives::ops::hash_with_namespace::<MinSig>(MinSig::MESSAGE, b"ns", b"msg");
+                let hm =
+                    primitives::ops::hash_with_namespace::<MinSig>(MinSig::MESSAGE, b"ns", b"msg");
                 (public, hm, sig)
             },
             |(public, hm, sig)| {
-                black_box(MinSig::verify(&public, &hm, &sig).unwrap())
+                black_box(MinSig::verify)(&public, &hm, &sig).unwrap();
             },
             BatchSize::SmallInput,
         );
@@ -164,7 +144,8 @@ fn benchmark_components(c: &mut Criterion) {
                 let mut rng = StdRng::seed_from_u64(0);
                 let namespace = b"ns";
                 let msg = b"msg";
-                let hm = primitives::ops::hash_with_namespace::<MinSig>(MinSig::MESSAGE, namespace, msg);
+                let hm =
+                    primitives::ops::hash_with_namespace::<MinSig>(MinSig::MESSAGE, namespace, msg);
                 let (publics, sigs): (Vec<G2>, Vec<G1>) = (0..n)
                     .map(|_| {
                         let (private, public) = primitives::ops::keypair::<_, MinSig>(&mut rng);
@@ -172,13 +153,17 @@ fn benchmark_components(c: &mut Criterion) {
                         (public, sig)
                     })
                     .unzip();
-                let scalars: Vec<Scalar> = (0..n)
-                    .map(|_| Scalar::random(&mut rng))
-                    .collect();
+                let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
                 (publics, hm, sigs, scalars)
             },
             |(publics, hm, sigs, scalars)| {
-                black_box(MinSig::verify_same_message_msm(&publics, &hm, &sigs, &scalars))
+                black_box(MinSig::verify_same_message_msm(
+                    &publics,
+                    &hm,
+                    &sigs,
+                    &scalars,
+                    &Sequential,
+                ))
             },
             BatchSize::SmallInput,
         );

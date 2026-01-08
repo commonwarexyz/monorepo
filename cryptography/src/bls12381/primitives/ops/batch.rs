@@ -81,19 +81,15 @@ where
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, sig)| *sig).collect();
 
     // Use optimized MSM with batch affine conversion (happy path)
-    if V::verify_same_message_msm(&pks, &hm, &sigs, &scalars) {
+    if V::verify_same_message_msm(&pks, &hm, &sigs, &scalars, strategy) {
         return Vec::new(); // All valid!
     }
 
     // Unhappy path: pre-compute weighted values once, then use simple sums for bisection
-    let weighted_pks: Vec<V::Public> = strategy.map_collect_vec(
-        pks.iter().zip(&scalars),
-        |(pk, s)| *pk * s,
-    );
-    let weighted_sigs: Vec<V::Signature> = strategy.map_collect_vec(
-        sigs.iter().zip(&scalars),
-        |(sig, s)| *sig * s,
-    );
+    let weighted_pks: Vec<V::Public> =
+        strategy.map_collect_vec(pks.iter().zip(&scalars), |(pk, s)| *pk * s);
+    let weighted_sigs: Vec<V::Signature> =
+        strategy.map_collect_vec(sigs.iter().zip(&scalars), |(sig, s)| *sig * s);
 
     // Use sum-based bisection (O(n) additions total, no repeated conversions)
     verify_same_message_bisect_sums::<V>(&weighted_pks, &weighted_sigs, &hm, 0, entries.len())
@@ -135,9 +131,14 @@ where
 
     // Bisect recursively
     let mid = start + (end - start) / 2;
-    let mut invalid = verify_same_message_bisect_sums::<V>(weighted_pks, weighted_sigs, hm, start, mid);
+    let mut invalid =
+        verify_same_message_bisect_sums::<V>(weighted_pks, weighted_sigs, hm, start, mid);
     invalid.extend(verify_same_message_bisect_sums::<V>(
-        weighted_pks, weighted_sigs, hm, mid, end,
+        weighted_pks,
+        weighted_sigs,
+        hm,
+        mid,
+        end,
     ));
     invalid
 }

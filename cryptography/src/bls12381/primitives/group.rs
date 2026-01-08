@@ -167,7 +167,7 @@ pub struct G1Affine(blst_p1_affine);
 
 impl G1Affine {
     /// Returns a reference to the inner `blst_p1_affine`.
-    pub(crate) fn inner(&self) -> &blst_p1_affine {
+    pub(crate) const fn inner(&self) -> &blst_p1_affine {
         &self.0
     }
 
@@ -213,7 +213,7 @@ pub struct G2Affine(blst_p2_affine);
 
 impl G2Affine {
     /// Returns a reference to the inner `blst_p2_affine`.
-    pub(crate) fn inner(&self) -> &blst_p2_affine {
+    pub(crate) const fn inner(&self) -> &blst_p2_affine {
         &self.0
     }
 
@@ -875,10 +875,8 @@ impl G1 {
         }
 
         // Create pointer arrays for BLST API
-        let points: Vec<*const blst_p1_affine> =
-            pairs.iter().map(|(p, _)| p as *const _).collect();
-        let scalars: Vec<*const u8> =
-            pairs.iter().map(|(_, s)| s.b.as_ptr()).collect();
+        let points: Vec<*const blst_p1_affine> = pairs.iter().map(|(p, _)| p as *const _).collect();
+        let scalars: Vec<*const u8> = pairs.iter().map(|(_, s)| s.b.as_ptr()).collect();
 
         // Allocate scratch space
         // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
@@ -932,6 +930,7 @@ impl G1 {
         let scalars_ptr: Vec<*const u8> = blst_scalars.iter().map(|s| s.b.as_ptr()).collect();
 
         // Allocate scratch space
+        // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof is a pure function with no side effects.
         let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
         assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
         let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
@@ -975,6 +974,7 @@ impl G1 {
         let blst_scalars: Vec<blst_scalar> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
         let scalars_ptr: Vec<*const u8> = blst_scalars.iter().map(|s| s.b.as_ptr()).collect();
 
+        // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof is a pure function with no side effects.
         let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
         assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
         let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
@@ -1285,10 +1285,8 @@ impl G2 {
         }
 
         // Create pointer arrays for BLST API
-        let points: Vec<*const blst_p2_affine> =
-            pairs.iter().map(|(p, _)| p as *const _).collect();
-        let scalars: Vec<*const u8> =
-            pairs.iter().map(|(_, s)| s.b.as_ptr()).collect();
+        let points: Vec<*const blst_p2_affine> = pairs.iter().map(|(p, _)| p as *const _).collect();
+        let scalars: Vec<*const u8> = pairs.iter().map(|(_, s)| s.b.as_ptr()).collect();
 
         // Allocate scratch space
         // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
@@ -1342,6 +1340,7 @@ impl G2 {
         let scalars_ptr: Vec<*const u8> = blst_scalars.iter().map(|s| s.b.as_ptr()).collect();
 
         // Allocate scratch space
+        // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof is a pure function with no side effects.
         let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
         assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
         let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
@@ -1385,6 +1384,7 @@ impl G2 {
         let blst_scalars: Vec<blst_scalar> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
         let scalars_ptr: Vec<*const u8> = blst_scalars.iter().map(|s| s.b.as_ptr()).collect();
 
+        // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof is a pure function with no side effects.
         let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
         assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
         let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];

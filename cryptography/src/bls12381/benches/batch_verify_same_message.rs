@@ -43,11 +43,7 @@ fn benchmark_batch_verify_same_message(c: &mut Criterion) {
                             } else {
                                 black_box(
                                     primitives::ops::batch::verify_same_message::<_, MinSig, _>(
-                                        &mut rng,
-                                        namespace,
-                                        msg,
-                                        &entries,
-                                        &strategy,
+                                        &mut rng, namespace, msg, &entries, &strategy,
                                     ),
                                 )
                             };
