@@ -123,6 +123,69 @@ fn parse_length_prefix(buf: &[u8]) -> Result<(usize, usize), Error> {
     Ok((size, varint_len))
 }
 
+/// Metadata parsed from an item's length-prefixed header.
+struct ItemMeta {
+    /// Size of the item data in bytes.
+    size: usize,
+    /// Length of the varint encoding.
+    varint_len: usize,
+    /// Offset after the item data ends.
+    next_offset: u64,
+}
+
+impl ItemMeta {
+    /// Parse item metadata from a buffer containing the varint header.
+    fn parse(buf: &[u8], available: usize, offset: u64) -> Result<Self, Error> {
+        let (size, varint_len) = parse_length_prefix(&buf[..available])?;
+        let next_offset = offset
+            .checked_add(varint_len as u64)
+            .ok_or(Error::OffsetOverflow)?
+            .checked_add(size as u64)
+            .ok_or(Error::OffsetOverflow)?;
+        Ok(Self {
+            size,
+            varint_len,
+            next_offset,
+        })
+    }
+
+    /// Extract item data from the buffer, returning either complete data or a partially-filled
+    /// buffer that needs more bytes read into it.
+    fn extract_from_buffer<'a>(&self, buf: &'a [u8], available: usize) -> ItemExtract<'a> {
+        let extra_bytes = available.saturating_sub(self.varint_len);
+        if extra_bytes >= self.size {
+            ItemExtract::Complete(&buf[self.varint_len..self.varint_len + self.size])
+        } else {
+            let mut buffer = vec![0u8; self.size];
+            buffer[..extra_bytes]
+                .copy_from_slice(&buf[self.varint_len..self.varint_len + extra_bytes]);
+            ItemExtract::Incomplete {
+                buffer,
+                filled: extra_bytes,
+            }
+        }
+    }
+}
+
+/// Result of extracting item data from a buffer.
+enum ItemExtract<'a> {
+    /// All item data is available in the buffer.
+    Complete(&'a [u8]),
+    /// Need to read more bytes. Buffer has been allocated and prefix copied.
+    Incomplete { buffer: Vec<u8>, filled: usize },
+}
+
+/// Decode item data with optional decompression.
+fn decode_item<V: Codec>(item_data: &[u8], cfg: &V::Cfg, compressed: bool) -> Result<V, Error> {
+    if compressed {
+        let decompressed =
+            decode_all(Cursor::new(item_data)).map_err(|_| Error::DecompressionFailed)?;
+        V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)
+    } else {
+        V::decode_cfg(item_data, cfg).map_err(Error::Codec)
+    }
+}
+
 /// Implementation of `Journal` storage.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     manager: Manager<E, AppendFactory>,
@@ -164,42 +227,21 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         blob: &Append<E::Blob>,
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
-        // Read varint header (max 5 bytes for u32)
         let buf = vec![0u8; MAX_VARINT_SIZE];
         let (buf, available) = blob.read_up_to(buf, offset).await?;
-        let (size, varint_len) = parse_length_prefix(&buf.as_ref()[..available])?;
-        let data_offset = offset
-            .checked_add(varint_len as u64)
-            .ok_or(Error::OffsetOverflow)?;
+        let meta = ItemMeta::parse(buf.as_ref(), available, offset)?;
 
-        // Compute next offset (no alignment)
-        let next_offset = data_offset
-            .checked_add(size as u64)
-            .ok_or(Error::OffsetOverflow)?;
-
-        // Get item bytes - either from buffer directly or by reading more
-        let extra_bytes = available - varint_len;
-        let item_data: Cow<'_, [u8]> = if extra_bytes >= size {
-            Cow::Borrowed(&buf.as_ref()[varint_len..varint_len + size])
-        } else {
-            let mut v = vec![0u8; size];
-            v[..extra_bytes].copy_from_slice(&buf.as_ref()[varint_len..varint_len + extra_bytes]);
-            blob.read_into(&mut v[extra_bytes..], data_offset + extra_bytes as u64)
-                .await?;
-            Cow::Owned(v)
+        let item_data: Cow<'_, [u8]> = match meta.extract_from_buffer(buf.as_ref(), available) {
+            ItemExtract::Complete(data) => Cow::Borrowed(data),
+            ItemExtract::Incomplete { mut buffer, filled } => {
+                let read_offset = offset + meta.varint_len as u64 + filled as u64;
+                blob.read_into(&mut buffer[filled..], read_offset).await?;
+                Cow::Owned(buffer)
+            }
         };
 
-        // Decode item (with optional decompression)
-        let item = if compressed {
-            let decompressed = decode_all(Cursor::new(item_data.as_ref()))
-                .map_err(|_| Error::DecompressionFailed)?;
-            V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)?
-        } else {
-            V::decode_cfg(item_data.as_ref(), cfg).map_err(Error::Codec)?
-        };
-
-        // Return item
-        Ok((next_offset, size as u32, item))
+        let item = decode_item::<V>(item_data.as_ref(), cfg, compressed)?;
+        Ok((meta.next_offset, meta.size as u32, item))
     }
 
     /// Helper function to read an item from a [Read].
@@ -213,55 +255,33 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         compressed: bool,
         varint_buf: &mut Vec<u8>,
     ) -> Result<(u64, u64, u32, V), Error> {
-        // If we're not at the right position, seek to it
         if reader.position() != offset {
             reader.seek_to(offset).map_err(Error::Runtime)?;
         }
 
-        // Read varint header (max 5 bytes for u32). Reuse the provided buffer.
         varint_buf.clear();
         varint_buf.resize(MAX_VARINT_SIZE, 0);
         let buf = std::mem::take(varint_buf);
         let (buf, available) = reader.read_up_to(buf).await?;
-        let (size, varint_len) = parse_length_prefix(&buf.as_ref()[..available])?;
+        let meta = ItemMeta::parse(buf.as_ref(), available, offset)?;
 
-        // Calculate the correct next offset
-        let next_offset = offset
-            .checked_add(varint_len as u64)
-            .ok_or(Error::OffsetOverflow)?
-            .checked_add(size as u64)
-            .ok_or(Error::OffsetOverflow)?;
-
-        // Get item bytes - either from buffer directly or by reading more
-        let extra_bytes = available - varint_len;
-        let item_data: Cow<'_, [u8]> = if extra_bytes >= size {
-            // We already have all the data we need, but reader position may be ahead
-            // Seek to the correct next position
-            reader.seek_to(next_offset).map_err(Error::Runtime)?;
-            Cow::Borrowed(&buf.as_ref()[varint_len..varint_len + size])
-        } else {
-            let mut v = vec![0u8; size];
-            v[..extra_bytes].copy_from_slice(&buf.as_ref()[varint_len..varint_len + extra_bytes]);
-            reader
-                .read_exact(&mut v[extra_bytes..], size - extra_bytes)
-                .await
-                .map_err(Error::Runtime)?;
-            Cow::Owned(v)
+        let item_data: Cow<'_, [u8]> = match meta.extract_from_buffer(buf.as_ref(), available) {
+            ItemExtract::Complete(data) => {
+                reader.seek_to(meta.next_offset).map_err(Error::Runtime)?;
+                Cow::Borrowed(data)
+            }
+            ItemExtract::Incomplete { mut buffer, filled } => {
+                reader
+                    .read_exact(&mut buffer[filled..], meta.size - filled)
+                    .await
+                    .map_err(Error::Runtime)?;
+                Cow::Owned(buffer)
+            }
         };
 
-        // Decode item (with optional decompression)
-        let item = if compressed {
-            let decompressed = decode_all(Cursor::new(item_data.as_ref()))
-                .map_err(|_| Error::DecompressionFailed)?;
-            V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)?
-        } else {
-            V::decode_cfg(item_data.as_ref(), cfg).map_err(Error::Codec)?
-        };
-
-        // Restore the buffer for reuse in the next iteration
+        let item = decode_item::<V>(item_data.as_ref(), cfg, compressed)?;
         *varint_buf = buf.into();
-
-        Ok((next_offset, next_offset, size as u32, item))
+        Ok((meta.next_offset, meta.next_offset, meta.size as u32, item))
     }
 
     /// Returns an ordered stream of all items in the journal starting with the item at the given
