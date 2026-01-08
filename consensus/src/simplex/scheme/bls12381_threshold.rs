@@ -11,7 +11,7 @@ use crate::{
         scheme::{seed_namespace, Namespace},
         types::{Finalization, Notarization, Subject},
     },
-    types::{Epoch, Round, View},
+    types::{Epoch, Participant, Round, View},
     Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
@@ -474,9 +474,9 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
     type Signature = Signature<V>;
     type Certificate = Signature<V>;
 
-    fn me(&self) -> Option<u32> {
+    fn me(&self) -> Option<Participant> {
         match &self.role {
-            Role::Signer { share, .. } => Some(share.index),
+            Role::Signer { share, .. } => Some(Participant::new(share.index)),
             _ => None,
         }
     }
@@ -504,7 +504,7 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
         };
 
         Some(Attestation {
-            signer: share.index,
+            signer: Participant::new(share.index),
             signature,
         })
     }
@@ -519,7 +519,7 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
         R: CryptoRngCore,
         D: Digest,
     {
-        let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
+        let Ok(evaluated) = self.polynomial().partial_public(attestation.signer.get()) else {
             return false;
         };
 
@@ -561,11 +561,11 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
             .map(|attestation| {
                 (
                     PartialSignature::<V> {
-                        index: attestation.signer,
+                        index: attestation.signer.get(),
                         value: attestation.signature.vote_signature,
                     },
                     PartialSignature::<V> {
-                        index: attestation.signer,
+                        index: attestation.signer.get(),
                         value: attestation.signature.seed_signature,
                     },
                 )
@@ -606,16 +606,19 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
             .into_iter()
             .zip(seed_partials)
             .map(|(vote, seed)| Attestation {
-                signer: vote.index,
+                signer: Participant::new(vote.index),
                 signature: Signature {
                     vote_signature: vote.value,
                     seed_signature: seed.value,
                 },
             })
-            .filter(|attestation| !invalid.contains(&attestation.signer))
+            .filter(|attestation| !invalid.contains(&attestation.signer.get()))
             .collect();
 
-        Verification::new(verified, invalid.into_iter().collect())
+        Verification::new(
+            verified,
+            invalid.into_iter().map(Participant::new).collect(),
+        )
     }
 
     fn assemble<I>(&self, attestations: I) -> Option<Self::Certificate>
@@ -627,11 +630,11 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
             .map(|attestation| {
                 (
                     PartialSignature::<V> {
-                        index: attestation.signer,
+                        index: attestation.signer.get(),
                         value: attestation.signature.vote_signature,
                     },
                     PartialSignature::<V> {
-                        index: attestation.signer,
+                        index: attestation.signer.get(),
                         value: attestation.signature.seed_signature,
                     },
                 )
@@ -1003,7 +1006,7 @@ mod tests {
         assert!(verification.invalid.is_empty());
         assert_eq!(verification.verified.len(), quorum);
 
-        votes[0].signer = 999;
+        votes[0].signer = Participant::new(999);
         let verification = schemes[0].verify_attestations(
             &mut rng,
             Subject::Notarize {
@@ -1011,7 +1014,7 @@ mod tests {
             },
             votes,
         );
-        assert_eq!(verification.invalid, vec![999]);
+        assert_eq!(verification.invalid, vec![Participant::new(999)]);
         assert_eq!(verification.verified.len(), quorum - 1);
     }
 
@@ -1449,7 +1452,7 @@ mod tests {
             threshold::sign_message::<V>(share, seed_namespace.as_ref(), seed_message.as_ref())
                 .value;
 
-        assert_eq!(vote.signer, share.index);
+        assert_eq!(vote.signer, Participant::new(share.index));
         assert_eq!(vote.signature.vote_signature, expected_message);
         assert_eq!(vote.signature.seed_signature, expected_seed);
     }

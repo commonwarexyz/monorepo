@@ -27,7 +27,7 @@
 
 use crate::{
     simplex::scheme::bls12381_threshold,
-    types::{Round, View},
+    types::{Participant, Round, View},
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -83,7 +83,7 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// The `certificate` is expected to be `None` only for view 1.
     ///
     /// Returns the index of the selected leader in the participants list.
-    fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> u32;
+    fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant;
 }
 
 /// Configuration for round-robin leader election.
@@ -117,7 +117,9 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
     fn build(self, participants: &Set<S::PublicKey>) -> RoundRobinElector<S> {
         assert!(!participants.is_empty(), "no participants");
 
-        let mut permutation: Vec<u32> = (0..participants.len() as u32).collect();
+        let mut permutation: Vec<Participant> = (0..participants.len() as u32)
+            .map(Participant::new)
+            .collect();
 
         if let Some(seed) = &self.seed {
             let mut hasher = H::new();
@@ -140,12 +142,12 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
 /// Created via [`RoundRobin::build`].
 #[derive(Clone, Debug)]
 pub struct RoundRobinElector<S: Scheme> {
-    permutation: Vec<u32>,
+    permutation: Vec<Participant>,
     _phantom: PhantomData<S>,
 }
 
 impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
-    fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> u32 {
+    fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> Participant {
         let n = self.permutation.len();
         let idx = (round.epoch().get().wrapping_add(round.view().get())) as usize % n;
         self.permutation[idx]
@@ -168,16 +170,18 @@ impl Random {
         round: Round,
         n: usize,
         seed_signature: Option<V::Signature>,
-    ) -> u32 {
+    ) -> Participant {
         assert!(seed_signature.is_some() || round.view() == View::new(1));
 
         let Some(seed_signature) = seed_signature else {
             // Standard round-robin for view 1
-            return (round.epoch().get().wrapping_add(round.view().get()) as usize % n) as u32;
+            return Participant::new(
+                (round.epoch().get().wrapping_add(round.view().get()) as usize % n) as u32,
+            );
         };
 
         // Use the seed signature as a source of randomness
-        modulo(seed_signature.encode().as_ref(), n as u64) as u32
+        Participant::new(modulo(seed_signature.encode().as_ref(), n as u64) as u32)
     }
 }
 
@@ -214,7 +218,11 @@ where
     V: Variant,
     S: Strategy,
 {
-    fn elect(&self, round: Round, certificate: Option<&bls12381_threshold::Signature<V>>) -> u32 {
+    fn elect(
+        &self,
+        round: Round,
+        certificate: Option<&bls12381_threshold::Signature<V>>,
+    ) -> Participant {
         Random::select_leader::<V>(round, self.n, certificate.map(|c| c.seed_signature))
     }
 }
@@ -260,7 +268,10 @@ mod tests {
 
         // Verify leaders cycle: consecutive leaders differ by 1 (mod n)
         for i in 0..leaders.len() - 1 {
-            assert_eq!((leaders[i] + 1) % n as u32, leaders[i + 1]);
+            assert_eq!(
+                Participant::new((leaders[i].get() + 1) % n as u32),
+                leaders[i + 1]
+            );
         }
     }
 
@@ -283,9 +294,9 @@ mod tests {
 
         // Each participant should be selected exactly once
         let mut seen = vec![false; n];
-        for &leader in &leaders {
-            assert!(!seen[leader as usize]);
-            seen[leader as usize] = true;
+        for leader in &leaders {
+            assert!(!seen[leader.get() as usize]);
+            seen[leader.get() as usize] = true;
         }
         assert!(seen.iter().all(|x| *x));
     }
@@ -316,7 +327,16 @@ mod tests {
             .collect();
 
         // No seed should be identity permutation
-        assert_eq!(leaders_no_seed, vec![1, 2, 3, 4, 0]);
+        assert_eq!(
+            leaders_no_seed,
+            vec![
+                Participant::new(1),
+                Participant::new(2),
+                Participant::new(3),
+                Participant::new(4),
+                Participant::new(0)
+            ]
+        );
 
         // Different seeds should produce different permutations
         assert_ne!(leaders_seed_1, leaders_no_seed);
@@ -327,7 +347,16 @@ mod tests {
         for leaders in [&leaders_seed_1, &leaders_seed_2] {
             let mut sorted = leaders.clone();
             sorted.sort();
-            assert_eq!(sorted, vec![0, 1, 2, 3, 4]);
+            assert_eq!(
+                sorted,
+                vec![
+                    Participant::new(0),
+                    Participant::new(1),
+                    Participant::new(2),
+                    Participant::new(3),
+                    Participant::new(4)
+                ]
+            );
         }
     }
 
@@ -376,9 +405,9 @@ mod tests {
 
         // Each participant should be selected exactly once (same as RoundRobin)
         let mut seen = vec![false; n];
-        for &leader in &leaders {
-            assert!(!seen[leader as usize]);
-            seen[leader as usize] = true;
+        for leader in &leaders {
+            assert!(!seen[leader.get() as usize]);
+            seen[leader.get() as usize] = true;
         }
         assert!(seen.iter().all(|x| *x));
     }

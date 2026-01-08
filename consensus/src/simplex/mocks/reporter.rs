@@ -128,7 +128,7 @@ where
                 }
                 let encoded = notarize.encode();
                 Notarize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[notarize.signer() as usize].clone();
+                let public_key = self.participants.key(notarize.signer()).unwrap().clone();
                 self.notarizes
                     .lock()
                     .unwrap()
@@ -169,7 +169,7 @@ where
                 }
                 let encoded = nullify.encode();
                 Nullify::<S>::decode(encoded).unwrap();
-                let public_key = self.participants[nullify.signer() as usize].clone();
+                let public_key = self.participants.key(nullify.signer()).unwrap().clone();
                 self.nullifies
                     .lock()
                     .unwrap()
@@ -208,7 +208,7 @@ where
                 }
                 let encoded = finalize.encode();
                 Finalize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[finalize.signer() as usize].clone();
+                let public_key = self.participants.key(finalize.signer()).unwrap().clone();
                 self.finalizes
                     .lock()
                     .unwrap()
@@ -257,7 +257,7 @@ where
                 }
                 let encoded = conflicting.encode();
                 ConflictingNotarize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[conflicting.signer() as usize].clone();
+                let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
                 self.faults
                     .lock()
                     .unwrap()
@@ -276,7 +276,7 @@ where
                 }
                 let encoded = conflicting.encode();
                 ConflictingFinalize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[conflicting.signer() as usize].clone();
+                let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
                 self.faults
                     .lock()
                     .unwrap()
@@ -295,7 +295,7 @@ where
                 }
                 let encoded = conflicting.encode();
                 NullifyFinalize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[conflicting.signer() as usize].clone();
+                let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
                 self.faults
                     .lock()
                     .unwrap()

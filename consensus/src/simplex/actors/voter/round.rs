@@ -1,7 +1,7 @@
 use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
     simplex::types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
-    types::Round as Rnd,
+    types::{Participant, Round as Rnd},
 };
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use commonware_utils::{futures::Aborter, ordered::Quorum};
@@ -14,7 +14,7 @@ use tracing::debug;
 /// Tracks the leader of a round.
 #[derive(Debug, Clone)]
 pub struct Leader<P: PublicKey> {
-    pub idx: u32,
+    pub idx: Participant,
     pub key: P,
 }
 
@@ -172,7 +172,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns true when the local participant controls `signer`.
-    pub fn is_signer(&self, signer: u32) -> bool {
+    pub fn is_signer(&self, signer: Participant) -> bool {
         self.scheme.me().is_some_and(|me| me == signer)
     }
 
@@ -183,14 +183,14 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Sets the leader for this round using the pre-computed leader index.
-    pub fn set_leader(&mut self, leader: u32) {
+    pub fn set_leader(&mut self, leader: Participant) {
         let key = self
             .scheme
             .participants()
             .key(leader)
             .cloned()
             .expect("leader index comes from elector, must be within bounds");
-        debug!(round=?self.round, ?leader, ?key, "leader elected");
+        debug!(round=?self.round, %leader, ?key, "leader elected");
         self.leader = Some(Leader { idx: leader, key });
     }
 
@@ -559,7 +559,7 @@ mod tests {
                 Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
             },
         },
-        types::{Epoch, View},
+        types::{Epoch, Participant, View},
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_utils::futures::AbortablePool;
@@ -589,7 +589,7 @@ mod tests {
         let mut round = Round::new(leader_scheme, proposal_a.round, SystemTime::UNIX_EPOCH);
 
         // Set proposal from batcher
-        round.set_leader(0);
+        round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal_a.clone()));
         assert!(round.verified());
 
@@ -642,7 +642,7 @@ mod tests {
         let mut round = Round::new(leader_scheme, proposal_a.round, SystemTime::UNIX_EPOCH);
 
         // Set proposal from batcher
-        round.set_leader(0);
+        round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal_a.clone()));
         assert!(round.verified());
 
@@ -700,7 +700,7 @@ mod tests {
         let mut round = Round::new(leader_scheme, proposal.round, SystemTime::UNIX_EPOCH);
 
         // Set proposal from batcher
-        round.set_leader(0);
+        round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal.clone()));
 
         // Add matching notarization certificate
@@ -759,7 +759,7 @@ mod tests {
 
         // Replay messages and verify broadcast flags
         let mut round = Round::new(local_scheme, round, now);
-        round.set_leader(0);
+        round.set_leader(Participant::new(0));
         round.replay(&Artifact::Notarize(notarize_local));
         assert!(round.broadcast_notarize);
         round.replay(&Artifact::Nullify(nullify_local));
@@ -800,7 +800,7 @@ mod tests {
 
         // Replay finalize and verify nullify is blocked
         let mut round = Round::new(local_scheme, round_info, now);
-        round.set_leader(0);
+        round.set_leader(Participant::new(0));
         round.replay(&Artifact::Finalize(finalize_local));
 
         // Check that construct_nullify returns None
@@ -819,7 +819,7 @@ mod tests {
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
 
         let mut round = Round::new(local_scheme, round_info, now);
-        round.set_leader(0);
+        round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal));
         assert!(round.verified());
 
@@ -841,7 +841,7 @@ mod tests {
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
 
         let mut round = Round::new(local_scheme, round_info, now);
-        round.set_leader(0);
+        round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal.clone()));
         assert!(round.verified());
 
@@ -882,7 +882,7 @@ mod tests {
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
 
         let mut round = Round::new(local_scheme, round_info, now);
-        round.set_leader(0);
+        round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal.clone()));
         assert!(round.verified());
 
@@ -922,7 +922,7 @@ mod tests {
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
 
         let mut round = Round::new(local_scheme, round_info, now);
-        round.set_leader(0);
+        round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal.clone()));
         assert!(round.verified());
 
@@ -965,7 +965,7 @@ mod tests {
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
 
         let mut round = Round::new(local_scheme, round_info, now);
-        round.set_leader(0);
+        round.set_leader(Participant::new(0));
         // Don't set proposal yet
 
         // Add notarization (which includes the proposal in the certificate)
@@ -997,7 +997,7 @@ mod tests {
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
 
         let mut round = Round::new(local_scheme, round_info, now);
-        round.set_leader(0);
+        round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal.clone()));
 
         // Add notarization

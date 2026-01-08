@@ -2,7 +2,7 @@
 
 use crate::{
     simplex::scheme,
-    types::{Epoch, Round, View},
+    types::{Epoch, Participant, Round, View},
     Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
@@ -47,7 +47,7 @@ impl<D: Digest, P: PublicKey> Viewable for Context<D, P> {
 /// This is used to identify which participant signed a given message.
 pub trait Attributable {
     /// Returns the index of the signer (validator) who produced this message.
-    fn signer(&self) -> u32;
+    fn signer(&self) -> Participant;
 }
 
 /// A map of [Attributable] items keyed by their signer index.
@@ -81,7 +81,7 @@ impl<T: Attributable> AttributableMap<T> {
     /// Returns `true` if the item was inserted, `false` if an item from this
     /// signer already exists or if the signer index is out of bounds.
     pub fn insert(&mut self, item: T) -> bool {
-        let index = item.signer() as usize;
+        let index = item.signer().get() as usize;
         if index >= self.data.len() {
             return false;
         }
@@ -104,8 +104,8 @@ impl<T: Attributable> AttributableMap<T> {
     }
 
     /// Returns a reference to the item associated with the given signer, if present.
-    pub fn get(&self, signer: u32) -> Option<&T> {
-        self.data.get(signer as usize)?.as_ref()
+    pub fn get(&self, signer: Participant) -> Option<&T> {
+        self.data.get(signer.get() as usize)?.as_ref()
     }
 
     /// Returns an iterator over items in the map, ordered by signer index
@@ -158,17 +158,17 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     }
 
     /// Returns the notarize vote for `signer`, if present.
-    pub fn notarize(&self, signer: u32) -> Option<&Notarize<S, D>> {
+    pub fn notarize(&self, signer: Participant) -> Option<&Notarize<S, D>> {
         self.notarizes.get(signer)
     }
 
     /// Returns the nullify vote for `signer`, if present.
-    pub fn nullify(&self, signer: u32) -> Option<&Nullify<S>> {
+    pub fn nullify(&self, signer: Participant) -> Option<&Nullify<S>> {
         self.nullifies.get(signer)
     }
 
     /// Returns the finalize vote for `signer`, if present.
-    pub fn finalize(&self, signer: u32) -> Option<&Finalize<S, D>> {
+    pub fn finalize(&self, signer: Participant) -> Option<&Finalize<S, D>> {
         self.finalizes.get(signer)
     }
 
@@ -203,18 +203,18 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     }
 
     /// Returns `true` if the given signer has a notarize vote recorded.
-    pub fn has_notarize(&self, signer: u32) -> bool {
-        self.notarize(signer).is_some()
+    pub fn has_notarize(&self, signer: Participant) -> bool {
+        self.notarizes.get(signer).is_some()
     }
 
-    /// Returns `true` if the given signer has a nullify vote recorded.
-    pub fn has_nullify(&self, signer: u32) -> bool {
-        self.nullify(signer).is_some()
+    /// Returns `true` if a nullify vote has been recorded for `signer`.
+    pub fn has_nullify(&self, signer: Participant) -> bool {
+        self.nullifies.get(signer).is_some()
     }
 
-    /// Returns `true` if the given signer has a finalize vote recorded.
-    pub fn has_finalize(&self, signer: u32) -> bool {
-        self.finalize(signer).is_some()
+    /// Returns `true` if a finalize vote has been recorded for `signer`.
+    pub fn has_finalize(&self, signer: Participant) -> bool {
+        self.finalizes.get(signer).is_some()
     }
 
     /// Clears all notarize votes but keeps the allocations for reuse.
@@ -849,7 +849,7 @@ impl<S: Scheme, D: Digest> Read for Notarize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Attributable for Notarize<S, D> {
-    fn signer(&self) -> u32 {
+    fn signer(&self) -> Participant {
         self.attestation.signer
     }
 }
@@ -1086,7 +1086,7 @@ impl<S: Scheme> Read for Nullify<S> {
 }
 
 impl<S: Scheme> Attributable for Nullify<S> {
-    fn signer(&self) -> u32 {
+    fn signer(&self) -> Participant {
         self.attestation.signer
     }
 }
@@ -1314,7 +1314,7 @@ impl<S: Scheme, D: Digest> Read for Finalize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Attributable for Finalize<S, D> {
-    fn signer(&self) -> u32 {
+    fn signer(&self) -> Participant {
         self.attestation.signer
     }
 }
@@ -2157,7 +2157,7 @@ impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Attributable for ConflictingNotarize<S, D> {
-    fn signer(&self) -> u32 {
+    fn signer(&self) -> Participant {
         self.notarize_1.signer()
     }
 }
@@ -2272,7 +2272,7 @@ impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Attributable for ConflictingFinalize<S, D> {
-    fn signer(&self) -> u32 {
+    fn signer(&self) -> Participant {
         self.finalize_1.signer()
     }
 }
@@ -2385,7 +2385,7 @@ impl<S: Scheme, D: Digest> NullifyFinalize<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Attributable for NullifyFinalize<S, D> {
-    fn signer(&self) -> u32 {
+    fn signer(&self) -> Participant {
         self.nullify.signer()
     }
 }
@@ -3159,10 +3159,10 @@ mod tests {
         finalization_verify_wrong_scheme(bls12381_threshold::fixture::<MinSig, _>);
     }
 
-    struct MockAttributable(u32);
+    struct MockAttributable(Participant);
 
     impl Attributable for MockAttributable {
-        fn signer(&self) -> u32 {
+        fn signer(&self) -> Participant {
             self.0
         }
     }
@@ -3175,50 +3175,56 @@ mod tests {
 
         // Test get on empty map
         for i in 0..5 {
-            assert!(map.get(i).is_none());
+            assert!(map.get(Participant::new(i)).is_none());
         }
 
-        assert!(map.insert(MockAttributable(3)));
+        assert!(map.insert(MockAttributable(Participant::new(3))));
         assert_eq!(map.len(), 1);
         assert!(!map.is_empty());
         let mut iter = map.iter();
-        assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
+        assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(3)));
         assert!(iter.next().is_none());
         drop(iter);
 
         // Test get on existing item
-        assert!(matches!(map.get(3), Some(a) if a.signer() == 3));
+        assert!(
+            matches!(map.get(Participant::new(3)), Some(a) if a.signer() == Participant::new(3))
+        );
 
-        assert!(map.insert(MockAttributable(1)));
+        assert!(map.insert(MockAttributable(Participant::new(1))));
         assert_eq!(map.len(), 2);
         assert!(!map.is_empty());
         let mut iter = map.iter();
-        assert!(matches!(iter.next(), Some(a) if a.signer() == 1));
-        assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
+        assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(1)));
+        assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(3)));
         assert!(iter.next().is_none());
         drop(iter);
 
         // Test get on both items
-        assert!(matches!(map.get(1), Some(a) if a.signer() == 1));
-        assert!(matches!(map.get(3), Some(a) if a.signer() == 3));
+        assert!(
+            matches!(map.get(Participant::new(1)), Some(a) if a.signer() == Participant::new(1))
+        );
+        assert!(
+            matches!(map.get(Participant::new(3)), Some(a) if a.signer() == Participant::new(3))
+        );
 
         // Test get on non-existing items
-        assert!(map.get(0).is_none());
-        assert!(map.get(2).is_none());
-        assert!(map.get(4).is_none());
+        assert!(map.get(Participant::new(0)).is_none());
+        assert!(map.get(Participant::new(2)).is_none());
+        assert!(map.get(Participant::new(4)).is_none());
 
-        assert!(!map.insert(MockAttributable(3)));
+        assert!(!map.insert(MockAttributable(Participant::new(3))));
         assert_eq!(map.len(), 2);
         assert!(!map.is_empty());
         let mut iter = map.iter();
-        assert!(matches!(iter.next(), Some(a) if a.signer() == 1));
-        assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
+        assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(1)));
+        assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(3)));
         assert!(iter.next().is_none());
         drop(iter);
 
         // Test out-of-bounds signer indices
-        assert!(!map.insert(MockAttributable(5)));
-        assert!(!map.insert(MockAttributable(100)));
+        assert!(!map.insert(MockAttributable(Participant::new(5))));
+        assert!(!map.insert(MockAttributable(Participant::new(100))));
         assert_eq!(map.len(), 2);
 
         // Test clear
@@ -3228,10 +3234,10 @@ mod tests {
         assert!(map.iter().next().is_none());
 
         // Verify can insert after clear
-        assert!(map.insert(MockAttributable(2)));
+        assert!(map.insert(MockAttributable(Participant::new(2))));
         assert_eq!(map.len(), 1);
         let mut iter = map.iter();
-        assert!(matches!(iter.next(), Some(a) if a.signer() == 2));
+        assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(2)));
         assert!(iter.next().is_none());
     }
 
