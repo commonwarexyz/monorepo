@@ -38,8 +38,8 @@ impl DatabaseAsyncRef for QmdbAsyncDb {
         let inner = self.inner.clone();
         async move {
             let inner = inner.lock().await;
-            let accounts = inner.accounts.as_ref().expect("accounts initialized");
-            let record = accounts.get(&account_key(address)).await?;
+            let stores = inner.stores()?;
+            let record = stores.accounts.get(&account_key(address)).await?;
             Ok(record.and_then(|record| record.as_info()))
         }
     }
@@ -55,8 +55,8 @@ impl DatabaseAsyncRef for QmdbAsyncDb {
             }
 
             let inner = inner.lock().await;
-            let code_db = inner.code.as_ref().expect("code initialized");
-            let code = code_db.get(&code_key(code_hash)).await?;
+            let stores = inner.stores()?;
+            let code = stores.code.get(&code_key(code_hash)).await?;
             let code = code.ok_or(Error::MissingCode(code_hash))?;
             Ok(Bytecode::new_raw(Bytes::copy_from_slice(&code)))
         }
@@ -70,8 +70,8 @@ impl DatabaseAsyncRef for QmdbAsyncDb {
         let inner = self.inner.clone();
         async move {
             let inner = inner.lock().await;
-            let accounts = inner.accounts.as_ref().expect("accounts initialized");
-            let record = accounts.get(&account_key(address)).await?;
+            let stores = inner.stores()?;
+            let record = stores.accounts.get(&account_key(address)).await?;
             let Some(record) = record else {
                 return Ok(U256::ZERO);
             };
@@ -79,8 +79,7 @@ impl DatabaseAsyncRef for QmdbAsyncDb {
                 return Ok(U256::ZERO);
             }
             let key = storage_key(address, record.storage_generation, index);
-            let storage = inner.storage.as_ref().expect("storage initialized");
-            let value = storage.get(&key).await?;
+            let value = stores.storage.get(&key).await?;
             Ok(value.map(|entry| entry.0).unwrap_or_default())
         }
     }

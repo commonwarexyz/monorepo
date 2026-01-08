@@ -15,18 +15,21 @@ mod adapter;
 mod keys;
 mod model;
 mod persist;
+mod store;
 
 use adapter::QmdbAsyncDb;
 use alloy_evm::revm::{
     database::CacheDB,
     database_interface::DBErrorMarker,
-    primitives::{Address, B256, KECCAK_EMPTY, U256},
+    primitives::{Address, B256, U256},
 };
 use commonware_codec::RangeCfg;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics as _};
 use commonware_storage::{
-    kv::{Batchable as _, Updatable as _},
-    qmdb::store::db::{Config as StoreConfig, Db},
+    qmdb::store::{
+        db::{Config as StoreConfig, Db},
+        NonDurable,
+    },
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -36,6 +39,7 @@ use thiserror::Error;
 
 use keys::{account_key, code_key, storage_key, AccountKey, CodeKey, StorageKey};
 use model::{AccountRecord, StorageRecord};
+use store::{apply_changes_inner, apply_genesis_inner, QmdbInner, Stores};
 
 pub(crate) use adapter::QmdbRefDb;
 pub(crate) use persist::QmdbChanges;
@@ -46,6 +50,9 @@ type Context = tokio::Context;
 type AccountStore = Db<Context, AccountKey, AccountRecord, EightCap>;
 type StorageStore = Db<Context, StorageKey, StorageRecord, EightCap>;
 type CodeStore = Db<Context, CodeKey, Vec<u8>, EightCap>;
+type AccountStoreDirty = Db<Context, AccountKey, AccountRecord, EightCap, NonDurable>;
+type StorageStoreDirty = Db<Context, StorageKey, StorageRecord, EightCap, NonDurable>;
+type CodeStoreDirty = Db<Context, CodeKey, Vec<u8>, EightCap, NonDurable>;
 
 /// Errors surfaced by the QMDB-backed REVM adapter.
 #[derive(Debug, Error)]
@@ -56,6 +63,8 @@ pub(crate) enum Error {
     MissingRuntime,
     #[error("missing code for hash {0:?}")]
     MissingCode(B256),
+    #[error("qmdb store unavailable: {0}")]
+    StoreUnavailable(&'static str),
 }
 
 impl DBErrorMarker for Error {}
@@ -122,11 +131,11 @@ impl QmdbState {
         .await?;
 
         let state = Self {
-            inner: Arc::new(Mutex::new(QmdbInner {
-                accounts: Some(accounts),
-                storage: Some(storage),
-                code: Some(code),
-            })),
+            inner: Arc::new(Mutex::new(QmdbInner::new(Stores {
+                accounts,
+                storage,
+                code,
+            }))),
         };
         state.bootstrap_genesis(genesis_alloc).await?;
         Ok(state)
@@ -151,95 +160,24 @@ impl QmdbState {
     /// The method stages updates with QMDB batch writers and commits once per
     /// partition, so callers can keep execution strictly in-memory and only
     /// persist at finalized block boundaries.
+    ///
+    /// If a write fails, the stores are left unavailable to prevent reuse
+    /// after a failed mutable operation.
     pub(crate) async fn apply_changes(&self, changes: &QmdbChanges) -> Result<(), Error> {
         if changes.accounts.is_empty() {
             return Ok(());
         }
 
         let mut inner = self.inner.lock().await;
-        let mut accounts = inner
-            .accounts
-            .take()
-            .expect("accounts initialized")
-            .into_dirty();
-        let mut storage = inner
-            .storage
-            .take()
-            .expect("storage initialized")
-            .into_dirty();
-        let mut code = inner.code.take().expect("code initialized").into_dirty();
-
-        let (accounts_ops, storage_ops, code_ops) = {
-            let mut accounts_batch = accounts.start_batch();
-            let mut storage_batch = storage.start_batch();
-            let mut code_batch = code.start_batch();
-
-            for (address, update) in changes.accounts.iter() {
-                let account_key = account_key(*address);
-                let existing = accounts.get(&account_key).await?;
-                let base_generation = existing
-                    .as_ref()
-                    .map(|record| record.storage_generation)
-                    .unwrap_or(0);
-
-                let storage_generation = if update.created || update.selfdestructed {
-                    base_generation.saturating_add(1)
-                } else {
-                    base_generation
-                };
-
-                let record = if update.selfdestructed {
-                    AccountRecord::empty(storage_generation)
-                } else {
-                    AccountRecord {
-                        exists: true,
-                        nonce: update.nonce,
-                        balance: update.balance,
-                        code_hash: update.code_hash,
-                        storage_generation,
-                    }
-                };
-                accounts_batch.update(account_key, record).await?;
-
-                if update.selfdestructed {
-                    continue;
-                }
-
-                if let Some(code) = update.code.as_ref() {
-                    if !code.is_empty() && update.code_hash != KECCAK_EMPTY {
-                        code_batch
-                            .update(code_key(update.code_hash), code.clone())
-                            .await?;
-                    }
-                }
-
-                for (slot, value) in update.storage.iter() {
-                    let key = storage_key(*address, storage_generation, *slot);
-                    if value.is_zero() {
-                        storage_batch.delete_unchecked(key).await?;
-                    } else {
-                        storage_batch.update(key, StorageRecord(*value)).await?;
-                    }
-                }
+        let stores = inner.take_stores()?;
+        let result = apply_changes_inner(stores, changes).await;
+        match result {
+            Ok(stores) => {
+                inner.restore_stores(stores);
+                Ok(())
             }
-
-            (
-                accounts_batch.into_iter().collect::<Vec<_>>(),
-                storage_batch.into_iter().collect::<Vec<_>>(),
-                code_batch.into_iter().collect::<Vec<_>>(),
-            )
-        };
-
-        accounts.write_batch(accounts_ops.into_iter()).await?;
-        storage.write_batch(storage_ops.into_iter()).await?;
-        code.write_batch(code_ops.into_iter()).await?;
-        let (accounts, _) = accounts.commit(None).await?;
-        let (storage, _) = storage.commit(None).await?;
-        let (code, _) = code.commit(None).await?;
-        inner.accounts = Some(accounts);
-        inner.storage = Some(storage);
-        inner.code = Some(code);
-        Ok(())
+            Err(err) => Err(err),
+        }
     }
 
     /// Writes genesis balances into the accounts partition.
@@ -249,43 +187,20 @@ impl QmdbState {
         }
 
         let mut inner = self.inner.lock().await;
-        let mut accounts = inner
-            .accounts
-            .take()
-            .expect("accounts initialized")
-            .into_dirty();
-        let batch_ops = {
-            let mut batch = accounts.start_batch();
-            for (address, balance) in genesis_alloc {
-                let record = AccountRecord {
-                    exists: true,
-                    nonce: 0,
-                    balance,
-                    code_hash: KECCAK_EMPTY,
-                    storage_generation: 0,
-                };
-                batch.update(account_key(address), record).await?;
+        let stores = inner.take_stores()?;
+        let result = apply_genesis_inner(stores, genesis_alloc).await;
+        match result {
+            Ok(stores) => {
+                inner.restore_stores(stores);
+                Ok(())
             }
-            batch.into_iter().collect::<Vec<_>>()
-        };
-        accounts.write_batch(batch_ops.into_iter()).await?;
-        let (accounts, _) = accounts.commit(None).await?;
-        inner.accounts = Some(accounts);
-        Ok(())
+            Err(err) => Err(err),
+        }
     }
 }
 
 /// Execution database type used by the REVM example.
 pub(crate) type RevmDb = CacheDB<QmdbRefDb>;
-
-struct QmdbInner {
-    /// Account metadata keyed by address.
-    accounts: Option<AccountStore>,
-    /// Storage slots keyed by address, generation, and slot.
-    storage: Option<StorageStore>,
-    /// Contract bytecode keyed by code hash.
-    code: Option<CodeStore>,
-}
 
 /// Builds a QMDB store config with example-appropriate defaults.
 const fn store_config<C>(
