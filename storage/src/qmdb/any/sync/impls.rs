@@ -1,5 +1,6 @@
-use super::{Config, Index, Reconstructable};
+use super::{Config, Index};
 use crate::{
+    index::{self},
     journal::{
         authenticated,
         contiguous::{fixed, variable},
@@ -8,6 +9,7 @@ use crate::{
     qmdb::{
         self,
         any::{db::Db, FixedConfig, VariableConfig},
+        operation::{Committable, Operation},
         Durable, Merkleized,
     },
 };
@@ -21,11 +23,10 @@ impl<E, O, I, H, U> qmdb::sync::Database
     for Db<E, fixed::Journal<E, O>, I, H, U, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    O: CodecFixed<Cfg = ()> + Send + Sync + 'static,
-    I: Index,
+    O: Operation + Committable + CodecFixed<Cfg = ()> + Send + Sync + 'static,
+    I: Index + index::Unordered<Value = Location>,
     H: Hasher,
     U: Send + Sync + 'static,
-    Self: Reconstructable<E, fixed::Journal<E, O>, H, Index = I>,
     FixedConfig<I::Translator>: Config,
 {
     type Context = E;
@@ -85,7 +86,7 @@ where
         )
         .await?;
         let snapshot = I::new(context.with_label("snapshot"), config.translator.clone());
-        let db = Self::reconstruct(range, log, snapshot).await?;
+        let db = Self::from_components(range.start, log, snapshot).await?;
 
         Ok(db)
     }
@@ -117,12 +118,11 @@ impl<E, O, I, H, U> qmdb::sync::Database
     for Db<E, variable::Journal<E, O>, I, H, U, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
-    O: Codec + Send + Sync + 'static,
+    O: Operation + Committable + Codec + Send + Sync + 'static,
     O::Cfg: Clone + Send + Sync,
-    I: Index,
+    I: Index + index::Unordered<Value = Location>,
     H: Hasher,
     U: Send + Sync + 'static,
-    Self: Reconstructable<E, variable::Journal<E, O>, H, Index = I>,
     VariableConfig<I::Translator, O::Cfg>: Config,
 {
     type Context = E;
@@ -184,7 +184,7 @@ where
         )
         .await?;
         let snapshot = I::new(context.with_label("snapshot"), config.translator.clone());
-        let db = Self::reconstruct(range, log, snapshot).await?;
+        let db = Self::from_components(range.start, log, snapshot).await?;
 
         Ok(db)
     }

@@ -1,19 +1,18 @@
 use crate::{
-    index::{ordered::Index as OrderedIndex, Cursor as _, Ordered as Index, Unordered},
+    index::{Cursor as _, Ordered as Index},
     journal::contiguous::{Contiguous, MutableContiguous},
     kv::{self, Batchable},
-    mmr::{mem::Clean, Location},
+    mmr::Location,
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
             ValueEncoding,
         },
-        build_snapshot_from_log, delete_known_loc,
-        operation::{Committable, Operation as OperationTrait},
+        delete_known_loc,
+        operation::Operation as OperationTrait,
         update_known_loc, DurabilityState, Durable, Error, MerkleizationState, Merkleized,
         NonDurable, Unmerkleized,
     },
-    translator::Translator,
 };
 #[cfg(any(test, feature = "test-traits"))]
 use crate::{
@@ -34,29 +33,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Bound,
 };
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        T: Translator + Clone,
-        H: Hasher,
-    > crate::qmdb::any::sync::Reconstructable<E, C, H>
-    for Db<E, C, OrderedIndex<T, Location>, H, Update<K, V>, Merkleized<H>, Durable>
-where
-    Operation<K, V>: Codec,
-{
-    type Index = OrderedIndex<T, Location>;
-
-    async fn reconstruct(
-        range: std::ops::Range<Location>,
-        log: crate::journal::authenticated::Journal<E, C, H, Clean<H::Digest>>,
-        index: Self::Index,
-    ) -> Result<Self, Error> {
-        Self::from_components(range.start, log, index).await
-    }
-}
 
 pub mod fixed;
 pub mod variable;
@@ -818,42 +794,6 @@ where
         }
 
         Ok(())
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location> + Unordered<Value = Location>,
-        H: Hasher,
-    > Db<E, C, I, H, Update<K, V>, crate::mmr::mem::Clean<DigestOf<H>>, Durable>
-where
-    Operation<K, V>: Codec,
-{
-    /// Returns a [Db] initialized directly from the given components. The log is
-    /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
-    /// inactivity floor. The last operation is assumed to be a commit.
-    pub(crate) async fn from_components(
-        inactivity_floor_loc: Location,
-        log: AuthenticatedLog<E, C, H>,
-        mut snapshot: I,
-    ) -> Result<Self, Error> {
-        let active_keys =
-            build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
-        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
-        assert!(log.read(last_commit_loc).await?.is_commit());
-
-        Ok(Self {
-            log,
-            inactivity_floor_loc,
-            snapshot,
-            last_commit_loc,
-            durable_state: Durable {},
-            active_keys,
-            _update: core::marker::PhantomData,
-        })
     }
 }
 

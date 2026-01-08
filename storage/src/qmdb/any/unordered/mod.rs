@@ -1,19 +1,18 @@
 use crate::{
-    index::{unordered::Index as UnorderedIndex, Unordered as Index},
+    index::Unordered as Index,
     journal::contiguous::{Contiguous, MutableContiguous},
     kv::{self, Batchable},
-    mmr::{mem::Clean, Location},
+    mmr::Location,
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
             ValueEncoding,
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
-        operation::{Committable as _, Operation as OperationTrait},
+        operation::{Committable, Operation as OperationTrait},
         update_key, update_known_loc, DurabilityState, Durable, Error, MerkleizationState,
         Merkleized, NonDurable, Unmerkleized,
     },
-    translator::Translator,
 };
 #[cfg(any(test, feature = "test-traits"))]
 use crate::{
@@ -26,29 +25,6 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        T: Translator + Clone,
-        H: Hasher,
-    > crate::qmdb::any::sync::Reconstructable<E, C, H>
-    for Db<E, C, UnorderedIndex<T, Location>, H, Update<K, V>, Merkleized<H>, Durable>
-where
-    Operation<K, V>: Codec,
-{
-    type Index = UnorderedIndex<T, Location>;
-
-    async fn reconstruct(
-        range: std::ops::Range<Location>,
-        log: crate::journal::authenticated::Journal<E, C, H, Clean<H::Digest>>,
-        index: Self::Index,
-    ) -> Result<Self, Error> {
-        Self::from_components(range.start, log, index).await
-    }
-}
 
 pub mod fixed;
 pub mod variable;
@@ -256,19 +232,17 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>>,
+        C: MutableContiguous<Item = O>,
+        O: OperationTrait + Committable + Codec,
         I: Index<Value = Location>,
         H: Hasher,
-    > Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
-where
-    Operation<K, V>: Codec,
+        U,
+    > Db<E, C, I, H, U, Merkleized<H>, Durable>
 {
     /// Returns an [Db] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
     /// inactivity floor. The last operation is assumed to be a commit.
-    async fn from_components(
+    pub(crate) async fn from_components(
         inactivity_floor_loc: Location,
         log: AuthenticatedLog<E, C, H>,
         mut snapshot: I,
