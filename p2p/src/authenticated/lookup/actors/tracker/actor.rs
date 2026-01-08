@@ -13,7 +13,10 @@ use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{channels::fallible::FallibleExt, ordered::Set};
+use commonware_utils::{
+    channels::fallible::{AsyncFallibleExt, FallibleExt},
+    ordered::Set,
+};
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use std::{
@@ -111,7 +114,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             },
             _ = self.directory.wait_for_unblock() => {
                 if self.directory.unblock_expired() {
-                    let _ = self.listener.send(self.directory.listenable()).await;
+                    self.listener.send_lossy(self.directory.listenable()).await;
                 }
             },
             msg = self.receiver.next() => {
@@ -140,7 +143,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 }
 
                 // Send the updated listenable IPs to the listener.
-                let _ = self.listener.send(self.directory.listenable()).await;
+                self.listener.send_lossy(self.directory.listenable()).await;
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
@@ -211,7 +214,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 }
 
                 // Send the updated listenable IPs to the listener.
-                let _ = self.listener.send(self.directory.listenable()).await;
+                self.listener.send_lossy(self.directory.listenable()).await;
             }
             Message::Release { metadata } => {
                 // Clear the peer handle if it exists

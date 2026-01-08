@@ -7,6 +7,7 @@ use super::{
     Error,
 };
 use crate::{
+    authenticated::UnboundedMailbox,
     utils::limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
     Channel, Message, Recipients, UnlimitedSender as _,
 };
@@ -124,8 +125,8 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Channel to receive messages from the oracle
     ingress: mpsc::UnboundedReceiver<ingress::Message<P, E>>,
 
-    // Sender to the oracle channel (passed to Senders for PeerSource subscriptions)
-    oracle_sender: mpsc::UnboundedSender<ingress::Message<P, E>>,
+    // Mailbox for the oracle channel (passed to Senders for PeerSource subscriptions)
+    oracle_mailbox: UnboundedMailbox<ingress::Message<P, E>>,
 
     // A channel to receive tasks from peers
     // The sender is cloned and given to each peer
@@ -173,7 +174,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// be used to modify the state of the network during context.
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (sender, receiver) = mpsc::unbounded();
-        let (oracle_sender, oracle_receiver) = mpsc::unbounded();
+        let (oracle_mailbox, oracle_receiver) = UnboundedMailbox::new();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         context.register("messages_sent", "messages sent", sent_messages.clone());
@@ -194,7 +195,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 next_addr,
                 ingress: oracle_receiver,
-                oracle_sender: oracle_sender.clone(),
+                oracle_mailbox: oracle_mailbox.clone(),
                 sender,
                 receiver,
                 links: HashMap::new(),
@@ -208,7 +209,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 received_messages,
                 sent_messages,
             },
-            Oracle::new(oracle_sender),
+            Oracle::new(oracle_mailbox),
         )
     }
 
@@ -345,7 +346,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     channel,
                     self.max_size,
                     self.sender.clone(),
-                    self.oracle_sender.clone(),
+                    self.oracle_mailbox.clone(),
                     clock,
                     quota,
                 );
@@ -725,20 +726,20 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 /// Implements [`crate::utils::limited::Connected`] to provide peer list updates
 /// to [`crate::utils::limited::LimitedSender`].
 pub struct ConnectedPeerProvider<P: PublicKey, E: Clock> {
-    sender: mpsc::UnboundedSender<ingress::Message<P, E>>,
+    mailbox: UnboundedMailbox<ingress::Message<P, E>>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
     fn clone(&self) -> Self {
         Self {
-            sender: self.sender.clone(),
+            mailbox: self.mailbox.clone(),
         }
     }
 }
 
 impl<P: PublicKey, E: Clock> ConnectedPeerProvider<P, E> {
-    const fn new(sender: mpsc::UnboundedSender<ingress::Message<P, E>>) -> Self {
-        Self { sender }
+    const fn new(mailbox: UnboundedMailbox<ingress::Message<P, E>>) -> Self {
+        Self { mailbox }
     }
 }
 
@@ -746,7 +747,7 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
     type PublicKey = P;
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
-        self.sender
+        self.mailbox
             .request(|response| ingress::Message::SubscribeConnected { response })
             .await
             .unwrap_or_else(|| {
@@ -824,7 +825,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
         channel: Channel,
         max_size: u32,
         mut sender: mpsc::UnboundedSender<Task<P>>,
-        oracle_sender: mpsc::UnboundedSender<ingress::Message<P, E>>,
+        oracle_mailbox: UnboundedMailbox<ingress::Message<P, E>>,
         clock: E,
         quota: Quota,
     ) -> (Self, Handle<()>) {
@@ -864,7 +865,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
             high,
             low,
         };
-        let peer_source = ConnectedPeerProvider::new(oracle_sender);
+        let peer_source = ConnectedPeerProvider::new(oracle_mailbox);
         let limited_sender = LimitedSender::new(unlimited_sender, quota, clock, peer_source);
 
         (Self { limited_sender }, processor)
@@ -1321,7 +1322,7 @@ mod tests {
                 tracked_peer_sets: Some(3),
             };
             let network_context = context.with_label("network");
-            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
             network_context.spawn(|_| network.run());
 
             // Create two public keys
@@ -1333,10 +1334,10 @@ mod tests {
             manager
                 .update(0, [pk1.clone(), pk2.clone()].try_into().unwrap())
                 .await;
-            let mut control = oracle.control(pk1.clone());
+            let control = oracle.control(pk1.clone());
             control.register(0, TEST_QUOTA).await.unwrap();
             control.register(1, TEST_QUOTA).await.unwrap();
-            let mut control = oracle.control(pk2.clone());
+            let control = oracle.control(pk2.clone());
             control.register(0, TEST_QUOTA).await.unwrap();
             control.register(1, TEST_QUOTA).await.unwrap();
 
@@ -1372,7 +1373,7 @@ mod tests {
                 tracked_peer_sets: Some(3),
             };
             let network_context = context.with_label("network");
-            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
             network_context.spawn(|_| network.run());
 
             // Create a "twin" node that will be split, plus two normal peers
@@ -1508,7 +1509,7 @@ mod tests {
                 tracked_peer_sets: Some(3),
             };
             let network_context = context.with_label("network");
-            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
             network_context.spawn(|_| network.run());
 
             // Create a "twin" node that will be split, plus a third peer
@@ -1583,7 +1584,7 @@ mod tests {
                 tracked_peer_sets: Some(3),
             };
             let network_context = context.with_label("network");
-            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
             network_context.spawn(|_| network.run());
 
             // Create a "twin" node that will be split, plus a third peer
@@ -1752,7 +1753,7 @@ mod tests {
         let runner = deterministic::Runner::default();
 
         runner.start(|context| async move {
-            let (network, mut oracle) = Network::new(context.with_label("network"), cfg);
+            let (network, oracle) = Network::new(context.with_label("network"), cfg);
             let network_handle = network.start();
 
             let sender_pk = ed25519::PrivateKey::from_seed(10).public_key();
@@ -1832,7 +1833,7 @@ mod tests {
         let runner = deterministic::Runner::default();
 
         runner.start(|context| async move {
-            let (network, mut oracle) = Network::new(context.with_label("network"), cfg);
+            let (network, oracle) = Network::new(context.with_label("network"), cfg);
             let network_handle = network.start();
 
             let sender_pk = ed25519::PrivateKey::from_seed(42).public_key();

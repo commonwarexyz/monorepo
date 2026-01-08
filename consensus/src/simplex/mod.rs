@@ -440,7 +440,7 @@ mod tests {
             Receiver<PublicKey>,
         ),
     ) {
-        let mut control = oracle.control(validator.clone());
+        let control = oracle.control(validator.clone());
         let (vote_sender, vote_receiver) = control.register(0, TEST_QUOTA).await.unwrap();
         let (certificate_sender, certificate_receiver) =
             control.register(1, TEST_QUOTA).await.unwrap();

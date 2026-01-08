@@ -194,6 +194,7 @@ impl ArcWake for Blocker {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 /// Count the number of running tasks whose name starts with the given prefix.
 ///
 /// This function encodes metrics and counts tasks that are currently running

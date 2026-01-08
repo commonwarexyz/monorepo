@@ -1,8 +1,6 @@
 use commonware_utils::channels::fallible::{AsyncFallibleExt, FallibleExt};
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt as _,
-};
+use futures::channel::{mpsc, oneshot};
+use std::future::Future;
 
 /// A mailbox wraps a sender for messages of type `T`.
 #[derive(Debug)]
@@ -22,45 +20,33 @@ impl<T> Clone for Mailbox<T> {
     }
 }
 
-impl<T> Mailbox<T> {
-    /// Sends a message to the corresponding receiver.
-    pub async fn send(&mut self, message: T) -> Result<(), mpsc::SendError> {
-        self.0.send(message).await
-    }
-
-    /// Returns true if the mailbox is closed.
-    pub fn is_closed(&self) -> bool {
-        self.0.is_closed()
-    }
-}
-
 impl<T: Send> AsyncFallibleExt<T> for Mailbox<T> {
     async fn send_lossy(&mut self, msg: T) -> bool {
         self.0.send_lossy(msg).await
     }
 
-    async fn request<R, F>(&mut self, make_msg: F) -> Option<R>
+    fn request<R, F>(&mut self, make_msg: F) -> impl Future<Output = Option<R>> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send,
     {
-        self.0.request(make_msg).await
+        self.0.request(make_msg)
     }
 
-    async fn request_or<R, F>(&mut self, make_msg: F, default: R) -> R
+    fn request_or<R, F>(&mut self, make_msg: F, default: R) -> impl Future<Output = R> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send,
     {
-        self.0.request_or(make_msg, default).await
+        self.0.request_or(make_msg, default)
     }
 
-    async fn request_or_default<R, F>(&mut self, make_msg: F) -> R
+    fn request_or_default<R, F>(&mut self, make_msg: F) -> impl Future<Output = R> + Send
     where
         R: Default + Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send,
     {
-        self.0.request_or_default(make_msg).await
+        self.0.request_or_default(make_msg)
     }
 }
 
@@ -87,27 +73,27 @@ impl<T: Send> FallibleExt<T> for UnboundedMailbox<T> {
         self.0.send_lossy(msg)
     }
 
-    async fn request<R, F>(&self, make_msg: F) -> Option<R>
+    fn request<R, F>(&self, make_msg: F) -> impl Future<Output = Option<R>> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send,
     {
-        self.0.request(make_msg).await
+        self.0.request(make_msg)
     }
 
-    async fn request_or<R, F>(&self, make_msg: F, default: R) -> R
+    fn request_or<R, F>(&self, make_msg: F, default: R) -> impl Future<Output = R> + Send
     where
         R: Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send,
     {
-        self.0.request_or(make_msg, default).await
+        self.0.request_or(make_msg, default)
     }
 
-    async fn request_or_default<R, F>(&self, make_msg: F) -> R
+    fn request_or_default<R, F>(&self, make_msg: F) -> impl Future<Output = R> + Send
     where
         R: Default + Send,
         F: FnOnce(oneshot::Sender<R>) -> T + Send,
     {
-        self.0.request_or_default(make_msg).await
+        self.0.request_or_default(make_msg)
     }
 }
