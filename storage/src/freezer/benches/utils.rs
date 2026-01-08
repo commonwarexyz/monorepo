@@ -7,10 +7,10 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::num::NonZeroUsize;
 
 /// Number of bytes that can be buffered before being written to disk.
-const JOURNAL_WRITE_BUFFER: usize = 1024 * 1024; // 1MB
+const WRITE_BUFFER: usize = 1024 * 1024; // 1MB
 
-/// Target size of each journal section before creating a new one.
-const JOURNAL_TARGET_SIZE: u64 = 100 * 1024 * 1024; // 100MB
+/// Target size of each value section before creating a new one.
+const VALUE_TARGET_SIZE: u64 = 100 * 1024 * 1024; // 100MB
 
 /// Initial size of the table.
 const TABLE_INITIAL_SIZE: u32 = 65_536;
@@ -24,8 +24,11 @@ const TABLE_RESIZE_CHUNK_SIZE: u32 = 1024;
 /// Size of the replay buffer when scanning the table.
 const TABLE_REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
-/// Partition for [Freezer] journal benchmarks.
-pub const JOURNAL_PARTITION: &str = "freezer_bench_journal";
+/// Partition for [Freezer] keys.
+pub const KEY_PARTITION: &str = "freezer_bench_key";
+
+/// Partition for [Freezer] values.
+pub const VALUE_PARTITION: &str = "freezer_bench_value";
 
 /// Partition for [Freezer] table benchmarks.
 pub const TABLE_PARTITION: &str = "freezer_bench_table";
@@ -46,11 +49,13 @@ pub type FreezerType = Freezer<Context, Key, Val>;
 /// Open (or create) a freezer store.
 pub async fn init(ctx: Context) -> FreezerType {
     let cfg = Config {
-        journal_partition: JOURNAL_PARTITION.into(),
-        journal_compression: None,
-        journal_write_buffer: NZUsize!(JOURNAL_WRITE_BUFFER),
-        journal_target_size: JOURNAL_TARGET_SIZE,
-        journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        key_partition: KEY_PARTITION.into(),
+        key_write_buffer: NZUsize!(WRITE_BUFFER),
+        key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        value_partition: VALUE_PARTITION.into(),
+        value_compression: None,
+        value_write_buffer: NZUsize!(WRITE_BUFFER),
+        value_target_size: VALUE_TARGET_SIZE,
         table_partition: TABLE_PARTITION.into(),
         table_initial_size: TABLE_INITIAL_SIZE,
         table_resize_frequency: TABLE_RESIZE_FREQUENCY,

@@ -119,11 +119,11 @@ impl<C> Config<C> {
 /// before the offsets journal.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
-    pub(crate) data: variable::Journal<E, V>,
+    data: variable::Journal<E, V>,
 
     /// Index mapping positions to byte offsets within the data journal.
     /// The section can be calculated from the position using items_per_section.
-    pub(crate) offsets: fixed::Journal<E, u32>,
+    offsets: fixed::Journal<E, u64>,
 
     /// The number of items per section.
     ///
@@ -597,13 +597,13 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Returns `(oldest_retained_pos, size)` for the contiguous journal.
     async fn align_journals(
         data: &mut variable::Journal<E, V>,
-        offsets: &mut fixed::Journal<E, u32>,
+        offsets: &mut fixed::Journal<E, u64>,
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
         // === Handle empty data journal case ===
-        let items_in_last_section = match data.blobs.last_key_value() {
-            Some((last_section, _)) => {
-                let stream = data.replay(*last_section, 0, REPLAY_BUFFER_SIZE).await?;
+        let items_in_last_section = match data.newest_section() {
+            Some(last_section) => {
+                let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
                 futures::pin_mut!(stream);
                 let mut count = 0u64;
                 while let Some(result) = stream.next().await {
@@ -619,16 +619,17 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // The latter should only occur if a crash occured after opening a data journal blob but
         // before writing to it.
         let data_empty =
-            data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == 0);
+            data.is_empty() || (data.num_sections() == 1 && items_in_last_section == 0);
         if data_empty {
             let size = offsets.size();
 
-            if !data.blobs.is_empty() {
+            if !data.is_empty() {
                 // A section exists but contains 0 items. This can happen in two cases:
                 // 1. Rewind crash: we rewound the data journal but crashed before rewinding offsets
                 // 2. First append crash: we opened the first section blob but crashed before writing to it
                 // In both cases, calculate target position from the first remaining section
-                let first_section = *data.blobs.first_key_value().unwrap().0;
+                // SAFETY: data is non-empty (checked above)
+                let first_section = data.oldest_section().unwrap();
                 let target_pos = first_section * items_per_section;
 
                 info!("crash repair: rewinding offsets from {size} to {target_pos}");
@@ -655,9 +656,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // === Handle non-empty data journal case ===
         let (data_oldest_pos, data_size) = {
-            // Data exists -- count items
-            let first_section = *data.blobs.first_key_value().unwrap().0;
-            let last_section = *data.blobs.last_key_value().unwrap().0;
+            // SAFETY: data is non-empty (empty case returns early above)
+            let first_section = data.oldest_section().unwrap();
+            let last_section = data.newest_section().unwrap();
 
             let oldest_pos = first_section * items_per_section;
 
@@ -733,16 +734,16 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// # Warning
     ///
-    /// - Panics if `data.blobs` is empty
+    /// - Panics if data journal is empty
     /// - Panics if `offsets_size` >= `data.size()`
     async fn add_missing_offsets(
         data: &variable::Journal<E, V>,
-        offsets: &mut fixed::Journal<E, u32>,
+        offsets: &mut fixed::Journal<E, u64>,
         offsets_size: u64,
         items_per_section: u64,
     ) -> Result<(), Error> {
         assert!(
-            !data.blobs.is_empty(),
+            !data.is_empty(),
             "rebuild_offsets called with empty data journal"
         );
 
@@ -756,14 +757,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                     (last_section, last_offset, true)
                 } else {
                     // Offsets fully pruned but data has items -- start from first data section
-                    // SAFETY: data.blobs is non-empty (checked above)
-                    let first_section = *data.blobs.first_key_value().unwrap().0;
+                    // SAFETY: data is non-empty (checked above)
+                    let first_section = data.oldest_section().unwrap();
                     (first_section, 0, false)
                 }
             } else {
                 // Offsets empty -- start from first data section
-                // SAFETY: data.blobs is non-empty (checked above)
-                let first_section = *data.blobs.first_key_value().unwrap().0;
+                // SAFETY: data is non-empty (checked above)
+                let first_section = data.oldest_section().unwrap();
                 (first_section, 0, false)
             };
 

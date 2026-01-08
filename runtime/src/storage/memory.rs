@@ -1,6 +1,7 @@
 use super::Header;
 use commonware_codec::Encode;
 use commonware_utils::{hex, StableBuf};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     ops::RangeInclusive,
@@ -18,6 +19,24 @@ impl Default for Storage {
         Self {
             partitions: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+}
+
+impl Storage {
+    /// Compute a [Sha256] digest of all blob contents.
+    pub fn audit(&self) -> [u8; 32] {
+        let partitions = self.partitions.lock().unwrap();
+        let mut hasher = Sha256::new();
+
+        for (partition_name, blobs) in partitions.iter() {
+            for (blob_name, content) in blobs.iter() {
+                hasher.update(partition_name.as_bytes());
+                hasher.update(blob_name);
+                hasher.update(content);
+            }
+        }
+
+        hasher.finalize().into()
     }
 }
 

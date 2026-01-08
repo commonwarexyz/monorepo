@@ -66,7 +66,7 @@ pub struct Cache<E: Storage + Metrics, V: Codec> {
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
-    indices: BTreeMap<u64, u32>,
+    indices: BTreeMap<u64, u64>,
     intervals: RMap,
 
     items_tracked: Gauge,

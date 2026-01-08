@@ -1,10 +1,12 @@
 use super::{Config, Error, Identifier};
 use crate::{
-    journal::segmented::variable::{Config as JournalConfig, Journal},
+    journal::segmented::oversized::{
+        Config as OversizedConfig, Oversized, Record as OversizedRecord,
+    },
     kv, Persistable,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{Codec, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
@@ -25,14 +27,15 @@ const RESIZE_THRESHOLD: u64 = 50;
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
-pub struct Cursor([u8; u64::SIZE + u32::SIZE]);
+pub struct Cursor([u8; u64::SIZE + u64::SIZE + u32::SIZE]);
 
 impl Cursor {
     /// Create a new [Cursor].
-    fn new(section: u64, offset: u32) -> Self {
-        let mut buf = [0u8; u64::SIZE + u32::SIZE];
+    fn new(section: u64, offset: u64, size: u32) -> Self {
+        let mut buf = [0u8; u64::SIZE + u64::SIZE + u32::SIZE];
         buf[..u64::SIZE].copy_from_slice(&section.to_be_bytes());
-        buf[u64::SIZE..].copy_from_slice(&offset.to_be_bytes());
+        buf[u64::SIZE..u64::SIZE + u64::SIZE].copy_from_slice(&offset.to_be_bytes());
+        buf[u64::SIZE + u64::SIZE..].copy_from_slice(&size.to_be_bytes());
         Self(buf)
     }
 
@@ -42,8 +45,13 @@ impl Cursor {
     }
 
     /// Get the offset of the cursor.
-    fn offset(&self) -> u32 {
-        u32::from_be_bytes(self.0[u64::SIZE..].try_into().unwrap())
+    fn offset(&self) -> u64 {
+        u64::from_be_bytes(self.0[u64::SIZE..u64::SIZE + u64::SIZE].try_into().unwrap())
+    }
+
+    /// Get the size of the value.
+    fn size(&self) -> u32 {
+        u32::from_be_bytes(self.0[u64::SIZE + u64::SIZE..].try_into().unwrap())
     }
 }
 
@@ -51,7 +59,7 @@ impl Read for Cursor {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        <[u8; u64::SIZE + u32::SIZE]>::read(buf).map(Self)
+        <[u8; u64::SIZE + u64::SIZE + u32::SIZE]>::read(buf).map(Self)
     }
 }
 
@@ -62,7 +70,7 @@ impl CodecWrite for Cursor {
 }
 
 impl FixedSize for Cursor {
-    const SIZE: usize = u64::SIZE + u32::SIZE;
+    const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
 }
 
 impl Span for Cursor {}
@@ -86,9 +94,10 @@ impl std::fmt::Debug for Cursor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Cursor(section={}, offset={})",
+            "Cursor(section={}, offset={}, size={})",
             self.section(),
-            self.offset()
+            self.offset(),
+            self.size()
         )
     }
 }
@@ -97,9 +106,10 @@ impl std::fmt::Display for Cursor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Cursor(section={}, offset={})",
+            "Cursor(section={}, offset={}, size={})",
             self.section(),
-            self.offset()
+            self.offset(),
+            self.size()
         )
     }
 }
@@ -115,8 +125,8 @@ pub struct Checkpoint {
     epoch: u64,
     /// The section of the last committed operation.
     section: u64,
-    /// The size of the journal in the last committed section.
-    size: u64,
+    /// The size of the oversized index journal in the last committed section.
+    oversized_size: u64,
     /// The size of the table.
     table_size: u32,
 }
@@ -128,7 +138,7 @@ impl Checkpoint {
             table_size,
             epoch: 0,
             section: 0,
-            size: 0,
+            oversized_size: 0,
         }
     }
 }
@@ -138,12 +148,12 @@ impl Read for Checkpoint {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
-        let size = u64::read(buf)?;
+        let oversized_size = u64::read(buf)?;
         let table_size = u32::read(buf)?;
         Ok(Self {
             epoch,
             section,
-            size,
+            oversized_size,
             table_size,
         })
     }
@@ -153,7 +163,7 @@ impl CodecWrite for Checkpoint {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
         self.section.write(buf);
-        self.size.write(buf);
+        self.oversized_size.write(buf);
         self.table_size.write(buf);
     }
 }
@@ -173,11 +183,11 @@ struct Entry {
     epoch: u64,
     // Section in which this slot was written
     section: u64,
-    // Offset in the section where this slot was written
-    offset: u32,
+    // Position in the key index for this section
+    position: u64,
     // Number of items added to this entry since last resize
     added: u8,
-    // CRC of (epoch | section | offset | added)
+    // CRC of (epoch | section | position | added)
     crc: u32,
 }
 
@@ -186,46 +196,46 @@ impl Entry {
     const FULL_SIZE: usize = Self::SIZE * 2;
 
     /// Compute a checksum for [Entry].
-    fn compute_crc(epoch: u64, section: u64, offset: u32, added: u8) -> u32 {
+    fn compute_crc(epoch: u64, section: u64, position: u64, added: u8) -> u32 {
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&epoch.to_be_bytes());
         hasher.update(&section.to_be_bytes());
-        hasher.update(&offset.to_be_bytes());
+        hasher.update(&position.to_be_bytes());
         hasher.update(&added.to_be_bytes());
         hasher.finalize()
     }
 
     /// Create a new [Entry].
-    fn new(epoch: u64, section: u64, offset: u32, added: u8) -> Self {
+    fn new(epoch: u64, section: u64, position: u64, added: u8) -> Self {
         Self {
             epoch,
             section,
-            offset,
+            position,
             added,
-            crc: Self::compute_crc(epoch, section, offset, added),
+            crc: Self::compute_crc(epoch, section, position, added),
         }
     }
 
     /// Check if this entry is empty (all zeros).
     const fn is_empty(&self) -> bool {
-        self.section == 0 && self.offset == 0 && self.crc == 0
+        self.section == 0 && self.position == 0 && self.crc == 0
     }
 
     /// Check if this entry is valid.
     fn is_valid(&self) -> bool {
-        Self::compute_crc(self.epoch, self.section, self.offset, self.added) == self.crc
+        Self::compute_crc(self.epoch, self.section, self.position, self.added) == self.crc
     }
 }
 
 impl FixedSize for Entry {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE + u8::SIZE + u32::SIZE;
+    const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE + u8::SIZE + u32::SIZE;
 }
 
 impl CodecWrite for Entry {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
         self.section.write(buf);
-        self.offset.write(buf);
+        self.position.write(buf);
         self.added.write(buf);
         self.crc.write(buf);
     }
@@ -236,70 +246,126 @@ impl Read for Entry {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
-        let offset = u32::read(buf)?;
+        let position = u64::read(buf)?;
         let added = u8::read(buf)?;
         let crc = u32::read(buf)?;
 
         Ok(Self {
             epoch,
             section,
-            offset,
+            position,
             added,
             crc,
         })
     }
 }
 
-/// A key-value pair stored in the [Journal].
-struct Record<K: Array, V: Codec> {
+/// Sentinel value indicating no next entry in the collision chain.
+const NO_NEXT_SECTION: u64 = u64::MAX;
+const NO_NEXT_POSITION: u64 = u64::MAX;
+
+/// Key entry stored in the segmented/fixed key index journal.
+///
+/// All fields are fixed size, enabling efficient collision chain traversal
+/// without reading large values.
+///
+/// The `next` pointer uses sentinel values (u64::MAX, u64::MAX) to indicate
+/// "no next entry" instead of Option, ensuring fixed-size encoding.
+#[derive(Debug, Clone, PartialEq)]
+struct Record<K: Array> {
+    /// The key for this entry.
     key: K,
-    value: V,
-    next: Option<(u64, u32)>,
+    /// Pointer to next entry in collision chain (section, position in key index).
+    /// Uses (u64::MAX, u64::MAX) as sentinel for "no next".
+    next_section: u64,
+    next_position: u64,
+    /// Byte offset in value journal (same section).
+    value_offset: u64,
+    /// Size of value data in the value journal.
+    value_size: u32,
 }
 
-impl<K: Array, V: Codec> Record<K, V> {
+impl<K: Array> Record<K> {
     /// Create a new [Record].
-    const fn new(key: K, value: V, next: Option<(u64, u32)>) -> Self {
-        Self { key, value, next }
+    fn new(key: K, next: Option<(u64, u64)>, value_offset: u64, value_size: u32) -> Self {
+        let (next_section, next_position) = next.unwrap_or((NO_NEXT_SECTION, NO_NEXT_POSITION));
+        Self {
+            key,
+            next_section,
+            next_position,
+            value_offset,
+            value_size,
+        }
+    }
+
+    /// Get the next entry in the collision chain, if any.
+    const fn next(&self) -> Option<(u64, u64)> {
+        if self.next_section == NO_NEXT_SECTION && self.next_position == NO_NEXT_POSITION {
+            None
+        } else {
+            Some((self.next_section, self.next_position))
+        }
     }
 }
 
-impl<K: Array, V: Codec> CodecWrite for Record<K, V> {
+impl<K: Array> CodecWrite for Record<K> {
     fn write(&self, buf: &mut impl BufMut) {
         self.key.write(buf);
-        self.value.write(buf);
-        self.next.write(buf);
+        self.next_section.write(buf);
+        self.next_position.write(buf);
+        self.value_offset.write(buf);
+        self.value_size.write(buf);
     }
 }
 
-impl<K: Array, V: Codec> Read for Record<K, V> {
-    type Cfg = V::Cfg;
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+impl<K: Array> Read for Record<K> {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let key = K::read(buf)?;
-        let value = V::read_cfg(buf, cfg)?;
-        let next = Option::<(u64, u32)>::read_cfg(buf, &((), ()))?;
+        let next_section = u64::read(buf)?;
+        let next_position = u64::read(buf)?;
+        let value_offset = u64::read(buf)?;
+        let value_size = u32::read(buf)?;
 
-        Ok(Self { key, value, next })
+        Ok(Self {
+            key,
+            next_section,
+            next_position,
+            value_offset,
+            value_size,
+        })
     }
 }
 
-impl<K: Array, V: Codec> EncodeSize for Record<K, V> {
-    fn encode_size(&self) -> usize {
-        K::SIZE + self.value.encode_size() + self.next.encode_size()
+impl<K: Array> FixedSize for Record<K> {
+    // key + next_section + next_position + value_offset + value_size
+    const SIZE: usize = K::SIZE + u64::SIZE + u64::SIZE + u64::SIZE + u32::SIZE;
+}
+
+impl<K: Array> OversizedRecord for Record<K> {
+    fn value_location(&self) -> (u64, u32) {
+        (self.value_offset, self.value_size)
+    }
+
+    fn with_location(mut self, offset: u64, size: u32) -> Self {
+        self.value_offset = offset;
+        self.value_size = size;
+        self
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Array, V: Codec> arbitrary::Arbitrary<'_> for Record<K, V>
+impl<K: Array> arbitrary::Arbitrary<'_> for Record<K>
 where
     K: for<'a> arbitrary::Arbitrary<'a>,
-    V: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             key: K::arbitrary(u)?,
-            value: V::arbitrary(u)?,
-            next: Option::<(u64, u32)>::arbitrary(u)?,
+            next_section: u64::arbitrary(u)?,
+            next_position: u64::arbitrary(u)?,
+            value_offset: u64::arbitrary(u)?,
+            value_size: u32::arbitrary(u)?,
         })
     }
 }
@@ -316,12 +382,14 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     table_resize_frequency: u8,
     table_resize_chunk_size: u32,
 
-    // Table blob that maps slots to journal chain heads
+    // Table blob that maps slots to key index chain heads
     table: E::Blob,
 
-    // Variable journal for storing entries
-    journal: Journal<E, Record<K, V>>,
-    journal_target_size: u64,
+    // Combined key index + value storage with crash recovery
+    oversized: Oversized<E, Record<K>, V>,
+
+    // Target size for value blob sections
+    blob_target_size: u64,
 
     // Current section for new writes
     current_section: u64,
@@ -491,20 +559,20 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Read the latest valid entry from two table slots.
-    fn read_latest_entry(entry1: &Entry, entry2: &Entry) -> Option<(u64, u32, u8)> {
+    fn read_latest_entry(entry1: &Entry, entry2: &Entry) -> Option<(u64, u64, u8)> {
         match (
             !entry1.is_empty() && entry1.is_valid(),
             !entry2.is_empty() && entry2.is_valid(),
         ) {
             (true, true) => match entry1.epoch.cmp(&entry2.epoch) {
-                Ordering::Greater => Some((entry1.section, entry1.offset, entry1.added)),
-                Ordering::Less => Some((entry2.section, entry2.offset, entry2.added)),
+                Ordering::Greater => Some((entry1.section, entry1.position, entry1.added)),
+                Ordering::Less => Some((entry2.section, entry2.position, entry2.added)),
                 Ordering::Equal => {
                     unreachable!("two valid entries with the same epoch")
                 }
             },
-            (true, false) => Some((entry1.section, entry1.offset, entry1.added)),
-            (false, true) => Some((entry2.section, entry2.offset, entry2.added)),
+            (true, false) => Some((entry1.section, entry1.position, entry1.added)),
+            (false, true) => Some((entry2.section, entry2.position, entry2.added)),
             (false, false) => None,
         }
     }
@@ -556,15 +624,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             "table_initial_size must be a power of 2"
         );
 
-        // Initialize variable journal with a separate partition
-        let journal_config = JournalConfig {
-            partition: config.journal_partition,
-            compression: config.journal_compression,
+        // Initialize oversized journal (handles crash recovery)
+        let oversized_cfg = OversizedConfig {
+            index_partition: config.key_partition.clone(),
+            value_partition: config.value_partition.clone(),
+            index_buffer_pool: config.key_buffer_pool.clone(),
+            index_write_buffer: config.key_write_buffer,
+            value_write_buffer: config.value_write_buffer,
+            compression: config.value_compression,
             codec_config: config.codec_config,
-            write_buffer: config.journal_write_buffer,
-            buffer_pool: config.journal_buffer_pool,
         };
-        let mut journal = Journal::init(context.with_label("journal"), journal_config).await?;
+        let mut oversized: Oversized<E, Record<K>, V> =
+            Oversized::init(context.with_label("oversized"), oversized_cfg).await?;
 
         // Open table blob
         let (table, table_len) = context
@@ -583,7 +654,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             (0, Some(checkpoint)) => {
                 assert_eq!(checkpoint.epoch, 0);
                 assert_eq!(checkpoint.section, 0);
-                assert_eq!(checkpoint.size, 0);
+                assert_eq!(checkpoint.oversized_size, 0);
                 assert_eq!(checkpoint.table_size, 0);
 
                 Self::init_table(&table, config.table_initial_size).await?;
@@ -597,9 +668,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                     "table_size must be a power of 2"
                 );
 
-                // Rewind the journal to the committed section and offset
-                journal.rewind(checkpoint.section, checkpoint.size).await?;
-                journal.sync(checkpoint.section).await?;
+                // Rewind oversized to the committed section and key size
+                oversized
+                    .rewind(checkpoint.section, checkpoint.oversized_size)
+                    .await?;
+
+                // Sync oversized
+                oversized.sync(checkpoint.section).await?;
 
                 // Resize table if needed
                 let expected_table_len = Self::table_offset(checkpoint.table_size);
@@ -649,11 +724,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                     table.sync().await?;
                 }
 
+                // Get sizes from oversized (crash recovery already ran during init)
+                let oversized_size = oversized.size(max_section).await?;
+
                 (
                     Checkpoint {
                         epoch: max_epoch,
                         section: max_section,
-                        size: journal.size(max_section).await?,
+                        oversized_size,
                         table_size,
                     },
                     resizable,
@@ -693,8 +771,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             table_resize_frequency: config.table_resize_frequency,
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
-            journal,
-            journal_target_size: config.journal_target_size,
+            oversized,
+            blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             modified_sections: BTreeSet::new(),
@@ -730,15 +808,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         self.resizable as u64 >= self.table_resize_threshold
     }
 
-    /// Determine which journal section to write to based on current journal size.
+    /// Determine which blob section to write to based on current blob size.
     async fn update_section(&mut self) -> Result<(), Error> {
-        // Get the current section size
-        let size = self.journal.size(self.current_section).await?;
+        // Get the current value blob section size
+        let value_size = self.oversized.value_size(self.current_section).await?;
 
         // If the current section has reached the target size, create a new section
-        if size >= self.journal_target_size {
+        if value_size >= self.blob_target_size {
             self.current_section += 1;
-            debug!(size, section = self.current_section, "updated section");
+            debug!(
+                size = value_size,
+                section = self.current_section,
+                "updated section"
+            );
         }
 
         Ok(())
@@ -757,15 +839,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
         let head = Self::read_latest_entry(&entry1, &entry2);
 
-        // Create new head of the chain
-        let entry = Record::new(
+        // Create key entry with pointer to previous head (value location set by oversized.append)
+        let key_entry = Record::new(
             key,
-            value,
-            head.map(|(section, offset, _)| (section, offset)),
+            head.map(|(section, position, _)| (section, position)),
+            0,
+            0,
         );
 
-        // Append entry to the variable journal
-        let (offset, _) = self.journal.append(self.current_section, entry).await?;
+        // Write value and key entry (glob first, then index)
+        let (position, value_offset, value_size) = self
+            .oversized
+            .append(self.current_section, key_entry, &value)
+            .await?;
 
         // Update the number of items added to the entry.
         //
@@ -780,7 +866,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Update the old position
         self.modified_sections.insert(self.current_section);
-        let new_entry = Entry::new(self.next_epoch, self.current_section, offset, added);
+        let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
         Self::update_head(&self.table, table_index, &entry1, &entry2, new_entry).await?;
 
         // If we're mid-resize and this entry has already been processed, update the new position too
@@ -797,20 +883,23 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 //
                 // The entries are still identical to the old ones, so we don't need to read them again.
                 let new_table_index = self.table_size + table_index;
-                let new_entry = Entry::new(self.next_epoch, self.current_section, offset, added);
+                let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
                 Self::update_head(&self.table, new_table_index, &entry1, &entry2, new_entry)
                     .await?;
             }
         }
 
-        Ok(Cursor::new(self.current_section, offset))
+        Ok(Cursor::new(self.current_section, value_offset, value_size))
     }
 
     /// Get the value for a given [Cursor].
     async fn get_cursor(&self, cursor: Cursor) -> Result<V, Error> {
-        let entry = self.journal.get(cursor.section(), cursor.offset()).await?;
+        let value = self
+            .oversized
+            .get_value(cursor.section(), cursor.offset(), cursor.size())
+            .await?;
 
-        Ok(entry.value)
+        Ok(value)
     }
 
     /// Get the first value for a given key.
@@ -820,29 +909,33 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Get head of the chain from table
         let table_index = self.table_index(key);
         let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
-        let Some((mut section, mut offset, _)) = Self::read_latest_entry(&entry1, &entry2) else {
+        let Some((mut section, mut position, _)) = Self::read_latest_entry(&entry1, &entry2) else {
             return Ok(None);
         };
 
         // Follow the linked list chain to find the first matching key
         loop {
-            // Get the entry from the variable journal
-            let entry = self.journal.get(section, offset).await?;
+            // Get the key entry from the fixed key index (efficient, good cache locality)
+            let key_entry = self.oversized.get(section, position).await?;
 
             // Check if this key matches
-            if entry.key.as_ref() == key.as_ref() {
-                return Ok(Some(entry.value));
+            if key_entry.key.as_ref() == key.as_ref() {
+                let value = self
+                    .oversized
+                    .get_value(section, key_entry.value_offset, key_entry.value_size)
+                    .await?;
+                return Ok(Some(value));
             }
 
             // Increment unnecessary reads
             self.unnecessary_reads.inc();
 
             // Follow the chain
-            let Some(next) = entry.next else {
+            let Some(next) = key_entry.next() else {
                 break; // End of chain
             };
             section = next.0;
-            offset = next.1;
+            position = next.1;
         }
 
         Ok(None)
@@ -918,7 +1011,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             let (entry1, entry2) = Self::parse_entries(entry_buf)?;
 
             // Get the current head
-            let (section, offset, added) =
+            let (section, position, added) =
                 Self::read_latest_entry(&entry1, &entry2).unwrap_or((0, 0, 0));
 
             // If the entry was over the threshold, decrement the resizable entries
@@ -927,7 +1020,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             }
 
             // Rewrite the entries
-            let reset_entry = Entry::new(self.next_epoch, section, offset, 0);
+            let reset_entry = Entry::new(self.next_epoch, section, position, 0);
             Self::rewrite_entries(&mut writes, &entry1, &entry2, &reset_entry);
         }
 
@@ -965,12 +1058,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// Each sync will process up to `table_resize_chunk_size` entries until the resize
     /// is complete.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
-        // Sync all modified journal sections
-        let mut updates = Vec::with_capacity(self.modified_sections.len());
-        for section in &self.modified_sections {
-            updates.push(self.journal.sync(*section));
-        }
-        try_join_all(updates).await?;
+        // Sync all modified sections for oversized journal
+        let syncs: Vec<_> = self
+            .modified_sections
+            .iter()
+            .map(|section| self.oversized.sync(*section))
+            .collect();
+        try_join_all(syncs).await?;
         self.modified_sections.clear();
 
         // Start a resize (if needed)
@@ -988,10 +1082,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let stored_epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
 
+        // Get size from oversized
+        let oversized_size = self.oversized.size(self.current_section).await?;
+
         Ok(Checkpoint {
             epoch: stored_epoch,
             section: self.current_section,
-            size: self.journal.size(self.current_section).await?,
+            oversized_size,
             table_size: self.table_size,
         })
     }
@@ -1011,8 +1108,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Close and remove any underlying blobs created by the [Freezer].
     pub async fn destroy(self) -> Result<(), Error> {
-        // Destroy the journal (removes all journal sections)
-        self.journal.destroy().await?;
+        // Destroy oversized journal
+        self.oversized.destroy().await?;
 
         // Destroy the table
         drop(self.table);
@@ -1085,6 +1182,6 @@ mod conformance {
         CodecConformance<Cursor>,
         CodecConformance<Checkpoint>,
         CodecConformance<Entry>,
-        CodecConformance<Record<U64, U64>>
+        CodecConformance<Record<U64>>
     }
 }

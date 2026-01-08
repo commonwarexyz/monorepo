@@ -189,7 +189,8 @@ mod tests {
             partition_prefix: format!("validator-{}", validator.clone()),
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
-            write_buffer: NZUsize!(1024),
+            key_write_buffer: NZUsize!(1024),
+            value_write_buffer: NZUsize!(1024),
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 
@@ -237,13 +238,17 @@ mod tests {
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 10,
                 freezer_table_resize_chunk_size: 10,
-                freezer_journal_partition: format!(
-                    "{}-finalizations-by-height-freezer-journal",
+                freezer_key_partition: format!(
+                    "{}-finalizations-by-height-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_journal_target_size: 1024,
-                freezer_journal_compression: None,
-                freezer_journal_buffer_pool: config.buffer_pool.clone(),
+                freezer_key_buffer_pool: config.buffer_pool.clone(),
+                freezer_value_partition: format!(
+                    "{}-finalizations-by-height-freezer-value",
+                    config.partition_prefix
+                ),
+                freezer_value_target_size: 1024,
+                freezer_value_compression: None,
                 ordinal_partition: format!(
                     "{}-finalizations-by-height-ordinal",
                     config.partition_prefix
@@ -251,7 +256,9 @@ mod tests {
                 items_per_section: NZU64!(10),
                 codec_config: S::certificate_codec_config_unbounded(),
                 replay_buffer: config.replay_buffer,
-                write_buffer: config.write_buffer,
+                freezer_key_write_buffer: config.key_write_buffer,
+                freezer_value_write_buffer: config.value_write_buffer,
+                ordinal_write_buffer: config.key_write_buffer,
             },
         )
         .await
@@ -274,18 +281,24 @@ mod tests {
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 10,
                 freezer_table_resize_chunk_size: 10,
-                freezer_journal_partition: format!(
-                    "{}-finalized_blocks-freezer-journal",
+                freezer_key_partition: format!(
+                    "{}-finalized_blocks-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_journal_target_size: 1024,
-                freezer_journal_compression: None,
-                freezer_journal_buffer_pool: config.buffer_pool.clone(),
+                freezer_key_buffer_pool: config.buffer_pool.clone(),
+                freezer_value_partition: format!(
+                    "{}-finalized_blocks-freezer-value",
+                    config.partition_prefix
+                ),
+                freezer_value_target_size: 1024,
+                freezer_value_compression: None,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: NZU64!(10),
                 codec_config: config.block_codec_config,
                 replay_buffer: config.replay_buffer,
-                write_buffer: config.write_buffer,
+                freezer_key_write_buffer: config.key_write_buffer,
+                freezer_value_write_buffer: config.value_write_buffer,
+                ordinal_write_buffer: config.key_write_buffer,
             },
         )
         .await
