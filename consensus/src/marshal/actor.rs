@@ -742,7 +742,7 @@ where
     async fn notify_subscribers(&mut self, commitment: B::Commitment, block: &B) {
         if let Some(mut bs) = self.block_subscriptions.remove(&commitment) {
             for subscriber in bs.subscribers.drain(..) {
-                let _ = subscriber.send(block.clone());
+                subscriber.send_lossy(block.clone());
             }
         }
     }
