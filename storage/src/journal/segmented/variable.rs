@@ -351,12 +351,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                         let buf_slice = buf.as_ref();
 
                         while buf_offset < available {
-                            // Try to parse an item from the remaining buffer
                             let remaining = &buf_slice[buf_offset..available];
-                            if remaining.is_empty() {
-                                break;
-                            }
-
                             match find_item(remaining, remaining.len(), current_offset) {
                                 Ok((next_offset, size, item)) => {
                                     let item_data: Cow<'_, [u8]> = match item {
@@ -412,25 +407,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     }
                                 }
                                 Err(Error::Runtime(RError::BlobInsufficientLength)) => {
-                                    // Incomplete item at end of buffer - stop and let next iteration handle it
+                                    // Incomplete item at end of buffer - stop and let next
+                                    // iteration handle it
                                     break;
                                 }
                                 Err(err) => {
                                     if batch.is_empty() {
-                                        // Error on first item - check if it's trailing bytes
-                                        if matches!(
-                                            err,
-                                            Error::Runtime(RError::BlobInsufficientLength)
-                                        ) {
-                                            warn!(
-                                                blob = section,
-                                                bad_offset = current_offset,
-                                                new_size = valid_size,
-                                                "trailing bytes detected: truncating"
-                                            );
-                                            blob.resize(valid_size).await.ok()?;
-                                            return None;
-                                        }
                                         batch_buffer = buf.into();
                                         return Some((
                                             vec![Err(err)],
@@ -453,9 +435,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                             }
                         }
 
-                        // Track how many bytes we consumed vs read
-                        let bytes_consumed = buf_offset;
-                        let bytes_remaining_in_buf = available - buf_offset;
+                        let bytes_remaining = available - buf_offset;
 
                         batch_buffer = buf.into();
 
@@ -484,8 +464,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                             // This can happen during an unclean file close (where pending data
                             // is not fully synced to disk).
                             let at_physical_end =
-                                current_offset + bytes_remaining_in_buf as u64 >= blob_size;
-                            if at_physical_end && bytes_remaining_in_buf > 0 {
+                                current_offset + bytes_remaining as u64 >= blob_size;
+                            if at_physical_end && bytes_remaining > 0 {
                                 warn!(
                                     blob = section,
                                     bad_offset = current_offset,
@@ -497,10 +477,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                             }
                             // If we consumed nothing and there's more data, the next read
                             // will get a fresh buffer starting at current_offset.
-                            // But if we read bytes and couldn't parse anything and we're not
-                            // at the end, something is wrong - but let the next iteration try.
-                            if bytes_consumed == 0 && !at_physical_end {
-                                // Continue to next iteration - we'll read more data
+                            if buf_offset == 0 && !at_physical_end {
                                 return Some((
                                     batch,
                                     (
@@ -516,7 +493,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     ),
                                 ));
                             }
-                            // At physical end with no remaining bytes - done with this blob
                             return None;
                         }
 
