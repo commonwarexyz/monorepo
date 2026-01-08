@@ -43,6 +43,7 @@ tracing.workspace = true
 [dev-dependencies]
 commonware-conformance.workspace = true
 commonware-consensus = { path = ".", features = ["mocks"] }
+commonware-cryptography = { workspace = true, features = ["unsafe-mlock"] }
 commonware-math.workspace = true
 commonware-resolver = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
