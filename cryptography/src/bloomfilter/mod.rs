@@ -63,9 +63,13 @@ impl<H: Hasher> BloomFilter<H> {
 
     /// Creates a new [BloomFilter] with `hashers` hash functions and `bits` bits.
     ///
-    /// The number of bits will be rounded up to the next power of 2.
+    /// The number of bits will be rounded up to the next power of 2. If that would
+    /// overflow, the maximum power of 2 for the platform (2^63 on 64-bit) is used.
     pub fn new(hashers: NonZeroU8, bits: NonZeroUsize) -> Self {
-        let bits = bits.get().next_power_of_two();
+        let bits = bits
+            .get()
+            .checked_next_power_of_two()
+            .unwrap_or(1 << (usize::BITS - 1));
         Self {
             hashers: hashers.get(),
             bits: BitMap::zeroes(bits as u64),
@@ -178,7 +182,9 @@ impl<H: Hasher> BloomFilter<H> {
     /// Calculates the optimal number of bits for a given capacity and false positive rate.
     ///
     /// Uses the formula `m = -n * ln(p) / (ln(2))^2` where `n` is the expected number
-    /// of items and `p` is the desired false positive rate.
+    /// of items and `p` is the desired false positive rate. The result is rounded up
+    /// to the next power of 2. If that would overflow, the maximum power of 2 for the
+    /// platform (2^63 on 64-bit) is used.
     ///
     /// # Panics
     ///
@@ -188,7 +194,9 @@ impl<H: Hasher> BloomFilter<H> {
         assert!(false_positive_rate > 0.0 && false_positive_rate < 1.0);
         let ln2_sq = core::f64::consts::LN_2 * core::f64::consts::LN_2;
         let m = -(expected_items as f64) * false_positive_rate.ln() / ln2_sq;
-        (m.ceil() as usize).next_power_of_two()
+        (m.ceil() as usize)
+            .checked_next_power_of_two()
+            .unwrap_or(1 << (usize::BITS - 1))
     }
 }
 
@@ -484,6 +492,21 @@ mod tests {
         let bits_lower_fp = BloomFilter::<Sha256>::optimal_bits(10000, 0.00001);
         assert_eq!(bits_lower_fp, 262144);
         assert!(bits_lower_fp.is_power_of_two());
+    }
+
+    #[test]
+    fn test_bits_overflow_fallback() {
+        // When bits would overflow on next_power_of_two, fallback to max power of 2
+        let max_pow2 = 1usize << (usize::BITS - 1);
+
+        // Test optimal_bits with extreme values that would overflow
+        // Using a very large expected_items with very low FP rate
+        let bits = BloomFilter::<Sha256>::optimal_bits(usize::MAX / 2, 0.0000001);
+        assert_eq!(bits, max_pow2);
+        assert!(bits.is_power_of_two());
+
+        // NOTE: We don't test new() with overflow values because that would
+        // attempt to allocate an impossibly large bitmap.
     }
 
     #[cfg(feature = "arbitrary")]
