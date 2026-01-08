@@ -246,11 +246,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Batch-verifies attestations and returns verified attestations and invalid signers.
-    pub fn verify_attestations<'a, S, R, D, I>(
+    pub fn verify_attestations<'a, S, R, D, I, PS>(
         &self,
         rng: &mut R,
         subject: S::Subject<'a, D>,
         attestations: I,
+        strategy: &PS,
     ) -> Verification<S>
     where
         S: Scheme<Signature = V::Signature>,
@@ -258,6 +259,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
+        PS: commonware_parallel::Strategy,
     {
         let mut invalid = BTreeSet::new();
         let partials: Vec<_> = attestations
@@ -269,12 +271,13 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .collect();
 
         let polynomial = self.polynomial();
-        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
+        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _, _>(
             rng,
             polynomial,
             subject.namespace(self.namespace()),
             &subject.message(),
             partials.iter(),
+            strategy,
         ) {
             for partial in errs {
                 invalid.insert(partial.index);
@@ -549,7 +552,7 @@ mod macros {
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
                     self.generic
-                        .verify_attestations::<_, _, D, _>(rng, subject, attestations)
+                        .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, &commonware_parallel::Sequential)
                 }
 
                 fn assemble<I>(&self, attestations: I) -> Option<Self::Certificate>

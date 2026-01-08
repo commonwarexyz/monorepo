@@ -178,13 +178,21 @@ impl Variant for MinPk {
             pairing.raw_aggregate(&s_agg_affine, &BLS12_381_NEG_G1);
         }
 
+        // Pre-compute r_i * pk_i in parallel
+        let scaled_pks: Vec<G1> = strategy.map_collect_vec(
+            publics.iter().zip(&scalars),
+            |(pk, s)| *pk * s,
+        );
+
+        // Batch convert scaled_pks to affine (1 inversion instead of n)
+        let scaled_pks_affine = G1::batch_to_affine(&scaled_pks);
+
+        // Batch convert hms to affine
+        let hms_affine = G2::batch_to_affine(hms);
+
         // Aggregate the `n` terms corresponding to public keys and messages: e(r_i * pk_i,hm_i)
-        for i in 0..publics.len() {
-            let mut scaled_pk = publics[i];
-            scaled_pk *= &scalars[i];
-            let pk_affine = scaled_pk.as_blst_p1_affine();
-            let hm_affine = hms[i].as_blst_p2_affine();
-            pairing.raw_aggregate(&hm_affine, &pk_affine);
+        for (pk_affine, hm_affine) in scaled_pks_affine.iter().zip(hms_affine.iter()) {
+            pairing.raw_aggregate(hm_affine.inner(), pk_affine.inner());
         }
 
         // Perform the final verification on the product of (n+1) pairing terms.
@@ -325,13 +333,21 @@ impl Variant for MinSig {
             pairing.raw_aggregate(&BLS12_381_NEG_G2, &s_agg_affine);
         }
 
+        // Pre-compute r_i * pk_i in parallel
+        let scaled_pks: Vec<G2> = strategy.map_collect_vec(
+            publics.iter().zip(&scalars),
+            |(pk, s)| *pk * s,
+        );
+
+        // Batch convert scaled_pks to affine (1 inversion instead of n)
+        let scaled_pks_affine = G2::batch_to_affine(&scaled_pks);
+
+        // Batch convert hms to affine
+        let hms_affine = G1::batch_to_affine(hms);
+
         // Aggregate the `n` terms corresponding to public keys and messages: e(hm_i, r_i * pk_i)
-        for i in 0..publics.len() {
-            let mut scaled_pk = publics[i];
-            scaled_pk *= &scalars[i];
-            let pk_affine = scaled_pk.as_blst_p2_affine();
-            let hm_affine = hms[i].as_blst_p1_affine();
-            pairing.raw_aggregate(&pk_affine, &hm_affine);
+        for (pk_affine, hm_affine) in scaled_pks_affine.iter().zip(hms_affine.iter()) {
+            pairing.raw_aggregate(pk_affine.inner(), hm_affine.inner());
         }
 
         // Perform the final verification on the product of (n+1) pairing terms.

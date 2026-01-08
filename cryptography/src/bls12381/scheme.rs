@@ -38,6 +38,9 @@ use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use commonware_math::algebra::Random;
+#[cfg(feature = "std")]
+use commonware_parallel::Rayon;
+#[cfg(not(feature = "std"))]
 use commonware_parallel::Sequential;
 use commonware_utils::{hex, Array, Span};
 use core::{
@@ -397,7 +400,15 @@ impl BatchVerifier<PublicKey> for Batch {
     }
 
     fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool {
-        MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures, &Sequential).is_ok()
+        #[cfg(feature = "std")]
+        {
+            let strategy = Rayon::new(commonware_utils::NZUsize!(4)).expect("valid thread count");
+            MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures, &strategy).is_ok()
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures, &Sequential).is_ok()
+        }
     }
 }
 

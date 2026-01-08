@@ -6,7 +6,8 @@ use commonware_cryptography::{
     ed25519::PrivateKey,
     Signer as _,
 };
-use commonware_utils::{quorum, TryCollect};
+use commonware_parallel::Rayon;
+use commonware_utils::{quorum, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::hint::black_box;
@@ -55,15 +56,23 @@ fn benchmark_threshold_batch_verify_same_message(c: &mut Criterion) {
                                 signatures.shuffle(&mut rng);
                             }
 
-                            // Verify
-                            let result =
-                                black_box(primitives::ops::threshold::batch_verify_same_message::<
+                            // Verify with parallel strategy
+                            let strategy = Rayon::new(NZUsize!(4)).unwrap();
+                            let result = black_box(
+                                primitives::ops::threshold::batch_verify_same_message::<
                                     _,
                                     MinSig,
                                     _,
+                                    _,
                                 >(
-                                    &mut rng, &polynomial, namespace, msg, &signatures
-                                ));
+                                    &mut rng,
+                                    &polynomial,
+                                    namespace,
+                                    msg,
+                                    &signatures,
+                                    &strategy,
+                                ),
+                            );
                             if invalid == 0 {
                                 assert!(result.is_ok());
                             } else {

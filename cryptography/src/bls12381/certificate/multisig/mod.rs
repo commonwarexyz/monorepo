@@ -136,11 +136,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Batch-verifies attestations and returns verified attestations and invalid signers.
-    pub fn verify_attestations<'a, S, R, D, I>(
+    pub fn verify_attestations<'a, S, R, D, I, PS>(
         &self,
         rng: &mut R,
         subject: S::Subject<'a, D>,
         attestations: I,
+        strategy: &PS,
     ) -> Verification<S>
     where
         S: Scheme<Signature = V::Signature>,
@@ -148,6 +149,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
+        PS: commonware_parallel::Strategy,
     {
         let mut invalid = BTreeSet::new();
         let mut candidates = Vec::new();
@@ -171,7 +173,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let namespace = subject.namespace(&self.namespace);
         let message = subject.message();
         let invalid_indices =
-            batch::verify_same_message::<_, V>(rng, namespace, message.as_ref(), &entries);
+            batch::verify_same_message::<_, V, _>(rng, namespace, message.as_ref(), &entries, strategy);
 
         // Mark invalid attestations.
         for idx in invalid_indices {
@@ -490,7 +492,7 @@ mod macros {
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
                     self.generic
-                        .verify_attestations::<_, _, D, _>(rng, subject, attestations)
+                        .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, &commonware_parallel::Sequential)
                 }
 
                 fn assemble<I>(&self, attestations: I) -> Option<Self::Certificate>

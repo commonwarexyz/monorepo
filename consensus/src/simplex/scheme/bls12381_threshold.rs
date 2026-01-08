@@ -575,12 +575,13 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
         let polynomial = self.polynomial();
         let vote_namespace = subject.namespace(namespace);
         let vote_message = subject.message();
-        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
+        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _, _>(
             rng,
             polynomial,
             vote_namespace,
             &vote_message,
             vote_partials.iter(),
+            &self.strategy,
         ) {
             for partial in errs {
                 invalid.insert(partial.index);
@@ -588,7 +589,7 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
         }
 
         let seed_message = seed_message_from_subject(&subject);
-        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
+        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _, _>(
             rng,
             polynomial,
             &namespace.seed,
@@ -596,6 +597,7 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
             seed_partials
                 .iter()
                 .filter(|partial| !invalid.contains(&partial.index)),
+            &self.strategy,
         ) {
             for partial in errs {
                 invalid.insert(partial.index);
