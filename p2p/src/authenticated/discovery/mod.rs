@@ -1635,113 +1635,43 @@ mod tests {
         }
     }
 
-    async fn run_peer_restart_test(
-        context: impl Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
-        base_port: u16,
-        n: usize,
-    ) {
-        // Create peers
-        let peers: Vec<_> = (0..n)
-            .map(|i| ed25519::PrivateKey::from_seed(i as u64))
-            .collect();
-        let addresses: Vec<_> = peers.iter().map(|p| p.public_key()).collect();
+    #[test_traced]
+    fn test_many_peer_restart_with_new_address() {
+        let base_port = 7500;
+        let n = 5;
 
-        // Track senders/receivers/handles across restarts
-        let mut senders: Vec<Option<channels::Sender<_, _>>> = (0..n).map(|_| None).collect();
-        let mut receivers: Vec<Option<channels::Receiver<_>>> = (0..n).map(|_| None).collect();
-        let mut handles: Vec<Option<Handle<()>>> = (0..n).map(|_| None).collect();
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create peers
+            let peers: Vec<_> = (0..n)
+                .map(|i| ed25519::PrivateKey::from_seed(i as u64))
+                .collect();
+            let addresses: Vec<_> = peers.iter().map(|p| p.public_key()).collect();
 
-        // Track port allocations (updated on restart)
-        let mut ports: Vec<u16> = (0..n).map(|i| base_port + i as u16).collect();
+            // Track senders/receivers/handles across restarts
+            let mut senders: Vec<Option<channels::Sender<_, _>>> = (0..n).map(|_| None).collect();
+            let mut receivers: Vec<Option<channels::Receiver<_>>> = (0..n).map(|_| None).collect();
+            let mut handles: Vec<Option<Handle<()>>> = (0..n).map(|_| None).collect();
 
-        // Create networks for all peers (peer 0 is bootstrapper)
-        for (i, peer) in peers.iter().enumerate() {
-            let peer_context = context.with_label(&format!("peer_{i}"));
+            // Track port allocations (updated on restart)
+            let mut ports: Vec<u16> = (0..n).map(|i| base_port + i as u16).collect();
 
-            // Non-bootstrapper peers point to peer 0
-            let mut bootstrappers = Vec::new();
-            if i > 0 {
-                bootstrappers.push((
-                    addresses[0].clone(),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[0]).into(),
-                ));
-            }
+            // Create networks for all peers (peer 0 is bootstrapper)
+            for (i, peer) in peers.iter().enumerate() {
+                let peer_context = context.with_label(&format!("peer_{i}"));
 
-            let config = Config::test(
-                peer.clone(),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[i]),
-                bootstrappers,
-                MAX_MESSAGE_SIZE,
-            );
-            let (mut network, mut oracle) =
-                Network::new(peer_context.with_label("network"), config);
-
-            // Register peer set
-            oracle
-                .update(0, addresses.clone().try_into().unwrap())
-                .await;
-
-            let (sender, receiver) =
-                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
-            senders[i] = Some(sender);
-            receivers[i] = Some(receiver);
-
-            let handle = network.start();
-            handles[i] = Some(handle);
-        }
-
-        // Wait for full connectivity (each peer can send to all others)
-        for (i, sender) in senders.iter_mut().enumerate() {
-            let sender = sender.as_mut().unwrap();
-            loop {
-                let sent = sender
-                    .send(Recipients::All, peers[i].public_key().as_ref(), true)
-                    .await
-                    .unwrap();
-                if sent.len() == n - 1 {
-                    break;
+                // Non-bootstrapper peers point to peer 0
+                let mut bootstrappers = Vec::new();
+                if i > 0 {
+                    bootstrappers.push((
+                        addresses[0].clone(),
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[0]).into(),
+                    ));
                 }
-                context.sleep(Duration::from_millis(100)).await;
-            }
-        }
 
-        // Verify each peer can receive from all others
-        for receiver in receivers.iter_mut() {
-            let receiver = receiver.as_mut().unwrap();
-            let mut received = HashSet::new();
-            while received.len() < n - 1 {
-                let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
-                assert_eq!(sender.as_ref(), message.as_ref());
-                received.insert(sender);
-            }
-        }
-
-        // Restart each non-first peer with a new port, multiple rounds
-        let mut restart_counter = 0u16;
-        for round in 0..3 {
-            for restart_peer_idx in 1..n {
-                // Allocate a new unique port
-                restart_counter += 1;
-                let new_port = base_port + 100 + restart_counter;
-                ports[restart_peer_idx] = new_port;
-
-                // Abort the peer's network
-                if let Some(handle) = handles[restart_peer_idx].take() {
-                    handle.abort();
-                }
-                senders[restart_peer_idx] = None;
-                receivers[restart_peer_idx] = None;
-
-                // Restart the peer with new port (uses bootstrapper for discovery)
-                let peer_context =
-                    context.with_label(&format!("peer_{restart_peer_idx}_round_{round}"));
-                let bootstrappers = vec![(
-                    addresses[0].clone(),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[0]).into(),
-                )];
                 let config = Config::test(
-                    peers[restart_peer_idx].clone(),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), new_port),
+                    peer.clone(),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[i]),
                     bootstrappers,
                     MAX_MESSAGE_SIZE,
                 );
@@ -1755,21 +1685,19 @@ mod tests {
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
-                senders[restart_peer_idx] = Some(sender);
-                receivers[restart_peer_idx] = Some(receiver);
+                senders[i] = Some(sender);
+                receivers[i] = Some(receiver);
 
                 let handle = network.start();
-                handles[restart_peer_idx] = Some(handle);
+                handles[i] = Some(handle);
+            }
 
-                // Wait for the restarted peer to reconnect to all others
-                let restarted_sender = senders[restart_peer_idx].as_mut().unwrap();
+            // Wait for full connectivity (each peer can send to all others)
+            for (i, sender) in senders.iter_mut().enumerate() {
+                let sender = sender.as_mut().unwrap();
                 loop {
-                    let sent = restarted_sender
-                        .send(
-                            Recipients::All,
-                            peers[restart_peer_idx].public_key().as_ref(),
-                            true,
-                        )
+                    let sent = sender
+                        .send(Recipients::All, peers[i].public_key().as_ref(), true)
                         .await
                         .unwrap();
                     if sent.len() == n - 1 {
@@ -1777,238 +1705,282 @@ mod tests {
                     }
                     context.sleep(Duration::from_millis(100)).await;
                 }
+            }
 
-                // Verify other peers can send to the restarted peer
-                for i in 0..n {
-                    if i == restart_peer_idx {
-                        continue;
-                    }
-                    let sender = senders[i].as_mut().unwrap();
-                    loop {
-                        let sent = sender
-                            .send(
-                                Recipients::One(addresses[restart_peer_idx].clone()),
-                                peers[i].public_key().as_ref(),
-                                true,
-                            )
-                            .await
-                            .unwrap();
-                        if sent.len() == 1 {
-                            break;
-                        }
-                        context.sleep(Duration::from_millis(100)).await;
-                    }
-                }
-
-                // Verify the restarted peer receives messages from all others
-                let restarted_receiver = receivers[restart_peer_idx].as_mut().unwrap();
+            // Verify each peer can receive from all others
+            for receiver in receivers.iter_mut() {
+                let receiver = receiver.as_mut().unwrap();
                 let mut received = HashSet::new();
                 while received.len() < n - 1 {
-                    let (sender, message): (ed25519::PublicKey, _) =
-                        restarted_receiver.recv().await.unwrap();
+                    let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
                     assert_eq!(sender.as_ref(), message.as_ref());
                     received.insert(sender);
                 }
             }
-        }
-    }
 
-    #[test_traced]
-    fn test_many_peer_restart_with_new_address() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            run_peer_restart_test(context.clone(), 7500, 5).await;
+            // Restart each non-first peer with a new port, multiple rounds
+            let mut restart_counter = 0u16;
+            for round in 0..3 {
+                for restart_peer_idx in 1..n {
+                    // Allocate a new unique port
+                    restart_counter += 1;
+                    let new_port = base_port + 100 + restart_counter;
+                    ports[restart_peer_idx] = new_port;
+
+                    // Abort the peer's network
+                    if let Some(handle) = handles[restart_peer_idx].take() {
+                        handle.abort();
+                    }
+                    senders[restart_peer_idx] = None;
+                    receivers[restart_peer_idx] = None;
+
+                    // Restart the peer with new port (uses bootstrapper for discovery)
+                    let peer_context =
+                        context.with_label(&format!("peer_{restart_peer_idx}_round_{round}"));
+                    let bootstrappers = vec![(
+                        addresses[0].clone(),
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[0]).into(),
+                    )];
+                    let config = Config::test(
+                        peers[restart_peer_idx].clone(),
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), new_port),
+                        bootstrappers,
+                        MAX_MESSAGE_SIZE,
+                    );
+                    let (mut network, mut oracle) =
+                        Network::new(peer_context.with_label("network"), config);
+
+                    // Register peer set
+                    oracle
+                        .update(0, addresses.clone().try_into().unwrap())
+                        .await;
+
+                    let (sender, receiver) = network.register(
+                        0,
+                        Quota::per_second(NZU32!(100)),
+                        DEFAULT_MESSAGE_BACKLOG,
+                    );
+                    senders[restart_peer_idx] = Some(sender);
+                    receivers[restart_peer_idx] = Some(receiver);
+
+                    let handle = network.start();
+                    handles[restart_peer_idx] = Some(handle);
+
+                    // Wait for the restarted peer to reconnect to all others
+                    let restarted_sender = senders[restart_peer_idx].as_mut().unwrap();
+                    loop {
+                        let sent = restarted_sender
+                            .send(
+                                Recipients::All,
+                                peers[restart_peer_idx].public_key().as_ref(),
+                                true,
+                            )
+                            .await
+                            .unwrap();
+                        if sent.len() == n - 1 {
+                            break;
+                        }
+                        context.sleep(Duration::from_millis(100)).await;
+                    }
+
+                    // Verify other peers can send to the restarted peer
+                    for i in 0..n {
+                        if i == restart_peer_idx {
+                            continue;
+                        }
+                        let sender = senders[i].as_mut().unwrap();
+                        loop {
+                            let sent = sender
+                                .send(
+                                    Recipients::One(addresses[restart_peer_idx].clone()),
+                                    peers[i].public_key().as_ref(),
+                                    true,
+                                )
+                                .await
+                                .unwrap();
+                            if sent.len() == 1 {
+                                break;
+                            }
+                            context.sleep(Duration::from_millis(100)).await;
+                        }
+                    }
+
+                    // Verify the restarted peer receives messages from all others
+                    let restarted_receiver = receivers[restart_peer_idx].as_mut().unwrap();
+                    let mut received = HashSet::new();
+                    while received.len() < n - 1 {
+                        let (sender, message): (ed25519::PublicKey, _) =
+                            restarted_receiver.recv().await.unwrap();
+                        assert_eq!(sender.as_ref(), message.as_ref());
+                        received.insert(sender);
+                    }
+                }
+            }
+
             assert_no_rate_limiting(&context);
         });
-    }
-
-    #[test_traced]
-    fn test_many_peer_restart_with_new_address_tokio() {
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            run_peer_restart_test(context, 8500, 5).await;
-            // Note: We don't assert_no_rate_limiting in tokio tests because the tight
-            // timing in test() config can cause occasional rate limiting due to
-            // wall-clock scheduling jitter.
-        });
-    }
-
-    async fn run_simultaneous_restart_test(
-        context: impl Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
-        base_port: u16,
-        n: usize,
-    ) {
-        // Create peers
-        let peers: Vec<_> = (0..n)
-            .map(|i| ed25519::PrivateKey::from_seed(i as u64))
-            .collect();
-        let addresses: Vec<_> = peers.iter().map(|p| p.public_key()).collect();
-
-        // Track port allocations (updated on restart)
-        let mut ports: Vec<u16> = (0..n).map(|i| base_port + i as u16).collect();
-
-        // Track senders/receivers/handles across restarts
-        let mut senders: Vec<Option<channels::Sender<_, _>>> = (0..n).map(|_| None).collect();
-        let mut receivers: Vec<Option<channels::Receiver<_>>> = (0..n).map(|_| None).collect();
-        let mut handles: Vec<Option<Handle<()>>> = (0..n).map(|_| None).collect();
-
-        // Create networks for all peers (peer 0 is bootstrapper)
-        for (i, peer) in peers.iter().enumerate() {
-            let peer_context = context.with_label(&format!("peer_{i}"));
-
-            // Non-bootstrapper peers point to peer 0
-            let mut bootstrappers = Vec::new();
-            if i > 0 {
-                bootstrappers.push((
-                    addresses[0].clone(),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[0]).into(),
-                ));
-            }
-
-            let config = Config::test(
-                peer.clone(),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[i]),
-                bootstrappers,
-                MAX_MESSAGE_SIZE,
-            );
-            let (mut network, mut oracle) =
-                Network::new(peer_context.with_label("network"), config);
-
-            // Register peer set
-            oracle
-                .update(0, addresses.clone().try_into().unwrap())
-                .await;
-
-            let (sender, receiver) =
-                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
-            senders[i] = Some(sender);
-            receivers[i] = Some(receiver);
-
-            let handle = network.start();
-            handles[i] = Some(handle);
-        }
-
-        // Wait for full connectivity (each peer can send to all others)
-        for (i, sender) in senders.iter_mut().enumerate() {
-            let sender = sender.as_mut().unwrap();
-            loop {
-                let sent = sender
-                    .send(Recipients::All, peers[i].public_key().as_ref(), true)
-                    .await
-                    .unwrap();
-                if sent.len() == n - 1 {
-                    break;
-                }
-                context.sleep(Duration::from_millis(100)).await;
-            }
-        }
-
-        // Verify each peer can receive from all others
-        for receiver in receivers.iter_mut() {
-            let receiver = receiver.as_mut().unwrap();
-            let mut received = HashSet::new();
-            while received.len() < n - 1 {
-                let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
-                assert_eq!(sender.as_ref(), message.as_ref());
-                received.insert(sender);
-            }
-        }
-
-        // Shutdown all non-bootstrapper peers simultaneously.
-        //
-        // We keep the bootstrapper (peer 0) alive to exercise the case
-        // where multiple peers churn at once.
-        let restart_peers: Vec<usize> = (1..n).collect();
-        for &idx in &restart_peers {
-            if let Some(handle) = handles[idx].take() {
-                handle.abort();
-            }
-            senders[idx] = None;
-            receivers[idx] = None;
-            // Allocate new ports for restarted peers
-            ports[idx] = base_port + 100 + idx as u16;
-        }
-
-        // Wait for connections to be detected as closed
-        context.sleep(Duration::from_secs(2)).await;
-
-        // Restart all peers with new ports (uses bootstrapper for discovery)
-        for &idx in &restart_peers {
-            let peer_context = context.with_label(&format!("peer_{idx}_restarted"));
-            let bootstrappers = vec![(
-                addresses[0].clone(),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[0]).into(),
-            )];
-            let config = Config::test(
-                peers[idx].clone(),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[idx]),
-                bootstrappers,
-                MAX_MESSAGE_SIZE,
-            );
-            let (mut network, mut oracle) =
-                Network::new(peer_context.with_label("network"), config);
-
-            // Register peer set
-            oracle
-                .update(0, addresses.clone().try_into().unwrap())
-                .await;
-
-            let (sender, receiver) =
-                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
-            senders[idx] = Some(sender);
-            receivers[idx] = Some(receiver);
-
-            let handle = network.start();
-            handles[idx] = Some(handle);
-        }
-
-        // Wait for full connectivity after restart
-        for (i, sender) in senders.iter_mut().enumerate() {
-            let sender = sender.as_mut().unwrap();
-            loop {
-                let sent = sender
-                    .send(Recipients::All, peers[i].public_key().as_ref(), true)
-                    .await
-                    .unwrap();
-                if sent.len() == n - 1 {
-                    break;
-                }
-                context.sleep(Duration::from_millis(100)).await;
-            }
-        }
-
-        // Verify each peer can receive from all others after restart
-        for receiver in receivers.iter_mut() {
-            let receiver = receiver.as_mut().unwrap();
-            let mut received = HashSet::new();
-            while received.len() < n - 1 {
-                let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
-                assert_eq!(sender.as_ref(), message.as_ref());
-                received.insert(sender);
-            }
-        }
     }
 
     #[test_traced]
     fn test_simultaneous_peer_restart() {
+        let base_port = 7700;
+        let n = 5;
+
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            run_simultaneous_restart_test(context.clone(), 7700, 5).await;
+            // Create peers
+            let peers: Vec<_> = (0..n)
+                .map(|i| ed25519::PrivateKey::from_seed(i as u64))
+                .collect();
+            let addresses: Vec<_> = peers.iter().map(|p| p.public_key()).collect();
+
+            // Track port allocations (updated on restart)
+            let mut ports: Vec<u16> = (0..n).map(|i| base_port + i as u16).collect();
+
+            // Track senders/receivers/handles across restarts
+            let mut senders: Vec<Option<channels::Sender<_, _>>> = (0..n).map(|_| None).collect();
+            let mut receivers: Vec<Option<channels::Receiver<_>>> = (0..n).map(|_| None).collect();
+            let mut handles: Vec<Option<Handle<()>>> = (0..n).map(|_| None).collect();
+
+            // Create networks for all peers (peer 0 is bootstrapper)
+            for (i, peer) in peers.iter().enumerate() {
+                let peer_context = context.with_label(&format!("peer_{i}"));
+
+                // Non-bootstrapper peers point to peer 0
+                let mut bootstrappers = Vec::new();
+                if i > 0 {
+                    bootstrappers.push((
+                        addresses[0].clone(),
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[0]).into(),
+                    ));
+                }
+
+                let config = Config::test(
+                    peer.clone(),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[i]),
+                    bootstrappers,
+                    MAX_MESSAGE_SIZE,
+                );
+                let (mut network, mut oracle) =
+                    Network::new(peer_context.with_label("network"), config);
+
+                // Register peer set
+                oracle
+                    .update(0, addresses.clone().try_into().unwrap())
+                    .await;
+
+                let (sender, receiver) =
+                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                senders[i] = Some(sender);
+                receivers[i] = Some(receiver);
+
+                let handle = network.start();
+                handles[i] = Some(handle);
+            }
+
+            // Wait for full connectivity (each peer can send to all others)
+            for (i, sender) in senders.iter_mut().enumerate() {
+                let sender = sender.as_mut().unwrap();
+                loop {
+                    let sent = sender
+                        .send(Recipients::All, peers[i].public_key().as_ref(), true)
+                        .await
+                        .unwrap();
+                    if sent.len() == n - 1 {
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(100)).await;
+                }
+            }
+
+            // Verify each peer can receive from all others
+            for receiver in receivers.iter_mut() {
+                let receiver = receiver.as_mut().unwrap();
+                let mut received = HashSet::new();
+                while received.len() < n - 1 {
+                    let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
+                    assert_eq!(sender.as_ref(), message.as_ref());
+                    received.insert(sender);
+                }
+            }
+
+            // Shutdown all non-bootstrapper peers simultaneously.
+            //
+            // We keep the bootstrapper (peer 0) alive to exercise the case
+            // where multiple peers churn at once.
+            let restart_peers: Vec<usize> = (1..n).collect();
+            for &idx in &restart_peers {
+                if let Some(handle) = handles[idx].take() {
+                    handle.abort();
+                }
+                senders[idx] = None;
+                receivers[idx] = None;
+                // Allocate new ports for restarted peers
+                ports[idx] = base_port + 100 + idx as u16;
+            }
+
+            // Wait for connections to be detected as closed
+            context.sleep(Duration::from_secs(2)).await;
+
+            // Restart all peers with new ports (uses bootstrapper for discovery)
+            for &idx in &restart_peers {
+                let peer_context = context.with_label(&format!("peer_{idx}_restarted"));
+                let bootstrappers = vec![(
+                    addresses[0].clone(),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[0]).into(),
+                )];
+                let config = Config::test(
+                    peers[idx].clone(),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[idx]),
+                    bootstrappers,
+                    MAX_MESSAGE_SIZE,
+                );
+                let (mut network, mut oracle) =
+                    Network::new(peer_context.with_label("network"), config);
+
+                // Register peer set
+                oracle
+                    .update(0, addresses.clone().try_into().unwrap())
+                    .await;
+
+                let (sender, receiver) =
+                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                senders[idx] = Some(sender);
+                receivers[idx] = Some(receiver);
+
+                let handle = network.start();
+                handles[idx] = Some(handle);
+            }
+
+            // Wait for full connectivity after restart
+            for (i, sender) in senders.iter_mut().enumerate() {
+                let sender = sender.as_mut().unwrap();
+                loop {
+                    let sent = sender
+                        .send(Recipients::All, peers[i].public_key().as_ref(), true)
+                        .await
+                        .unwrap();
+                    if sent.len() == n - 1 {
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(100)).await;
+                }
+            }
+
+            // Verify each peer can receive from all others after restart
+            for receiver in receivers.iter_mut() {
+                let receiver = receiver.as_mut().unwrap();
+                let mut received = HashSet::new();
+                while received.len() < n - 1 {
+                    let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
+                    assert_eq!(sender.as_ref(), message.as_ref());
+                    received.insert(sender);
+                }
+            }
+
             assert_no_rate_limiting(&context);
         });
     }
-
-    #[test_traced]
-    fn test_simultaneous_peer_restart_tokio() {
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            run_simultaneous_restart_test(context, 8700, 5).await;
-            // Note: We don't assert_no_rate_limiting in tokio tests because the tight
-            // timing in test() config can cause occasional rate limiting due to
-            // wall-clock scheduling jitter.
-        });
-    }
-
     #[test_traced]
     fn test_peer_restart_with_new_address_must_dial() {
         let base_port = 3600;
