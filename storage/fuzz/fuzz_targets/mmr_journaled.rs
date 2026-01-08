@@ -437,9 +437,10 @@ fn fuzz(input: FuzzInput) {
                     )
                     .await
                     .unwrap();
-                    // Reset tracking variables to match recovered state
-                    leaves.clear();
-                    historical_sizes.clear();
+                    // Truncate tracking variables to match recovered state
+                    let recovered_leaves = new_mmr.leaves().as_u64() as usize;
+                    leaves.truncate(recovered_leaves);
+                    historical_sizes.truncate(recovered_leaves);
                     MmrState::Clean(new_mmr)
                 }
 
