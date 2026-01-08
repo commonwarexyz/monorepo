@@ -8,6 +8,7 @@ mod tests {
     };
     use crate::qmdb::any::ordered::variable::Operation;
     use commonware_cryptography::sha256::Digest;
+    use commonware_macros::test_traced;
     use commonware_runtime::deterministic::Context;
     use rstest::rstest;
     use std::num::NonZeroU64;
@@ -50,12 +51,12 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_invalid_bounds() {
         sync_tests::test_sync_invalid_bounds::<VariableHarness>();
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_resolver_fails() {
         sync_tests::test_sync_resolver_fails::<VariableHarness>();
     }
@@ -76,42 +77,42 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_subset_of_target_database() {
         sync_tests::test_sync_subset_of_target_database::<VariableHarness>(1000);
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_use_existing_db_partial_match() {
         sync_tests::test_sync_use_existing_db_partial_match::<VariableHarness>(1000);
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_use_existing_db_exact_match() {
         sync_tests::test_sync_use_existing_db_exact_match::<VariableHarness>(1000);
     }
 
-    #[test]
+    #[test_traced("WARN")]
     fn test_target_update_lower_bound_decrease() {
         sync_tests::test_target_update_lower_bound_decrease::<VariableHarness>();
     }
 
-    #[test]
+    #[test_traced("WARN")]
     fn test_target_update_upper_bound_decrease() {
         sync_tests::test_target_update_upper_bound_decrease::<VariableHarness>();
     }
 
-    #[test]
+    #[test_traced("WARN")]
     fn test_target_update_bounds_increase() {
         sync_tests::test_target_update_bounds_increase::<VariableHarness>();
     }
 
-    #[test]
+    #[test_traced("WARN")]
     fn test_target_update_invalid_bounds() {
         sync_tests::test_target_update_invalid_bounds::<VariableHarness>();
     }
 
-    #[test]
+    #[test_traced("WARN")]
     fn test_target_update_on_done_client() {
         sync_tests::test_target_update_on_done_client::<VariableHarness>();
     }
@@ -133,27 +134,27 @@ mod tests {
         sync_tests::test_target_update_during_sync::<VariableHarness>(initial_ops, additional_ops);
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_database_persistence() {
         sync_tests::test_sync_database_persistence::<VariableHarness>();
     }
 
-    #[test]
+    #[test_traced]
     fn test_from_sync_result_empty_to_nonempty() {
         sync_tests::test_from_sync_result_empty_to_nonempty::<VariableHarness>();
     }
 
-    #[test]
+    #[test_traced("WARN")]
     fn test_from_sync_result_empty_to_empty() {
         sync_tests::test_from_sync_result_empty_to_empty::<VariableHarness>();
     }
 
-    #[test]
+    #[test_traced]
     fn test_from_sync_result_nonempty_to_nonempty_partial_match() {
         sync_tests::test_from_sync_result_nonempty_to_nonempty_partial_match::<VariableHarness>();
     }
 
-    #[test]
+    #[test_traced]
     fn test_from_sync_result_nonempty_to_nonempty_exact_match() {
         sync_tests::test_from_sync_result_nonempty_to_nonempty_exact_match::<VariableHarness>();
     }

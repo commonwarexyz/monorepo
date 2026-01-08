@@ -17,6 +17,7 @@ mod tests {
         buffer::PoolRef,
         deterministic::{self, Context},
     };
+    use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use rstest::rstest;
@@ -140,12 +141,12 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_invalid_bounds() {
         sync_tests::test_sync_invalid_bounds::<VariableHarness>();
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_resolver_fails() {
         sync_tests::test_sync_resolver_fails::<VariableHarness>();
     }
@@ -166,46 +167,46 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_subset_of_target_database() {
         sync_tests::test_sync_subset_of_target_database::<VariableHarness>(1000);
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_use_existing_db_partial_match() {
         sync_tests::test_sync_use_existing_db_partial_match::<VariableHarness>(
             1000,
         );
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_use_existing_db_exact_match() {
         sync_tests::test_sync_use_existing_db_exact_match::<VariableHarness>(
             1000,
         );
     }
 
-    #[commonware_macros::test_traced("WARN")]
+    #[test_traced("WARN")]
     fn test_target_update_lower_bound_decrease() {
         sync_tests::test_target_update_lower_bound_decrease::<VariableHarness>();
     }
 
-    #[commonware_macros::test_traced("WARN")]
+    #[test_traced("WARN")]
     fn test_target_update_upper_bound_decrease() {
         sync_tests::test_target_update_upper_bound_decrease::<VariableHarness>();
     }
 
-    #[commonware_macros::test_traced("WARN")]
+    #[test_traced("WARN")]
     fn test_target_update_bounds_increase() {
         sync_tests::test_target_update_bounds_increase::<VariableHarness>();
     }
 
-    #[commonware_macros::test_traced("WARN")]
+    #[test_traced("WARN")]
     fn test_target_update_invalid_bounds() {
         sync_tests::test_target_update_invalid_bounds::<VariableHarness>();
     }
 
-    #[commonware_macros::test_traced("WARN")]
+    #[test_traced("WARN")]
     fn test_target_update_on_done_client() {
         sync_tests::test_target_update_on_done_client::<VariableHarness>();
     }
@@ -217,6 +218,7 @@ mod tests {
     #[case(2, 1)]
     #[case(2, 2)]
     #[case(2, 100)]
+    // Regression test: panicked when we didn't set pinned nodes after updating target
     #[case(20, 10)]
     #[case(100, 1)]
     #[case(100, 2)]
@@ -229,29 +231,29 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_database_persistence() {
         sync_tests::test_sync_database_persistence::<VariableHarness>();
     }
 
-    #[test]
+    #[test_traced]
     fn test_from_sync_result_empty_to_nonempty() {
         sync_tests::test_from_sync_result_empty_to_nonempty::<VariableHarness>();
     }
 
-    #[commonware_macros::test_traced("WARN")]
+    #[test_traced("WARN")]
     fn test_from_sync_result_empty_to_empty() {
         sync_tests::test_from_sync_result_empty_to_empty::<VariableHarness>();
     }
 
-    #[test]
+    #[test_traced]
     fn test_from_sync_result_nonempty_to_nonempty_partial_match() {
         sync_tests::test_from_sync_result_nonempty_to_nonempty_partial_match::<
             VariableHarness,
         >();
     }
 
-    #[test]
+    #[test_traced]
     fn test_from_sync_result_nonempty_to_nonempty_exact_match() {
         sync_tests::test_from_sync_result_nonempty_to_nonempty_exact_match::<
             VariableHarness,

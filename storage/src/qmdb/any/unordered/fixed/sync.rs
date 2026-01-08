@@ -77,12 +77,12 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_invalid_bounds() {
         sync_tests::test_sync_invalid_bounds::<FixedHarness>();
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_subset_of_target_database() {
         sync_tests::test_sync_subset_of_target_database::<FixedHarness>(1000);
     }
@@ -103,12 +103,12 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_use_existing_db_partial_match() {
         sync_tests::test_sync_use_existing_db_partial_match::<FixedHarness>(1000);
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_use_existing_db_exact_match() {
         sync_tests::test_sync_use_existing_db_exact_match::<FixedHarness>(1000);
     }
@@ -155,12 +155,12 @@ mod tests {
         sync_tests::test_target_update_during_sync::<FixedHarness>(initial_ops, additional_ops);
     }
 
-    #[test_traced("WARN")]
+    #[test_traced]
     fn test_sync_database_persistence() {
         sync_tests::test_sync_database_persistence::<FixedHarness>();
     }
 
-    #[test]
+    #[test_traced]
     fn test_sync_resolver_fails() {
         sync_tests::test_sync_resolver_fails::<FixedHarness>();
     }
@@ -170,17 +170,17 @@ mod tests {
         sync_tests::test_from_sync_result_empty_to_empty::<FixedHarness>();
     }
 
-    #[test]
+    #[test_traced]
     fn test_from_sync_result_empty_to_nonempty() {
         sync_tests::test_from_sync_result_empty_to_nonempty::<FixedHarness>();
     }
 
-    #[test]
+    #[test_traced]
     fn test_from_sync_result_nonempty_to_nonempty_partial_match() {
         sync_tests::test_from_sync_result_nonempty_to_nonempty_partial_match::<FixedHarness>();
     }
 
-    #[test]
+    #[test_traced]
     fn test_from_sync_result_nonempty_to_nonempty_exact_match() {
         sync_tests::test_from_sync_result_nonempty_to_nonempty_exact_match::<FixedHarness>();
     }
