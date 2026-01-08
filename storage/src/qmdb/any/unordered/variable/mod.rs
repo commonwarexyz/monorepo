@@ -96,11 +96,12 @@ pub(super) mod test {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::RngCore;
+    use std::num::{NonZeroU16, NonZeroUsize};
 
-    const PAGE_SIZE: usize = 77;
-    const PAGE_CACHE_SIZE: usize = 9;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(77);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
     fn db_config(suffix: &str) -> VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
         VariableConfig {
@@ -115,7 +116,7 @@ pub(super) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 

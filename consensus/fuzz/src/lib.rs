@@ -28,14 +28,20 @@ use commonware_cryptography::{
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::{max_faults, NZUsize};
+use commonware_utils::{max_faults, NZUsize, NZU16};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::{cell::RefCell, num::NonZeroUsize, panic, sync::Arc, time::Duration};
+use std::{
+    cell::RefCell,
+    num::{NonZeroU16, NonZeroUsize},
+    panic,
+    sync::Arc,
+    time::Duration,
+};
 
 pub const EPOCH: u64 = 333;
 
-const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 const MIN_REQUIRED_CONTAINERS: u64 = 10;
 const MAX_REQUIRED_CONTAINERS: u64 = 50;

@@ -10,9 +10,9 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner, Storage as _};
 use commonware_storage::journal::segmented::oversized::{Config, Oversized, Record};
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroUsize};
 
 /// Test index entry that stores a u64 id and references a value.
 #[derive(Debug, Clone, PartialEq)]
@@ -154,7 +154,7 @@ struct FuzzInput {
     sync_before_corrupt: bool,
 }
 
-const PAGE_SIZE: NonZeroUsize = NZUsize!(128);
+const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(4);
 const INDEX_PARTITION: &str = "fuzz_index";
 const VALUE_PARTITION: &str = "fuzz_values";

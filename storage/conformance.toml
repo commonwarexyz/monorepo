@@ -1,10 +1,10 @@
 ["commonware_storage::archive::conformance::ArchiveImmutable"]
 n_cases = 128
-hash = "8e578ed38733486716d072e565e62fe5d9ba7185ffb6e26ec7db8611c69b90b8"
+hash = "6acfa1bc0c17920b5c0e0437af106e09ee57dcd37459091402192f2c146afdb5"
 
 ["commonware_storage::archive::conformance::ArchivePrunable"]
 n_cases = 128
-hash = "674e81c769c06a3965dc691b1f8c0327374f427e8a4bf67895c6ad4e566fed20"
+hash = "cb063a05c6a75902893f790e9802b4906be506f2f7e5d10b46dff90a92e40819"
 
 ["commonware_storage::archive::immutable::storage::conformance::CodecConformance<Record>"]
 n_cases = 65536
@@ -48,15 +48,15 @@ hash = "13b3e99a8c74b50dc18150194a92306de670b94e6642758feb6d9b6e9881f827"
 
 ["commonware_storage::journal::conformance::ContiguousFixed"]
 n_cases = 512
-hash = "134bb8b838241c2dedf98d96130f014bea19f1bc7580307c9798540466eb81c6"
+hash = "4c786b6b7f91b9924a62a7b9a1c32a8d47398f1c8a3d5bf06fe1a90998e86aab"
 
 ["commonware_storage::journal::conformance::ContiguousVariable"]
 n_cases = 512
-hash = "29d37f2309943dd27d4344710a900bb3b992c0a1089ff9734cddbfa78c039200"
+hash = "973ebd77804d2ea346574d377f39bd29350063098f2e6fab9596783ba43664e5"
 
 ["commonware_storage::journal::conformance::SegmentedFixed"]
 n_cases = 512
-hash = "505611ba11d6380254c159eb6234f87cc19a62b0919bc96d59e83de498b458fa"
+hash = "e077ce8c6d9a79c87cf9b48866c65f387ffbec9d8e8c65dd40c46b4296cfc050"
 
 ["commonware_storage::journal::conformance::SegmentedGlob"]
 n_cases = 512
@@ -64,11 +64,11 @@ hash = "adb1efeef12c203c05879ce4d1d03ef443c767737a6c6b57433189100eec9197"
 
 ["commonware_storage::journal::conformance::SegmentedOversized"]
 n_cases = 512
-hash = "b98d56d2eb039657b3452135666795eeeefdc83e9d6f3cb070e7ca114b4621a1"
+hash = "b815138329a06cbe235cf547ed62774165bd2108e68c65bf15ae152bedf84b3a"
 
 ["commonware_storage::journal::conformance::SegmentedVariable"]
 n_cases = 512
-hash = "cd79e09ca53917f78c290e67efe08bf17b3ec0d0faf1b5f6507d4665749574b1"
+hash = "418dafd67008cb74d34fe58b9be8747cfaf86e345a71eb4c35ae0e43a4c077ef"
 
 ["commonware_storage::mmr::proof::tests::conformance::CodecConformance<Proof<Sha256Digest>>"]
 n_cases = 65536

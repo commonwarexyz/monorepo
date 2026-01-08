@@ -23,7 +23,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{vec::NonEmptyVec, NZUsize};
+use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use futures::{channel::mpsc, StreamExt};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
@@ -105,7 +105,7 @@ where
         config: Config<B, V, C, H, A, S, L, St>,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
-        let pool_ref = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));
+        let pool_ref = PoolRef::new(NZU16!(16_384), NZUsize!(10_000));
 
         (
             Self {

@@ -8,7 +8,7 @@ use libfuzzer_sys::{
     fuzz_target,
 };
 use rand::{rngs::StdRng, SeedableRng};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, num::NonZeroU16};
 
 const MAX_OPERATIONS: usize = 50;
 const MAX_INDEX: u64 = 10000;
@@ -21,8 +21,8 @@ const MIN_REPLAY_BUFFER: usize = 256;
 const MAX_REPLAY_BUFFER: usize = 2 * 8192;
 const MIN_COMPRESSION_LEVEL: u8 = 1;
 const MAX_COMPRESSION_LEVEL: u8 = 21;
-const MIN_BUFFER_POOL_PAGE_SIZE: usize = 512;
-const MAX_BUFFER_POOL_PAGE_SIZE: usize = 4096;
+const MIN_BUFFER_POOL_PAGE_SIZE: u16 = 511;
+const MAX_BUFFER_POOL_PAGE_SIZE: u16 = 4097;
 const MIN_BUFFER_POOL_CAPACITY: usize = 10;
 const MAX_BUFFER_POOL_CAPACITY: usize = 64;
 
@@ -45,7 +45,7 @@ struct CacheConfig {
     write_buffer: usize,
     replay_buffer: usize,
     compression: Option<u8>,
-    buffer_pool_pages_size: usize,
+    buffer_pool_pages_size: NonZeroU16,
     buffer_pool_capacity: usize,
 }
 
@@ -71,7 +71,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             None
         };
         let buffer_pool_pages_size =
-            u.int_in_range(MIN_BUFFER_POOL_PAGE_SIZE..=MAX_BUFFER_POOL_PAGE_SIZE)?;
+            NonZeroU16::new(u.int_in_range(MIN_BUFFER_POOL_PAGE_SIZE..=MAX_BUFFER_POOL_PAGE_SIZE)?)
+                .unwrap();
         let buffer_pool_capacity =
             u.int_in_range(MIN_BUFFER_POOL_CAPACITY..=MAX_BUFFER_POOL_CAPACITY)?;
 
@@ -137,7 +138,7 @@ fn fuzz(input: FuzzInput) {
             replay_buffer: NZUsize!(input.config.replay_buffer),
             items_per_blob: NZU64!(input.config.items_per_blob),
             buffer_pool: PoolRef::new(
-                NZUsize!(input.config.buffer_pool_pages_size),
+                input.config.buffer_pool_pages_size,
                 NZUsize!(input.config.buffer_pool_capacity),
             ),
         };

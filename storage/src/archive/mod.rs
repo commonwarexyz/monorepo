@@ -122,11 +122,14 @@ mod tests {
         deterministic::{self, Context},
         Runner,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;
-    use std::{collections::BTreeMap, num::NonZeroUsize};
+    use std::{
+        collections::BTreeMap,
+        num::{NonZeroU16, NonZeroUsize},
+    };
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     fn test_key(key: &str) -> FixedBytes<64> {

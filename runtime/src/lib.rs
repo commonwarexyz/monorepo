@@ -111,8 +111,12 @@ pub enum Error {
         expected: std::ops::RangeInclusive<u16>,
         found: u16,
     },
+    #[error("invalid or missing checksum")]
+    InvalidChecksum,
     #[error("offset overflow")]
     OffsetOverflow,
+    #[error("immutable blob")]
+    ImmutableBlob,
     #[error("io error: {0}")]
     Io(#[from] IoError),
 }

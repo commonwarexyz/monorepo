@@ -8,12 +8,13 @@ use commonware_storage::mmr::{
     location::{Location, LocationRangeExt},
     Position, StandardHasher as Standard,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
+use std::num::NonZeroU16;
 
 const MAX_OPERATIONS: usize = 200;
 const MAX_DATA_SIZE: usize = 64;
-const PAGE_SIZE: usize = 111;
+const PAGE_SIZE: NonZeroU16 = NZU16!(111);
 const PAGE_CACHE_SIZE: usize = 5;
 const ITEMS_PER_BLOB: u64 = 7;
 
@@ -88,7 +89,7 @@ fn test_config(partition_suffix: &str) -> Config {
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
         thread_pool: None,
-        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+        buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
