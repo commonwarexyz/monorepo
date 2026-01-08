@@ -114,11 +114,13 @@ pub fn check_lts_violations(
                     continue;
                 };
 
-                if !is_dependency_lts(dep, dep_scan) {
-                    let dep_str = format_dependency(dep);
+                if !is_module_lts(dep, dep_scan) {
                     violations.push(Conflict {
                         path: format!("{}/{}", crate_name, path),
-                        message: format!("LTS module imports from non-LTS: {}", dep_str),
+                        message: format!(
+                            "LTS module imports from non-LTS module: {}",
+                            dep.module_string()
+                        ),
                         severity: Severity::Error,
                     });
                 }
@@ -129,11 +131,11 @@ pub fn check_lts_violations(
     violations
 }
 
-fn is_dependency_lts(dep: &Dependency, scan: &CrateScan) -> bool {
-    let possible_paths = generate_possible_paths(&dep.path_segments);
+fn is_module_lts(dep: &Dependency, scan: &CrateScan) -> bool {
+    let module_files = get_module_files(&dep.module_path);
 
-    for possible_path in possible_paths {
-        if let Some(status) = scan.modules.get(&possible_path) {
+    for module_file in module_files {
+        if let Some(status) = scan.modules.get(&module_file) {
             if status.markers.is_lts() {
                 return true;
             }
@@ -143,34 +145,19 @@ fn is_dependency_lts(dep: &Dependency, scan: &CrateScan) -> bool {
     false
 }
 
-fn generate_possible_paths(segments: &[String]) -> Vec<String> {
-    let mut paths = vec!["src/lib.rs".to_string()];
+fn get_module_files(module_path: &[String]) -> Vec<String> {
+    let mut files = Vec::new();
 
-    if segments.is_empty() {
-        return paths;
-    }
-
-    for i in 1..=segments.len() {
-        let prefix: Vec<String> = segments[..i].iter().map(|s| s.to_lowercase()).collect();
-        let joined = prefix.join("/");
-
-        paths.push(format!("src/{}.rs", joined));
-        paths.push(format!("src/{}/mod.rs", joined));
-    }
-
-    paths
-}
-
-fn format_dependency(dep: &Dependency) -> String {
-    if dep.path_segments.is_empty() {
-        format!("commonware_{}", dep.crate_name)
+    if module_path.is_empty() {
+        files.push("src/lib.rs".to_string());
     } else {
-        format!(
-            "commonware_{}::{}",
-            dep.crate_name,
-            dep.path_segments.join("::")
-        )
+        let path = module_path.join("/");
+        files.push(format!("src/{}.rs", path));
+        files.push(format!("src/{}/mod.rs", path));
+        files.push("src/lib.rs".to_string());
     }
+
+    files
 }
 
 #[cfg(test)]
@@ -178,27 +165,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_generate_possible_paths() {
-        let paths = generate_possible_paths(&["buffer".to_string(), "PoolRef".to_string()]);
-        assert!(paths.contains(&"src/lib.rs".to_string()));
-        assert!(paths.contains(&"src/buffer.rs".to_string()));
-        assert!(paths.contains(&"src/buffer/mod.rs".to_string()));
-        assert!(paths.contains(&"src/buffer/poolref.rs".to_string()));
-        assert!(paths.contains(&"src/buffer/poolref/mod.rs".to_string()));
+    fn test_get_module_files_root() {
+        let files = get_module_files(&[]);
+        assert_eq!(files, vec!["src/lib.rs"]);
     }
 
     #[test]
-    fn test_format_dependency() {
-        let dep = Dependency {
-            crate_name: "codec".to_string(),
-            path_segments: vec!["Encode".to_string()],
-        };
-        assert_eq!(format_dependency(&dep), "commonware_codec::Encode");
+    fn test_get_module_files_nested() {
+        let files = get_module_files(&["buffer".to_string()]);
+        assert!(files.contains(&"src/buffer.rs".to_string()));
+        assert!(files.contains(&"src/buffer/mod.rs".to_string()));
+        assert!(files.contains(&"src/lib.rs".to_string()));
+    }
 
-        let dep_empty = Dependency {
-            crate_name: "codec".to_string(),
-            path_segments: vec![],
-        };
-        assert_eq!(format_dependency(&dep_empty), "commonware_codec");
+    #[test]
+    fn test_get_module_files_deeply_nested() {
+        let files = get_module_files(&["utils".to_string(), "buffer".to_string()]);
+        assert!(files.contains(&"src/utils/buffer.rs".to_string()));
+        assert!(files.contains(&"src/utils/buffer/mod.rs".to_string()));
+        assert!(files.contains(&"src/lib.rs".to_string()));
     }
 }

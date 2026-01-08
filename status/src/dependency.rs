@@ -4,7 +4,17 @@ use syn::{Item, UseTree};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Dependency {
     pub crate_name: String,
-    pub path_segments: Vec<String>,
+    pub module_path: Vec<String>,
+}
+
+impl Dependency {
+    pub fn module_string(&self) -> String {
+        if self.module_path.is_empty() {
+            self.crate_name.clone()
+        } else {
+            format!("{}::{}", self.crate_name, self.module_path.join("::"))
+        }
+    }
 }
 
 pub fn parse_dependencies(content: &str) -> Vec<Dependency> {
@@ -65,9 +75,11 @@ fn try_add_dep(path: &[String], deps: &mut Vec<Dependency>, seen: &mut HashSet<D
     let first = &path[0];
 
     if let Some(crate_name) = first.strip_prefix("commonware_") {
+        let module_path = extract_module_path(&path[1..]);
+
         let dep = Dependency {
             crate_name: crate_name.to_string(),
-            path_segments: path[1..].to_vec(),
+            module_path,
         };
 
         if !seen.contains(&dep) {
@@ -75,6 +87,28 @@ fn try_add_dep(path: &[String], deps: &mut Vec<Dependency>, seen: &mut HashSet<D
             deps.push(dep);
         }
     }
+}
+
+fn extract_module_path(segments: &[String]) -> Vec<String> {
+    let mut module_path = Vec::new();
+
+    for segment in segments {
+        if is_likely_module_name(segment) {
+            module_path.push(segment.clone());
+        } else {
+            break;
+        }
+    }
+
+    module_path
+}
+
+fn is_likely_module_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let first_char = name.chars().next().unwrap();
+    first_char.is_lowercase() || first_char == '_'
 }
 
 #[cfg(test)]
@@ -87,17 +121,16 @@ mod tests {
         let deps = parse_dependencies(code);
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].crate_name, "codec");
-        assert_eq!(deps[0].path_segments, vec!["Encode"]);
+        assert!(deps[0].module_path.is_empty());
     }
 
     #[test]
     fn test_curly_brace_import() {
         let code = r#"use commonware_codec::{Encode, Write, Read};"#;
         let deps = parse_dependencies(code);
-        assert_eq!(deps.len(), 3);
-        assert!(deps.iter().any(|d| d.path_segments == vec!["Encode"]));
-        assert!(deps.iter().any(|d| d.path_segments == vec!["Write"]));
-        assert!(deps.iter().any(|d| d.path_segments == vec!["Read"]));
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].crate_name, "codec");
+        assert!(deps[0].module_path.is_empty());
     }
 
     #[test]
@@ -106,7 +139,7 @@ mod tests {
         let deps = parse_dependencies(code);
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].crate_name, "runtime");
-        assert_eq!(deps[0].path_segments, vec!["buffer", "PoolRef"]);
+        assert_eq!(deps[0].module_path, vec!["buffer"]);
     }
 
     #[test]
@@ -115,7 +148,7 @@ mod tests {
         let deps = parse_dependencies(code);
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].crate_name, "codec");
-        assert!(deps[0].path_segments.is_empty());
+        assert!(deps[0].module_path.is_empty());
     }
 
     #[test]
@@ -124,7 +157,7 @@ mod tests {
         let deps = parse_dependencies(code);
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].crate_name, "codec");
-        assert_eq!(deps[0].path_segments, vec!["Read"]);
+        assert!(deps[0].module_path.is_empty());
     }
 
     #[test]
@@ -138,7 +171,7 @@ use commonware_codec::Read;
 "#;
         let deps = parse_dependencies(code);
         assert_eq!(deps.len(), 1);
-        assert_eq!(deps[0].path_segments, vec!["Read"]);
+        assert!(deps[0].module_path.is_empty());
     }
 
     #[test]
@@ -157,9 +190,32 @@ use commonware_codec::Encode;
     fn test_nested_curly_braces() {
         let code = r#"use commonware_codec::{types::{Vec, Map}, Encode};"#;
         let deps = parse_dependencies(code);
-        assert_eq!(deps.len(), 3);
-        assert!(deps.iter().any(|d| d.path_segments == vec!["types", "Vec"]));
-        assert!(deps.iter().any(|d| d.path_segments == vec!["types", "Map"]));
-        assert!(deps.iter().any(|d| d.path_segments == vec!["Encode"]));
+        assert_eq!(deps.len(), 2);
+        assert!(deps.iter().any(|d| d.module_path == vec!["types"]));
+        assert!(deps.iter().any(|d| d.module_path.is_empty()));
+    }
+
+    #[test]
+    fn test_module_string() {
+        let dep = Dependency {
+            crate_name: "runtime".to_string(),
+            module_path: vec!["buffer".to_string()],
+        };
+        assert_eq!(dep.module_string(), "runtime::buffer");
+
+        let dep_root = Dependency {
+            crate_name: "codec".to_string(),
+            module_path: vec![],
+        };
+        assert_eq!(dep_root.module_string(), "codec");
+    }
+
+    #[test]
+    fn test_deeply_nested_module() {
+        let code = r#"use commonware_runtime::utils::buffer::pool::PoolRef;"#;
+        let deps = parse_dependencies(code);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].crate_name, "runtime");
+        assert_eq!(deps[0].module_path, vec!["utils", "buffer", "pool"]);
     }
 }
