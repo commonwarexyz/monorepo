@@ -330,7 +330,7 @@ mod tests {
             .collect();
 
         // Generate certificate signatures
-        Finalization::from_finalizes(&schemes[0], &finalizes).unwrap()
+        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
     }
 
     fn make_notarization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Notarization<S, D> {
@@ -342,7 +342,7 @@ mod tests {
             .collect();
 
         // Generate certificate signatures
-        Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()
+        Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
     }
 
     fn setup_network(

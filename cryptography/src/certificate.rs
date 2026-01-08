@@ -67,6 +67,7 @@ pub use crate::{
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
+use commonware_parallel::Strategy;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::{bitmap::BitMap, ordered::Set, Participant};
@@ -210,6 +211,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         rng: &mut R,
         subject: Self::Subject<'_, D>,
         attestation: &Attestation<Self>,
+        strategy: &impl Strategy,
     ) -> bool
     where
         R: CryptoRngCore,
@@ -224,6 +226,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         rng: &mut R,
         subject: Self::Subject<'_, D>,
         attestations: I,
+        strategy: &impl Strategy,
     ) -> Verification<Self>
     where
         R: CryptoRngCore,
@@ -233,7 +236,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         let mut invalid = BTreeSet::new();
 
         let verified = attestations.into_iter().filter_map(|attestation| {
-            if self.verify_attestation(&mut *rng, subject.clone(), &attestation) {
+            if self.verify_attestation(&mut *rng, subject.clone(), &attestation, strategy) {
                 Some(attestation)
             } else {
                 invalid.insert(attestation.signer);
@@ -247,7 +250,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Assembles attestations into a certificate, returning `None` if the threshold is not met.
     ///
     /// Callers must not include duplicate attestations from the same signer.
-    fn assemble<I>(&self, attestations: I) -> Option<Self::Certificate>
+    fn assemble<I>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>;
 
@@ -257,17 +260,23 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         rng: &mut R,
         subject: Self::Subject<'_, D>,
         certificate: &Self::Certificate,
+        strategy: &impl Strategy,
     ) -> bool;
 
     /// Verifies a stream of certificates, returning `false` at the first failure.
-    fn verify_certificates<'a, R, D, I>(&self, rng: &mut R, certificates: I) -> bool
+    fn verify_certificates<'a, R, D, I>(
+        &self,
+        rng: &mut R,
+        certificates: I,
+        strategy: &impl Strategy,
+    ) -> bool
     where
         R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
     {
         for (subject, certificate) in certificates {
-            if !self.verify_certificate(rng, subject, certificate) {
+            if !self.verify_certificate(rng, subject, certificate, strategy) {
                 return false;
             }
         }

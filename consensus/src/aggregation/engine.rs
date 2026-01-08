@@ -15,6 +15,7 @@ use commonware_cryptography::{
     certificate::{Provider, Scheme},
     Digest,
 };
+use commonware_parallel::Sequential;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -519,7 +520,7 @@ impl<
             .filter(|a| a.item.digest == ack.item.digest)
             .collect::<Vec<_>>();
         if filtered.len() >= quorum as usize {
-            if let Some(certificate) = Certificate::from_acks(&*scheme, filtered) {
+            if let Some(certificate) = Certificate::from_acks(&*scheme, filtered, &Sequential) {
                 self.metrics.certificates.inc();
                 self.handle_certificate(certificate).await;
             }
@@ -666,7 +667,7 @@ impl<
         }
 
         // Validate signature
-        if !ack.verify(&mut self.context, &*scheme) {
+        if !ack.verify(&mut self.context, &*scheme, &Sequential) {
             return Err(Error::InvalidAckSignature);
         }
 

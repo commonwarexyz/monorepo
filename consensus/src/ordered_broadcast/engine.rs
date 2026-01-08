@@ -610,7 +610,7 @@ impl<
         };
 
         // Add the vote. If a new certificate is formed, handle it.
-        if let Some(certificate) = self.ack_manager.add_ack(ack, scheme.as_ref()) {
+        if let Some(certificate) = self.ack_manager.add_ack(ack, scheme.as_ref(), &commonware_parallel::Sequential) {
             debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = %ack.chunk.height, "recovered certificate");
             self.metrics.certificates.inc();
             self.handle_certificate(&ack.chunk, ack.epoch, certificate)
@@ -885,6 +885,7 @@ impl<
             &mut self.context,
             &self.chunk_verifier,
             &self.validators_provider,
+            &commonware_parallel::Sequential,
         )
     }
 
@@ -942,7 +943,7 @@ impl<
         }
 
         // Validate the vote signature
-        if !ack.verify(&mut self.context, scheme.as_ref()) {
+        if !ack.verify(&mut self.context, scheme.as_ref(), &commonware_parallel::Sequential) {
             return Err(Error::InvalidAckSignature);
         }
 

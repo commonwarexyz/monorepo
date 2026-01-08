@@ -76,7 +76,7 @@ impl<
 
     async fn report(&mut self, activity: Self::Activity) {
         // Verify peer activities if verification is enabled
-        if self.verify && !activity.verified() && !activity.verify(&mut self.rng, &self.scheme) {
+        if self.verify && !activity.verified() && !activity.verify(&mut self.rng, &self.scheme, &commonware_parallel::Sequential) {
             // Drop unverified peer activity
             return;
         }
@@ -282,7 +282,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble(votes)
+            .assemble(votes, &commonware_parallel::Sequential)
             .expect("failed to assemble certificate");
 
         let notarization = Notarization {

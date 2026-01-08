@@ -174,7 +174,7 @@ impl<
                     );
                     return None;
                 }
-                if !notarization.verify(&mut self.context, &self.scheme) {
+                if !notarization.verify(&mut self.context, &self.scheme, &commonware_parallel::Sequential) {
                     debug!(%view, "notarization failed verification");
                     return None;
                 }
@@ -194,7 +194,7 @@ impl<
                     );
                     return None;
                 }
-                if !finalization.verify(&mut self.context, &self.scheme) {
+                if !finalization.verify(&mut self.context, &self.scheme, &commonware_parallel::Sequential) {
                     debug!(%view, "finalization failed verification");
                     return None;
                 }
@@ -214,7 +214,7 @@ impl<
                     );
                     return None;
                 }
-                if !nullification.verify::<_, D>(&mut self.context, &self.scheme) {
+                if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &commonware_parallel::Sequential) {
                     debug!(%view, "nullification failed verification");
                     return None;
                 }

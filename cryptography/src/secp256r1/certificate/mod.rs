@@ -416,6 +416,7 @@ mod macros {
                     _rng: &mut R,
                     subject: Self::Subject<'_, D>,
                     attestation: &$crate::certificate::Attestation<Self>,
+                    _strategy: &impl commonware_parallel::Strategy,
                 ) -> bool
                 where
                     R: rand_core::CryptoRngCore,
@@ -430,6 +431,7 @@ mod macros {
                     rng: &mut R,
                     subject: Self::Subject<'_, D>,
                     attestations: I,
+                    _strategy: &impl commonware_parallel::Strategy,
                 ) -> $crate::certificate::Verification<Self>
                 where
                     R: rand_core::CryptoRngCore,
@@ -443,7 +445,11 @@ mod macros {
                     )
                 }
 
-                fn assemble<I>(&self, attestations: I) -> Option<Self::Certificate>
+                fn assemble<I>(
+                    &self,
+                    attestations: I,
+                    _strategy: &impl commonware_parallel::Strategy,
+                ) -> Option<Self::Certificate>
                 where
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
@@ -455,6 +461,7 @@ mod macros {
                     rng: &mut R,
                     subject: Self::Subject<'_, D>,
                     certificate: &Self::Certificate,
+                    _strategy: &impl commonware_parallel::Strategy,
                 ) -> bool {
                     self.generic.verify_certificate::<Self, _, D>(
                         rng,
@@ -494,6 +501,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_utils::{ordered::BiMap, quorum, test_rng, TryCollect};
     use rand_core::CryptoRngCore;
 
@@ -575,7 +583,8 @@ mod tests {
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &attestation
+            &attestation,
+            &Sequential,
         ));
     }
 
@@ -613,6 +622,7 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             attestations.clone(),
+            &Sequential,
         );
         assert!(result.invalid.is_empty());
         assert_eq!(result.verified.len(), quorum);
@@ -626,6 +636,7 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             attestations_corrupted,
+            &Sequential,
         );
         assert_eq!(result.invalid, vec![Participant::new(999)]);
         assert_eq!(result.verified.len(), quorum - 1);
@@ -640,6 +651,7 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             attestations_corrupted,
+            &Sequential,
         );
         // Without batch verification, we detect exactly which signer has invalid sig
         assert_eq!(result.invalid, vec![first_signer]);

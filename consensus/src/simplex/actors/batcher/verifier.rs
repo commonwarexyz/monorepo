@@ -6,6 +6,7 @@ use crate::{
     types::Participant,
 };
 use commonware_cryptography::{certificate::Verification, Digest};
+use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 
 /// `Verifier` is a utility for tracking and verifying consensus messages.
@@ -200,6 +201,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     pub fn verify_notarizes<R: CryptoRngCore>(
         &mut self,
         rng: &mut R,
+        strategy: &impl Strategy,
     ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
         let notarizes = std::mem::take(&mut self.notarizes);
 
@@ -219,6 +221,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             rng,
             Subject::Notarize { proposal },
             attestations,
+            strategy,
         );
 
         self.notarizes_verified += verified.len();
@@ -292,6 +295,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     pub fn verify_nullifies<R: CryptoRngCore>(
         &mut self,
         rng: &mut R,
+        strategy: &impl Strategy,
     ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
         let nullifies = std::mem::take(&mut self.nullifies);
 
@@ -306,6 +310,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             rng,
             Subject::Nullify { round },
             nullifies.into_iter().map(|nullify| nullify.attestation),
+            strategy,
         );
 
         self.nullifies_verified += verified.len();
@@ -366,6 +371,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     pub fn verify_finalizes<R: CryptoRngCore>(
         &mut self,
         rng: &mut R,
+        strategy: &impl Strategy,
     ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
         let finalizes = std::mem::take(&mut self.finalizes);
 
@@ -385,6 +391,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             rng,
             Subject::Finalize { proposal },
             attestations,
+            strategy,
         );
 
         self.finalizes_verified += verified.len();
@@ -456,6 +463,7 @@ mod tests {
         ed25519::PublicKey,
         sha256::Digest as Sha256,
     };
+    use commonware_parallel::Sequential;
     use commonware_utils::{quorum_from_slice, test_rng};
     use rand::rngs::StdRng;
 
@@ -632,7 +640,7 @@ mod tests {
         assert!(verifier.ready_notarizes());
         assert_eq!(verifier.notarizes.len(), 4);
 
-        let (verified_bulk, failed_bulk) = verifier.verify_notarizes(&mut rng);
+        let (verified_bulk, failed_bulk) = verifier.verify_notarizes(&mut rng, &Sequential);
         assert_eq!(verified_bulk.len(), 4);
         assert!(failed_bulk.is_empty());
         assert_eq!(verifier.notarizes_verified, 4);
@@ -656,7 +664,7 @@ mod tests {
         }
         assert!(verifier2.ready_notarizes());
 
-        let (verified_second, failed_second) = verifier2.verify_notarizes(&mut rng);
+        let (verified_second, failed_second) = verifier2.verify_notarizes(&mut rng, &Sequential);
         assert!(verified_second
             .iter()
             .any(|v| matches!(v, Vote::Notarize(ref n) if n == &leader_vote)));
@@ -731,7 +739,7 @@ mod tests {
         assert!(verifier.ready_nullifies());
         assert_eq!(verifier.nullifies.len(), 3);
 
-        let (verified, failed) = verifier.verify_nullifies(&mut rng);
+        let (verified, failed) = verifier.verify_nullifies(&mut rng, &Sequential);
         assert_eq!(verified.len(), 3);
         assert!(failed.is_empty());
         assert_eq!(verifier.nullifies_verified, 4);
@@ -827,7 +835,7 @@ mod tests {
         verifier.add(Vote::Finalize(finalizes[3].clone()), false);
         assert!(verifier.ready_finalizes());
 
-        let (verified, failed) = verifier.verify_finalizes(&mut rng);
+        let (verified, failed) = verifier.verify_finalizes(&mut rng, &Sequential);
         assert_eq!(verified.len(), 3);
         assert!(failed.is_empty());
         assert_eq!(verifier.finalizes_verified, 4);
@@ -966,7 +974,7 @@ mod tests {
         }
         assert!(verifier.ready_notarizes(), "Should be ready at quorum");
 
-        let (verified, _) = verifier.verify_notarizes(&mut rng);
+        let (verified, _) = verifier.verify_notarizes(&mut rng, &Sequential);
         assert_eq!(verified.len(), quorum as usize);
         assert!(!verifier.ready_notarizes());
     }
@@ -1103,7 +1111,7 @@ mod tests {
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         assert!(verifier.nullifies.is_empty());
         assert!(!verifier.ready_nullifies());
-        let (verified, failed) = verifier.verify_nullifies(&mut rng);
+        let (verified, failed) = verifier.verify_nullifies(&mut rng, &Sequential);
         assert!(verified.is_empty());
         assert!(failed.is_empty());
         assert_eq!(verifier.nullifies_verified, 0);
@@ -1131,7 +1139,7 @@ mod tests {
         verifier.set_leader(Participant::new(0));
         assert!(verifier.finalizes.is_empty());
         assert!(!verifier.ready_finalizes());
-        let (verified, failed) = verifier.verify_finalizes(&mut rng);
+        let (verified, failed) = verifier.verify_finalizes(&mut rng, &Sequential);
         assert!(verified.is_empty());
         assert!(failed.is_empty());
         assert_eq!(verifier.finalizes_verified, 0);
@@ -1183,7 +1191,7 @@ mod tests {
             }
         }
 
-        let (verified, failed) = verifier.verify_notarizes(&mut rng);
+        let (verified, failed) = verifier.verify_notarizes(&mut rng, &Sequential);
         assert_eq!(verified.len(), quorum as usize - 1);
         assert!(failed.is_empty());
         assert_eq!(verifier.notarizes_verified, quorum as usize);

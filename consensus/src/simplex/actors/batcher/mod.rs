@@ -52,6 +52,7 @@ mod tests {
         Hasher as _, Sha256, Signer,
     };
     use commonware_macros::{select, test_traced};
+    use commonware_parallel::Sequential;
     use commonware_p2p::{
         simulated::{Config as NConfig, Link, Network},
         Recipients, Sender as _,
@@ -74,7 +75,7 @@ mod tests {
             .take(count)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(&schemes[0], &votes)
+        Notarization::from_notarizes(&schemes[0], &votes, &Sequential)
             .expect("notarization requires a quorum of votes")
     }
 
@@ -88,7 +89,7 @@ mod tests {
             .take(count)
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).unwrap())
             .collect();
-        Nullification::from_nullifies(&schemes[0], &votes)
+        Nullification::from_nullifies(&schemes[0], &votes, &Sequential)
             .expect("nullification requires a quorum of votes")
     }
 
@@ -102,7 +103,7 @@ mod tests {
             .take(count)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(&schemes[0], &votes)
+        Finalization::from_finalizes(&schemes[0], &votes, &Sequential)
             .expect("finalization requires a quorum of votes")
     }
 

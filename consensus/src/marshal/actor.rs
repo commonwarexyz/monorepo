@@ -645,7 +645,7 @@ where
                                     // Validation
                                     if block.height() != height
                                         || finalization.proposal.payload != block.commitment()
-                                        || !finalization.verify(&mut self.context, &scheme)
+                                        || !finalization.verify(&mut self.context, &scheme, &commonware_parallel::Sequential)
                                     {
                                         response.send_lossy(false);
                                         continue;
@@ -685,7 +685,7 @@ where
                                     // Validation
                                     if notarization.round() != round
                                         || notarization.proposal.payload != block.commitment()
-                                        || !notarization.verify(&mut self.context, &scheme)
+                                        || !notarization.verify(&mut self.context, &scheme, &commonware_parallel::Sequential)
                                     {
                                         response.send_lossy(false);
                                         continue;

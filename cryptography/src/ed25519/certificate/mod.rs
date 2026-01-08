@@ -584,6 +584,7 @@ mod macros {
                     _rng: &mut R,
                     subject: Self::Subject<'_, D>,
                     attestation: &$crate::certificate::Attestation<Self>,
+                    _strategy: &impl commonware_parallel::Strategy,
                 ) -> bool
                 where
                     R: rand_core::CryptoRngCore,
@@ -598,6 +599,7 @@ mod macros {
                     rng: &mut R,
                     subject: Self::Subject<'_, D>,
                     attestations: I,
+                    _strategy: &impl commonware_parallel::Strategy,
                 ) -> $crate::certificate::Verification<Self>
                 where
                     R: rand_core::CryptoRngCore,
@@ -608,7 +610,11 @@ mod macros {
                         .verify_attestations::<_, _, D, _>(rng, subject, attestations)
                 }
 
-                fn assemble<I>(&self, attestations: I) -> Option<Self::Certificate>
+                fn assemble<I>(
+                    &self,
+                    attestations: I,
+                    _strategy: &impl commonware_parallel::Strategy,
+                ) -> Option<Self::Certificate>
                 where
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
@@ -620,12 +626,18 @@ mod macros {
                     rng: &mut R,
                     subject: Self::Subject<'_, D>,
                     certificate: &Self::Certificate,
+                    _strategy: &impl commonware_parallel::Strategy,
                 ) -> bool {
                     self.generic
                         .verify_certificate::<Self, _, D>(rng, subject, certificate)
                 }
 
-                fn verify_certificates<'a, R, D, I>(&self, rng: &mut R, certificates: I) -> bool
+                fn verify_certificates<'a, R, D, I>(
+                    &self,
+                    rng: &mut R,
+                    certificates: I,
+                    _strategy: &impl commonware_parallel::Strategy,
+                ) -> bool
                 where
                     R: rand::Rng + rand::CryptoRng,
                     D: $crate::Digest,
@@ -667,6 +679,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_utils::{ordered::Set, quorum, test_rng, Participant, TryCollect};
 
     const NAMESPACE: &[u8] = b"test-ed25519";
