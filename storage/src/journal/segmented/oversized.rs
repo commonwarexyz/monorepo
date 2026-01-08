@@ -1882,10 +1882,20 @@ mod tests {
             // Size 0 - should fail
             assert!(oversized.get_value(1, offset, 0).await.is_err());
 
-            // Size < value size - should fail with codec error
+            // Size < value size - should fail with codec error, checksum mismatch, or
+            // insufficient length (if size < 4 bytes for checksum)
             for size in 1..4u32 {
                 let result = oversized.get_value(1, offset, size).await;
-                assert!(matches!(result, Err(Error::Codec(_))));
+                assert!(
+                    matches!(
+                        result,
+                        Err(Error::Codec(_))
+                            | Err(Error::ChecksumMismatch(_, _))
+                            | Err(Error::Runtime(_))
+                    ),
+                    "expected error, got: {:?}",
+                    result
+                );
             }
 
             oversized.destroy().await.expect("Failed to destroy");
@@ -1909,9 +1919,14 @@ mod tests {
                 .expect("Failed to append");
             oversized.sync(1).await.expect("Failed to sync");
 
-            // Size too small - will fail to decode
+            // Size too small - will fail to decode or checksum mismatch
+            // (checksum mismatch can occur because we read wrong bytes as the checksum)
             let result = oversized.get_value(1, offset, correct_size - 1).await;
-            assert!(matches!(result, Err(Error::Codec(_))));
+            assert!(
+                matches!(result, Err(Error::Codec(_)) | Err(Error::ChecksumMismatch(_, _))),
+                "expected Codec or ChecksumMismatch error, got: {:?}",
+                result
+            );
 
             oversized.destroy().await.expect("Failed to destroy");
         });

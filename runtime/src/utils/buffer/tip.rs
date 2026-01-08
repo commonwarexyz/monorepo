@@ -16,7 +16,7 @@ pub(super) struct Buffer {
     pub(super) capacity: usize,
 
     /// Whether this buffer should allow new data.
-    /// TODO: <https://github.com/commonwarexyz/monorepo/issues/2731>
+    // TODO(#2371): Use a distinct state-type for immutable vs immutable.
     pub(super) immutable: bool,
 }
 

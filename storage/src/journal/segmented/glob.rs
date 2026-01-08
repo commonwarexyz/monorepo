@@ -28,8 +28,9 @@
 
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
-use commonware_codec::Codec;
-use commonware_runtime::{Blob as _, Metrics, Storage};
+use bytes::BufMut;
+use commonware_codec::{Codec, FixedSize};
+use commonware_runtime::{Blob as _, Error as RError, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
@@ -85,17 +86,26 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
     /// Append value to section, returns (offset, size).
     ///
     /// The returned offset is the byte offset where the entry was written.
-    /// The returned size is the total bytes written.
+    /// The returned size is the total bytes written (compressed_data + crc32).
     /// Both should be stored in the index entry for later retrieval.
     pub async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u32), Error> {
-        // Encode and optionally compress
+        // Encode and optionally compress, then append checksum
         let buf = if let Some(level) = self.compression {
-            // Compressed: encode first, then compress
+            // Compressed: encode first, then compress, then append checksum
             let encoded = value.encode();
-            compress(&encoded, level as i32).map_err(|_| Error::CompressionFailed)?
+            let mut compressed =
+                compress(&encoded, level as i32).map_err(|_| Error::CompressionFailed)?;
+            let checksum = crc32fast::hash(&compressed);
+            compressed.put_u32(checksum);
+            compressed
         } else {
-            // Uncompressed: encode directly
-            value.encode().to_vec()
+            // Uncompressed: pre-allocate exact size to avoid copying
+            let entry_size = value.encode_size() + u32::SIZE;
+            let mut buf = Vec::with_capacity(entry_size);
+            value.write(&mut buf);
+            let checksum = crc32fast::hash(&buf);
+            buf.put_u32(checksum);
+            buf
         };
 
         // Write to blob
@@ -123,13 +133,29 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
         let buf = writer.read_at(vec![0u8; size_usize], offset).await?;
         let buf = buf.as_ref();
 
+        // Entry format: [compressed_data] [crc32 (4 bytes)]
+        if buf.len() < u32::SIZE {
+            return Err(Error::Runtime(RError::BlobInsufficientLength));
+        }
+
+        let data_len = buf.len() - u32::SIZE;
+        let compressed_data = &buf[..data_len];
+        let stored_checksum =
+            u32::from_be_bytes(buf[data_len..].try_into().expect("checksum is 4 bytes"));
+
+        // Verify checksum
+        let checksum = crc32fast::hash(compressed_data);
+        if checksum != stored_checksum {
+            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
+        }
+
         // Decompress if needed and decode
         let value = if self.compression.is_some() {
             let decompressed =
-                decode_all(Cursor::new(buf)).map_err(|_| Error::DecompressionFailed)?;
+                decode_all(Cursor::new(compressed_data)).map_err(|_| Error::DecompressionFailed)?;
             V::decode_cfg(decompressed.as_ref(), &self.codec_config).map_err(Error::Codec)?
         } else {
-            V::decode_cfg(buf, &self.codec_config).map_err(Error::Codec)?
+            V::decode_cfg(compressed_data, &self.codec_config).map_err(Error::Codec)?
         };
 
         Ok(value)
@@ -331,6 +357,35 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_glob_checksum_mismatch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut glob: Glob<_, i32> = Glob::init(context.clone(), test_cfg())
+                .await
+                .expect("Failed to init glob");
+
+            // Append a value
+            let value: i32 = 42;
+            let (offset, size) = glob.append(1, &value).await.expect("Failed to append");
+            glob.sync(1).await.expect("Failed to sync");
+
+            // Corrupt the data by writing directly to the underlying blob
+            let writer = glob.manager.blobs.get(&1).unwrap();
+            writer
+                .write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], offset)
+                .await
+                .expect("Failed to corrupt");
+            writer.sync().await.expect("Failed to sync");
+
+            // Get should fail with checksum mismatch
+            let result = glob.get(1, offset, size).await;
+            assert!(matches!(result, Err(Error::ChecksumMismatch(_, _))));
+
+            glob.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
     fn test_glob_rewind() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -412,10 +467,13 @@ mod tests {
             // Size 0 - should fail
             assert!(glob.get(1, offset, 0).await.is_err());
 
-            // Size < i32::SIZE (1, 2, 3 bytes) - should fail with codec error
+            // Size < CRC_SIZE (1, 2, 3 bytes) - should fail with BlobInsufficientLength
             for size in 1..4u32 {
                 let result = glob.get(1, offset, size).await;
-                assert!(matches!(result, Err(Error::Codec(_))));
+                assert!(matches!(
+                    result,
+                    Err(Error::Runtime(RError::BlobInsufficientLength))
+                ));
             }
 
             glob.destroy().await.expect("Failed to destroy");
@@ -433,9 +491,9 @@ mod tests {
             let (offset, correct_size) = glob.append(1, &42).await.expect("Failed to append");
             glob.sync(1).await.expect("Failed to sync");
 
-            // Size too small - will fail to decode
+            // Size too small (but >= CRC_SIZE) - checksum mismatch
             let result = glob.get(1, offset, correct_size - 1).await;
-            assert!(matches!(result, Err(Error::Codec(_))));
+            assert!(matches!(result, Err(Error::ChecksumMismatch(_, _))));
 
             glob.destroy().await.expect("Failed to destroy");
         });
