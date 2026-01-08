@@ -227,10 +227,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         blob: &Append<E::Blob>,
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
+        // Read varint header (max 5 bytes for u32)
         let buf = vec![0u8; MAX_VARINT_SIZE];
         let (buf, available) = blob.read_up_to(buf, offset).await?;
         let meta = ItemMeta::parse(buf.as_ref(), available, offset)?;
 
+        // Get item bytes - either from buffer directly or by reading more
         let item_data: Cow<'_, [u8]> = match meta.extract_from_buffer(buf.as_ref(), available) {
             ItemExtract::Complete(data) => Cow::Borrowed(data),
             ItemExtract::Incomplete { mut buffer, filled } => {
@@ -240,6 +242,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             }
         };
 
+        // Decode item (with optional decompression)
         let item = decode_item::<V>(item_data.as_ref(), cfg, compressed)?;
         Ok((meta.next_offset, meta.size as u32, item))
     }
@@ -255,18 +258,23 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         compressed: bool,
         varint_buf: &mut Vec<u8>,
     ) -> Result<(u64, u64, u32, V), Error> {
+        // If we're not at the right position, seek to it
         if reader.position() != offset {
             reader.seek_to(offset).map_err(Error::Runtime)?;
         }
 
+        // Read varint header (max 5 bytes for u32). Reuse the provided buffer.
         varint_buf.clear();
         varint_buf.resize(MAX_VARINT_SIZE, 0);
         let buf = std::mem::take(varint_buf);
         let (buf, available) = reader.read_up_to(buf).await?;
         let meta = ItemMeta::parse(buf.as_ref(), available, offset)?;
 
+        // Get item bytes - either from buffer directly or by reading more
         let item_data: Cow<'_, [u8]> = match meta.extract_from_buffer(buf.as_ref(), available) {
             ItemExtract::Complete(data) => {
+                // We already have all the data we need, but reader position may be ahead.
+                // Seek to the correct next position.
                 reader.seek_to(meta.next_offset).map_err(Error::Runtime)?;
                 Cow::Borrowed(data)
             }
@@ -279,7 +287,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             }
         };
 
+        // Decode item (with optional decompression)
         let item = decode_item::<V>(item_data.as_ref(), cfg, compressed)?;
+
+        // Restore the buffer for reuse in the next iteration
         *varint_buf = buf.into();
         Ok((meta.next_offset, meta.next_offset, meta.size as u32, item))
     }
