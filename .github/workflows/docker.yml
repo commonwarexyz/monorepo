@@ -42,7 +42,7 @@ jobs:
           if [[ -z $TARGET ]]; then
               export TARGET="${GIT_REF_NAME%/*}"
           fi
-          echo "Target: "${INPUT_TARGET}"
+          echo "Target: "$INPUT_TARGET"
           echo "target=$TARGET" >> $GITHUB_OUTPUT
       - name: Create matrix
         id: platforms
