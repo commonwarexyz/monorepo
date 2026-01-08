@@ -68,6 +68,9 @@ iouring-storage = [ "io-uring" ]
 iouring-network = [ "io-uring" ]
 tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 
+[dev-dependencies]
+crc.workspace = true
+
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]

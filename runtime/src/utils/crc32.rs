@@ -51,6 +51,16 @@ impl Crc32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crc::{Crc, CRC_32_ISCSI};
+
+    /// Reference CRC32C implementation from the [`crc`](https://crates.io/crates/crc) crate.
+    const CRC32C_REF: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
+
+    /// Verify checksum against both the reference `crc` crate and our implementation.
+    fn verify(data: &[u8], expected: u32) {
+        assert_eq!(CRC32C_REF.checksum(data), expected);
+        assert_eq!(Crc32::checksum(data), expected);
+    }
 
     /// Generate deterministic test data: sequential bytes wrapping at 256.
     fn sequential_data(len: usize) -> Vec<u8> {
@@ -62,18 +72,18 @@ mod tests {
     #[test]
     fn rfc3720_test_vectors() {
         // 32 bytes of zeros -> CRC = aa 36 91 8a
-        assert_eq!(Crc32::checksum(&[0x00; 32]), 0x8A9136AA);
+        verify(&[0x00; 32], 0x8A9136AA);
 
         // 32 bytes of 0xFF -> CRC = 43 ab a8 62
-        assert_eq!(Crc32::checksum(&[0xFF; 32]), 0x62A8AB43);
+        verify(&[0xFF; 32], 0x62A8AB43);
 
         // 32 bytes ascending (0x00..0x1F) -> CRC = 4e 79 dd 46
         let ascending: Vec<u8> = (0x00..0x20).collect();
-        assert_eq!(Crc32::checksum(&ascending), 0x46DD794E);
+        verify(&ascending, 0x46DD794E);
 
         // 32 bytes descending (0x1F..0x00) -> CRC = 5c db 3f 11
         let descending: Vec<u8> = (0x00..0x20).rev().collect();
-        assert_eq!(Crc32::checksum(&descending), 0x113FDB5C);
+        verify(&descending, 0x113FDB5C);
 
         // iSCSI SCSI Read (10) Command PDU -> CRC = 56 3a 96 d9
         let iscsi_read_pdu: [u8; 48] = [
@@ -82,7 +92,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x18, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
-        assert_eq!(Crc32::checksum(&iscsi_read_pdu), 0xD9963A56);
+        verify(&iscsi_read_pdu, 0xD9963A56);
     }
 
     /// Additional test vectors from external sources.
@@ -92,19 +102,16 @@ mod tests {
     #[test]
     fn external_test_vectors() {
         // CRC catalogue test vector
-        assert_eq!(Crc32::checksum(b""), 0x00000000);
-        assert_eq!(Crc32::checksum(b"123456789"), 0xE3069283);
+        verify(b"", 0x00000000);
+        verify(b"123456789", 0xE3069283);
 
         // ICRAR test vectors
-        assert_eq!(Crc32::checksum(b"23456789"), 0xBFE92A83);
-        assert_eq!(
-            Crc32::checksum(b"The quick brown fox jumps over the lazy dog"),
-            0x22620404
-        );
+        verify(b"23456789", 0xBFE92A83);
+        verify(b"The quick brown fox jumps over the lazy dog", 0x22620404);
 
         // LevelDB test vector: sequential 0x01-0xF0 (240 bytes)
         let sequential_240: Vec<u8> = (0x01..=0xF0).collect();
-        assert_eq!(Crc32::checksum(&sequential_240), 0x24C5D375);
+        verify(&sequential_240, 0x24C5D375);
     }
 
     /// SIMD boundary tests.
@@ -133,7 +140,7 @@ mod tests {
         ];
 
         // Pre-computed expected values for sequential data pattern.
-        // Generated using crc-fast with CRC32C/iSCSI algorithm.
+        // Generated with the [`crc`](https://crates.io/crates/crc) crate.
         const EXPECTED: &[(usize, u32)] = &[
             (0, 0x00000000),
             (1, 0x527D5351),
@@ -176,8 +183,7 @@ mod tests {
 
         for &(size, expected) in EXPECTED {
             let data = sequential_data(size);
-            let actual = Crc32::checksum(&data);
-            assert_eq!(actual, expected);
+            verify(&data, expected);
         }
     }
 
@@ -185,7 +191,7 @@ mod tests {
     #[test]
     fn chunk_size_independence() {
         let data = sequential_data(1024);
-        let expected = Crc32::checksum(&data);
+        let expected = CRC32C_REF.checksum(&data);
 
         // Test chunk sizes from 1 to 64 bytes
         for chunk_size in 1..=64 {
@@ -193,8 +199,7 @@ mod tests {
             for chunk in data.chunks(chunk_size) {
                 hasher.update(chunk);
             }
-            let actual = hasher.finalize();
-            assert_eq!(actual, expected);
+            assert_eq!(hasher.finalize(), expected);
         }
     }
 
@@ -205,25 +210,18 @@ mod tests {
         let base_data: Vec<u8> = (0..256).map(|i| i as u8).collect();
         let test_len = 64;
 
-        // Get reference CRC for the pattern
-        let reference = Crc32::checksum(&base_data[..test_len]);
+        // Get reference CRC for the first 64 bytes
+        let reference = CRC32C_REF.checksum(&base_data[..test_len]);
 
         // Verify the same 64-byte pattern produces the same CRC regardless of where
         // it appears in the source buffer (tests alignment handling)
         for offset in 0..16 {
-            // Create data starting at different offsets but with same content
-            let data: Vec<u8> = (0..test_len).map(|i| ((offset + i) & 0xFF) as u8).collect();
-            let expected: Vec<u8> = base_data[offset..offset + test_len].to_vec();
-
-            // Both should have the same content
-            assert_eq!(data, expected);
-
-            let actual = Crc32::checksum(&data);
-            let expected_crc = Crc32::checksum(&expected);
-            assert_eq!(actual, expected_crc);
+            let data = &base_data[offset..offset + test_len];
+            let expected = CRC32C_REF.checksum(data);
+            assert_eq!(Crc32::checksum(data), expected);
         }
 
         // Also verify that the first 64 bytes always produce the reference CRC
-        assert_eq!(Crc32::checksum(&base_data[..test_len]), reference);
+        verify(&base_data[..test_len], reference);
     }
 }
