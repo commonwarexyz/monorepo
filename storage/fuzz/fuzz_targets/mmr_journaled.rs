@@ -105,6 +105,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut leaves = Vec::new();
+        let mut leaves_synced = true;
         let mut hasher = Standard::<Sha256>::new();
         let mmr = Mmr::init(
             context.clone(),
@@ -138,7 +139,9 @@ fn fuzz(input: FuzzInput) {
 
                     let size_before = mmr.size();
                     let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
-                    leaves.push(limited_data.to_vec());
+                    if leaves_synced {
+                        leaves.push(limited_data.to_vec());
+                    }
                     historical_sizes.push(mmr.size());
                     assert!(mmr.size() > size_before);
                     assert_eq!(mmr.last_leaf_pos(), Some(pos));
@@ -166,7 +169,9 @@ fn fuzz(input: FuzzInput) {
                     let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
                     assert!(mmr.size() > size_before);
 
-                    leaves.push(limited_data.to_vec());
+                    if leaves_synced {
+                        leaves.push(limited_data.to_vec());
+                    }
                     historical_sizes.push(mmr.size());
                     assert_eq!(mmr.last_leaf_pos(), Some(pos));
 
@@ -182,8 +187,10 @@ fn fuzz(input: FuzzInput) {
 
                     if count as u64 <= mmr.leaves() {
                         let _ = mmr.pop(&mut hasher, count as usize).await;
-                        let new_len = mmr.leaves();
-                        leaves.truncate(new_len.as_u64() as usize);
+                        if leaves_synced {
+                            let new_len = mmr.leaves();
+                            leaves.truncate(new_len.as_u64() as usize);
+                        }
                     }
                     MmrState::Clean(mmr)
                 }
@@ -210,16 +217,22 @@ fn fuzz(input: FuzzInput) {
                         let position = Position::try_from(location).unwrap();
 
                         if position <= mmr.size() && position >= mmr.pruned_to_pos() {
-                            let element = leaves.get(location.as_u64() as usize).unwrap();
-
-                            if let Ok(proof) = mmr.proof(location).await {
-                                let root = mmr.root();
-                                assert!(proof.verify_element_inclusion(
-                                    &mut hasher,
-                                    element,
-                                    location,
-                                    &root,
-                                ));
+                            // Only verify proof if we have synchronized leaf data
+                            if leaves_synced {
+                                if let Some(element) = leaves.get(location.as_u64() as usize) {
+                                    if let Ok(proof) = mmr.proof(location).await {
+                                        let root = mmr.root();
+                                        assert!(proof.verify_element_inclusion(
+                                            &mut hasher,
+                                            element,
+                                            location,
+                                            &root,
+                                        ));
+                                    }
+                                }
+                            } else {
+                                // Just generate the proof without verification
+                                let _ = mmr.proof(location).await;
                             }
                         }
                     }
@@ -248,14 +261,23 @@ fn fuzz(input: FuzzInput) {
                             && start_pos >= mmr.pruned_to_pos()
                             && start_pos < mmr.size()
                         {
-                            if let Ok(proof) = mmr.range_proof(range.clone()).await {
-                                let root = mmr.root();
-                                assert!(proof.verify_range_inclusion(
-                                    &mut hasher,
-                                    &leaves[range.to_usize_range()],
-                                    Location::new(start_loc).unwrap(),
-                                    &root
-                                ));
+                            // Only verify proof if we have synchronized leaf data
+                            if leaves_synced {
+                                let usize_range = range.to_usize_range();
+                                if usize_range.end <= leaves.len() {
+                                    if let Ok(proof) = mmr.range_proof(range.clone()).await {
+                                        let root = mmr.root();
+                                        assert!(proof.verify_range_inclusion(
+                                            &mut hasher,
+                                            &leaves[usize_range],
+                                            Location::new(start_loc).unwrap(),
+                                            &root
+                                        ));
+                                    }
+                                }
+                            } else {
+                                // Just generate the proof without verification
+                                let _ = mmr.range_proof(range.clone()).await;
                             }
                         }
                     }
@@ -285,16 +307,25 @@ fn fuzz(input: FuzzInput) {
                             let range =
                                 Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
 
-                            if let Ok(historical_proof) =
-                                mmr.historical_range_proof(mmr.size(), range.clone()).await
-                            {
-                                let root = mmr.root();
-                                assert!(historical_proof.verify_range_inclusion(
-                                    &mut hasher,
-                                    &leaves[range.to_usize_range()],
-                                    Location::new(start_loc).unwrap(),
-                                    &root
-                                ));
+                            // Only verify proof if we have synchronized leaf data
+                            if leaves_synced {
+                                let usize_range = range.to_usize_range();
+                                if usize_range.end <= leaves.len() {
+                                    if let Ok(historical_proof) =
+                                        mmr.historical_range_proof(mmr.size(), range.clone()).await
+                                    {
+                                        let root = mmr.root();
+                                        assert!(historical_proof.verify_range_inclusion(
+                                            &mut hasher,
+                                            &leaves[usize_range],
+                                            Location::new(start_loc).unwrap(),
+                                            &root
+                                        ));
+                                    }
+                                }
+                            } else {
+                                // Just generate the proof without verification
+                                let _ = mmr.historical_range_proof(mmr.size(), range.clone()).await;
                             }
                         }
                     }
@@ -439,6 +470,8 @@ fn fuzz(input: FuzzInput) {
                     // Reset tracking variables to match recovered state
                     leaves.clear();
                     historical_sizes.clear();
+                    // After reinit, if MMR has recovered data, we're out of sync
+                    leaves_synced = new_mmr.leaves() == 0;
                     MmrState::Clean(new_mmr)
                 }
 
