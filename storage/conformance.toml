@@ -1,10 +1,10 @@
 ["commonware_storage::archive::conformance::ArchiveImmutable"]
 n_cases = 128
-hash = "6acfa1bc0c17920b5c0e0437af106e09ee57dcd37459091402192f2c146afdb5"
+hash = "45b84846b33d2769f05c4118b6388e944361e778cc320c4d94d2297b46faf816"
 
 ["commonware_storage::archive::conformance::ArchivePrunable"]
 n_cases = 128
-hash = "cb063a05c6a75902893f790e9802b4906be506f2f7e5d10b46dff90a92e40819"
+hash = "590d5e27608bed5c2945a3347b04f13bbeb706ba28ca38f6c307c4428a621ca7"
 
 ["commonware_storage::archive::immutable::storage::conformance::CodecConformance<Record>"]
 n_cases = 65536
@@ -16,15 +16,15 @@ hash = "3cb6882637c1c1a929a50b3ab425311f3ef342184dc46a80b1eae616ca7b64a4"
 
 ["commonware_storage::bmt::tests::conformance::CodecConformance<Bounds<Sha256Digest>>"]
 n_cases = 65536
-hash = "927da8204f16522162168efcae8ca126b927c96fb08289e805859071647b9333"
+hash = "20f5ef35a4bbd3a40852e907df519c724e5ce24d9f929e84947fd971a2256d02"
 
 ["commonware_storage::bmt::tests::conformance::CodecConformance<Proof<Sha256>>"]
 n_cases = 65536
-hash = "fcb0baa781f374ca04f2c967abc3c82c7b99d26239b387472de23c85aebd2790"
+hash = "c1f1d4c35fcd50931d7c36cbcddbb1c0a93afef9a93945cdd3efadf68ff53328"
 
 ["commonware_storage::bmt::tests::conformance::CodecConformance<RangeProof<Sha256>>"]
 n_cases = 65536
-hash = "035babcc7aa34c3d4b263924865c4da8206b226e7c372484b89e5430166068c3"
+hash = "6ecb0491b09443f1f93c178af5472f138ddc71b3e8c0c106f32eafca617b56af"
 
 ["commonware_storage::cache::storage::conformance::CodecConformance<Record<u64>>"]
 n_cases = 65536
@@ -48,35 +48,35 @@ hash = "13b3e99a8c74b50dc18150194a92306de670b94e6642758feb6d9b6e9881f827"
 
 ["commonware_storage::journal::conformance::ContiguousFixed"]
 n_cases = 512
-hash = "4c786b6b7f91b9924a62a7b9a1c32a8d47398f1c8a3d5bf06fe1a90998e86aab"
+hash = "cac48d3c84becf5567c7ee1eb3495809f48610ab400200f748815af4ccceb5c1"
 
 ["commonware_storage::journal::conformance::ContiguousVariable"]
 n_cases = 512
-hash = "973ebd77804d2ea346574d377f39bd29350063098f2e6fab9596783ba43664e5"
+hash = "9debd18a1e9b8e8844a57bcbc9546a80503a8caad5c23816206d623ed230bd7e"
 
 ["commonware_storage::journal::conformance::SegmentedFixed"]
 n_cases = 512
-hash = "e077ce8c6d9a79c87cf9b48866c65f387ffbec9d8e8c65dd40c46b4296cfc050"
+hash = "fb5d8f684b1a03c0bbaf8c4fd7b67043fa73496446fff115e75d7521154b6ad1"
 
 ["commonware_storage::journal::conformance::SegmentedGlob"]
 n_cases = 512
-hash = "adb1efeef12c203c05879ce4d1d03ef443c767737a6c6b57433189100eec9197"
+hash = "bcc3e67945fe5a97a644e839aeff277bb29711503da65a20e84077e69ae9dcef"
 
 ["commonware_storage::journal::conformance::SegmentedOversized"]
 n_cases = 512
-hash = "b815138329a06cbe235cf547ed62774165bd2108e68c65bf15ae152bedf84b3a"
+hash = "ada5da872b95b6369905c2fca454f3276935a380d3da91190bc04f1602e7c501"
 
 ["commonware_storage::journal::conformance::SegmentedVariable"]
 n_cases = 512
-hash = "418dafd67008cb74d34fe58b9be8747cfaf86e345a71eb4c35ae0e43a4c077ef"
+hash = "506b5a02d1a7c3e249f514b889e6099c27bb0723ebc711514263f0c71f0676ef"
 
 ["commonware_storage::mmr::proof::tests::conformance::CodecConformance<Proof<Sha256Digest>>"]
 n_cases = 65536
-hash = "e3e6735a810f1002164333013fbff442c91a690483e75fe7a78618a96d5afd62"
+hash = "9658f1ff018c2339049b7bcba191d3202844e28d3bf3001da851c9be505232ed"
 
 ["commonware_storage::ordinal::storage::conformance::CodecConformance<Record<u32>>"]
 n_cases = 65536
-hash = "07a88b442e9f86b5395a73584211cb6abbb58e51c6f3954b29095c56d77d370c"
+hash = "f93b1dda40f6d9f1ccb3f05994be56189205dcb558551e056c2f3db03a79182d"
 
 ["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<OrderedOperation<U64,FixedEncoding<U64>>>"]
 n_cases = 65536
@@ -120,4 +120,4 @@ hash = "b41d6c6ec560bde9caf2e206526864c618a0721af367585a1719617ca7ce9291"
 
 ["commonware_storage::qmdb::sync::target::tests::conformance::CodecConformance<Target<sha256::Digest>>"]
 n_cases = 65536
-hash = "48e2131a0dffcb40a0a29581aa7bb0e39160212117eadb661b629030a58373d6"
+hash = "252e8350e4c38a2e0e5aa8679e474cb9a788fe88bfa5811a59c3220bff4afca0"

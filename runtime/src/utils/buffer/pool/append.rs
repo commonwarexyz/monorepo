@@ -33,6 +33,7 @@ use crate::{
     },
     Blob, Error, RwLock, RwLockWriteGuard,
 };
+use commonware_cryptography::Crc32;
 use commonware_utils::StableBuf;
 use std::{num::NonZeroUsize, sync::Arc};
 use tracing::warn;
@@ -628,7 +629,7 @@ impl<B: Blob> Append<B> {
             let logical_page = &buffer.data[start_read_idx..end_read_idx];
             write_buffer.extend_from_slice(logical_page);
 
-            let crc = crc32fast::hash(logical_page);
+            let crc = Crc32::checksum(logical_page);
             let logical_page_size_u16 =
                 u16::try_from(logical_page_size).expect("page size must fit in u16 for CRC record");
 
@@ -664,7 +665,7 @@ impl<B: Blob> Append<B> {
         }
         write_buffer.extend_from_slice(partial_page);
         let partial_len = partial_page.len();
-        let crc = crc32fast::hash(partial_page);
+        let crc = Crc32::checksum(partial_page);
 
         // Pad with zeros to fill up to logical_page_size.
         write_buffer.resize(write_buffer.len() + (logical_page_size - partial_len), 0);

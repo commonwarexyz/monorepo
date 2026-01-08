@@ -28,6 +28,8 @@ use rand_core::CryptoRngCore;
 pub use sha256::{CoreSha256, Sha256};
 pub mod blake3;
 pub use blake3::{Blake3, CoreBlake3};
+pub mod crc32;
+pub use crc32::Crc32;
 pub mod bloomfilter;
 pub use bloomfilter::BloomFilter;
 #[cfg(feature = "std")]

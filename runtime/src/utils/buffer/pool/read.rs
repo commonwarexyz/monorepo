@@ -1,10 +1,9 @@
-use super::{Checksum, CHECKSUM_SIZE};
+use super::Checksum;
 use crate::{Blob, Error};
+use commonware_codec::FixedSize;
 use commonware_utils::StableBuf;
 use std::num::NonZeroUsize;
 use tracing::{debug, error};
-
-const CHECKSUM_SIZE_USIZE: usize = CHECKSUM_SIZE as usize;
 
 /// A reader that buffers content from a [Blob] with page-level CRCs to optimize the performance of
 /// a full scan of contents.
@@ -45,7 +44,7 @@ impl<B: Blob> Read<B> {
         capacity: NonZeroUsize,
         logical_page_size: NonZeroUsize,
     ) -> Self {
-        let page_size = logical_page_size.get() + CHECKSUM_SIZE_USIZE;
+        let page_size = logical_page_size.get() + Checksum::SIZE;
         let mut capacity = capacity.get();
         if !capacity.is_multiple_of(page_size) {
             capacity += page_size - capacity % page_size;
@@ -74,7 +73,7 @@ impl<B: Blob> Read<B> {
 
     /// Returns the current logical position in the blob.
     pub const fn position(&self) -> u64 {
-        let logical_page_size = (self.page_size - CHECKSUM_SIZE_USIZE) as u64;
+        let logical_page_size = (self.page_size - Checksum::SIZE) as u64;
         self.blob_page * logical_page_size + self.buffer_position as u64
     }
 
@@ -141,7 +140,7 @@ impl<B: Blob> Read<B> {
     /// Fills the buffer from the blob starting at the current physical position and verifies the
     /// CRC of each page (including any trailing partial page).
     async fn fill_buffer(&mut self) -> Result<(), Error> {
-        let logical_page_size = self.page_size - CHECKSUM_SIZE_USIZE;
+        let logical_page_size = self.page_size - Checksum::SIZE;
 
         // Advance blob_page based on how much of the buffer we've consumed. We use ceiling division
         // because even a partial page counts as a "page" read from the blob.
@@ -222,7 +221,7 @@ impl<B: Blob> Read<B> {
             }
 
             // Partial page - must have at least CHECKSUM_SIZE bytes
-            if remaining < CHECKSUM_SIZE_USIZE {
+            if remaining < Checksum::SIZE {
                 error!(
                     page = self.blob_page + (read_offset / self.page_size) as u64,
                     "short page"
@@ -261,7 +260,7 @@ impl<B: Blob> Read<B> {
 
     /// Repositions the buffer to read from the specified logical position in the blob.
     pub fn seek_to(&mut self, position: u64) -> Result<(), Error> {
-        let logical_page_size = (self.page_size - CHECKSUM_SIZE_USIZE) as u64;
+        let logical_page_size = (self.page_size - Checksum::SIZE) as u64;
 
         // Check if the position is within the current buffer.
         let buffer_start = self.blob_page * logical_page_size;
@@ -283,6 +282,7 @@ impl<B: Blob> Read<B> {
 mod tests {
     use super::super::{append::Append, PoolRef};
     use crate::{deterministic, Blob, Error, Runner as _, Storage as _};
+    use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
     use std::num::NonZeroU16;
@@ -448,7 +448,7 @@ mod tests {
             // Corrupt page 0 to claim a shorter (partial) length with a valid CRC.
             let page_size = PAGE_SIZE.get() as u64;
             let short_len = page_size / 2;
-            let crc = crc32fast::hash(&data[..short_len as usize]);
+            let crc = Crc32::checksum(&data[..short_len as usize]);
             let record = super::Checksum::new(short_len as u16, crc);
             let crc_offset = page_size; // CRC record starts after logical page bytes
             blob.write_at(record.to_bytes().to_vec(), crc_offset)

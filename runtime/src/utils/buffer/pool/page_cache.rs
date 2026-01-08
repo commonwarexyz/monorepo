@@ -418,6 +418,7 @@ impl Pool {
 mod tests {
     use super::{super::Checksum, *};
     use crate::{buffer::pool::CHECKSUM_SIZE, deterministic, Runner as _, Storage as _};
+    use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
     use std::num::NonZeroU16;
@@ -489,7 +490,7 @@ mod tests {
             for i in 0..11 {
                 // Write logical data followed by Checksum.
                 let logical_data = vec![i as u8; PAGE_SIZE.get() as usize];
-                let crc = crc32fast::hash(&logical_data);
+                let crc = Crc32::checksum(&logical_data);
                 let record = Checksum::new(PAGE_SIZE.get(), crc);
                 let mut page_data = logical_data;
                 page_data.extend_from_slice(&record.to_bytes());

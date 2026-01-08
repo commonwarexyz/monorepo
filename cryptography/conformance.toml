@@ -1,6 +1,6 @@
 ["commonware_cryptography::blake3::tests::conformance::CodecConformance<Digest>"]
 n_cases = 65536
-hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
+hash = "d01e3ef0dd81919abd3f149649940ae2e8cff6dc4aa9f927d544aece387b12d1"
 
 ["commonware_cryptography::bloomfilter::tests::conformance::CodecConformance<BloomFilter>"]
 n_cases = 65536
@@ -102,6 +102,10 @@ hash = "42867052b1619b912d08f0a6bf5f964f587897a0eed8612732fd27813f6c03bd"
 n_cases = 65536
 hash = "41ef7a306dd2032d7d1b73fe2799cff6f2e8fb1edcd02a0b9798f18f900a19fa"
 
+["commonware_cryptography::crc32::tests::conformance::CodecConformance<Digest>"]
+n_cases = 65536
+hash = "d0101a0688d45c8f7428b3861ed6e7e77c2ed25033cb7d6b47b3fa58148a3f18"
+
 ["commonware_cryptography::ed25519::certificate::tests::conformance::CodecConformance<Certificate>"]
 n_cases = 65536
 hash = "eab4ff22bb7ed99fd73107c8b067e39bd25813b65614df95b4b5c46a312557ad"
@@ -164,7 +168,7 @@ hash = "05880099d66c9e04ab2d4bf5dfa3fecfc4fb114264ca3b4a0c3b4816332414b9"
 
 ["commonware_cryptography::sha256::tests::conformance::CodecConformance<Digest>"]
 n_cases = 65536
-hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
+hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 
 ["commonware_cryptography::transcript::test::conformance::CodecConformance<Summary>"]
 n_cases = 65536

@@ -30,6 +30,7 @@ use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
 use bytes::BufMut;
 use commonware_codec::{Codec, FixedSize};
+use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{Blob as _, Error as RError, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
@@ -95,15 +96,15 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
             let encoded = value.encode();
             let mut compressed =
                 compress(&encoded, level as i32).map_err(|_| Error::CompressionFailed)?;
-            let checksum = crc32fast::hash(&compressed);
+            let checksum = Crc32::checksum(&compressed);
             compressed.put_u32(checksum);
             compressed
         } else {
             // Uncompressed: pre-allocate exact size to avoid copying
-            let entry_size = value.encode_size() + u32::SIZE;
+            let entry_size = value.encode_size() + crc32::Digest::SIZE;
             let mut buf = Vec::with_capacity(entry_size);
             value.write(&mut buf);
-            let checksum = crc32fast::hash(&buf);
+            let checksum = Crc32::checksum(&buf);
             buf.put_u32(checksum);
             buf
         };
@@ -134,17 +135,17 @@ impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
         let buf = buf.as_ref();
 
         // Entry format: [compressed_data] [crc32 (4 bytes)]
-        if buf.len() < u32::SIZE {
+        if buf.len() < crc32::Digest::SIZE {
             return Err(Error::Runtime(RError::BlobInsufficientLength));
         }
 
-        let data_len = buf.len() - u32::SIZE;
+        let data_len = buf.len() - crc32::Digest::SIZE;
         let compressed_data = &buf[..data_len];
         let stored_checksum =
             u32::from_be_bytes(buf[data_len..].try_into().expect("checksum is 4 bytes"));
 
         // Verify checksum
-        let checksum = crc32fast::hash(compressed_data);
+        let checksum = Crc32::checksum(compressed_data);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }

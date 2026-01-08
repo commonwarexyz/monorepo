@@ -7,6 +7,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_cryptography::{crc32, Crc32, Hasher};
 use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
@@ -197,12 +198,12 @@ impl Entry {
 
     /// Compute a checksum for [Entry].
     fn compute_crc(epoch: u64, section: u64, position: u64, added: u8) -> u32 {
-        let mut hasher = crc32fast::Hasher::new();
+        let mut hasher = Crc32::new();
         hasher.update(&epoch.to_be_bytes());
         hasher.update(&section.to_be_bytes());
         hasher.update(&position.to_be_bytes());
         hasher.update(&added.to_be_bytes());
-        hasher.finalize()
+        hasher.finalize().as_u32()
     }
 
     /// Create a new [Entry].
@@ -228,7 +229,7 @@ impl Entry {
 }
 
 impl FixedSize for Entry {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE + u8::SIZE + u32::SIZE;
+    const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE + u8::SIZE + crc32::Digest::SIZE;
 }
 
 impl CodecWrite for Entry {
@@ -799,7 +800,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     ///
     /// To determine the appropriate entry, we AND the key's hash with the current table size.
     fn table_index(&self, key: &K) -> u32 {
-        let hash = crc32fast::hash(key.as_ref());
+        let hash = Crc32::checksum(key.as_ref());
         hash & (self.table_size - 1)
     }
 
