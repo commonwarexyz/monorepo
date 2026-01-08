@@ -223,7 +223,11 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Get item bytes - either from buffer directly or by reading more
         let item_data: Cow<'_, [u8]> = match item {
             Item::Complete(data) => Cow::Borrowed(data),
-            Item::Incomplete { mut buffer, filled, read_offset } => {
+            Item::Incomplete {
+                mut buffer,
+                filled,
+                read_offset,
+            } => {
                 blob.read_into(&mut buffer[filled..], read_offset).await?;
                 Cow::Owned(buffer)
             }
@@ -265,7 +269,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 reader.seek_to(next_offset).map_err(Error::Runtime)?;
                 Cow::Borrowed(data)
             }
-            Item::Incomplete { mut buffer, filled, .. } => {
+            Item::Incomplete {
+                mut buffer, filled, ..
+            } => {
                 reader
                     .read_exact(&mut buffer[filled..], size as usize - filled)
                     .await
