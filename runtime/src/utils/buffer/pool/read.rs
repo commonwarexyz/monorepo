@@ -171,24 +171,22 @@ impl<B: Blob> Read<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Read physical data into buffer
-        let mut buffer = std::mem::take(&mut self.buffer);
-        if buffer.capacity() < bytes_to_read {
-            buffer.reserve(bytes_to_read - buffer.len());
-        }
-        buffer.resize(bytes_to_read, 0);
-        self.buffer = self.blob.read_at(buffer, start_offset).await?.into();
+        // Read physical data into a staging buffer, then extract only logical data into the main
+        // buffer. This avoids copy_within which would be needed if we compacted in-place.
+        let staging = vec![0u8; bytes_to_read];
+        let staging = self.blob.read_at(staging, start_offset).await?;
 
-        // Verify CRC of each page and compact in-place
+        // Clear the main buffer and prepare to fill with logical data only.
+        // Reuse existing capacity to avoid reallocation.
+        self.buffer.clear();
+
         let mut read_offset = 0;
-        let mut write_offset = 0;
-
-        while read_offset < self.buffer.len() {
-            let remaining = self.buffer.len() - read_offset;
+        while read_offset < staging.len() {
+            let remaining = staging.len() - read_offset;
 
             // Check if full page or partial
             if remaining >= self.page_size {
-                let page_slice = &self.buffer[read_offset..read_offset + self.page_size];
+                let page_slice = &staging.as_ref()[read_offset..read_offset + self.page_size];
                 let Some(record) = CrcRecord::validate_page(page_slice) else {
                     error!(
                         page = self.blob_page + (read_offset / self.page_size) as u64,
@@ -211,10 +209,8 @@ impl<B: Blob> Read<B> {
                     );
                     return Err(Error::InvalidChecksum);
                 }
-                // Compact: copy logical part to write_offset
-                self.buffer
-                    .copy_within(read_offset..read_offset + len, write_offset);
-                write_offset += len;
+                // Append only logical data to the main buffer
+                self.buffer.extend_from_slice(&page_slice[..len]);
                 read_offset += self.page_size;
                 continue;
             }
@@ -227,7 +223,8 @@ impl<B: Blob> Read<B> {
                 );
                 return Err(Error::InvalidChecksum);
             }
-            let Some(record) = CrcRecord::validate_page(&self.buffer[read_offset..]) else {
+            let page_slice = &staging.as_ref()[read_offset..];
+            let Some(record) = CrcRecord::validate_page(page_slice) else {
                 error!(
                     page = self.blob_page + (read_offset / self.page_size) as u64,
                     "CRC mismatch"
@@ -236,13 +233,9 @@ impl<B: Blob> Read<B> {
             };
             let (len, _) = record.get_crc();
             let logical_len = len as usize;
-            self.buffer
-                .copy_within(read_offset..read_offset + logical_len, write_offset);
-            write_offset += logical_len;
+            self.buffer.extend_from_slice(&page_slice[..logical_len]);
             break;
         }
-
-        self.buffer.truncate(write_offset);
 
         // If we sought to a position that is beyond the end of what we just read, error.
         if self.buffer_position >= self.buffer.len() {
