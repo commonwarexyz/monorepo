@@ -42,7 +42,7 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
-use commonware_utils::futures::ClosedExt;
+use commonware_utils::{channels::fallible::OneshotExt, futures::ClosedExt};
 use futures::{
     channel::oneshot::{self, Canceled},
     future::{select, try_join, Either, Ready},
@@ -356,9 +356,9 @@ where
                         .expect("current epoch should exist");
                     if block.height() == last_in_epoch {
                         marshal.verified(context.round, block).await;
-                        let _ = tx.send(true);
+                        tx.send_lossy(true);
                     } else {
-                        let _ = tx.send(false);
+                        tx.send_lossy(false);
                     }
                     return;
                 }
@@ -370,11 +370,11 @@ where
                         height = %block.height(),
                         "block height not covered by epoch strategy"
                     );
-                    let _ = tx.send(false);
+                    tx.send_lossy(false);
                     return;
                 };
                 if block_bounds.epoch() != context.epoch() {
-                    let _ = tx.send(false);
+                    tx.send_lossy(false);
                     return;
                 }
 
@@ -385,7 +385,7 @@ where
                         expected_parent = %parent.commitment(),
                         "block parent commitment does not match expected parent"
                     );
-                    let _ = tx.send(false);
+                    tx.send_lossy(false);
                     return;
                 }
 
@@ -396,7 +396,7 @@ where
                         block_height = %block.height(),
                         "block height is not contiguous with parent height"
                     );
-                    let _ = tx.send(false);
+                    tx.send_lossy(false);
                     return;
                 }
 
@@ -422,7 +422,7 @@ where
                 if application_valid {
                     marshal.verified(context.round, block).await;
                 }
-                let _ = tx.send(application_valid);
+                tx.send_lossy(application_valid);
             });
         rx
     }

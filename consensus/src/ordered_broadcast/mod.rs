@@ -97,7 +97,7 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_utils::{channels::fallible::OneshotExt, NZUsize, NZU16};
     use futures::{channel::oneshot, future::join_all};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -305,7 +305,7 @@ mod tests {
                                 && epoch >= threshold_epoch
                                 && (!require_contiguous || contiguous_height >= threshold_height)
                             {
-                                let _ = tx.send(sequencer.clone());
+                                tx.send_lossy(sequencer.clone());
                                 break;
                             }
                             context.sleep(Duration::from_millis(100)).await;

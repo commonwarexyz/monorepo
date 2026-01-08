@@ -103,7 +103,9 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{test_rng, NZUsize, NonZeroDuration, NZU16};
+    use commonware_utils::{
+        channels::fallible::OneshotExt, test_rng, NZUsize, NonZeroDuration, NZU16,
+    };
     use futures::{channel::oneshot, future::join_all};
     use rand::{rngs::StdRng, Rng};
     use std::{
@@ -292,7 +294,7 @@ mod tests {
                                 ?reporter,
                                 "reporter reached threshold, signaling completion"
                             );
-                            let _ = tx.send(reporter.clone());
+                            tx.send_lossy(reporter.clone());
                             break;
                         }
                         context.sleep(Duration::from_millis(100)).await;

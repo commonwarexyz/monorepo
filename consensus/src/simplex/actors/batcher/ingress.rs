@@ -1,10 +1,7 @@
 use crate::{simplex::types::Vote, types::View};
 use commonware_cryptography::{certificate::Scheme, Digest};
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
-};
-use tracing::error;
+use commonware_utils::channels::fallible::AsyncFallibleExt;
+use futures::channel::{mpsc, oneshot};
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
@@ -33,33 +30,21 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
 
     /// Send an update message.
     pub async fn update(&mut self, current: View, leader: u32, finalized: View) -> bool {
-        let (active, active_receiver) = oneshot::channel();
-        if let Err(err) = self
-            .sender
-            .send(Message::Update {
-                current,
-                leader,
-                finalized,
-                active,
-            })
+        self.sender
+            .request_or(
+                |active| Message::Update {
+                    current,
+                    leader,
+                    finalized,
+                    active,
+                },
+                true,
+            )
             .await
-        {
-            error!(?err, "failed to send update message");
-            return true; // default to active
-        }
-        match active_receiver.await {
-            Ok(active) => active,
-            Err(err) => {
-                error!(?err, "failed to receive active response");
-                true // default to active
-            }
-        }
     }
 
     /// Send a constructed vote.
     pub async fn constructed(&mut self, message: Vote<S, D>) {
-        if let Err(err) = self.sender.send(Message::Constructed(message)).await {
-            error!(?err, "failed to send constructed message");
-        }
+        self.sender.send_lossy(Message::Constructed(message)).await;
     }
 }
