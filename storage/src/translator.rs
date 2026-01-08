@@ -145,7 +145,7 @@ impl<const N: usize> PartialEq<[u8; N]> for UnhashedArray<N> {
 }
 
 /// Translators for keys that are not the length of a standard integer.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct Cap<const N: usize>;
 
 impl<const N: usize> Cap<N> {
@@ -154,6 +154,13 @@ impl<const N: usize> Cap<N> {
             assert!(N <= 8 && N > 0, "Cap must be between 1 and 8");
         };
         Self
+    }
+}
+
+// Manually implement Default for Cap<N> so it calls new() which validates N.
+impl<const N: usize> Default for Cap<N> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
