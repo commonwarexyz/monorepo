@@ -2459,10 +2459,7 @@ mod tests {
         sha256::Digest as Sha256,
     };
     use commonware_utils::{quorum, quorum_from_slice, test_rng};
-    use rand::{
-        rngs::{OsRng, StdRng},
-        SeedableRng,
-    };
+    use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -2550,7 +2547,7 @@ mod tests {
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Notarization::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(notarization, decoded);
-        assert!(decoded.verify(&mut OsRng, &fixture.schemes[0]));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
     }
 
     #[test]
@@ -2606,7 +2603,7 @@ mod tests {
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Nullification::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(nullification, decoded);
-        assert!(decoded.verify::<_, Sha256>(&mut OsRng, &fixture.schemes[0]));
+        assert!(decoded.verify::<_, Sha256>(&mut rng, &fixture.schemes[0]));
     }
 
     #[test]
@@ -2664,7 +2661,7 @@ mod tests {
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Finalization::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(finalization, decoded);
-        assert!(decoded.verify(&mut OsRng, &fixture.schemes[0]));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
     }
 
     #[test]
@@ -2773,7 +2770,6 @@ mod tests {
         assert_eq!(response.notarizations.len(), decoded.notarizations.len());
         assert_eq!(response.nullifications.len(), decoded.nullifications.len());
 
-        let mut rng = OsRng;
         assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
 
         decoded.nullifications[0].round = Round::new(
@@ -2957,6 +2953,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
+        let mut rng = test_rng();
         let fixture = setup_seeded(5, 0, &f);
         let wrong_fixture = setup_seeded(5, 1, &f);
         let round = Round::new(Epoch::new(0), View::new(10));
@@ -2971,10 +2968,7 @@ mod tests {
 
         let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes)
             .expect("quorum notarization");
-        let mut rng = OsRng;
         assert!(notarization.verify(&mut rng, &fixture.schemes[0]));
-
-        let mut rng = OsRng;
         assert!(!notarization.verify(&mut rng, &wrong_fixture.verifier));
     }
 
@@ -3128,6 +3122,7 @@ mod tests {
         S: Scheme<Sha256>,
         F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
+        let mut rng = test_rng();
         let fixture = setup_seeded(5, 0, &f);
         let wrong_fixture = setup_seeded(5, 1, &f);
         let round = Round::new(Epoch::new(0), View::new(10));
@@ -3142,10 +3137,7 @@ mod tests {
 
         let finalization = Finalization::from_finalizes(&fixture.schemes[0], &finalizes)
             .expect("quorum finalization");
-        let mut rng = OsRng;
         assert!(finalization.verify(&mut rng, &fixture.schemes[0]));
-
-        let mut rng = OsRng;
         assert!(!finalization.verify(&mut rng, &wrong_fixture.verifier));
     }
 
