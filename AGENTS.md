@@ -215,6 +215,15 @@ loop {
 }
 ```
 
+#### Deterministic RNG
+Use `commonware_utils::test_rng()` for random number generation in tests:
+```rust
+let mut rng = test_rng();
+let key = PrivateKey::random(&mut rng);
+```
+Avoid `OsRng`, `StdRng::from_entropy()`, or hardcoded seeds like `StdRng::seed_from_u64(42)`.
+Exceptions: fuzz tests deriving seed from input, loops testing multiple seeds, or parameterized helpers taking a seed.
+
 ### Simulated Network Testing
 To simulate network operations, use the simulated network (`p2p/src/simulated`):
 ```rust
