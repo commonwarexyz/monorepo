@@ -168,7 +168,7 @@ impl Random {
     /// Returns the selected leader index for the given round and seed signature.
     pub fn select_leader<V: Variant>(
         round: Round,
-        n: usize,
+        n: u32,
         seed_signature: Option<V::Signature>,
     ) -> Participant {
         assert!(seed_signature.is_some() || round.view() == View::new(1));
@@ -176,12 +176,12 @@ impl Random {
         let Some(seed_signature) = seed_signature else {
             // Standard round-robin for view 1
             return Participant::new(
-                (round.epoch().get().wrapping_add(round.view().get()) as usize % n) as u32,
+                (round.epoch().get().wrapping_add(round.view().get())) as u32 % n,
             );
         };
 
         // Use the seed signature as a source of randomness
-        Participant::new(modulo(seed_signature.encode().as_ref(), n as u64) as u32)
+        Participant::new(modulo(seed_signature.encode().as_ref(), u64::from(n)) as u32)
     }
 }
 
@@ -196,7 +196,7 @@ where
     fn build(self, participants: &Set<P>) -> RandomElector<bls12381_threshold::Scheme<P, V, S>> {
         assert!(!participants.is_empty(), "no participants");
         RandomElector {
-            n: participants.len(),
+            n: participants.len() as u32,
             _phantom: PhantomData,
         }
     }
@@ -207,7 +207,7 @@ where
 /// Created via [`Random::build`].
 #[derive(Clone, Debug)]
 pub struct RandomElector<S: Scheme> {
-    n: usize,
+    n: u32,
     _phantom: PhantomData<S>,
 }
 
