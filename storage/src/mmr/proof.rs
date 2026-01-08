@@ -25,10 +25,10 @@ use tracing::debug;
 
 /// The maximum number of digests in a proof per element being proven.
 ///
-/// This accounts for both the path from a leaf to its peak (max 61 nodes) and
-/// peak digests for mountains not containing the element (max 62 peaks).
-/// The value 128 provides a safe upper bound with room for future growth.
-pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 128;
+/// This accounts for the worst case proof size, in an MMR with 62 peaks. The
+/// left-most leaf in such a tree requires 122 digests, for 61 path siblings
+/// and 61 peak digests.
+pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 122;
 
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
 #[derive(Error, Debug)]
@@ -1646,7 +1646,7 @@ mod tests {
 
     #[test]
     fn test_max_proof_digests_per_element_sufficient() {
-        // Verify that MAX_PROOF_DIGESTS_PER_ELEMENT (128) is sufficient for any single-element
+        // Verify that MAX_PROOF_DIGESTS_PER_ELEMENT (122) is sufficient for any single-element
         // proof in the largest valid MMR.
         //
         // MMR sizes follow: mmr_size(N) = 2*N - popcount(N) where N = leaf count.
@@ -1669,8 +1669,6 @@ mod tests {
         //   - Path siblings: 61
         //   - Other peaks: 61
         //   - Total: 61 + 61 = 122 digests
-        //
-        // This is comfortably below MAX_PROOF_DIGESTS_PER_ELEMENT = 128.
 
         const NUM_PEAKS: usize = 62;
         const MAX_TREE_HEIGHT: usize = 61;
@@ -1721,6 +1719,31 @@ mod tests {
             positions.len(),
             expected_last_leaf,
             "Last leaf proof should require exactly {expected_last_leaf} digests (0 path + 61 peaks)",
+        );
+    }
+
+    #[test]
+    fn test_max_proof_digests_per_element_is_maximum() {
+        // For K peaks, the worst-case proof needs: (max_tree_height) + (K - 1) digests
+        // With K peaks of heights K-1, K-2, ..., 0, this is (K-1) + (K-1) = 2*(K-1)
+        //
+        // To get K peaks, leaf count N must have exactly K bits set.
+        // MMR size = 2*N - popcount(N) = 2*N - K
+        //
+        // For 63 peaks: N = 2^63 - 1 (63 bits set), size = 2*(2^63 - 1) - 63 = 2^64 - 65
+        // This exceeds MAX_POSITION, so is_mmr_size() returns false.
+
+        let n_for_63_peaks = (1u128 << 63) - 1;
+        let size_for_63_peaks = 2 * n_for_63_peaks - 63; // = 2^64 - 65
+        assert!(
+            size_for_63_peaks > *crate::mmr::MAX_POSITION as u128,
+            "63 peaks requires size {size_for_63_peaks} > MAX_POSITION",
+        );
+
+        let size_truncated = size_for_63_peaks as u64;
+        assert!(
+            !Position::new(size_truncated).is_mmr_size(),
+            "Size for 63 peaks should fail is_mmr_size()"
         );
     }
 
