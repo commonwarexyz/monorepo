@@ -222,8 +222,8 @@ impl<B: Blob> Append<B> {
     ///
     /// If there is unwritten data in the buffer, it will be flushed and synced before returning.
     pub async fn to_immutable(&self) -> Result<(), Error> {
-        // Flush any buffered data. When flush_internal returns, the write_at has completed
-        // and data is in the OS buffer.
+        // Flush any buffered data. When flush_internal returns, write_at has completed and data
+        // has been written to the underlying blob.
         let mut buf_guard = self.buffer.write().await;
         if buf_guard.immutable {
             return Ok(());
@@ -238,7 +238,7 @@ impl<B: Blob> Append<B> {
             buf_guard.data.shrink_to_fit();
         }
 
-        // Sync the OS buffer to disk to ensure new_immutable on restart will succeed even in the
+        // Sync the underlying blob to ensure new_immutable on restart will succeed even in the
         // event of a crash.
         let blob_state = self.blob_state.read().await;
         blob_state.blob.sync().await
@@ -711,8 +711,8 @@ impl<B: Blob> Append<B> {
             NonZeroUsize::new(logical_page_size as usize).expect("page_size is non-zero");
 
         // Flush any buffered data (without fsync) so the Read wrapper sees all written data.
-        // We don't need fsync here since we just want to ensure data is in the OS buffer,
-        // not durably persisted.
+        // We don't need fsync here since we just want to ensure data has been written to the
+        // underlying blob, not durably persisted.
         {
             let buf_guard = self.buffer.write().await;
             if !buf_guard.immutable {
@@ -766,15 +766,15 @@ impl<B: Blob> Blob for Append<B> {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        // Flush any buffered data, including any partial page. When flush_internal returns, the
-        // write_at has completed and data is in the OS buffer.
+        // Flush any buffered data, including any partial page. When flush_internal returns,
+        // write_at has completed and data has been written to the underlying blob.
         let buf_guard = self.buffer.write().await;
         if buf_guard.immutable {
             return Ok(());
         }
         self.flush_internal(buf_guard, true).await?;
 
-        // Sync the OS buffer to disk. We need the blob read lock here since sync() requires access
+        // Sync the underlying blob. We need the blob read lock here since sync() requires access
         // to the blob, but only a read lock since we're not modifying blob state.
         let blob_state = self.blob_state.read().await;
         blob_state.blob.sync().await
