@@ -90,7 +90,7 @@ pub struct Digest(pub [u8; DIGEST_LENGTH]);
 impl<'a> arbitrary::Arbitrary<'a> for Digest {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         // Generate random bytes and compute their Sha256 hash
-        let len = u.int_in_range(0..=1024)?;
+        let len = u.int_in_range(0..=256)?;
         let data = u.bytes(len)?;
         Ok(Sha256::hash(data))
     }
