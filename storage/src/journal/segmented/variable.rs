@@ -1344,7 +1344,7 @@ mod tests {
             assert_eq!(items[0].1, 1);
 
             // Append a new item to truncated partition
-            let (offset, _) = journal.append(2, 5).await.expect("Failed to append data");
+            let (_offset, _) = journal.append(2, 5).await.expect("Failed to append data");
             journal.sync(2).await.expect("Failed to sync blob");
 
             // Get the new item (offset is 0 since blob was truncated)
