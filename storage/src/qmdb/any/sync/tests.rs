@@ -1228,11 +1228,9 @@ where
     });
 }
 
-// ===== Harness Implementations =====
-
 mod harnesses {
     use super::SyncTestHarness;
-    use crate::translator::TwoCap;
+    use crate::{qmdb::any::value::VariableEncoding, translator::TwoCap};
     use commonware_cryptography::sha256::Digest;
     use commonware_runtime::deterministic::Context;
 
@@ -1377,134 +1375,49 @@ mod harnesses {
     }
 
     // ----- Unordered/Variable -----
-    // This harness has its own test config with different mmr_items_per_blob values.
-
-    use crate::qmdb::{
-        any::unordered::{variable::Db, Update},
-        Durable, Merkleized, NonDurable, Unmerkleized,
-    };
-    use commonware_cryptography::Sha256;
-    use commonware_math::algebra::Random;
-    use commonware_runtime::buffer::PoolRef;
-    use commonware_utils::{NZUsize, NZU16, NZU64};
-    use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
-    use std::num::{NonZeroU16, NonZeroUsize};
-
-    const PAGE_SIZE: NonZeroU16 = NZU16!(99);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
-
-    pub type UnorderedVarConfig =
-        crate::qmdb::any::VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
-
-    type UnorderedVarAnyTest =
-        Db<Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
-
-    type UnorderedVarDirtyAnyTest =
-        Db<Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
-
-    fn unordered_var_test_config(suffix: &str) -> UnorderedVarConfig {
-        crate::qmdb::any::VariableConfig {
-            mmr_journal_partition: format!("mmr_journal_{suffix}"),
-            mmr_metadata_partition: format!("mmr_metadata_{suffix}"),
-            mmr_items_per_blob: NZU64!(13),
-            mmr_write_buffer: NZUsize!(64),
-            log_partition: format!("log_{suffix}"),
-            log_items_per_blob: NZU64!(11),
-            log_write_buffer: NZUsize!(64),
-            log_compression: None,
-            log_codec_config: ((0..=10000).into(), ()),
-            translator: TwoCap,
-            thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-        }
-    }
-
-    fn unordered_var_test_value(i: u64) -> Vec<u8> {
-        let len = ((i % 13) + 7) as usize;
-        vec![(i % 255) as u8; len]
-    }
-
-    async fn unordered_var_create_test_db(mut context: Context) -> UnorderedVarAnyTest {
-        let seed = context.next_u64();
-        let config = unordered_var_test_config(&format!("{seed}"));
-        UnorderedVarAnyTest::init(context, config).await.unwrap()
-    }
-
-    fn unordered_var_create_test_ops(
-        n: usize,
-    ) -> Vec<crate::qmdb::any::unordered::variable::Operation<Digest, Vec<u8>>> {
-        use crate::qmdb::any::unordered::variable::Operation;
-        let mut rng = StdRng::seed_from_u64(1337);
-        let mut prev_key = Digest::random(&mut rng);
-        let mut ops = Vec::new();
-        for i in 0..n {
-            let key = Digest::random(&mut rng);
-            if i % 10 == 0 && i > 0 {
-                ops.push(Operation::Delete(prev_key));
-            } else {
-                let value = unordered_var_test_value(i as u64);
-                ops.push(Operation::Update(Update(key, value)));
-                prev_key = key;
-            }
-        }
-        ops
-    }
-
-    async fn unordered_var_apply_ops(
-        mut db: UnorderedVarDirtyAnyTest,
-        ops: Vec<crate::qmdb::any::unordered::variable::Operation<Digest, Vec<u8>>>,
-    ) -> UnorderedVarDirtyAnyTest {
-        use crate::qmdb::any::unordered::variable::Operation;
-        for op in ops {
-            match op {
-                Operation::Update(Update(key, value)) => {
-                    db.update(key, value).await.unwrap();
-                }
-                Operation::Delete(key) => {
-                    db.delete(key).await.unwrap();
-                }
-                Operation::CommitFloor(metadata, _) => {
-                    db = db.commit(metadata).await.unwrap().0.into_mutable();
-                }
-            }
-        }
-        db
-    }
 
     pub struct UnorderedVariableHarness;
 
     impl SyncTestHarness for UnorderedVariableHarness {
-        type Db = UnorderedVarAnyTest;
+        type Db = crate::qmdb::any::unordered::variable::test::AnyTest;
 
-        fn config(suffix: &str) -> UnorderedVarConfig {
-            unordered_var_test_config(suffix)
+        fn config(suffix: &str) -> crate::qmdb::any::unordered::variable::test::VarConfig {
+            crate::qmdb::any::unordered::variable::test::create_test_config(
+                suffix.parse().unwrap_or(0),
+            )
         }
 
-        fn clone_config(config: &UnorderedVarConfig) -> UnorderedVarConfig {
+        fn clone_config(
+            config: &crate::qmdb::any::unordered::variable::test::VarConfig,
+        ) -> crate::qmdb::any::unordered::variable::test::VarConfig {
             config.clone()
         }
 
         fn create_ops(
             n: usize,
-        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<Digest, Vec<u8>>> {
-            unordered_var_create_test_ops(n)
+        ) -> Vec<crate::qmdb::any::unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>
+        {
+            crate::qmdb::any::unordered::variable::test::create_test_ops(n)
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            unordered_var_create_test_db(ctx).await
+            crate::qmdb::any::unordered::variable::test::create_test_db(ctx).await
         }
 
-        async fn init_db_with_config(ctx: Context, config: UnorderedVarConfig) -> Self::Db {
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::unordered::variable::test::VarConfig,
+        ) -> Self::Db {
             Self::Db::init(ctx, config).await.unwrap()
         }
 
         async fn apply_ops(
             db: Self::Db,
-            ops: Vec<crate::qmdb::any::unordered::variable::Operation<Digest, Vec<u8>>>,
+            ops: Vec<crate::qmdb::any::unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>,
         ) -> Self::Db {
-            unordered_var_apply_ops(db.into_mutable(), ops)
-                .await
-                .commit(None)
+            let mut db = db.into_mutable();
+            crate::qmdb::any::unordered::variable::test::apply_ops(&mut db, ops).await;
+            db.commit(None::<Vec<u8>>)
                 .await
                 .unwrap()
                 .0
