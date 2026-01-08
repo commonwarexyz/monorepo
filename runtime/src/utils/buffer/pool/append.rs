@@ -1941,14 +1941,6 @@ mod tests {
         });
     }
 
-    /// Regression test: Verify that corrupted CRC with len > page_size is handled gracefully.
-    ///
-    /// Bug: In read_last_valid_page(), if a corrupted CRC record has len > page_size,
-    /// the slice operation `buf[..(len as usize)]` could panic instead of being detected
-    /// as corruption.
-    ///
-    /// Note: validate_page() checks `len > crc_start_idx` which should catch this,
-    /// so this test verifies that defense is working.
     #[test]
     fn test_corrupted_crc_len_too_large() {
         let executor = deterministic::Runner::default();
@@ -2020,10 +2012,6 @@ mod tests {
         });
     }
 
-    /// Regression test: Verify that both CRC slots having len > page_size is handled.
-    ///
-    /// Tests that validate_page() properly rejects pages where both CRC slots
-    /// have invalid (too large) lengths, rather than falling through to slice operations.
     #[test]
     fn test_corrupted_crc_both_slots_len_too_large() {
         let executor = deterministic::Runner::default();
