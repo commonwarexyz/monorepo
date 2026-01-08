@@ -794,7 +794,7 @@ mod tests {
     }
 
     fn signer_shares_must_match_participant_indices<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(7);
+        let mut rng = test_rng();
         let participants = ed25519_participants(&mut rng, 4);
         let (polynomial, mut shares) =
             dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
@@ -820,7 +820,7 @@ mod tests {
         signer_shares_must_match_participant_indices::<MinSig>();
     }
     fn scheme_polynomial_threshold_must_equal_quorum<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(7);
+        let mut rng = test_rng();
         let participants = ed25519_participants(&mut rng, 5);
         let (polynomial, shares) = deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
         Scheme::<V>::signer(
@@ -845,7 +845,7 @@ mod tests {
     }
 
     fn verifier_polynomial_threshold_must_equal_quorum<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(7);
+        let mut rng = test_rng();
         let participants = ed25519_participants(&mut rng, 5);
         let (polynomial, _) = deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
         Scheme::<V>::verifier(
@@ -1548,7 +1548,7 @@ mod tests {
     }
 
     fn verify_attestation_rejects_malleability<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(12345);
+        let mut rng = test_rng();
         let (schemes, _) = setup_signers::<V>(4, 67);
         let proposal = sample_proposal(Epoch::new(0), View::new(27), 14);
 
@@ -1601,7 +1601,7 @@ mod tests {
     }
 
     fn verify_attestations_rejects_malleability<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(54321);
+        let mut rng = test_rng();
         let (schemes, _) = setup_signers::<V>(4, 71);
         let proposal = sample_proposal(Epoch::new(0), View::new(29), 15);
 
@@ -1672,7 +1672,7 @@ mod tests {
     }
 
     fn verify_certificate_rejects_malleability<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(98765);
+        let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 73);
         let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(31), 16);
@@ -1729,7 +1729,7 @@ mod tests {
     }
 
     fn verify_certificates_rejects_malleability<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(13579);
+        let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 79);
         let quorum = quorum_from_slice(&schemes) as usize;
         let proposal1 = sample_proposal(Epoch::new(0), View::new(33), 17);

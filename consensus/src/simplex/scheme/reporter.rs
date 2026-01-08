@@ -123,8 +123,8 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
+    use commonware_utils::test_rng;
     use futures::executor::block_on;
-    use rand::{rngs::StdRng, SeedableRng};
     use std::sync::{Arc, Mutex};
 
     const NAMESPACE: &[u8] = b"test-reporter";
@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn test_invalid_peer_activity_dropped() {
         // Invalid peer activities should be dropped when verification is enabled
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture { verifier, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
 
         // Create a scheme with wrong namespace to generate invalid signatures
@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn test_skip_verification() {
         // When verification is disabled, invalid activities pass through
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture { verifier, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
 
         // Create a scheme with wrong namespace to generate invalid signatures
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn test_certificates_always_reported() {
         // Certificates should always be reported, even for non-attributable schemes
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture {
             schemes, verifier, ..
         } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn test_non_attributable_filters_peer_activities() {
         // Non-attributable schemes (like BLS threshold) must filter peer per-validator activities
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture {
             schemes, verifier, ..
         } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn test_attributable_scheme_reports_peer_activities() {
         // Ed25519 (attributable) should report peer per-validator activities
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture {
             schemes, verifier, ..
         } = ed25519::fixture(&mut rng, NAMESPACE, 4);

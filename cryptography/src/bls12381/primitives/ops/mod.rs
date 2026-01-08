@@ -318,11 +318,14 @@ mod tests {
             assert!(verify::<MinSig>(&public, DST, &message, &signature).is_err());
         }
 
-        assert!(MinSig::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_ok());
+        assert!(
+            MinSig::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_ok()
+        );
 
         signatures[0] += &<MinSig as Variant>::Signature::generator();
         assert!(
-            MinSig::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_err()
+            MinSig::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential)
+                .is_err()
         );
     }
 
@@ -359,10 +362,14 @@ mod tests {
             assert!(verify::<MinPk>(&public, DST, &message, &signature).is_err());
         }
 
-        assert!(MinPk::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_ok());
+        assert!(
+            MinPk::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_ok()
+        );
 
         signatures[0] += &<MinPk as Variant>::Signature::generator();
-        assert!(MinPk::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_err());
+        assert!(
+            MinPk::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_err()
+        );
     }
 
     fn parse_sign_vector(
