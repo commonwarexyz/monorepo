@@ -233,13 +233,14 @@ mod tests {
         bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
         sha256::Digest as Sha256Digest, Sha256,
     };
+    use commonware_parallel::Sequential;
     use commonware_utils::{quorum_from_slice, TryFromIterator};
     use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test";
 
     type ThresholdScheme =
-        bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
+        bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk, Sequential>;
 
     #[test]
     fn round_robin_rotates_through_participants() {

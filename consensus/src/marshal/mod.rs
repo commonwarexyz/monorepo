@@ -128,6 +128,7 @@ mod tests {
         simulated::{self, Link, Network, Oracle},
         Manager,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_storage::archive::immutable;
     use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
@@ -147,7 +148,7 @@ mod tests {
     type B = Block<D>;
     type K = PublicKey;
     type V = MinPk;
-    type S = bls12381_threshold::Scheme<K, V>;
+    type S = bls12381_threshold::Scheme<K, V, Sequential>;
     type P = ConstantProvider<S, Epoch>;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
