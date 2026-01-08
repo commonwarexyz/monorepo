@@ -105,6 +105,11 @@ pub const SCALAR_LENGTH: usize = 32;
 /// decoded integer lies in the range `0 ≤ x < r`.
 const SCALAR_BITS: usize = 255;
 
+/// Number of scalar bits used for batch verification.
+/// 128 bits provides sufficient security (2^-128 collision probability)
+/// while roughly halving MSM computation time.
+const BATCH_SCALAR_BITS: usize = 128;
+
 /// This constant serves as the multiplicative identity (i.e., "one") in the
 /// BLS12-381 finite field, ensuring that arithmetic is carried out within the
 /// correct modulo.
@@ -897,6 +902,98 @@ impl G1 {
 
         Self::from_blst_p1(result)
     }
+
+    /// Computes MSM on pre-converted affine points. Skips filtering.
+    ///
+    /// This is faster than `msm` when:
+    /// 1. Points are already in affine form (avoids per-point conversion)
+    /// 2. Points are known to be valid (skips zero-filtering)
+    ///
+    /// # Panics
+    ///
+    /// Panics if `points.len() != scalars.len()`.
+    ///
+    /// # Warning
+    ///
+    /// This function does NOT filter out identity points or zero scalars.
+    /// Passing such values may cause undefined behavior in BLST.
+    pub fn msm_affine(points: &[G1Affine], scalars: &[Scalar]) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        if points.is_empty() {
+            return Self::zero();
+        }
+
+        // Build pointer arrays directly (no filtering/conversion)
+        let points_ptr: Vec<*const blst_p1_affine> =
+            points.iter().map(|p| p.inner() as *const _).collect();
+
+        // Convert scalars to blst_scalar format
+        let blst_scalars: Vec<blst_scalar> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        let scalars_ptr: Vec<*const u8> = blst_scalars.iter().map(|s| s.b.as_ptr()).collect();
+
+        // Allocate scratch space
+        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
+        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+
+        // Perform MSM
+        let mut result = blst_p1::default();
+        // SAFETY: All pointers are valid and point to data that outlives this call.
+        // Caller guarantees no identity points or zero scalars.
+        unsafe {
+            blst_p1s_mult_pippenger(
+                &mut result,
+                points_ptr.as_ptr(),
+                points.len(),
+                scalars_ptr.as_ptr(),
+                SCALAR_BITS,
+                scratch.as_mut_ptr() as *mut _,
+            );
+        }
+
+        Self::from_blst_p1(result)
+    }
+
+    /// Computes MSM using only the lower 128 bits of each scalar.
+    ///
+    /// This is optimized for batch verification where 128-bit randomness
+    /// provides sufficient security (2^-128 collision probability).
+    /// Processing fewer bits roughly halves the MSM computation time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `points.len() != scalars.len()`.
+    pub fn msm_affine_batch(points: &[G1Affine], scalars: &[Scalar]) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        if points.is_empty() {
+            return Self::zero();
+        }
+
+        let points_ptr: Vec<*const blst_p1_affine> =
+            points.iter().map(|p| p.inner() as *const _).collect();
+
+        let blst_scalars: Vec<blst_scalar> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        let scalars_ptr: Vec<*const u8> = blst_scalars.iter().map(|s| s.b.as_ptr()).collect();
+
+        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
+        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+
+        let mut result = blst_p1::default();
+        // SAFETY: All pointers are valid. Using BATCH_SCALAR_BITS (128) for faster batch verification.
+        unsafe {
+            blst_p1s_mult_pippenger(
+                &mut result,
+                points_ptr.as_ptr(),
+                points.len(),
+                scalars_ptr.as_ptr(),
+                BATCH_SCALAR_BITS,
+                scratch.as_mut_ptr() as *mut _,
+            );
+        }
+
+        Self::from_blst_p1(result)
+    }
 }
 
 impl CryptoGroup for G1 {
@@ -1209,6 +1306,98 @@ impl G2 {
                 pairs.len(),
                 scalars.as_ptr(),
                 SCALAR_BITS,
+                scratch.as_mut_ptr() as *mut _,
+            );
+        }
+
+        Self::from_blst_p2(result)
+    }
+
+    /// Computes MSM on pre-converted affine points. Skips filtering.
+    ///
+    /// This is faster than `msm` when:
+    /// 1. Points are already in affine form (avoids per-point conversion)
+    /// 2. Points are known to be valid (skips zero-filtering)
+    ///
+    /// # Panics
+    ///
+    /// Panics if `points.len() != scalars.len()`.
+    ///
+    /// # Warning
+    ///
+    /// This function does NOT filter out identity points or zero scalars.
+    /// Passing such values may cause undefined behavior in BLST.
+    pub fn msm_affine(points: &[G2Affine], scalars: &[Scalar]) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        if points.is_empty() {
+            return Self::zero();
+        }
+
+        // Build pointer arrays directly (no filtering/conversion)
+        let points_ptr: Vec<*const blst_p2_affine> =
+            points.iter().map(|p| p.inner() as *const _).collect();
+
+        // Convert scalars to blst_scalar format
+        let blst_scalars: Vec<blst_scalar> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        let scalars_ptr: Vec<*const u8> = blst_scalars.iter().map(|s| s.b.as_ptr()).collect();
+
+        // Allocate scratch space
+        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
+        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+
+        // Perform MSM
+        let mut result = blst_p2::default();
+        // SAFETY: All pointers are valid and point to data that outlives this call.
+        // Caller guarantees no identity points or zero scalars.
+        unsafe {
+            blst_p2s_mult_pippenger(
+                &mut result,
+                points_ptr.as_ptr(),
+                points.len(),
+                scalars_ptr.as_ptr(),
+                SCALAR_BITS,
+                scratch.as_mut_ptr() as *mut _,
+            );
+        }
+
+        Self::from_blst_p2(result)
+    }
+
+    /// Computes MSM using only the lower 128 bits of each scalar.
+    ///
+    /// This is optimized for batch verification where 128-bit randomness
+    /// provides sufficient security (2^-128 collision probability).
+    /// Processing fewer bits roughly halves the MSM computation time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `points.len() != scalars.len()`.
+    pub fn msm_affine_batch(points: &[G2Affine], scalars: &[Scalar]) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        if points.is_empty() {
+            return Self::zero();
+        }
+
+        let points_ptr: Vec<*const blst_p2_affine> =
+            points.iter().map(|p| p.inner() as *const _).collect();
+
+        let blst_scalars: Vec<blst_scalar> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        let scalars_ptr: Vec<*const u8> = blst_scalars.iter().map(|s| s.b.as_ptr()).collect();
+
+        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
+        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+
+        let mut result = blst_p2::default();
+        // SAFETY: All pointers are valid. Using BATCH_SCALAR_BITS (128) for faster batch verification.
+        unsafe {
+            blst_p2s_mult_pippenger(
+                &mut result,
+                points_ptr.as_ptr(),
+                points.len(),
+                scalars_ptr.as_ptr(),
+                BATCH_SCALAR_BITS,
                 scratch.as_mut_ptr() as *mut _,
             );
         }

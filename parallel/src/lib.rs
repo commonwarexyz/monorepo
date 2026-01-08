@@ -77,12 +77,6 @@ cfg_if! {
 /// to be written generically and then executed with different strategies depending
 /// on the use case (e.g., sequential for testing/debugging, parallel for production).
 pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
-    /// Returns the parallelism level of this strategy.
-    ///
-    /// This is a hint for algorithms that want to manually partition work.
-    /// For [`Sequential`], this returns 1. For [`Rayon`], this returns
-    /// the number of threads in the pool.
-    fn parallelism(&self) -> usize;
     /// Reduces a collection to a single value with per-partition initialization.
     ///
     /// Similar to [`fold`](Self::fold), but provides a separate initialization value
@@ -313,10 +307,6 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
 pub struct Sequential;
 
 impl Strategy for Sequential {
-    fn parallelism(&self) -> usize {
-        1
-    }
-
     fn fold_init<I, INIT, T, R, ID, F, RD>(
         &self,
         iter: I,
@@ -404,10 +394,6 @@ cfg_if! {
         }
 
         impl Strategy for Rayon {
-            fn parallelism(&self) -> usize {
-                self.thread_pool.current_num_threads()
-            }
-
             fn fold_init<I, INIT, T, R, ID, F, RD>(
                 &self,
                 iter: I,

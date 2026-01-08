@@ -80,11 +80,8 @@ where
     let pks: Vec<V::Public> = entries.iter().map(|(pk, _)| *pk).collect();
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, sig)| *sig).collect();
 
-    // Use MSM for the initial batch check (happy path optimization)
-    let pk_agg = V::Public::msm(&pks, &scalars, strategy);
-    let sig_agg = V::Signature::msm(&sigs, &scalars, strategy);
-
-    if V::verify(&pk_agg, &hm, &sig_agg).is_ok() {
+    // Use optimized MSM with batch affine conversion (happy path)
+    if V::verify_same_message_msm(&pks, &hm, &sigs, &scalars) {
         return Vec::new(); // All valid!
     }
 
