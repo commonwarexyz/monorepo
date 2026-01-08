@@ -53,7 +53,7 @@ pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     _array: PhantomData<A>,
 }
 
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
+impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> Journal<E, A> {
     /// Size of each entry.
     pub const CHUNK_SIZE: usize = A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
@@ -157,7 +157,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         &self,
         start_section: u64,
         buffer: NonZeroUsize,
-    ) -> Result<impl Stream<Item = Result<(u64, u64, A), Error>> + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, u64, A), Error>> + Send + '_, Error> {
         // Pre-create readers from blobs (async operation)
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {

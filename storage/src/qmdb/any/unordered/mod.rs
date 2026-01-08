@@ -41,7 +41,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > Db<E, C, I, H, Update<K, V>, M, D>
 where
@@ -86,6 +86,7 @@ impl<
     > Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     /// Appends the given delete operation to the log, updating the snapshot and other state to
     /// reflect the deletion.
@@ -243,6 +244,7 @@ impl<
     > Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     /// Returns an [Db] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
@@ -274,13 +276,14 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + Send + Sync,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Key = K;
     type Value = V::Value;
@@ -296,11 +299,12 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + Send + Sync,
         H: Hasher,
     > kv::Updatable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
@@ -312,11 +316,11 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + Send + Sync,
         H: Hasher,
     > kv::Deletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
-    Operation<K, V>: Codec,
+    Operation<K, V>: Codec + Send + Sync,
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
@@ -329,9 +333,9 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync,
     H: Hasher,
-    Operation<K, V>: Codec,
+    Operation<K, V>: Codec + Send + Sync,
 {
     async fn write_batch(
         &mut self,
@@ -350,7 +354,7 @@ where
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location>,
     H: Hasher,
-    Operation<K, V>: Codec,
+    Operation<K, V>: Codec + Send + Sync,
 {
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
 
@@ -370,6 +374,7 @@ where
     I: Index<Value = Location>,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
@@ -396,6 +401,7 @@ where
     I: Index<Value = Location>,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
     type Durable = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
@@ -422,6 +428,7 @@ where
     I: Index<Value = Location>,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;

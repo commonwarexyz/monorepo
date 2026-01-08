@@ -100,7 +100,7 @@ where
 }
 
 /// Implementation of `Archive` storage.
-pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
+pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec + Send + Sync> {
     items_per_section: u64,
 
     /// Combined index + value storage with crash recovery.
@@ -129,7 +129,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     syncs: Counter,
 }
 
-impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V> {
+impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec + Send + Sync> Archive<T, E, K, V> {
     /// Calculate the section for a given index.
     const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_section) * self.items_per_section
@@ -338,7 +338,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     }
 }
 
-impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Archive
+impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec + Send + Sync> crate::archive::Archive
     for Archive<T, E, K, V>
 {
     type Key = K;

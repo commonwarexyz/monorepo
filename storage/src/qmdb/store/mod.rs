@@ -26,7 +26,7 @@ mod private {
 }
 
 /// Trait for valid store state types.
-pub trait State: private::Sealed + Sized {}
+pub trait State: private::Sealed + Sized + Send + Sync {}
 
 /// Marker type for a store in a "durable" state (no uncommitted operations).
 #[derive(Clone, Copy, Debug)]

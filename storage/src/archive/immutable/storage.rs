@@ -84,7 +84,7 @@ impl EncodeSize for Record {
 }
 
 /// An immutable key-value store for ordered data with a minimal memory footprint.
-pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
+pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec + Send + Sync> {
     /// Number of items per section.
     items_per_section: u64,
 
@@ -103,7 +103,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     syncs: Counter,
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec + Send + Sync> Archive<E, K, V> {
     /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
@@ -231,7 +231,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec + Send + Sync> crate::archive::Archive
     for Archive<E, K, V>
 {
     type Key = K;

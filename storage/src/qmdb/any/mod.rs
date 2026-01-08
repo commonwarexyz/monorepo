@@ -113,7 +113,7 @@ type AuthenticatedLog<E, O, H, S = Merkleized<H>> = authenticated::Journal<E, Jo
 /// floor specified by the last commit.
 pub(crate) async fn init_fixed_authenticated_log<
     E: Storage + Clock + Metrics,
-    O: Committable + CodecFixed<Cfg = ()>,
+    O: Committable + CodecFixed<Cfg = ()> + Send + Sync,
     H: Hasher,
     T: Translator,
 >(

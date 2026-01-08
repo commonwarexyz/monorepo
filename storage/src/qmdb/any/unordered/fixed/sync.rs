@@ -141,7 +141,7 @@ where
 /// # Invariants
 ///
 /// The returned [fixed::Journal] has size in the given range.
-pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
+pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync>(
     context: E,
     cfg: fixed::Config,
     range: Range<u64>,
@@ -201,7 +201,10 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
 /// - Reading from positions 0-19 will return `ItemPruned` since those blobs don't exist
 /// - This represents a journal that had operations 0-24, with operations 0-19 pruned,
 ///   leaving operations 20-24 in tail blob 2.
-pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
+pub(crate) async fn init_journal_at_size<
+    E: Storage + Metrics,
+    A: CodecFixed<Cfg = ()> + Send + Sync,
+>(
     context: E,
     cfg: fixed::Config,
     size: u64,

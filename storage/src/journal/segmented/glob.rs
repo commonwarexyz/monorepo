@@ -66,7 +66,7 @@ pub struct Glob<E: Storage + Metrics, V: Codec> {
     codec_config: V::Cfg,
 }
 
-impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
+impl<E: Storage + Metrics, V: Codec + Send + Sync> Glob<E, V> {
     /// Initialize blob storage, opening existing section blobs.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {

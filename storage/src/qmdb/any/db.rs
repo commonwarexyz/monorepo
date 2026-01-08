@@ -43,10 +43,10 @@ pub struct Db<
     I,
     H: Hasher,
     U,
-    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
+    M: MerkleizationState<DigestOf<H>> + Send + Sync = Merkleized<H>,
     D: DurabilityState = Durable,
 > where
-    C::Item: Codec,
+    C::Item: Codec + Send + Sync,
 {
     /// A (pruned) log of all operations in order of their application. The index of each
     /// operation in the log is called its _location_, which is a stable identifier.
@@ -88,13 +88,14 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    U: Update<K, V>,
+    U: Update<K, V> + Send + Sync,
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    M: MerkleizationState<DigestOf<H>>,
+    M: MerkleizationState<DigestOf<H>> + Send + Sync,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
+    V::Value: Send + Sync,
 {
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
@@ -136,12 +137,13 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    U: Update<K, V>,
+    U: Update<K, V> + Send + Sync,
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
+    V::Value: Send + Sync,
 {
     pub const fn root(&self) -> H::Digest {
         self.log.root()
@@ -194,11 +196,12 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    U: Update<K, V>,
+    U: Update<K, V> + Send + Sync,
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
+    V::Value: Send + Sync,
 {
     /// Returns a [Db] initialized from `log`, using `callback` to report snapshot
     /// building events.
@@ -269,11 +272,12 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    U: Update<K, V>,
+    U: Update<K, V> + Send + Sync,
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
+    V::Value: Send + Sync,
 {
     /// Convert this database into a mutable state.
     pub fn into_mutable(self) -> Db<E, C, I, H, U, Unmerkleized, NonDurable> {
@@ -307,11 +311,12 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    U: Update<K, V>,
+    U: Update<K, V> + Send + Sync,
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
+    V::Value: Send + Sync,
 {
     pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, NonDurable> {
         Db {
@@ -332,11 +337,12 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    U: Update<K, V>,
+    U: Update<K, V> + Send + Sync,
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
+    V::Value: Send + Sync,
 {
     /// Convert this database into a mutable state.
     pub fn into_mutable(self) -> Db<E, C, I, H, U, Unmerkleized, NonDurable> {
@@ -358,13 +364,14 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    U: Update<K, V>,
+    U: Update<K, V> + Send + Sync,
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    M: MerkleizationState<DigestOf<H>>,
+    M: MerkleizationState<DigestOf<H>> + Send + Sync,
     Operation<K, V, U>: Codec,
     AuthenticatedLog<E, C, H, M>: MutableContiguous<Item = Operation<K, V, U>>,
+    V::Value: Send + Sync,
 {
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
     /// inactivity floor.
@@ -470,11 +477,12 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    U: Update<K, V>,
+    U: Update<K, V> + Send + Sync,
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
+    V::Value: Send + Sync,
 {
     type Error = Error;
 
@@ -497,12 +505,13 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    U: Update<K, V>,
+    U: Update<K, V> + Send + Sync,
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
+    V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
@@ -527,13 +536,14 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    U: Update<K, V>,
+    U: Update<K, V> + Send + Sync,
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    M: MerkleizationState<DigestOf<H>>,
+    M: MerkleizationState<DigestOf<H>> + Send + Sync,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
+    V::Value: Send + Sync,
 {
     type Value = V::Value;
 
@@ -559,12 +569,13 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    U: Update<K, V>,
+    U: Update<K, V> + Send + Sync,
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
+    V::Value: Send + Sync,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await

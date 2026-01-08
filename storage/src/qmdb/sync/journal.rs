@@ -21,41 +21,45 @@ pub trait Journal {
 impl<E, V> Journal for crate::journal::contiguous::variable::Journal<E, V>
 where
     E: commonware_runtime::Storage + commonware_runtime::Metrics,
-    V: commonware_codec::Codec,
+    V: commonware_codec::Codec + Send + Sync,
 {
     type Op = V;
     type Error = crate::journal::Error;
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
-        Self::sync(self).await
+        crate::journal::contiguous::variable::Journal::sync(self).await
     }
 
     async fn size(&self) -> u64 {
-        Self::size(self)
+        crate::journal::contiguous::variable::Journal::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        self.append(op).await.map(|_| ())
+        crate::journal::contiguous::variable::Journal::append(self, op)
+            .await
+            .map(|_| ())
     }
 }
 
 impl<E, A> Journal for crate::journal::contiguous::fixed::Journal<E, A>
 where
     E: commonware_runtime::Storage + commonware_runtime::Metrics,
-    A: commonware_codec::CodecFixed<Cfg = ()>,
+    A: commonware_codec::CodecFixed<Cfg = ()> + Send + Sync,
 {
     type Op = A;
     type Error = crate::journal::Error;
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
-        Self::sync(self).await
+        crate::journal::contiguous::fixed::Journal::sync(self).await
     }
 
     async fn size(&self) -> u64 {
-        Self::size(self)
+        crate::journal::contiguous::fixed::Journal::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        self.append(op).await.map(|_| ())
+        crate::journal::contiguous::fixed::Journal::append(self, op)
+            .await
+            .map(|_| ())
     }
 }

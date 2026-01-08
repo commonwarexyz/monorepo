@@ -370,7 +370,7 @@ where
 }
 
 /// Implementation of [Freezer].
-pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
+pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec + Send + Sync> {
     // Context for storage operations
     context: E,
 
@@ -407,7 +407,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     resizes: Counter,
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec + Send + Sync> Freezer<E, K, V> {
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -1131,7 +1131,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> kv::Gettable for Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec + Send + Sync> kv::Gettable
+    for Freezer<E, K, V>
+{
     type Key = K;
     type Value = V;
     type Error = Error;
@@ -1141,14 +1143,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> kv::Gettable for Freezer<
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> kv::Updatable for Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec + Send + Sync> kv::Updatable
+    for Freezer<E, K, V>
+{
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await?;
         Ok(())
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Persistable for Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec + Send + Sync> Persistable
+    for Freezer<E, K, V>
+{
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Self::Error> {
