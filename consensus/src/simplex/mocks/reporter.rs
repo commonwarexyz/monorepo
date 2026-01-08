@@ -122,11 +122,7 @@ where
         let verified = activity.verified();
         match &activity {
             Activity::Notarize(notarize) => {
-                if !notarize.verify(
-                    &mut self.context,
-                    &self.scheme,
-                    &commonware_parallel::Sequential,
-                ) {
+                if !notarize.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -152,7 +148,7 @@ where
                         proposal: &notarization.proposal,
                     },
                     &notarization.certificate,
-                    &commonware_parallel::Sequential,
+                    &Sequential,
                 ) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
@@ -168,11 +164,7 @@ where
                 self.certified(notarization.round(), &notarization.certificate);
             }
             Activity::Nullify(nullify) => {
-                if !nullify.verify(
-                    &mut self.context,
-                    &self.scheme,
-                    &commonware_parallel::Sequential,
-                ) {
+                if !nullify.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -196,7 +188,7 @@ where
                         round: nullification.round,
                     },
                     &nullification.certificate,
-                    &commonware_parallel::Sequential,
+                    &Sequential,
                 ) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
@@ -212,11 +204,7 @@ where
                 self.certified(nullification.round, &nullification.certificate);
             }
             Activity::Finalize(finalize) => {
-                if !finalize.verify(
-                    &mut self.context,
-                    &self.scheme,
-                    &commonware_parallel::Sequential,
-                ) {
+                if !finalize.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -242,7 +230,7 @@ where
                         proposal: &finalization.proposal,
                     },
                     &finalization.certificate,
-                    &commonware_parallel::Sequential,
+                    &Sequential,
                 ) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
@@ -266,11 +254,7 @@ where
             }
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(
-                    &mut self.context,
-                    &self.scheme,
-                    &commonware_parallel::Sequential,
-                ) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
