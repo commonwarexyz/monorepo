@@ -651,6 +651,17 @@ impl<B: Blob> Append<B> {
             // No partial page data to write.
             return (write_buffer, None);
         }
+
+        // If there are no full pages and the partial page length matches what was already
+        // written, there's nothing new to write.
+        if pages_to_write == 0 {
+            if let Some(old_crc) = old_crc_record {
+                let (old_len, _) = old_crc.get_crc();
+                if partial_page.len() == old_len as usize {
+                    return (write_buffer, None);
+                }
+            }
+        }
         write_buffer.extend_from_slice(partial_page);
         let partial_len = partial_page.len();
         let crc = crc32fast::hash(partial_page);
@@ -701,7 +712,7 @@ impl<B: Blob> Append<B> {
         }
     }
 
-    /// Syncs any buffered data, then returns a [Read] wrapper for the underlying blob.
+    /// Flushes any buffered data, then returns a [Read] wrapper for the underlying blob.
     ///
     /// The returned reader can be used to sequentially read all data from the blob while ensuring
     /// all data passes integrity verification.
