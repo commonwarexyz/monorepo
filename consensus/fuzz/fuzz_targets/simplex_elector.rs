@@ -61,10 +61,10 @@ where
     // For view 1 certificate should be None, for other views use provided certificate
     if input.round.view() == View::new(1) {
         let leader = elector.elect(input.round, None);
-        assert!(leader < participants.len() as u32);
+        assert!(leader.get() < participants.len() as u32);
     } else {
         let leader = elector.elect(input.round, certificate);
-        assert!(leader < participants.len() as u32);
+        assert!(leader.get() < participants.len() as u32);
     }
 }
 

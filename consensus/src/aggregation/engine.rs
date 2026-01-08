@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     aggregation::{scheme, types::Certificate},
-    types::{Epoch, EpochDelta, Height, HeightDelta},
+    types::{Epoch, EpochDelta, Height, HeightDelta, Participant},
     Automaton, Monitor, Reporter,
 };
 use commonware_cryptography::{
@@ -49,10 +49,10 @@ use tracing::{debug, error, info, trace, warn};
 enum Pending<S: Scheme, D: Digest> {
     /// The automaton has not yet provided the digest for this height.
     /// The signatures may have arbitrary digests.
-    Unverified(BTreeMap<Epoch, BTreeMap<u32, Ack<S, D>>>),
+    Unverified(BTreeMap<Epoch, BTreeMap<Participant, Ack<S, D>>>),
 
     /// Verified by the automaton. Now stores the digest.
-    Verified(D, BTreeMap<Epoch, BTreeMap<u32, Ack<S, D>>>),
+    Verified(D, BTreeMap<Epoch, BTreeMap<Participant, Ack<S, D>>>),
 }
 
 /// The type returned by the `pending` pool, used by the application to return which digest is

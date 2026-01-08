@@ -11,8 +11,8 @@ extern crate alloc;
 
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
-use bytes::{BufMut, BytesMut};
-use commonware_codec::{EncodeSize, Write};
+use bytes::{Buf, BufMut, BytesMut};
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use core::{
     fmt::{Debug, Write as FmtWrite},
     time::Duration,
@@ -34,6 +34,63 @@ pub use hostname::Hostname;
 pub mod net;
 pub mod ordered;
 pub mod vec;
+
+/// Represents a participant/validator index within a consensus committee.
+///
+/// Participant indices are used to identify validators in attestations,
+/// votes, and certificates. The index corresponds to the position of the
+/// validator's public key in the ordered participant set.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Participant(u32);
+
+impl Participant {
+    /// Creates a new participant from a u32 index.
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// Creates a new participant from a usize index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` exceeds `u32::MAX`.
+    pub fn from_usize(index: usize) -> Self {
+        Self(u32::try_from(index).expect("participant index exceeds u32::MAX"))
+    }
+
+    /// Returns the underlying u32 index.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl core::fmt::Display for Participant {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Read for Participant {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let value: u32 = UInt::read(buf)?.into();
+        Ok(Self(value))
+    }
+}
+
+impl Write for Participant {
+    fn write(&self, buf: &mut impl BufMut) {
+        UInt(self.0).write(buf);
+    }
+}
+
+impl EncodeSize for Participant {
+    fn encode_size(&self) -> usize {
+        UInt(self.0).encode_size()
+    }
+}
 
 /// A type that can be constructed from an iterator, possibly failing.
 pub trait TryFromIterator<T>: Sized {
@@ -625,5 +682,59 @@ mod tests {
         let d1 = NonZeroDuration::new(Duration::from_millis(100)).unwrap();
         let d2 = NonZeroDuration::new(Duration::from_millis(200)).unwrap();
         assert!(d1 < d2);
+    }
+
+    #[test]
+    fn test_participant_constructors() {
+        assert_eq!(Participant::new(0).get(), 0);
+        assert_eq!(Participant::new(42).get(), 42);
+        assert_eq!(Participant::from_usize(0).get(), 0);
+        assert_eq!(Participant::from_usize(42).get(), 42);
+        assert_eq!(Participant::from_usize(u32::MAX as usize).get(), u32::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "participant index exceeds u32::MAX")]
+    fn test_participant_from_usize_overflow() {
+        Participant::from_usize((u32::MAX as usize) + 1);
+    }
+
+    #[test]
+    fn test_participant_display() {
+        assert_eq!(format!("{}", Participant::new(0)), "0");
+        assert_eq!(format!("{}", Participant::new(42)), "42");
+        assert_eq!(format!("{}", Participant::new(1000)), "1000");
+    }
+
+    #[test]
+    fn test_participant_ordering() {
+        assert!(Participant::new(0) < Participant::new(1));
+        assert!(Participant::new(5) < Participant::new(10));
+        assert!(Participant::new(10) > Participant::new(5));
+        assert_eq!(Participant::new(42), Participant::new(42));
+    }
+
+    #[test]
+    fn test_participant_encode_decode() {
+        use commonware_codec::{DecodeExt, Encode};
+
+        let cases = vec![0u32, 1, 127, 128, 255, 256, u32::MAX];
+        for value in cases {
+            let participant = Participant::new(value);
+            let encoded = participant.encode();
+            assert_eq!(encoded.len(), participant.encode_size());
+            let decoded = Participant::decode(encoded).unwrap();
+            assert_eq!(participant, decoded);
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Participant>,
+        }
     }
 }
