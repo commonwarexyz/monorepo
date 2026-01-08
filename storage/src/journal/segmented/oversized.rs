@@ -2424,9 +2424,20 @@ mod tests {
     fn test_recovery_entry_with_overflow_offset() {
         // Tests that an entry with offset near u64::MAX that would overflow
         // when added to size is detected as invalid during recovery.
+        // This tests semantic validation, not just integrity - the page CRC is valid
+        // but the entry's value_offset + value_size would overflow.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            // Use page size = entry size so one entry per page
+            let cfg = Config {
+                index_partition: "test_index".to_string(),
+                value_partition: "test_values".to_string(),
+                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                compression: None,
+                codec_config: (),
+            };
 
             // Create and populate with valid entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2443,25 +2454,38 @@ mod tests {
             oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Corrupt the index entry to have offset near u64::MAX
-            // Entry format: id (8) + value_offset (8) + value_size (4) + CRC32 (4) = 24 bytes
+            // Build a corrupted entry with offset near u64::MAX that would overflow.
+            // We need to write a valid page (with correct page-level CRC) containing
+            // the semantically-invalid entry data.
             let (blob, _) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
 
-            // Write a corrupted entry with offset = u64::MAX - 10 and size = 100
-            // This would overflow when computing offset + size
-            let mut corrupted_entry = Vec::new();
-            1u64.write(&mut corrupted_entry); // id
-            (u64::MAX - 10).write(&mut corrupted_entry); // value_offset (near max)
-            100u32.write(&mut corrupted_entry); // value_size
-            let checksum = crc32fast::hash(&corrupted_entry);
-            corrupted_entry.put_u32(checksum);
+            // Build entry data: id (8) + value_offset (8) + value_size (4) = 20 bytes
+            let mut entry_data = Vec::new();
+            1u64.write(&mut entry_data); // id
+            (u64::MAX - 10).write(&mut entry_data); // value_offset (near max)
+            100u32.write(&mut entry_data); // value_size (offset + size overflows)
+            assert_eq!(entry_data.len(), TestEntry::SIZE);
 
-            blob.write_at(corrupted_entry, 0)
+            // Build page-level CRC record (12 bytes):
+            // len1 (2) + crc1 (4) + len2 (2) + crc2 (4)
+            let crc = crc32fast::hash(&entry_data);
+            let len1 = TestEntry::SIZE as u16;
+            let mut crc_record = Vec::new();
+            crc_record.extend_from_slice(&len1.to_be_bytes()); // len1
+            crc_record.extend_from_slice(&crc.to_be_bytes()); // crc1
+            crc_record.extend_from_slice(&0u16.to_be_bytes()); // len2 (unused)
+            crc_record.extend_from_slice(&0u32.to_be_bytes()); // crc2 (unused)
+            assert_eq!(crc_record.len(), 12);
+
+            // Write the complete physical page: entry_data + crc_record
+            let mut page = entry_data;
+            page.extend_from_slice(&crc_record);
+            blob.write_at(page, 0)
                 .await
-                .expect("Failed to write corrupted entry");
+                .expect("Failed to write corrupted page");
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
