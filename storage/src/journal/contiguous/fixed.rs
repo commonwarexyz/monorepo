@@ -1634,8 +1634,6 @@ mod tests {
         });
     }
 
-    // ===== Sync initialization tests =====
-
     /// Test `init_sync` when there is no existing data on disk.
     #[test_traced]
     fn test_init_sync_no_existing_data() {

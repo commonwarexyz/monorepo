@@ -5,7 +5,11 @@ pub(crate) mod impls;
 #[cfg(test)]
 pub(crate) mod tests;
 
-use crate::mmr::journaled::Config as MmrConfig;
+use crate::{
+    mmr::journaled::Config as MmrConfig,
+    qmdb::any::{FixedConfig, VariableConfig},
+    translator::Translator,
+};
 use commonware_runtime::Metrics;
 
 /// Database configurations that support sync operations.
@@ -16,6 +20,32 @@ use commonware_runtime::Metrics;
 pub trait Config: Clone {
     /// Extract the MMR configuration for sync initialization.
     fn mmr_config(&self) -> MmrConfig;
+}
+
+impl<T: Translator + Clone> Config for FixedConfig<T> {
+    fn mmr_config(&self) -> MmrConfig {
+        MmrConfig {
+            journal_partition: self.mmr_journal_partition.clone(),
+            metadata_partition: self.mmr_metadata_partition.clone(),
+            items_per_blob: self.mmr_items_per_blob,
+            write_buffer: self.mmr_write_buffer,
+            thread_pool: self.thread_pool.clone(),
+            buffer_pool: self.buffer_pool.clone(),
+        }
+    }
+}
+
+impl<T: Translator + Clone, C: Clone> Config for VariableConfig<T, C> {
+    fn mmr_config(&self) -> MmrConfig {
+        MmrConfig {
+            journal_partition: self.mmr_journal_partition.clone(),
+            metadata_partition: self.mmr_metadata_partition.clone(),
+            items_per_blob: self.mmr_items_per_blob,
+            write_buffer: self.mmr_write_buffer,
+            thread_pool: self.thread_pool.clone(),
+            buffer_pool: self.buffer_pool.clone(),
+        }
+    }
 }
 
 /// Indexes that can be constructed during sync operations.

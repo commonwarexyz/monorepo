@@ -148,32 +148,6 @@ pub(crate) async fn init_fixed_authenticated_log<
     Ok(log)
 }
 
-impl<T: Translator + Clone> sync::Config for FixedConfig<T> {
-    fn mmr_config(&self) -> MmrConfig {
-        MmrConfig {
-            journal_partition: self.mmr_journal_partition.clone(),
-            metadata_partition: self.mmr_metadata_partition.clone(),
-            items_per_blob: self.mmr_items_per_blob,
-            write_buffer: self.mmr_write_buffer,
-            thread_pool: self.thread_pool.clone(),
-            buffer_pool: self.buffer_pool.clone(),
-        }
-    }
-}
-
-impl<T: Translator + Clone, C: Clone> sync::Config for VariableConfig<T, C> {
-    fn mmr_config(&self) -> MmrConfig {
-        MmrConfig {
-            journal_partition: self.mmr_journal_partition.clone(),
-            metadata_partition: self.mmr_metadata_partition.clone(),
-            items_per_blob: self.mmr_items_per_blob,
-            write_buffer: self.mmr_write_buffer,
-            thread_pool: self.thread_pool.clone(),
-            buffer_pool: self.buffer_pool.clone(),
-        }
-    }
-}
-
 #[cfg(test)]
 // pub(crate) so qmdb/current can use the generic tests.
 pub(crate) mod test {
