@@ -2,13 +2,16 @@ use criterion::criterion_main;
 
 mod aggregate_verify_same_message;
 mod aggregate_verify_same_signer;
+mod batch_to_affine;
 mod batch_verify_same_message;
 mod batch_verify_same_signer;
 mod combine_public_keys;
 mod combine_signatures;
 mod dkg;
 mod evaluate_point;
-mod msm_components;
+mod msm;
+mod msm_affine;
+mod pairing_verify;
 mod scheme_batch_verify_same_message;
 mod scheme_batch_verify_same_signer;
 mod signature_generation;
@@ -18,6 +21,7 @@ mod threshold_batch_verify_same_message_precomputed;
 mod threshold_recover;
 mod tle_decrypt;
 mod tle_encrypt;
+mod verify_same_message_msm;
 
 criterion_main!(
     dkg::benches,
@@ -37,5 +41,9 @@ criterion_main!(
     threshold_batch_verify_same_message_precomputed::benches,
     tle_encrypt::benches,
     tle_decrypt::benches,
-    msm_components::benches,
+    batch_to_affine::benches,
+    msm::benches,
+    msm_affine::benches,
+    pairing_verify::benches,
+    verify_same_message_msm::benches,
 );
