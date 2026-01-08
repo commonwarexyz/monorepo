@@ -40,7 +40,7 @@
 //! assert!(proof.verify_element_inclusion(&mut hasher, &digests[1], 1, &root).is_ok());
 //! ```
 
-use alloc::collections::{btree_map::BTreeMap, btree_set::BTreeSet};
+use alloc::collections::btree_set::BTreeSet;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
@@ -726,75 +726,92 @@ impl<D: Digest> Proof<D> {
             return Err(Error::NoLeaves);
         }
 
-        // Get required sibling positions (validates positions and checks for duplicates)
-        let sibling_positions = siblings_required_for_multi_proof(
-            self.leaf_count,
-            elements.iter().map(|(_, pos)| *pos),
-        )?;
-
-        // Verify we have the exact number of siblings needed
-        if sibling_positions.len() != self.siblings.len() {
-            return Err(Error::UnalignedProof);
-        }
-
-        // Group siblings by level for efficient per-level access.
-        let levels_count = levels_in_tree(self.leaf_count);
-        let mut siblings_by_level: Vec<BTreeMap<usize, H::Digest>> =
-            (0..levels_count).map(|_| BTreeMap::new()).collect();
-        for (&(level, index), digest) in sibling_positions.iter().zip(self.siblings.iter()) {
-            siblings_by_level[level].insert(index, *digest);
-        }
-
-        // Compute position-hashed leaf digests to build initial level.
-        // Position bounds and duplicates were already validated by siblings_required_for_multi_proof.
-        let mut current: BTreeMap<usize, H::Digest> = BTreeMap::new();
+        // 1. Initialize current level nodes (sorted by position)
+        let mut current: Vec<(u32, D)> = Vec::with_capacity(elements.len());
         for (leaf, position) in elements {
+            if *position >= self.leaf_count {
+                return Err(Error::InvalidPosition(*position));
+            }
             hasher.update(&position.to_be_bytes());
             hasher.update(leaf);
-            current.insert(*position as usize, hasher.finalize());
+            current.push((*position, hasher.finalize()));
         }
 
-        // Compute tree level by level.
-        // IMPORTANT: We only check parents of nodes we have, not all possible parents.
-        // This ensures O(elements * levels) complexity instead of O(leaf_count * levels),
-        // preventing DoS attacks with maliciously large leaf_count values.
-        let mut level_size = self.leaf_count as usize;
-        for siblings in siblings_by_level.iter().take(levels_count - 1) {
-            // Add siblings for this level
-            current.extend(siblings.iter().map(|(&k, &v)| (k, v)));
+        // Sort by position to enable linear processing
+        current.sort_unstable_by(|(p1, _), (p2, _)| p1.cmp(p2));
 
-            // Compute unique parent indices from current level nodes
-            let candidate_parents: BTreeSet<usize> = current.keys().map(|idx| idx / 2).collect();
+        // Check for duplicates
+        for i in 1..current.len() {
+            if current[i].0 == current[i - 1].0 {
+                return Err(Error::DuplicatePosition(current[i].0));
+            }
+        }
 
-            // Compute parent digests
-            let mut next: BTreeMap<usize, H::Digest> = BTreeMap::new();
-            for parent_idx in candidate_parents {
-                let left_child_idx = parent_idx * 2;
-                let right_child_idx = parent_idx * 2 + 1;
+        // 2. Iterate up the tree
+        let levels = levels_in_tree(self.leaf_count);
+        let mut level_size = self.leaf_count;
+        let mut sibling_iter = self.siblings.iter();
+        let mut next_level = Vec::with_capacity(current.len() / 2 + 1);
 
-                let left_digest = current.get(&left_child_idx);
-                let right_digest = if right_child_idx < level_size {
-                    current.get(&right_child_idx)
+        for _ in 0..levels - 1 {
+            let mut i = 0;
+            while i < current.len() {
+                let (pos, digest) = current[i];
+                let parent_pos = pos / 2;
+
+                // Determine if we have the left or right child
+                let (left, right) = if pos % 2 == 0 {
+                    // We are the LEFT child
+                    let left = digest;
+
+                    // Check if we have the right child in our current set
+                    let right = if i + 1 < current.len() && current[i + 1].0 == pos + 1 {
+                        i += 2; // Consume both
+                        current[i - 1].1
+                    } else {
+                        i += 1; // Consume left
+
+                        // If no right child exists in tree, duplicate left
+                        if pos + 1 >= level_size {
+                            left
+                        } else {
+                            // Otherwise, must consume a sibling
+                            *sibling_iter.next().ok_or(Error::UnalignedProof)?
+                        }
+                    };
+                    (left, right)
                 } else {
-                    // Odd-sized level: duplicate left child
-                    left_digest
+                    // We are the RIGHT child
+                    // This implies the LEFT child was missing from 'current', so it must be a sibling.
+                    i += 1;
+                    let right = digest;
+                    let left = *sibling_iter.next().ok_or(Error::UnalignedProof)?;
+                    (left, right)
                 };
 
-                if let (Some(left), Some(right)) = (left_digest, right_digest) {
-                    hasher.update(left);
-                    hasher.update(right);
-                    next.insert(parent_idx, hasher.finalize());
-                }
+                // Hash parent
+                hasher.update(&left);
+                hasher.update(&right);
+                next_level.push((parent_pos, hasher.finalize()));
             }
 
-            current = next;
+            // Prepare for next level
+            current.clear();
+            current.append(&mut next_level);
             level_size = level_size.div_ceil(2);
         }
 
-        // Get the computed root (should be at index 0)
-        let computed = current.get(&0).ok_or(Error::UnalignedProof)?;
+        // 3. Verify root
+        if sibling_iter.next().is_some() {
+            return Err(Error::UnalignedProof);
+        }
 
-        if computed == root {
+        if current.len() != 1 {
+            return Err(Error::UnalignedProof);
+        }
+
+        let computed = current[0].1;
+        if computed == *root {
             Ok(())
         } else {
             Err(Error::InvalidProof(computed.to_string(), root.to_string()))
