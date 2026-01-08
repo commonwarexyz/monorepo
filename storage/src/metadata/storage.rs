@@ -1,9 +1,9 @@
 use super::{Config, Error};
-use crate::{crc32, Crc32};
 use bytes::BufMut;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Blob, Clock, Error as RError, Metrics, Storage,
+    crc32, telemetry::metrics::status::GaugeExt, Blob, Clock, Crc32, Error as RError, Metrics,
+    Storage,
 };
 use commonware_utils::Span;
 use futures::future::try_join_all;

@@ -1,14 +1,13 @@
 use super::{Config, Error, Identifier};
 use crate::{
-    crc32,
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
-    kv, Crc32, Persistable,
+    kv, Persistable,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
-use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
+use commonware_runtime::{buffer, crc32, Blob, Clock, Crc32, Metrics, Storage};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;

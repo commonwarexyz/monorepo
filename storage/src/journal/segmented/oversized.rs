@@ -443,7 +443,7 @@ mod tests {
     use bytes::{Buf, BufMut};
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
+    use commonware_runtime::{buffer::PoolRef, crc32, deterministic, Blob as _, Crc32, Runner};
     use commonware_utils::{NZUsize, NZU16};
 
     /// Convert offset + size to byte end position (for truncation tests).
@@ -493,7 +493,7 @@ mod tests {
     }
 
     impl FixedSize for TestEntry {
-        const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
+        const SIZE: usize = u64::SIZE + u64::SIZE + crc32::SIZE;
     }
 
     impl Record for TestEntry {
@@ -2487,7 +2487,7 @@ mod tests {
 
             // Build page-level CRC record (12 bytes):
             // len1 (2) + crc1 (4) + len2 (2) + crc2 (4)
-            let crc = crc32fast::hash(&entry_data);
+            let crc = Crc32::checksum(&entry_data);
             let len1 = TestEntry::SIZE as u16;
             let mut crc_record = Vec::new();
             crc_record.extend_from_slice(&len1.to_be_bytes()); // len1

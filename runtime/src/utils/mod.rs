@@ -14,6 +14,8 @@ use std::{
 };
 
 pub mod buffer;
+pub mod crc32;
+pub use crc32::Crc32;
 pub mod signal;
 
 mod handle;

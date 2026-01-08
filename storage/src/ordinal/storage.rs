@@ -1,10 +1,10 @@
 use super::{Config, Error};
-use crate::{crc32, kv, rmap::RMap, Crc32, Persistable};
+use crate::{kv, rmap::RMap, Persistable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
-    Blob, Clock, Error as RError, Metrics, Storage,
+    crc32, Blob, Clock, Crc32, Error as RError, Metrics, Storage,
 };
 use commonware_utils::{bitmap::BitMap, hex};
 use futures::future::try_join_all;

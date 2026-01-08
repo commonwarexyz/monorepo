@@ -16,8 +16,6 @@ pub mod mmr;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        pub mod crc32;
-        pub use crc32::Crc32;
         pub mod qmdb;
         pub mod archive;
         mod bitmap;
