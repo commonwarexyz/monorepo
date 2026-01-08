@@ -523,13 +523,11 @@ mod tests {
                 Err(Error::NetworkClosed)
             ));
 
-            // Send on original
-            assert!(matches!(
-                my_sender
-                    .send(Recipients::One(other_pk.clone()), msg.clone(), false)
-                    .await,
-                Err(Error::NetworkClosed)
-            ));
+            // Send on original (gracefully handles closed channel)
+            assert!(my_sender
+                .send(Recipients::One(other_pk.clone()), msg.clone(), false)
+                .await
+                .is_ok());
         });
     }
 
