@@ -1,4 +1,4 @@
-use commonware_cryptography::BloomFilter;
+use commonware_cryptography::{sha256::Sha256, BloomFilter};
 use commonware_utils::{NZUsize, NZU8};
 use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -14,7 +14,7 @@ fn benchmark_insert(c: &mut Criterion) {
 
     for &bits in &filter_bits {
         for &k in &hashers {
-            let mut bf = BloomFilter::new(NZU8!(k), NZUsize!(bits));
+            let mut bf = BloomFilter::<Sha256>::new(NZU8!(k), NZUsize!(bits));
 
             let mut item = vec![0u8; item_size];
             rng.fill_bytes(&mut item);

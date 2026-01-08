@@ -1,9 +1,6 @@
 //! An implementation of a [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 
-use crate::{
-    sha256::{Digest, Sha256},
-    Hasher,
-};
+use crate::{sha256::Sha256, Hasher};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     codec::{Read, Write},
@@ -11,25 +8,56 @@ use commonware_codec::{
     EncodeSize, FixedSize,
 };
 use commonware_utils::bitmap::BitMap;
-use core::num::{NonZeroU64, NonZeroU8, NonZeroUsize};
-
-/// The length of a [Digest] in bytes.
-const DIGEST_LEN: usize = Digest::SIZE;
+use core::{
+    marker::PhantomData,
+    num::{NonZeroU64, NonZeroU8, NonZeroUsize},
+};
 
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///
 /// This implementation uses the Kirsch-Mitzenmacher optimization to derive `k` hash functions
-/// from two hash values, which are in turn derived from a single [Digest]. This provides
+/// from two hash values, which are in turn derived from a single hash digest. This provides
 /// efficient hashing for [BloomFilter::insert] and [BloomFilter::contains] operations.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BloomFilter {
+///
+/// # Hasher Selection
+///
+/// The `H` type parameter specifies the hash function to use. It defaults to [Sha256].
+/// The hasher's digest must be at least 16 bytes (128 bits) long, this is enforced at
+/// compile time.
+///
+/// When choosing a hasher, consider:
+///
+/// - **Security**: If the bloom filter accepts untrusted input, use a cryptographically
+///   secure hash function to prevent attackers from crafting inputs that cause excessive
+///   collisions (degrading the filter to always return `true`).
+///
+/// - **Determinism**: If the bloom filter must produce consistent results across runs
+///   or machines (e.g. for serialization or consensus-critical applications), avoid keyed
+///   or randomized hash functions. Both [Sha256] and [Blake3](crate::blake3::Blake3)
+///   are deterministic.
+///
+/// - **Performance**: Hash function performance varies with the size of items inserted
+///   and queried. [Sha256] is faster for smaller items (up to ~2KB), while
+///   [Blake3](crate::blake3::Blake3) is faster for larger items (4KB+).
+#[derive(Clone, Debug)]
+pub struct BloomFilter<H: Hasher = Sha256> {
     hashers: u8,
     bits: BitMap,
+    _marker: PhantomData<H>,
 }
 
-impl BloomFilter {
+impl<H: Hasher> PartialEq for BloomFilter<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.hashers == other.hashers && self.bits == other.bits
+    }
+}
+
+impl<H: Hasher> Eq for BloomFilter<H> {}
+
+impl<H: Hasher> BloomFilter<H> {
+    /// Compile-time assertion that the digest is at least 16 bytes.
     const _ASSERT_DIGEST_AT_LEAST_16_BYTES: () = assert!(
-        DIGEST_LEN >= 16,
+        <H::Digest as FixedSize>::SIZE >= 16,
         "digest must be at least 128 bits (16 bytes)"
     );
 
@@ -41,6 +69,7 @@ impl BloomFilter {
         Self {
             hashers: hashers.get(),
             bits: BitMap::zeroes(bits as u64),
+            _marker: PhantomData,
         }
     }
 
@@ -57,6 +86,7 @@ impl BloomFilter {
         Self {
             hashers,
             bits: BitMap::zeroes(bits as u64),
+            _marker: PhantomData,
         }
     }
 
@@ -65,8 +95,8 @@ impl BloomFilter {
         #[allow(path_statements)]
         Self::_ASSERT_DIGEST_AT_LEAST_16_BYTES;
 
-        // Extract two 64-bit hash values from the Sha256 digest of the item
-        let digest = Sha256::hash(item);
+        // Extract two 64-bit hash values from the digest of the item
+        let digest = H::hash(item);
         let h1 = u64::from_be_bytes(digest[0..8].try_into().unwrap());
         let mut h2 = u64::from_be_bytes(digest[8..16].try_into().unwrap());
         h2 |= 1; // make sure h2 is non-zero
@@ -152,14 +182,14 @@ impl BloomFilter {
     }
 }
 
-impl Write for BloomFilter {
+impl<H: Hasher> Write for BloomFilter<H> {
     fn write(&self, buf: &mut impl BufMut) {
         self.hashers.write(buf);
         self.bits.write(buf);
     }
 }
 
-impl Read for BloomFilter {
+impl<H: Hasher> Read for BloomFilter<H> {
     // The number of hashers and the number of bits that the bitmap must have.
     type Cfg = (NonZeroU8, NonZeroU64);
 
@@ -181,18 +211,22 @@ impl Read for BloomFilter {
                 "bitmap length doesn't match config",
             ));
         }
-        Ok(Self { hashers, bits })
+        Ok(Self {
+            hashers,
+            bits,
+            _marker: PhantomData,
+        })
     }
 }
 
-impl EncodeSize for BloomFilter {
+impl<H: Hasher> EncodeSize for BloomFilter<H> {
     fn encode_size(&self) -> usize {
         self.hashers.encode_size() + self.bits.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for BloomFilter {
+impl<H: Hasher> arbitrary::Arbitrary<'_> for BloomFilter<H> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         // Ensure at least 1 hasher
         let hashers = u8::arbitrary(u)?.max(1);
@@ -202,7 +236,11 @@ impl arbitrary::Arbitrary<'_> for BloomFilter {
         for _ in 0..bits_len {
             bits.push(u.arbitrary::<bool>()?);
         }
-        Ok(Self { hashers, bits })
+        Ok(Self {
+            hashers,
+            bits,
+            _marker: PhantomData,
+        })
     }
 }
 
@@ -214,7 +252,7 @@ mod tests {
 
     #[test]
     fn test_insert_and_contains() {
-        let mut bf = BloomFilter::new(NZU8!(10), NZUsize!(1000));
+        let mut bf = BloomFilter::<Sha256>::new(NZU8!(10), NZUsize!(1000));
         let item1 = b"hello";
         let item2 = b"world";
         let item3 = b"bloomfilter";
@@ -229,13 +267,13 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        let bf = BloomFilter::new(NZU8!(5), NZUsize!(100));
+        let bf = BloomFilter::<Sha256>::new(NZU8!(5), NZUsize!(100));
         assert!(!bf.contains(b"anything"));
     }
 
     #[test]
     fn test_false_positives() {
-        let mut bf = BloomFilter::new(NZU8!(10), NZUsize!(100));
+        let mut bf = BloomFilter::<Sha256>::new(NZU8!(10), NZUsize!(100));
         for i in 0..10usize {
             bf.insert(&i.to_be_bytes());
         }
@@ -261,36 +299,36 @@ mod tests {
 
     #[test]
     fn test_codec_roundtrip() {
-        let mut bf = BloomFilter::new(NZU8!(5), NZUsize!(128));
+        let mut bf = BloomFilter::<Sha256>::new(NZU8!(5), NZUsize!(128));
         bf.insert(b"test1");
         bf.insert(b"test2");
 
         let cfg = (NZU8!(5), NZU64!(128));
 
         let encoded = bf.encode();
-        let decoded = BloomFilter::decode_cfg(encoded, &cfg).unwrap();
+        let decoded = BloomFilter::<Sha256>::decode_cfg(encoded, &cfg).unwrap();
 
         assert_eq!(bf, decoded);
     }
 
     #[test]
     fn test_codec_empty() {
-        let bf = BloomFilter::new(NZU8!(4), NZUsize!(128));
+        let bf = BloomFilter::<Sha256>::new(NZU8!(4), NZUsize!(128));
         let cfg = (NZU8!(4), NZU64!(128));
         let encoded = bf.encode();
-        let decoded = BloomFilter::decode_cfg(encoded, &cfg).unwrap();
+        let decoded = BloomFilter::<Sha256>::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(bf, decoded);
     }
 
     #[test]
     fn test_codec_with_invalid_hashers() {
-        let mut bf = BloomFilter::new(NZU8!(5), NZUsize!(128));
+        let mut bf = BloomFilter::<Sha256>::new(NZU8!(5), NZUsize!(128));
         bf.insert(b"test1");
         let encoded = bf.encode();
 
         // Too large
         let cfg = (NZU8!(10), NZU64!(128));
-        let decoded = BloomFilter::decode_cfg(encoded.clone(), &cfg);
+        let decoded = BloomFilter::<Sha256>::decode_cfg(encoded.clone(), &cfg);
         assert!(matches!(
             decoded,
             Err(CodecError::Invalid(
@@ -301,7 +339,7 @@ mod tests {
 
         // Too small
         let cfg = (NZU8!(4), NZU64!(128));
-        let decoded = BloomFilter::decode_cfg(encoded, &cfg);
+        let decoded = BloomFilter::<Sha256>::decode_cfg(encoded, &cfg);
         assert!(matches!(
             decoded,
             Err(CodecError::Invalid(
@@ -313,17 +351,17 @@ mod tests {
 
     #[test]
     fn test_codec_with_invalid_bits() {
-        let mut bf = BloomFilter::new(NZU8!(5), NZUsize!(128));
+        let mut bf = BloomFilter::<Sha256>::new(NZU8!(5), NZUsize!(128));
         bf.insert(b"test1");
         let encoded = bf.encode();
 
         // Wrong bit count
         let cfg = (NZU8!(5), NZU64!(64));
-        let result = BloomFilter::decode_cfg(encoded.clone(), &cfg);
+        let result = BloomFilter::<Sha256>::decode_cfg(encoded.clone(), &cfg);
         assert!(matches!(result, Err(CodecError::InvalidLength(128))));
 
         let cfg = (NZU8!(5), NZU64!(256));
-        let result = BloomFilter::decode_cfg(encoded, &cfg);
+        let result = BloomFilter::<Sha256>::decode_cfg(encoded, &cfg);
         assert!(matches!(
             result,
             Err(CodecError::Invalid(
@@ -335,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_statistics() {
-        let mut bf = BloomFilter::new(NZU8!(7), NZUsize!(1024));
+        let mut bf = BloomFilter::<Sha256>::new(NZU8!(7), NZUsize!(1024));
 
         // Empty filter should have 0 estimated count and FP rate
         assert_eq!(bf.estimated_count(), 0.0);
@@ -358,7 +396,7 @@ mod tests {
     #[test]
     fn test_with_rate() {
         // Create a filter for 1000 items with 1% false positive rate
-        let mut bf = BloomFilter::with_rate(1000, 0.01);
+        let mut bf = BloomFilter::<Sha256>::with_rate(1000, 0.01);
 
         // Insert 1000 items
         for i in 0..1000usize {
@@ -386,15 +424,15 @@ mod tests {
     #[test]
     fn test_optimal_hashers() {
         // For 1000 items in 10000 bits, optimal k = (10000/1000) * ln(2) = 6.93 -> 7
-        let k = BloomFilter::optimal_hashers(1000, 10000);
+        let k = BloomFilter::<Sha256>::optimal_hashers(1000, 10000);
         assert_eq!(k, 7);
 
         // For 100 items in 1000 bits, optimal k = (1000/100) * ln(2) = 6.93 -> 7
-        let k = BloomFilter::optimal_hashers(100, 1000);
+        let k = BloomFilter::<Sha256>::optimal_hashers(100, 1000);
         assert_eq!(k, 7);
 
         // Edge case: very few bits per item
-        let k = BloomFilter::optimal_hashers(1000, 100);
+        let k = BloomFilter::<Sha256>::optimal_hashers(1000, 100);
         assert!(k >= 1);
     }
 
@@ -403,14 +441,14 @@ mod tests {
         // For 1000 items with 1% FP rate
         // Formula: m = -n * ln(p) / (ln(2))^2 = -1000 * ln(0.01) / 0.4804 = 9585
         // Rounded to next power of 2 = 16384
-        let bits = BloomFilter::optimal_bits(1000, 0.01);
+        let bits = BloomFilter::<Sha256>::optimal_bits(1000, 0.01);
         assert_eq!(bits, 16384);
         assert!(bits.is_power_of_two());
 
         // For 10000 items with 0.001% FP rate (need significantly more bits)
         // Formula: m = -10000 * ln(0.00001) / 0.4804 = 239627
         // Rounded to next power of 2 = 262144
-        let bits_lower_fp = BloomFilter::optimal_bits(10000, 0.00001);
+        let bits_lower_fp = BloomFilter::<Sha256>::optimal_bits(10000, 0.00001);
         assert_eq!(bits_lower_fp, 262144);
         assert!(bits_lower_fp.is_power_of_two());
     }

@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, Encode, EncodeSize};
-use commonware_cryptography::BloomFilter;
+use commonware_cryptography::{sha256::Sha256, BloomFilter};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashSet,
@@ -41,7 +41,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 fn fuzz(input: FuzzInput) {
     let cfg = (input.hashers, input.bits.into());
-    let mut bf = BloomFilter::new(input.hashers, input.bits.into());
+    let mut bf = BloomFilter::<Sha256>::new(input.hashers, input.bits.into());
     let mut model: HashSet<Vec<u8>> = HashSet::new();
 
     for op in input.ops {
@@ -58,11 +58,11 @@ fn fuzz(input: FuzzInput) {
             }
             Op::DecodeCfg(data, hashers, bits) => {
                 let cfg = (hashers, bits.into());
-                _ = BloomFilter::decode_cfg(&data[..], &cfg);
+                _ = BloomFilter::<Sha256>::decode_cfg(&data[..], &cfg);
             }
             Op::Encode(_item) => {
                 let encoded = bf.encode();
-                let decoded = BloomFilter::decode_cfg(encoded.clone(), &cfg).unwrap();
+                let decoded = BloomFilter::<Sha256>::decode_cfg(encoded.clone(), &cfg).unwrap();
                 assert_eq!(bf, decoded);
 
                 let encode_size = bf.encode_size();
@@ -80,7 +80,7 @@ fn fuzz(input: FuzzInput) {
                     "encode_size should match encode().len()"
                 );
 
-                let decoded = BloomFilter::decode_cfg(encoded, &cfg).unwrap();
+                let decoded = BloomFilter::<Sha256>::decode_cfg(encoded, &cfg).unwrap();
                 assert_eq!(bf, decoded);
 
                 assert_eq!(decoded.encode_size(), size1);
