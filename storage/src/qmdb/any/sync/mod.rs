@@ -15,7 +15,7 @@ use std::future::Future;
 /// Both `FixedConfig` and `VariableConfig` implement this trait,
 /// allowing the sync implementation to extract common configuration
 /// without knowing the specific config type.
-pub trait SyncConfig: Clone {
+pub trait Config: Clone {
     /// Extract the MMR configuration for sync initialization.
     fn mmr_config(&self) -> MmrConfig;
 }
@@ -24,7 +24,7 @@ pub trait SyncConfig: Clone {
 ///
 /// Both `ordered::Index` and `unordered::Index` have the same
 /// constructor signature: `fn new(ctx: impl Metrics, translator: T)`
-pub trait SyncIndex: Sized {
+pub trait Index: Sized {
     type Translator: crate::translator::Translator + Clone;
     /// Create a new index for use during sync.
     fn new(ctx: impl Metrics, translator: Self::Translator) -> Self;

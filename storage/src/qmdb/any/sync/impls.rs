@@ -1,4 +1,4 @@
-use super::{Reconstructable, SyncConfig, SyncIndex};
+use super::{Config, Index, Reconstructable};
 use crate::{
     journal::{
         authenticated,
@@ -22,11 +22,11 @@ impl<E, O, I, H, U> qmdb::sync::Database
 where
     E: Storage + Clock + Metrics,
     O: CodecFixed<Cfg = ()> + Send + Sync + 'static,
-    I: SyncIndex,
+    I: Index,
     H: Hasher,
     U: Send + Sync + 'static,
     Self: Reconstructable<E, fixed::Journal<E, O>, H, Index = I>,
-    FixedConfig<I::Translator>: SyncConfig,
+    FixedConfig<I::Translator>: Config,
 {
     type Context = E;
     type Op = O;
@@ -119,11 +119,11 @@ where
     E: Storage + Clock + Metrics,
     O: Codec + Send + Sync + 'static,
     O::Cfg: Clone + Send + Sync,
-    I: SyncIndex,
+    I: Index,
     H: Hasher,
     U: Send + Sync + 'static,
     Self: Reconstructable<E, variable::Journal<E, O>, H, Index = I>,
-    VariableConfig<I::Translator, O::Cfg>: SyncConfig,
+    VariableConfig<I::Translator, O::Cfg>: Config,
 {
     type Context = E;
     type Op = O;

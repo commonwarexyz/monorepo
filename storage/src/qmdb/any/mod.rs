@@ -148,7 +148,7 @@ pub(crate) async fn init_fixed_authenticated_log<
     Ok(log)
 }
 
-impl<T: Translator + Clone> sync::SyncConfig for FixedConfig<T> {
+impl<T: Translator + Clone> sync::Config for FixedConfig<T> {
     fn mmr_config(&self) -> MmrConfig {
         MmrConfig {
             journal_partition: self.mmr_journal_partition.clone(),
@@ -161,7 +161,7 @@ impl<T: Translator + Clone> sync::SyncConfig for FixedConfig<T> {
     }
 }
 
-impl<T: Translator + Clone, C: Clone> sync::SyncConfig for VariableConfig<T, C> {
+impl<T: Translator + Clone, C: Clone> sync::Config for VariableConfig<T, C> {
     fn mmr_config(&self) -> MmrConfig {
         MmrConfig {
             journal_partition: self.mmr_journal_partition.clone(),
