@@ -1,6 +1,6 @@
 ["commonware_storage::archive::conformance::ArchiveImmutable"]
 n_cases = 128
-hash = "1fb629cfd9c3dfacd97cf674147387b4c9c1e36a1d64568fa0f782f96589e2e9"
+hash = "8e578ed38733486716d072e565e62fe5d9ba7185ffb6e26ec7db8611c69b90b8"
 
 ["commonware_storage::archive::conformance::ArchivePrunable"]
 n_cases = 128
@@ -8,7 +8,7 @@ hash = "674e81c769c06a3965dc691b1f8c0327374f427e8a4bf67895c6ad4e566fed20"
 
 ["commonware_storage::archive::immutable::storage::conformance::CodecConformance<Record>"]
 n_cases = 65536
-hash = "9a040034af8177874f3c8be9fc5d5148fd40bf4991a62ca72708ff9c74a3f558"
+hash = "892ba87ed9fa60ee60f694f927de60c3ee7fcdddd5a04d330c7511533cc2ca8d"
 
 ["commonware_storage::archive::prunable::storage::conformance::CodecConformance<IndexEntry<U64>>"]
 n_cases = 65536
@@ -34,9 +34,13 @@ hash = "fcb0baa781f374ca04f2c967abc3c82c7b99d26239b387472de23c85aebd2790"
 n_cases = 65536
 hash = "035babcc7aa34c3d4b263924865c4da8206b226e7c372484b89e5430166068c3"
 
+["commonware_storage::cache::storage::conformance::CodecConformance<Record<u64>>"]
+n_cases = 65536
+hash = "9add8634d4f06c3fb7f6dfd80630f38013ecb20849c18accd0579d7eb2ca11d5"
+
 ["commonware_storage::freezer::storage::conformance::CodecConformance<Checkpoint>"]
 n_cases = 65536
-hash = "b0979a7998b8bde23262563837f9f42a461a69b83ca095d50da9b0f8f52f2ed0"
+hash = "2066c89982e914e02272e613a7577bd22d15f4f7ce0a03c6b2fb5d3bdaff78fd"
 
 ["commonware_storage::freezer::storage::conformance::CodecConformance<Cursor>"]
 n_cases = 65536
