@@ -1,6 +1,6 @@
 //! A trait for subscribing to values by key.
 
-use crate::Array;
+use crate::Span;
 use futures::channel::oneshot;
 use std::future::Future;
 
@@ -10,7 +10,7 @@ use std::future::Future;
 /// and subscribing to receive values when they become available.
 pub trait Subscribable: Clone + Send + 'static {
     /// The key type used to look up values.
-    type Key: Array;
+    type Key: Span;
 
     /// The type of value that can be retrieved.
     type Value: Clone + Send + 'static;
