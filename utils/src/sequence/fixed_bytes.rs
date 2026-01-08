@@ -1,3 +1,8 @@
+//! Fixed-length byte arrays with codec support.
+//!
+//! @beta("0.1.0")
+//! @lts("0.1.0")
+
 use crate::{hex, Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};

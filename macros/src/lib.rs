@@ -1,4 +1,7 @@
 //! Augment the development of primitives with procedural macros.
+//!
+//! @beta("0.1.0")
+//! @lts("0.1.0")
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",

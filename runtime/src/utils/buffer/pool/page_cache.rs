@@ -1,5 +1,8 @@
 //! A buffer pool for caching _logical_ pages of [Blob] data in memory. The buffer pool is unaware
 //! of the physical page format used by the blob, which is left to the blob implementation.
+//!
+//! @beta("0.1.0")
+//! @lts("0.1.0")
 
 use super::get_page_from_blob;
 use crate::{Blob, Error, RwLock};

@@ -110,6 +110,7 @@ function insertFooter() {
         <div class="socials">
             <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
             <a href="/benchmarks.html">Benchmarks</a>
+            <a href="/status.html">Status</a>
             <a href="/mcp.html">MCP</a>
             <a href="/hiring.html">Hiring</a>
             <a href="https://x.com/commonwarexyz">X</a>

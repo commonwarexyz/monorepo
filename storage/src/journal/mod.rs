@@ -4,6 +4,9 @@
 //! pruning, and rudimentary support for fetching individual items. A journal can be used on its own
 //! to serve as a backing store for some in-memory data structure, or as a building block for a more
 //! complex construction that prescribes some meaning to items in the log.
+//!
+//! @beta("0.1.0")
+//! @lts("0.1.0")
 
 use thiserror::Error;
 

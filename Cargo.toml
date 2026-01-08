@@ -15,6 +15,7 @@ members = [
     "parallel",
     "resolver",
     "runtime",
+    "status",
     "storage",
     "stream",
     "utils",

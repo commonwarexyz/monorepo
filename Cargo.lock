@@ -801,6 +801,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link 0.2.1",
 ]
@@ -1493,6 +1494,19 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "commonware-status"
+version = "0.0.64"
+dependencies = [
+ "chrono",
+ "clap",
+ "regex",
+ "serde",
+ "serde_json",
+ "syn",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
