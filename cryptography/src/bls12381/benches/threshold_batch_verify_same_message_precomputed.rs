@@ -6,6 +6,7 @@ use commonware_cryptography::{
     ed25519::PrivateKey,
     Signer as _,
 };
+use commonware_parallel::Sequential;
 use commonware_utils::{quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -63,8 +64,9 @@ fn benchmark_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) 
                                     _,
                                     MinSig,
                                     _,
+                                    _,
                                 >(
-                                    &mut rng, &polynomial, namespace, msg, &signatures
+                                    &mut rng, &polynomial, namespace, msg, &signatures, &Sequential,
                                 ));
                             if invalid == 0 {
                                 assert!(result.is_ok());
