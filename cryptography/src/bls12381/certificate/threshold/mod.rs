@@ -294,11 +294,11 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Assembles a certificate from a collection of attestations.
-    pub fn assemble<S, I, St>(&self, attestations: I, strategy: &St) -> Option<V::Signature>
+    pub fn assemble<S, I, T>(&self, attestations: I, strategy: &T) -> Option<V::Signature>
     where
         S: Scheme<Signature = V::Signature>,
         I: IntoIterator<Item = Attestation<S>>,
-        St: Strategy,
+        T: Strategy,
     {
         let partials: Vec<_> = attestations
             .into_iter()
@@ -339,11 +339,11 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Verifies multiple certificates in a batch.
-    pub fn verify_certificates<'a, S, R, D, I, St>(
+    pub fn verify_certificates<'a, S, R, D, I, T>(
         &self,
         rng: &mut R,
         certificates: I,
-        strategy: &St,
+        strategy: &T,
     ) -> bool
     where
         S: Scheme,
@@ -351,7 +351,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a V::Signature)>,
-        St: Strategy,
+        T: Strategy,
     {
         let mut entries: Vec<_> = Vec::new();
 
