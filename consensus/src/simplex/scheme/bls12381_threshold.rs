@@ -531,7 +531,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         rng: &mut R,
         subject: Subject<'_, D>,
         attestations: I,
-        _strategy: &impl Strategy,
+        strategy: &impl Strategy,
     ) -> Verification<Self>
     where
         R: CryptoRngCore,
@@ -559,12 +559,13 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let polynomial = self.polynomial();
         let vote_namespace = subject.namespace(namespace);
         let vote_message = subject.message();
-        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
+        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _, _>(
             rng,
             polynomial,
             vote_namespace,
             &vote_message,
             vote_partials.iter(),
+            strategy,
         ) {
             for partial in errs {
                 invalid.insert(partial.index);
@@ -572,7 +573,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         }
 
         let seed_message = seed_message_from_subject(&subject);
-        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
+        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _, _>(
             rng,
             polynomial,
             &namespace.seed,
@@ -580,6 +581,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             seed_partials
                 .iter()
                 .filter(|partial| !invalid.contains(&partial.index)),
+            strategy,
         ) {
             for partial in errs {
                 invalid.insert(partial.index);
