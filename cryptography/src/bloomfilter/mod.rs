@@ -142,6 +142,7 @@ impl<H: Hasher> BloomFilter<H> {
     /// # Panics
     ///
     /// Panics if `false_positive_rate` is not between 0.0 and 1.0 (exclusive).
+    #[cfg(feature = "std")]
     pub fn with_rate(expected_items: NonZeroUsize, false_positive_rate: f64) -> Self {
         let bits = Self::optimal_bits(expected_items.get(), false_positive_rate);
         let hashers = Self::optimal_hashers(expected_items.get(), bits);
@@ -244,6 +245,7 @@ impl<H: Hasher> BloomFilter<H> {
     /// Uses integer math with Q16.16 fixed-point for determinism. The result is clamped to
     /// [1, 16] since beyond ~10-12 hashes provides negligible improvement while increasing
     /// CPU cost.
+    #[cfg(feature = "std")]
     pub fn optimal_hashers(expected_items: usize, bits: usize) -> u8 {
         if expected_items == 0 {
             return 1;
@@ -264,6 +266,7 @@ impl<H: Hasher> BloomFilter<H> {
     /// # Panics
     ///
     /// Panics if `false_positive_rate` is not between 0.0 and 1.0 (exclusive).
+    #[cfg(feature = "std")]
     pub fn optimal_bits(expected_items: usize, false_positive_rate: f64) -> usize {
         let fp_normalized = normalize_fp_rate(false_positive_rate);
         let bpe = bpe_for_rate(fp_normalized);
