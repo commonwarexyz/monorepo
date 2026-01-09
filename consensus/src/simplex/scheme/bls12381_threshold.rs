@@ -31,6 +31,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::ordered::Set;
+use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
 use std::{
     collections::{BTreeSet, HashMap},
@@ -539,7 +540,6 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         I: IntoIterator<Item = Attestation<Self>>,
     {
         let namespace = self.namespace();
-        let mut invalid = BTreeSet::new();
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = attestations
             .into_iter()
             .map(|attestation| {
@@ -559,34 +559,48 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let polynomial = self.polynomial();
         let vote_namespace = subject.namespace(namespace);
         let vote_message = subject.message();
-        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _, _>(
-            rng,
-            polynomial,
-            vote_namespace,
-            &vote_message,
-            vote_partials.iter(),
-            strategy,
-        ) {
-            for partial in errs {
-                invalid.insert(partial.index);
-            }
-        }
-
         let seed_message = seed_message_from_subject(&subject);
-        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _, _>(
-            rng,
-            polynomial,
-            &namespace.seed,
-            &seed_message,
-            seed_partials
-                .iter()
-                .filter(|partial| !invalid.contains(&partial.index)),
-            strategy,
-        ) {
-            for partial in errs {
-                invalid.insert(partial.index);
-            }
-        }
+
+        // Generate independent RNG seeds for concurrent verification
+        let mut vote_rng_seed = [0u8; 32];
+        let mut seed_rng_seed = [0u8; 32];
+        rng.fill_bytes(&mut vote_rng_seed);
+        rng.fill_bytes(&mut seed_rng_seed);
+
+        // Verify vote and seed signatures concurrently
+        let (vote_invalid, seed_invalid) = strategy.join(
+            || {
+                let mut vote_rng = StdRng::from_seed(vote_rng_seed);
+                match threshold::batch_verify_same_message::<_, V, _, _>(
+                    &mut vote_rng,
+                    polynomial,
+                    vote_namespace,
+                    &vote_message,
+                    vote_partials.iter(),
+                    strategy,
+                ) {
+                    Ok(()) => BTreeSet::new(),
+                    Err(errs) => errs.into_iter().map(|p| p.index).collect(),
+                }
+            },
+            || {
+                let mut seed_rng = StdRng::from_seed(seed_rng_seed);
+                match threshold::batch_verify_same_message::<_, V, _, _>(
+                    &mut seed_rng,
+                    polynomial,
+                    &namespace.seed,
+                    &seed_message,
+                    seed_partials.iter(),
+                    strategy,
+                ) {
+                    Ok(()) => BTreeSet::new(),
+                    Err(errs) => errs.into_iter().map(|p| p.index).collect(),
+                }
+            },
+        );
+
+        // Merge invalid sets
+        let invalid: BTreeSet<_> = vote_invalid.union(&seed_invalid).copied().collect();
 
         let verified = vote_partials
             .into_iter()
