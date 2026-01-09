@@ -36,7 +36,7 @@ use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU32, NonZeroUsize},
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(1 << 12);
 const POOL_CAPACITY: NonZeroUsize = NZUsize!(1 << 20);
@@ -405,7 +405,7 @@ impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V
         // Persist to metadata using epoch number as key
         let epoch_key = epoch.get();
         if self.states.put(epoch_key, state.clone()).is_some() {
-            tracing::warn!(%epoch, "overwriting existing epoch state");
+            warn!(%epoch, "overwriting existing epoch state");
         }
         self.states
             .sync()
