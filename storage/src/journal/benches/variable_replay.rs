@@ -1,27 +1,23 @@
-use super::{append_variable_data, get_variable_journal};
+use crate::{append_fixed_random_data, get_variable_journal, ITEMS_PER_BLOB, ITEM_SIZE};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
     Runner as _,
 };
 use commonware_storage::journal::contiguous::variable::Journal;
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize};
 use criterion::{criterion_group, Criterion};
 use futures::{pin_mut, StreamExt};
 use std::{
     hint::black_box,
-    num::NonZeroU64,
     time::{Duration, Instant},
 };
 
 /// Partition name to use in the journal config.
 const PARTITION: &str = "variable_test_partition";
 
-/// Value of items_per_section to use in the journal config.
-const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(50_000);
-
 /// Replay all items in the given `journal`.
-async fn bench_run(journal: &Journal<Context, u64>, buffer: usize) {
+async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {
     let stream = journal
         .replay(0, NZUsize!(buffer))
         .await
@@ -48,8 +44,8 @@ fn bench_variable_replay(c: &mut Criterion) {
         // Generate a large temp journal with random data.
         let runner = Runner::new(cfg.clone());
         runner.start(|ctx| async move {
-            let mut j = get_variable_journal(ctx, PARTITION, ITEMS_PER_SECTION).await;
-            append_variable_data(&mut j, items).await;
+            let mut j = get_variable_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
+            append_fixed_random_data::<_, ITEM_SIZE>(&mut j, items).await;
             j.sync().await.unwrap();
         });
 
@@ -57,12 +53,17 @@ fn bench_variable_replay(c: &mut Criterion) {
         let runner = tokio::Runner::new(cfg.clone());
         for buffer in [16_384, 65_536, 1_048_576] {
             c.bench_function(
-                &format!("{}/items={} buffer={}", module_path!(), items, buffer,),
+                &format!(
+                    "{}/items={} buffer={} size={}",
+                    module_path!(),
+                    items,
+                    buffer,
+                    ITEM_SIZE
+                ),
                 |b| {
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let j =
-                            get_variable_journal(ctx.clone(), PARTITION, ITEMS_PER_SECTION).await;
+                        let j = get_variable_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB).await;
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
@@ -78,7 +79,7 @@ fn bench_variable_replay(c: &mut Criterion) {
         // Clean up the temp journal.
         let runner = Runner::new(cfg);
         runner.start(|context| async move {
-            let j = get_variable_journal(context, PARTITION, ITEMS_PER_SECTION).await;
+            let j = get_variable_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
             j.destroy().await.unwrap();
         });
     }
