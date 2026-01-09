@@ -276,7 +276,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location> + Send + Sync,
+        I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
         M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
@@ -299,7 +299,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location> + Send + Sync,
+        I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
     > kv::Updatable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
@@ -316,7 +316,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location> + Send + Sync,
+        I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
     > kv::Deletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
@@ -333,7 +333,7 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>>,
-    I: Index<Value = Location> + Send + Sync,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec + Send + Sync,
 {
@@ -352,7 +352,7 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location> + Send + Sync,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec + Send + Sync,
 {
@@ -371,7 +371,7 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location> + Send + Sync,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -398,7 +398,7 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location> + Send + Sync,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -425,7 +425,7 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location> + Send + Sync,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
