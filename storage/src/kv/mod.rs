@@ -6,8 +6,8 @@ use std::future::Future;
 
 /// A readable key-value store.
 pub trait Gettable {
-    type Key;
-    type Value;
+    type Key: Send + Sync;
+    type Value: Send + Sync;
     type Error;
 
     /// Get the value of a key.
@@ -24,7 +24,7 @@ pub trait Updatable: Gettable {
         &mut self,
         key: Self::Key,
         value: Self::Value,
-    ) -> impl Future<Output = Result<(), Self::Error>>;
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Updates the value associated with the given key in the store, inserting a default value if
     /// the key does not already exist.

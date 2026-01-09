@@ -1,7 +1,7 @@
 //! Types for the `commonware-reshare` example application.
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use commonware_consensus::Block as ConsensusBlock;
+use commonware_consensus::{types::Height, Block as ConsensusBlock, Heightable};
 use commonware_cryptography::{
     bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
     Committable, Digest, Digestible, Hasher, Signer,
@@ -20,7 +20,7 @@ where
     pub parent: H::Digest,
 
     /// The current height.
-    pub height: u64,
+    pub height: Height,
 
     /// An optional outcome of a dealing operation.
     pub log: Option<SignedDealerLog<V, C>>,
@@ -33,7 +33,11 @@ where
     V: Variant,
 {
     /// Create a new [Block].
-    pub const fn new(parent: H::Digest, height: u64, log: Option<SignedDealerLog<V, C>>) -> Self {
+    pub const fn new(
+        parent: H::Digest,
+        height: Height,
+        log: Option<SignedDealerLog<V, C>>,
+    ) -> Self {
         Self {
             parent,
             height,
@@ -78,7 +82,7 @@ where
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             parent: H::Digest::read(buf)?,
-            height: u64::read(buf)?,
+            height: Height::read(buf)?,
             log: Read::read_cfg(buf, cfg)?,
         })
     }
@@ -110,6 +114,17 @@ where
     }
 }
 
+impl<H, C, V> Heightable for Block<H, C, V>
+where
+    H: Hasher,
+    C: Signer,
+    V: Variant,
+{
+    fn height(&self) -> Height {
+        self.height
+    }
+}
+
 impl<H, C, V> ConsensusBlock for Block<H, C, V>
 where
     H: Hasher,
@@ -118,10 +133,6 @@ where
 {
     fn parent(&self) -> Self::Commitment {
         self.parent
-    }
-
-    fn height(&self) -> u64 {
-        self.height
     }
 }
 
@@ -132,5 +143,9 @@ where
     C: Signer,
     V: Variant,
 {
-    Block::new(<<H as Hasher>::Digest as Digest>::EMPTY, 0, None)
+    Block::new(
+        <<H as Hasher>::Digest as Digest>::EMPTY,
+        Height::zero(),
+        None,
+    )
 }

@@ -10,7 +10,7 @@ use crate::{
     mmr::{Location, Proof},
     qmdb::Error,
 };
-use commonware_codec::Codec;
+use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
 use core::future::Future;
 use std::num::NonZeroU64;
@@ -26,7 +26,7 @@ mod private {
 }
 
 /// Trait for valid store state types.
-pub trait State: private::Sealed + Sized {}
+pub trait State: private::Sealed + Sized + Send + Sync {}
 
 /// Marker type for a store in a "durable" state (no uncommitted operations).
 #[derive(Clone, Copy, Debug)]
@@ -47,8 +47,8 @@ impl private::Sealed for NonDurable {}
 impl State for NonDurable {}
 
 /// A trait for a store based on an append-only log of operations.
-pub trait LogStore {
-    type Value: Codec + Clone;
+pub trait LogStore: Send + Sync {
+    type Value: CodecShared + Clone;
 
     /// Returns true if there are no active keys in the database.
     fn is_empty(&self) -> bool;

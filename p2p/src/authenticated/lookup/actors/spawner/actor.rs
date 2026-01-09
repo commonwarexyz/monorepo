@@ -127,8 +127,12 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: Publ
                                     },
                                 );
 
-                                // Register peer with the router
-                                let channels = router.ready(peer.clone(), messenger).await;
+                                // Register peer with the router (may fail during shutdown)
+                                let Some(channels) = router.ready(peer.clone(), messenger).await else {
+                                    debug!(?peer, "router shut down during peer setup");
+                                    connections.dec();
+                                    return;
+                                };
 
                                 // Register peer with tracker
                                 tracker.connect(peer.clone(), peer_mailbox);

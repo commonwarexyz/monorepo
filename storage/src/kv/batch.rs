@@ -2,7 +2,7 @@
 
 use super::{Deletable, Gettable, Updatable};
 use crate::qmdb::Error;
-use commonware_codec::Codec;
+use commonware_codec::CodecShared;
 use commonware_utils::Array;
 use core::future::Future;
 use std::collections::BTreeMap;
@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 pub struct Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone,
-    D: Gettable<Key = K, Value = V, Error = Error>,
+    V: CodecShared + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     /// The underlying k/v store.
     db: &'a D,
@@ -30,8 +30,8 @@ where
 impl<'a, K, V, D> Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone,
-    D: Gettable<Key = K, Value = V, Error = Error>,
+    V: CodecShared + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     /// Returns a new batch of changes that may be written to the store.
     pub const fn new(db: &'a D) -> Self {
@@ -52,8 +52,8 @@ where
 impl<'a, K, V, D> Gettable for Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone,
-    D: Gettable<Key = K, Value = V, Error = Error>,
+    V: CodecShared + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     type Key = K;
     type Value = V;
@@ -73,8 +73,8 @@ where
 impl<'a, K, V, D> Updatable for Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone,
-    D: Gettable<Key = K, Value = V, Error = Error>,
+    V: CodecShared + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     /// Updates the value of `key` to `value` in the batch.
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
@@ -108,8 +108,8 @@ where
 impl<'a, K, V, D> Deletable for Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone,
-    D: Gettable<Key = K, Value = V, Error = Error>,
+    V: CodecShared + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     /// Deletes `key` from the batch.
     /// Returns true if the key was in the batch or store, false otherwise.
@@ -136,8 +136,8 @@ where
 impl<'a, K, V, D> IntoIterator for Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone,
-    D: Gettable<Key = K, Value = V, Error = Error>,
+    V: CodecShared + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     type Item = (K, Option<V>);
     type IntoIter = std::collections::btree_map::IntoIter<K, Option<V>>;
@@ -149,12 +149,13 @@ where
 
 /// A k/v store that supports making batched changes.
 pub trait Batchable:
-    Gettable<Key: Array, Value: Codec + Clone, Error = Error> + Updatable + Deletable
+    Gettable<Key: Array, Value: CodecShared + Clone, Error = Error> + Updatable + Deletable
 {
     /// Returns a new empty batch of changes.
     fn start_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>
     where
-        Self: Sized,
+        Self: Sized + Sync,
+        Self::Value: Send + Sync,
     {
         Batch {
             db: self,
@@ -165,7 +166,7 @@ pub trait Batchable:
     /// Writes a batch of changes to the store.
     fn write_batch(
         &mut self,
-        iter: impl Iterator<Item = (Self::Key, Option<Self::Value>)>,
+        iter: impl Iterator<Item = (Self::Key, Option<Self::Value>)> + Send,
     ) -> impl Future<Output = Result<(), Error>> {
         async {
             for (key, value) in iter {

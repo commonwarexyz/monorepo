@@ -21,7 +21,7 @@ use crate::{
     },
     Persistable,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -61,11 +61,12 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     async fn get_update_op(
         log: &AuthenticatedLog<E, C, H, M>,
@@ -210,6 +211,7 @@ where
     ) -> Result<impl Stream<Item = Result<(K, V::Value), Error>> + 'a, Error>
     where
         V: 'a,
+        V::Value: Send + Sync,
     {
         let start_iter = self.snapshot.get(&start);
         let mut init_pending = self.fetch_all_updates(start_iter).await?;
@@ -270,6 +272,7 @@ impl<
     > Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     /// Finds and updates the location of the previous key to `key` in the snapshot for cases where
     /// the previous key does not share the same translated key, returning an UpdateLocResult
@@ -804,20 +807,23 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
 where
-    Operation<K, V>: Codec,
+    Operation<K, V>: CodecShared,
 {
     type Key = K;
     type Value = V::Value;
     type Error = Error;
 
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(key).await
+    fn get(
+        &self,
+        key: &Self::Key,
+    ) -> impl std::future::Future<Output = Result<Option<Self::Value>, Self::Error>> {
+        self.get(key)
     }
 }
 
@@ -826,14 +832,18 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + 'static,
         H: Hasher,
     > kv::Updatable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
-    Operation<K, V>: Codec,
+    Operation<K, V>: CodecShared,
 {
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.update(key, value).await
+    fn update(
+        &mut self,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> {
+        self.update(key, value)
     }
 }
 
@@ -842,14 +852,18 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + 'static,
         H: Hasher,
     > kv::Deletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
-    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
-        self.delete(key).await
+    fn delete(
+        &mut self,
+        key: Self::Key,
+    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> {
+        self.delete(key)
     }
 }
 
@@ -897,9 +911,10 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     async fn write_batch(
         &mut self,
@@ -916,9 +931,10 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
 
@@ -935,9 +951,10 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
@@ -961,9 +978,10 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
     type Durable = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
@@ -987,9 +1005,10 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
@@ -1113,15 +1132,15 @@ mod test {
         assert_eq!(db.root(), root);
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
-        let mut db = db.into_mutable();
+        let mut mutable_db = db.into_mutable();
         for _ in 1..100 {
-            let (durable_db, _) = db.commit(None).await.unwrap();
+            let (durable_db, _) = mutable_db.commit(None).await.unwrap();
             let clean_db = durable_db.into_merkleized().await.unwrap();
             assert_eq!(clean_db.op_count() - 1, clean_db.inactivity_floor_loc());
-            db = clean_db.into_mutable();
+            mutable_db = clean_db.into_mutable();
         }
-
-        db.commit(None)
+        mutable_db
+            .commit(None)
             .await
             .unwrap()
             .0

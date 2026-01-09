@@ -42,7 +42,7 @@ pub trait Persistable {
     /// Durably persist the structure, guaranteeing the current state will survive a crash.
     ///
     /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-    fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> {
+    fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
         self.sync()
     }
 
@@ -50,11 +50,11 @@ pub trait Persistable {
     /// no recovery will be needed on startup.
     ///
     /// This provides a stronger guarantee than [Self::commit] but may be slower.
-    fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>>;
+    fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
 
     /// Destroy the structure, removing all associated storage.
     ///
     /// This method consumes the structure and deletes all persisted data, leaving behind no storage
     /// artifacts. This can be used to clean up disk resources in tests.
-    fn destroy(self) -> impl std::future::Future<Output = Result<(), Self::Error>>;
+    fn destroy(self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
 }

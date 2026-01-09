@@ -6,6 +6,8 @@
 //!   set changes, the epoch increments. Epochs provide reconfiguration boundaries for the consensus
 //!   protocol.
 //!
+//! - [`Height`]: Represents a sequential position in a chain or sequence.
+//!
 //! - [`View`]: A monotonically increasing counter within a single epoch, representing individual
 //!   consensus rounds. Views advance as the protocol progresses through proposals and votes.
 //!
@@ -13,8 +15,8 @@
 //!   Provides ordering across epoch boundaries.
 //!
 //! - [`Delta`]: A generic type representing offsets or durations for consensus types. Provides
-//!   type safety to prevent mixing epoch and view deltas. Type aliases [`EpochDelta`] and
-//!   [`ViewDelta`] are provided for convenience.
+//!   type safety to prevent mixing epoch, height, and view deltas. Type aliases [`EpochDelta`],
+//!   [`HeightDelta`], and [`ViewDelta`] are provided for convenience.
 //!
 //! - [`Epocher`]: Mechanism for determining epoch boundaries.
 //!
@@ -133,6 +135,111 @@ impl EncodeSize for Epoch {
 impl From<Epoch> for U64 {
     fn from(epoch: Epoch) -> Self {
         Self::from(epoch.get())
+    }
+}
+
+/// Represents a sequential position in a chain or sequence.
+///
+/// Height is a monotonically increasing counter.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Height(u64);
+
+impl Height {
+    /// Returns height zero.
+    pub const fn zero() -> Self {
+        Self(0)
+    }
+
+    /// Creates a new height from a u64 value.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the underlying u64 value.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Returns true if this is height zero.
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Returns the next height.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the height would overflow u64::MAX. In practice, this is extremely unlikely
+    /// to occur during normal operation.
+    pub const fn next(self) -> Self {
+        Self(self.0.checked_add(1).expect("height overflow"))
+    }
+
+    /// Returns the previous height, or `None` if this is height zero.
+    ///
+    /// Unlike `Height::next()`, this returns an Option since reaching height zero
+    /// is common, whereas overflowing u64::MAX is not expected in normal
+    /// operation.
+    pub fn previous(self) -> Option<Self> {
+        self.0.checked_sub(1).map(Self)
+    }
+
+    /// Adds a height delta, saturating at u64::MAX.
+    pub const fn saturating_add(self, delta: HeightDelta) -> Self {
+        Self(self.0.saturating_add(delta.0))
+    }
+
+    /// Subtracts a height delta, saturating at zero.
+    pub const fn saturating_sub(self, delta: HeightDelta) -> Self {
+        Self(self.0.saturating_sub(delta.0))
+    }
+
+    /// Returns the delta from `other` to `self`, or `None` if `other > self`.
+    pub fn delta_from(self, other: Self) -> Option<HeightDelta> {
+        self.0.checked_sub(other.0).map(HeightDelta::new)
+    }
+
+    /// Returns an iterator over the range [start, end).
+    ///
+    /// If start >= end, returns an empty range.
+    pub const fn range(start: Self, end: Self) -> HeightRange {
+        HeightRange {
+            inner: start.get()..end.get(),
+        }
+    }
+}
+
+impl Display for Height {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Read for Height {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
+        let value: u64 = UInt::read(buf)?.into();
+        Ok(Self(value))
+    }
+}
+
+impl Write for Height {
+    fn write(&self, buf: &mut impl BufMut) {
+        UInt(self.0).write(buf);
+    }
+}
+
+impl EncodeSize for Height {
+    fn encode_size(&self) -> usize {
+        UInt(self.0).encode_size()
+    }
+}
+
+impl From<Height> for U64 {
+    fn from(height: Height) -> Self {
+        Self::from(height.get())
     }
 }
 
@@ -281,6 +388,12 @@ impl<T> Display for Delta<T> {
 /// It is used for epoch arithmetic operations and defining epoch bounds for data retention.
 pub type EpochDelta = Delta<Epoch>;
 
+/// Type alias for height offsets and durations.
+///
+/// [`HeightDelta`] represents a distance between heights or a duration measured in heights.
+/// It is used for height arithmetic operations and defining height bounds for data retention.
+pub type HeightDelta = Delta<Height>;
+
 /// Type alias for view offsets and durations.
 ///
 /// [`ViewDelta`] represents a distance between views or a duration measured in views.
@@ -361,14 +474,14 @@ pub enum EpochPhase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EpochInfo {
     epoch: Epoch,
-    height: u64,
-    first: u64,
-    last: u64,
+    height: Height,
+    first: Height,
+    last: Height,
 }
 
 impl EpochInfo {
     /// Creates a new [`EpochInfo`].
-    pub const fn new(epoch: Epoch, height: u64, first: u64, last: u64) -> Self {
+    pub const fn new(epoch: Epoch, height: Height, first: Height, last: Height) -> Self {
         Self {
             epoch,
             height,
@@ -383,34 +496,34 @@ impl EpochInfo {
     }
 
     /// Returns the queried height.
-    pub const fn height(&self) -> u64 {
+    pub const fn height(&self) -> Height {
         self.height
     }
 
     /// Returns the first block height in this epoch.
-    pub const fn first(&self) -> u64 {
+    pub const fn first(&self) -> Height {
         self.first
     }
 
     /// Returns the last block height in this epoch.
-    pub const fn last(&self) -> u64 {
+    pub const fn last(&self) -> Height {
         self.last
     }
 
     /// Returns the length of this epoch.
-    pub const fn length(&self) -> u64 {
-        self.last - self.first + 1
+    pub const fn length(&self) -> HeightDelta {
+        HeightDelta::new(self.last.get() - self.first.get() + 1)
     }
 
     /// Returns the relative position of the queried height within this epoch.
-    pub const fn relative(&self) -> u64 {
-        self.height - self.first
+    pub const fn relative(&self) -> Height {
+        Height::new(self.height.get() - self.first.get())
     }
 
     /// Returns the phase of the queried height within this epoch.
     pub const fn phase(&self) -> EpochPhase {
-        let relative = self.relative();
-        let midpoint = self.length() / 2;
+        let relative = self.relative().get();
+        let midpoint = self.length().get() / 2;
 
         if relative < midpoint {
             EpochPhase::Early
@@ -427,17 +540,17 @@ pub trait Epocher: Clone + Send + Sync + 'static {
     /// Returns the information about an epoch containing the given block height.
     ///
     /// Returns `None` if the height is not supported.
-    fn containing(&self, height: u64) -> Option<EpochInfo>;
+    fn containing(&self, height: Height) -> Option<EpochInfo>;
 
     /// Returns the first block height in the given epoch.
     ///
     /// Returns `None` if the epoch is not supported.
-    fn first(&self, epoch: Epoch) -> Option<u64>;
+    fn first(&self, epoch: Epoch) -> Option<Height>;
 
     /// Returns the last block height in the given epoch.
     ///
     /// Returns `None` if the epoch is not supported.
-    fn last(&self, epoch: Epoch) -> Option<u64>;
+    fn last(&self, epoch: Epoch) -> Option<Height>;
 }
 
 /// Implementation of [`Epocher`] for fixed epoch lengths.
@@ -459,25 +572,25 @@ impl FixedEpocher {
 
     /// Computes the first and last block height for an epoch, returning `None` if
     /// either would overflow.
-    fn bounds(&self, epoch: Epoch) -> Option<(u64, u64)> {
+    fn bounds(&self, epoch: Epoch) -> Option<(Height, Height)> {
         let first = epoch.get().checked_mul(self.0)?;
         let last = first.checked_add(self.0 - 1)?;
-        Some((first, last))
+        Some((Height::new(first), Height::new(last)))
     }
 }
 
 impl Epocher for FixedEpocher {
-    fn containing(&self, height: u64) -> Option<EpochInfo> {
-        let epoch = Epoch::new(height / self.0);
+    fn containing(&self, height: Height) -> Option<EpochInfo> {
+        let epoch = Epoch::new(height.get() / self.0);
         let (first, last) = self.bounds(epoch)?;
         Some(EpochInfo::new(epoch, height, first, last))
     }
 
-    fn first(&self, epoch: Epoch) -> Option<u64> {
+    fn first(&self, epoch: Epoch) -> Option<Height> {
         self.bounds(epoch).map(|(first, _)| first)
     }
 
-    fn last(&self, epoch: Epoch) -> Option<u64> {
+    fn last(&self, epoch: Epoch) -> Option<Height> {
         self.bounds(epoch).map(|(_, last)| last)
     }
 }
@@ -542,6 +655,40 @@ impl ExactSizeIterator for ViewRange {
         self.size_hint().0
     }
 }
+
+/// An iterator over a range of heights.
+///
+/// Created by [`Height::range`]. Iterates from start (inclusive) to end (exclusive).
+pub struct HeightRange {
+    inner: std::ops::Range<u64>,
+}
+
+impl Iterator for HeightRange {
+    type Item = Height;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(Height::new)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for HeightRange {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back().map(Height::new)
+    }
+}
+
+impl ExactSizeIterator for HeightRange {
+    fn len(&self) -> usize {
+        self.size_hint().0
+    }
+}
+
+/// Re-export [Participant] from commonware_utils for convenience.
+pub use commonware_utils::Participant;
 
 #[cfg(test)]
 mod tests {
@@ -650,6 +797,166 @@ mod tests {
             let decoded = Epoch::decode(encoded).unwrap();
             assert_eq!(epoch, decoded);
         }
+    }
+
+    #[test]
+    fn test_height_constructors() {
+        assert_eq!(Height::zero().get(), 0);
+        assert_eq!(Height::new(42).get(), 42);
+        assert_eq!(Height::new(100).get(), 100);
+        assert_eq!(Height::default().get(), 0);
+    }
+
+    #[test]
+    fn test_height_is_zero() {
+        assert!(Height::zero().is_zero());
+        assert!(Height::new(0).is_zero());
+        assert!(!Height::new(1).is_zero());
+        assert!(!Height::new(100).is_zero());
+    }
+
+    #[test]
+    fn test_height_next() {
+        assert_eq!(Height::zero().next().get(), 1);
+        assert_eq!(Height::new(5).next().get(), 6);
+        assert_eq!(Height::new(999).next().get(), 1000);
+    }
+
+    #[test]
+    #[should_panic(expected = "height overflow")]
+    fn test_height_next_overflow() {
+        Height::new(u64::MAX).next();
+    }
+
+    #[test]
+    fn test_height_previous() {
+        assert_eq!(Height::zero().previous(), None);
+        assert_eq!(Height::new(1).previous(), Some(Height::zero()));
+        assert_eq!(Height::new(5).previous(), Some(Height::new(4)));
+        assert_eq!(Height::new(1000).previous(), Some(Height::new(999)));
+    }
+
+    #[test]
+    fn test_height_saturating_add() {
+        let delta5 = HeightDelta::new(5);
+        let delta100 = HeightDelta::new(100);
+        assert_eq!(Height::zero().saturating_add(delta5).get(), 5);
+        assert_eq!(Height::new(10).saturating_add(delta100).get(), 110);
+        assert_eq!(
+            Height::new(u64::MAX)
+                .saturating_add(HeightDelta::new(1))
+                .get(),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn test_height_saturating_sub() {
+        let delta5 = HeightDelta::new(5);
+        let delta100 = HeightDelta::new(100);
+        assert_eq!(Height::new(10).saturating_sub(delta5).get(), 5);
+        assert_eq!(Height::new(5).saturating_sub(delta5).get(), 0);
+        assert_eq!(Height::new(5).saturating_sub(delta100).get(), 0);
+        assert_eq!(Height::zero().saturating_sub(delta100).get(), 0);
+    }
+
+    #[test]
+    fn test_height_display() {
+        assert_eq!(format!("{}", Height::zero()), "0");
+        assert_eq!(format!("{}", Height::new(42)), "42");
+        assert_eq!(format!("{}", Height::new(1000)), "1000");
+    }
+
+    #[test]
+    fn test_height_ordering() {
+        assert!(Height::zero() < Height::new(1));
+        assert!(Height::new(5) < Height::new(10));
+        assert!(Height::new(10) > Height::new(5));
+        assert_eq!(Height::new(42), Height::new(42));
+    }
+
+    #[test]
+    fn test_height_encode_decode() {
+        let cases = vec![0u64, 1, 127, 128, 255, 256, u64::MAX];
+        for value in cases {
+            let height = Height::new(value);
+            let encoded = height.encode();
+            assert_eq!(encoded.len(), height.encode_size());
+            let decoded = Height::decode(encoded).unwrap();
+            assert_eq!(height, decoded);
+        }
+    }
+
+    #[test]
+    fn test_height_delta_from() {
+        assert_eq!(
+            Height::new(10).delta_from(Height::new(3)),
+            Some(HeightDelta::new(7))
+        );
+        assert_eq!(
+            Height::new(5).delta_from(Height::new(5)),
+            Some(HeightDelta::zero())
+        );
+        assert_eq!(Height::new(3).delta_from(Height::new(10)), None);
+        assert_eq!(Height::zero().delta_from(Height::new(1)), None);
+    }
+
+    #[test]
+    fn height_range_iterates() {
+        let collected: Vec<_> = Height::range(Height::new(3), Height::new(6))
+            .map(Height::get)
+            .collect();
+        assert_eq!(collected, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn height_range_empty() {
+        let collected: Vec<_> = Height::range(Height::new(5), Height::new(5)).collect();
+        assert_eq!(collected, vec![]);
+
+        let collected: Vec<_> = Height::range(Height::new(10), Height::new(5)).collect();
+        assert_eq!(collected, vec![]);
+    }
+
+    #[test]
+    fn height_range_single() {
+        let collected: Vec<_> = Height::range(Height::new(5), Height::new(6))
+            .map(Height::get)
+            .collect();
+        assert_eq!(collected, vec![5]);
+    }
+
+    #[test]
+    fn height_range_size_hint() {
+        let range = Height::range(Height::new(3), Height::new(10));
+        assert_eq!(range.size_hint(), (7, Some(7)));
+        assert_eq!(range.len(), 7);
+
+        let empty = Height::range(Height::new(5), Height::new(5));
+        assert_eq!(empty.size_hint(), (0, Some(0)));
+        assert_eq!(empty.len(), 0);
+    }
+
+    #[test]
+    fn height_range_rev() {
+        let collected: Vec<_> = Height::range(Height::new(3), Height::new(7))
+            .rev()
+            .map(Height::get)
+            .collect();
+        assert_eq!(collected, vec![6, 5, 4, 3]);
+    }
+
+    #[test]
+    fn height_range_double_ended() {
+        let mut range = Height::range(Height::new(5), Height::new(10));
+        assert_eq!(range.next(), Some(Height::new(5)));
+        assert_eq!(range.next_back(), Some(Height::new(9)));
+        assert_eq!(range.next(), Some(Height::new(6)));
+        assert_eq!(range.next_back(), Some(Height::new(8)));
+        assert_eq!(range.len(), 1);
+        assert_eq!(range.next(), Some(Height::new(7)));
+        assert_eq!(range.next(), None);
+        assert_eq!(range.next_back(), None);
     }
 
     #[test]
@@ -905,27 +1212,27 @@ mod tests {
         let epocher = FixedEpocher::new(NZU64!(100));
 
         // Test containing returns correct EpochInfo
-        let bounds = epocher.containing(0).unwrap();
+        let bounds = epocher.containing(Height::zero()).unwrap();
         assert_eq!(bounds.epoch(), Epoch::new(0));
-        assert_eq!(bounds.first(), 0);
-        assert_eq!(bounds.last(), 99);
-        assert_eq!(bounds.length(), 100);
+        assert_eq!(bounds.first(), Height::zero());
+        assert_eq!(bounds.last(), Height::new(99));
+        assert_eq!(bounds.length(), HeightDelta::new(100));
 
-        let bounds = epocher.containing(99).unwrap();
+        let bounds = epocher.containing(Height::new(99)).unwrap();
         assert_eq!(bounds.epoch(), Epoch::new(0));
 
-        let bounds = epocher.containing(100).unwrap();
+        let bounds = epocher.containing(Height::new(100)).unwrap();
         assert_eq!(bounds.epoch(), Epoch::new(1));
-        assert_eq!(bounds.first(), 100);
-        assert_eq!(bounds.last(), 199);
+        assert_eq!(bounds.first(), Height::new(100));
+        assert_eq!(bounds.last(), Height::new(199));
 
         // Test first/last return correct boundaries
-        assert_eq!(epocher.first(Epoch::new(0)), Some(0));
-        assert_eq!(epocher.last(Epoch::new(0)), Some(99));
-        assert_eq!(epocher.first(Epoch::new(1)), Some(100));
-        assert_eq!(epocher.last(Epoch::new(1)), Some(199));
-        assert_eq!(epocher.first(Epoch::new(5)), Some(500));
-        assert_eq!(epocher.last(Epoch::new(5)), Some(599));
+        assert_eq!(epocher.first(Epoch::new(0)), Some(Height::zero()));
+        assert_eq!(epocher.last(Epoch::new(0)), Some(Height::new(99)));
+        assert_eq!(epocher.first(Epoch::new(1)), Some(Height::new(100)));
+        assert_eq!(epocher.last(Epoch::new(1)), Some(Height::new(199)));
+        assert_eq!(epocher.first(Epoch::new(5)), Some(Height::new(500)));
+        assert_eq!(epocher.last(Epoch::new(5)), Some(Height::new(599)));
     }
 
     #[test]
@@ -933,19 +1240,46 @@ mod tests {
         let epocher = FixedEpocher::new(NZU64!(100));
 
         // Epoch 0: heights 0-99
-        assert_eq!(epocher.containing(0).unwrap().relative(), 0);
-        assert_eq!(epocher.containing(50).unwrap().relative(), 50);
-        assert_eq!(epocher.containing(99).unwrap().relative(), 99);
+        assert_eq!(
+            epocher.containing(Height::zero()).unwrap().relative(),
+            Height::zero()
+        );
+        assert_eq!(
+            epocher.containing(Height::new(50)).unwrap().relative(),
+            Height::new(50)
+        );
+        assert_eq!(
+            epocher.containing(Height::new(99)).unwrap().relative(),
+            Height::new(99)
+        );
 
         // Epoch 1: heights 100-199
-        assert_eq!(epocher.containing(100).unwrap().relative(), 0);
-        assert_eq!(epocher.containing(150).unwrap().relative(), 50);
-        assert_eq!(epocher.containing(199).unwrap().relative(), 99);
+        assert_eq!(
+            epocher.containing(Height::new(100)).unwrap().relative(),
+            Height::zero()
+        );
+        assert_eq!(
+            epocher.containing(Height::new(150)).unwrap().relative(),
+            Height::new(50)
+        );
+        assert_eq!(
+            epocher.containing(Height::new(199)).unwrap().relative(),
+            Height::new(99)
+        );
 
         // Epoch 5: heights 500-599
-        assert_eq!(epocher.containing(500).unwrap().relative(), 0);
-        assert_eq!(epocher.containing(567).unwrap().relative(), 67);
-        assert_eq!(epocher.containing(599).unwrap().relative(), 99);
+        assert_eq!(
+            epocher.containing(Height::new(500)).unwrap().relative(),
+            Height::zero()
+        );
+        assert_eq!(
+            epocher.containing(Height::new(567)).unwrap().relative(),
+            Height::new(67)
+        );
+        assert_eq!(
+            epocher.containing(Height::new(599)).unwrap().relative(),
+            Height::new(99)
+        );
     }
 
     #[test]
@@ -954,43 +1288,94 @@ mod tests {
         let epocher = FixedEpocher::new(NZU64!(30));
 
         // Early phase: relative 0-14
-        assert_eq!(epocher.containing(0).unwrap().phase(), EpochPhase::Early);
-        assert_eq!(epocher.containing(14).unwrap().phase(), EpochPhase::Early);
+        assert_eq!(
+            epocher.containing(Height::zero()).unwrap().phase(),
+            EpochPhase::Early
+        );
+        assert_eq!(
+            epocher.containing(Height::new(14)).unwrap().phase(),
+            EpochPhase::Early
+        );
 
         // Midpoint: relative 15
         assert_eq!(
-            epocher.containing(15).unwrap().phase(),
+            epocher.containing(Height::new(15)).unwrap().phase(),
             EpochPhase::Midpoint
         );
 
         // Late phase: relative 16-29
-        assert_eq!(epocher.containing(16).unwrap().phase(), EpochPhase::Late);
-        assert_eq!(epocher.containing(29).unwrap().phase(), EpochPhase::Late);
+        assert_eq!(
+            epocher.containing(Height::new(16)).unwrap().phase(),
+            EpochPhase::Late
+        );
+        assert_eq!(
+            epocher.containing(Height::new(29)).unwrap().phase(),
+            EpochPhase::Late
+        );
 
         // Second epoch starts at height 30
-        assert_eq!(epocher.containing(30).unwrap().phase(), EpochPhase::Early);
-        assert_eq!(epocher.containing(44).unwrap().phase(), EpochPhase::Early);
         assert_eq!(
-            epocher.containing(45).unwrap().phase(),
+            epocher.containing(Height::new(30)).unwrap().phase(),
+            EpochPhase::Early
+        );
+        assert_eq!(
+            epocher.containing(Height::new(44)).unwrap().phase(),
+            EpochPhase::Early
+        );
+        assert_eq!(
+            epocher.containing(Height::new(45)).unwrap().phase(),
             EpochPhase::Midpoint
         );
-        assert_eq!(epocher.containing(46).unwrap().phase(), EpochPhase::Late);
+        assert_eq!(
+            epocher.containing(Height::new(46)).unwrap().phase(),
+            EpochPhase::Late
+        );
 
         // Test with epoch length 10 (midpoint = 5)
         let epocher = FixedEpocher::new(NZU64!(10));
-        assert_eq!(epocher.containing(0).unwrap().phase(), EpochPhase::Early);
-        assert_eq!(epocher.containing(4).unwrap().phase(), EpochPhase::Early);
-        assert_eq!(epocher.containing(5).unwrap().phase(), EpochPhase::Midpoint);
-        assert_eq!(epocher.containing(6).unwrap().phase(), EpochPhase::Late);
-        assert_eq!(epocher.containing(9).unwrap().phase(), EpochPhase::Late);
+        assert_eq!(
+            epocher.containing(Height::zero()).unwrap().phase(),
+            EpochPhase::Early
+        );
+        assert_eq!(
+            epocher.containing(Height::new(4)).unwrap().phase(),
+            EpochPhase::Early
+        );
+        assert_eq!(
+            epocher.containing(Height::new(5)).unwrap().phase(),
+            EpochPhase::Midpoint
+        );
+        assert_eq!(
+            epocher.containing(Height::new(6)).unwrap().phase(),
+            EpochPhase::Late
+        );
+        assert_eq!(
+            epocher.containing(Height::new(9)).unwrap().phase(),
+            EpochPhase::Late
+        );
 
         // Test with odd epoch length 11 (midpoint = 5 via integer division)
         let epocher = FixedEpocher::new(NZU64!(11));
-        assert_eq!(epocher.containing(0).unwrap().phase(), EpochPhase::Early);
-        assert_eq!(epocher.containing(4).unwrap().phase(), EpochPhase::Early);
-        assert_eq!(epocher.containing(5).unwrap().phase(), EpochPhase::Midpoint);
-        assert_eq!(epocher.containing(6).unwrap().phase(), EpochPhase::Late);
-        assert_eq!(epocher.containing(10).unwrap().phase(), EpochPhase::Late);
+        assert_eq!(
+            epocher.containing(Height::zero()).unwrap().phase(),
+            EpochPhase::Early
+        );
+        assert_eq!(
+            epocher.containing(Height::new(4)).unwrap().phase(),
+            EpochPhase::Early
+        );
+        assert_eq!(
+            epocher.containing(Height::new(5)).unwrap().phase(),
+            EpochPhase::Midpoint
+        );
+        assert_eq!(
+            epocher.containing(Height::new(6)).unwrap().phase(),
+            EpochPhase::Late
+        );
+        assert_eq!(
+            epocher.containing(Height::new(10)).unwrap().phase(),
+            EpochPhase::Late
+        );
     }
 
     #[test]
@@ -1006,8 +1391,8 @@ mod tests {
         // Height 18446744073709551600 onwards would be in an invalid epoch
 
         // This height is in the last valid epoch
-        let last_valid_first = 18446744073709551500u64;
-        let last_valid_last = 18446744073709551599u64;
+        let last_valid_first = Height::new(18446744073709551500u64);
+        let last_valid_last = Height::new(18446744073709551599u64);
 
         let result = epocher.containing(last_valid_first);
         assert!(result.is_some());
@@ -1020,35 +1405,35 @@ mod tests {
         assert_eq!(result.unwrap().last(), last_valid_last);
 
         // This height would be in an epoch where last() overflows
-        let overflow_height = last_valid_last + 1;
+        let overflow_height = last_valid_last.next();
         assert!(epocher.containing(overflow_height).is_none());
 
         // u64::MAX is also in the overflow range
-        assert!(epocher.containing(u64::MAX).is_none());
+        assert!(epocher.containing(Height::new(u64::MAX)).is_none());
 
         // Test the boundary more precisely with epoch length 2
         let epocher = FixedEpocher::new(NZU64!(2));
 
         // u64::MAX - 1 is even, so epoch starts at u64::MAX - 1, last = u64::MAX
-        let result = epocher.containing(u64::MAX - 1);
+        let result = epocher.containing(Height::new(u64::MAX - 1));
         assert!(result.is_some());
-        assert_eq!(result.unwrap().last(), u64::MAX);
+        assert_eq!(result.unwrap().last(), Height::new(u64::MAX));
 
         // u64::MAX is odd, epoch would start at u64::MAX - 1
         // first = u64::MAX - 1, last = first + 2 - 1 = u64::MAX (OK)
-        let result = epocher.containing(u64::MAX);
+        let result = epocher.containing(Height::new(u64::MAX));
         assert!(result.is_some());
-        assert_eq!(result.unwrap().last(), u64::MAX);
+        assert_eq!(result.unwrap().last(), Height::new(u64::MAX));
 
         // Test with epoch length 1 (every height is its own epoch)
         let epocher = FixedEpocher::new(NZU64!(1));
-        let result = epocher.containing(u64::MAX);
+        let result = epocher.containing(Height::new(u64::MAX));
         assert!(result.is_some());
-        assert_eq!(result.unwrap().last(), u64::MAX);
+        assert_eq!(result.unwrap().last(), Height::new(u64::MAX));
 
         // Test case where first overflows (covered by existing checked_mul)
         let epocher = FixedEpocher::new(NZU64!(u64::MAX));
-        assert!(epocher.containing(u64::MAX).is_none());
+        assert!(epocher.containing(Height::new(u64::MAX)).is_none());
 
         // Test consistency: first(), last(), and containing() should agree on valid epochs
         let epocher = FixedEpocher::new(NZU64!(100));
@@ -1068,7 +1453,7 @@ mod tests {
         // For first invalid epoch, all methods should return None
         assert!(epocher.first(first_invalid_epoch).is_none());
         assert!(epocher.last(first_invalid_epoch).is_none());
-        assert!(epocher.containing(last_valid_last + 1).is_none());
+        assert!(epocher.containing(last_valid_last.next()).is_none());
     }
 
     #[cfg(feature = "arbitrary")]
@@ -1078,6 +1463,7 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Epoch>,
+            CodecConformance<Height>,
             CodecConformance<View>,
             CodecConformance<Round>,
         }

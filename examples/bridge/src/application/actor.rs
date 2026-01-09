@@ -16,6 +16,7 @@ use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     Hasher,
 };
+use commonware_parallel::Sequential;
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, StreamExt};
@@ -84,7 +85,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                                 })
                                 .encode();
                             indexer_sender
-                                .send(&msg)
+                                .send(msg)
                                 .await
                                 .expect("failed to send finalization to indexer");
                             let result = indexer_receiver
@@ -104,7 +105,11 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
 
                             // Verify certificate
                             assert!(
-                                finalization.verify(&mut self.context, &self.other_network),
+                                finalization.verify(
+                                    &mut self.context,
+                                    &self.other_network,
+                                    &Sequential
+                                ),
                                 "indexer is corrupt"
                             );
 
@@ -125,7 +130,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                     })
                     .encode();
                     indexer_sender
-                        .send(&msg)
+                        .send(msg)
                         .await
                         .expect("failed to send block to indexer");
                     let result = indexer_receiver
@@ -153,7 +158,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                     })
                     .encode();
                     indexer_sender
-                        .send(&msg)
+                        .send(msg)
                         .await
                         .expect("failed to send block to indexer");
                     let result = indexer_receiver
@@ -177,8 +182,11 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                             let _ = response.send(true);
                         }
                         BlockFormat::Bridge(finalization) => {
-                            let result =
-                                finalization.verify(&mut self.context, &self.other_network);
+                            let result = finalization.verify(
+                                &mut self.context,
+                                &self.other_network,
+                                &Sequential,
+                            );
                             let _ = response.send(result);
                         }
                     }
@@ -206,7 +214,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                                 })
                                 .encode();
                             indexer_sender
-                                .send(&msg)
+                                .send(msg)
                                 .await
                                 .expect("failed to send finalization to indexer");
                             let result = indexer_receiver

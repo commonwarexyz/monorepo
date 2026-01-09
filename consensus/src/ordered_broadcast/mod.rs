@@ -81,7 +81,7 @@ mod tests {
         ordered_broadcast::scheme::{
             bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme,
         },
-        types::{Epoch, EpochDelta},
+        types::{Epoch, EpochDelta, Height, HeightDelta},
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -92,21 +92,22 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::NZUsize;
+    use commonware_utils::{channels::fallible::OneshotExt, NZUsize, NZU16, NZU64};
     use futures::{channel::oneshot, future::join_all};
     use std::{
         collections::{BTreeMap, HashMap},
-        num::{NonZeroU32, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         time::Duration,
     };
     use tracing::debug;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     const TEST_NAMESPACE: &[u8] = b"ordered_broadcast_test";
@@ -125,7 +126,7 @@ mod tests {
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
-            let mut control = oracle.control(participant.clone());
+            let control = oracle.control(participant.clone());
             let (a1, a2) = control.register(0, TEST_QUOTA).await.unwrap();
             let (b1, b2) = control.register(1, TEST_QUOTA).await.unwrap();
             registrations.insert(participant.clone(), ((a1, a2), (b1, b2)));
@@ -204,7 +205,7 @@ mod tests {
         sequencer_pks: &[PublicKey],
         registrations: &mut Registrations<PublicKey>,
         rebroadcast_timeout: Duration,
-        invalid_when: fn(u64) -> bool,
+        invalid_when: fn(Height) -> bool,
         misses_allowed: Option<usize>,
         epoch: Epoch,
     ) -> BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>
@@ -252,13 +253,14 @@ mod tests {
                     priority_acks: false,
                     rebroadcast_timeout,
                     epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
-                    height_bound: 2,
-                    journal_heights_per_section: 10,
+                    height_bound: HeightDelta::new(2),
+                    journal_heights_per_section: NZU64!(10),
                     journal_replay_buffer: NZUsize!(4096),
                     journal_write_buffer: NZUsize!(4096),
                     journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                     journal_compression: Some(3),
                     journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    strategy: Sequential,
                 },
             );
 
@@ -272,7 +274,7 @@ mod tests {
         context: Context,
         sequencers: Vec<PublicKey>,
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>,
-        threshold: (u64, Epoch, bool),
+        threshold: (Height, Epoch, bool),
     ) where
         S: certificate::Scheme,
     {
@@ -295,17 +297,17 @@ mod tests {
                             let (height, epoch) = mailbox
                                 .get_tip(sequencer.clone())
                                 .await
-                                .unwrap_or((0, Epoch::zero()));
-                            debug!(height, epoch = %epoch, ?sequencer, ?reporter, "reporter");
+                                .unwrap_or((Height::zero(), Epoch::zero()));
+                            debug!(height = %height, epoch = %epoch, ?sequencer, ?reporter, "reporter");
                             let contiguous_height = mailbox
                                 .get_contiguous_tip(sequencer.clone())
                                 .await
-                                .unwrap_or(0);
+                                .unwrap_or(Height::zero());
                             if height >= threshold_height
                                 && epoch >= threshold_epoch
                                 && (!require_contiguous || contiguous_height >= threshold_height)
                             {
-                                let _ = tx.send(sequencer.clone());
+                                tx.send_lossy(sequencer.clone());
                                 break;
                             }
                             context.sleep(Duration::from_millis(100)).await;
@@ -327,13 +329,13 @@ mod tests {
 
     async fn get_max_height<S: certificate::Scheme>(
         reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>,
-    ) -> u64 {
-        let mut max_height = 0;
+    ) -> Height {
+        let mut max_height = Height::zero();
         for (sequencer, mailbox) in reporters.iter_mut() {
             let (height, _) = mailbox
                 .get_tip(sequencer.clone())
                 .await
-                .unwrap_or((0, Epoch::zero()));
+                .unwrap_or((Height::zero(), Epoch::zero()));
             if height > max_height {
                 max_height = height;
             }
@@ -372,7 +374,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, epoch, true),
+                (Height::new(100), epoch, true),
             )
             .await;
         });
@@ -397,7 +399,7 @@ mod tests {
         let epoch = Epoch::new(111);
         let num_validators = 4;
         let crash_after = Duration::from_secs(5);
-        let target_height = 30;
+        let target_height = Height::new(30);
 
         loop {
             let fixture = fixture.clone();
@@ -521,7 +523,11 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (max_height + 100, epoch, false),
+                (
+                    max_height.saturating_add(HeightDelta::new(100)),
+                    epoch,
+                    false,
+                ),
             )
             .await;
         });
@@ -584,7 +590,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (40, epoch, false),
+                (Height::new(40), epoch, false),
             )
             .await;
 
@@ -684,7 +690,7 @@ mod tests {
                 &fixture.participants,
                 &mut registrations,
                 Duration::from_secs(5),
-                |i| i % 10 == 0,
+                |i| i.get() % 10 == 0,
                 None,
                 epoch,
             );
@@ -693,7 +699,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, epoch, true),
+                (Height::new(100), epoch, true),
             )
             .await;
         });
@@ -770,16 +776,17 @@ mod tests {
                         reporter: reporters.get(validator).unwrap().clone(),
                         monitor,
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
-                        height_bound: 2,
+                        height_bound: HeightDelta::new(2),
                         rebroadcast_timeout: Duration::from_secs(1),
                         priority_acks: false,
                         priority_proposals: false,
-                        journal_heights_per_section: 10,
+                        journal_heights_per_section: NZU64!(10),
                         journal_replay_buffer: NZUsize!(4096),
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
                         journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        strategy: Sequential,
                     },
                 );
 
@@ -792,7 +799,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, epoch, true),
+                (Height::new(100), epoch, true),
             )
             .await;
 
@@ -829,7 +836,11 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (max_height + 100, next_epoch, true),
+                (
+                    max_height.saturating_add(HeightDelta::new(100)),
+                    next_epoch,
+                    true,
+                ),
             )
             .await;
         });
@@ -923,16 +934,17 @@ mod tests {
                         reporter: reporters.get(validator).unwrap().clone(),
                         monitor,
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
-                        height_bound: 2,
+                        height_bound: HeightDelta::new(2),
                         rebroadcast_timeout: Duration::from_secs(5),
                         priority_acks: false,
                         priority_proposals: false,
-                        journal_heights_per_section: 10,
+                        journal_heights_per_section: NZU64!(10),
                         journal_replay_buffer: NZUsize!(4096),
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
                         journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        strategy: Sequential,
                     },
                 );
 
@@ -973,11 +985,11 @@ mod tests {
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
                         monitor: mocks::Monitor::new(epoch),
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
-                        height_bound: 2,
+                        height_bound: HeightDelta::new(2),
                         rebroadcast_timeout: Duration::from_secs(5),
                         priority_acks: false,
                         priority_proposals: false,
-                        journal_heights_per_section: 10,
+                        journal_heights_per_section: NZU64!(10),
                         journal_replay_buffer: NZUsize!(4096),
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!(
@@ -986,6 +998,7 @@ mod tests {
                         ),
                         journal_compression: Some(3),
                         journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        strategy: Sequential,
                     },
                 );
 
@@ -998,7 +1011,7 @@ mod tests {
                 context.with_label("reporter"),
                 vec![sequencer.public_key()],
                 &reporters,
-                (100, epoch, true),
+                (Height::new(100), epoch, true),
             )
             .await;
         });
@@ -1065,7 +1078,7 @@ mod tests {
                 context.with_label("reporter"),
                 sequencers,
                 &reporters,
-                (1_000, epoch, false),
+                (Height::new(1_000), epoch, false),
             )
             .await;
         })

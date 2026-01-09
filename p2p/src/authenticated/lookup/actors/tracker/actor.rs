@@ -13,7 +13,10 @@ use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::ordered::Set;
+use commonware_utils::{
+    channels::fallible::{AsyncFallibleExt, FallibleExt},
+    ordered::Set,
+};
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use std::{
@@ -111,7 +114,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             },
             _ = self.directory.wait_for_unblock() => {
                 if self.directory.unblock_expired() {
-                    let _ = self.listener.send(self.directory.listenable()).await;
+                    self.listener.0.send_lossy(self.directory.listenable()).await;
                 }
             },
             msg = self.receiver.next() => {
@@ -140,13 +143,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 }
 
                 // Send the updated listenable IPs to the listener.
-                let _ = self.listener.send(self.directory.listenable()).await;
+                self.listener
+                    .0
+                    .send_lossy(self.directory.listenable())
+                    .await;
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
-                    subscriber
-                        .unbounded_send((index, peer_keys.clone(), self.directory.tracked()))
-                        .is_ok()
+                    subscriber.send_lossy((index, peer_keys.clone(), self.directory.tracked()))
                 });
             }
             Message::PeerSet { index, responder } => {
@@ -160,9 +164,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
                     let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
-                    sender
-                        .unbounded_send((latest_set_id, latest_set, self.directory.tracked()))
-                        .ok();
+                    sender.send_lossy((latest_set_id, latest_set, self.directory.tracked()));
                 }
                 self.subscribers.push(sender);
 
@@ -215,7 +217,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 }
 
                 // Send the updated listenable IPs to the listener.
-                let _ = self.listener.send(self.directory.listenable()).await;
+                self.listener
+                    .0
+                    .send_lossy(self.directory.listenable())
+                    .await;
             }
             Message::Release { metadata } => {
                 // Clear the peer handle if it exists

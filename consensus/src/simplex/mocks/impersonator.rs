@@ -1,8 +1,11 @@
 //! Byzantine participant that sends impersonated (and invalid) notarize/finalize messages.
 
-use crate::simplex::{
-    scheme,
-    types::{Finalize, Notarize, Vote},
+use crate::{
+    simplex::{
+        scheme,
+        types::{Finalize, Notarize, Vote},
+    },
+    types::Participant,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Hasher};
@@ -58,14 +61,14 @@ impl<E: Clock + CryptoRngCore + Spawner, S: scheme::Scheme<H::Digest>, H: Hasher
                     let mut n = Notarize::sign(&self.scheme, notarize.proposal).unwrap();
 
                     // Manipulate index
-                    if n.attestation.signer == 0 {
-                        n.attestation.signer = 1;
+                    if n.attestation.signer == Participant::new(0) {
+                        n.attestation.signer = Participant::new(1);
                     } else {
-                        n.attestation.signer = 0;
+                        n.attestation.signer = Participant::new(0);
                     }
 
                     // Send invalid message
-                    let msg = Vote::Notarize(n).encode().into();
+                    let msg = Vote::Notarize(n).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Vote::Finalize(finalize) => {
@@ -73,14 +76,14 @@ impl<E: Clock + CryptoRngCore + Spawner, S: scheme::Scheme<H::Digest>, H: Hasher
                     let mut f = Finalize::sign(&self.scheme, finalize.proposal).unwrap();
 
                     // Manipulate signature
-                    if f.attestation.signer == 0 {
-                        f.attestation.signer = 1;
+                    if f.attestation.signer == Participant::new(0) {
+                        f.attestation.signer = Participant::new(1);
                     } else {
-                        f.attestation.signer = 0;
+                        f.attestation.signer = Participant::new(0);
                     }
 
                     // Send invalid message
-                    let msg = Vote::Finalize(f).encode().into();
+                    let msg = Vote::Finalize(f).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,

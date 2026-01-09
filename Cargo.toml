@@ -12,6 +12,7 @@ members = [
     "macros",
     "math",
     "p2p",
+    "parallel",
     "resolver",
     "runtime",
     "storage",
@@ -45,6 +46,7 @@ version = "0.0.64"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
+rust-version = "1.91.1"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)'] }
@@ -89,15 +91,18 @@ commonware-deployer = { version = "0.0.64", path = "deployer", default-features 
 commonware-macros = { version = "0.0.64", path = "macros" }
 commonware-math = { version = "0.0.64", path = "math", default-features = false }
 commonware-p2p = { version = "0.0.64", path = "p2p" }
+commonware-parallel = { version = "0.0.64", path = "parallel", default-features = false }
 commonware-resolver = { version = "0.0.64", path = "resolver" }
 commonware-runtime = { version = "0.0.64", path = "runtime" }
 commonware-storage = { version = "0.0.64", path = "storage", default-features = false }
 commonware-stream = { version = "0.0.64", path = "stream" }
 commonware-utils = { version = "0.0.64", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
-crc32fast = "1.5.0"
+crc = "3.4.0"
+crc-fast = { version = "1.10.0", default-features = false }
 criterion = "0.7.0"
 crossterm = "0.29.0"
+ctutils = "0.3.1"
 ecdsa = { version = "0.16.9", default-features = false }
 ed25519-consensus = { version = "2.1.0", default-features = false }
 ed25519-zebra = "4.1.0"

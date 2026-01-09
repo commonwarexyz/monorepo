@@ -10,6 +10,7 @@ use commonware_consensus::simplex::{
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
+    certificate::secp256r1,
     sha256::Digest as Sha256Digest,
 };
 use commonware_utils::quorum;
@@ -210,6 +211,12 @@ fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
         t if t == TypeId::of::<ed25519::certificate::Certificate>() => {
             let cert = unsafe {
                 &*(certificate as *const S::Certificate as *const ed25519::certificate::Certificate)
+            };
+            Some(cert.signatures.len())
+        }
+        t if t == TypeId::of::<secp256r1::Certificate>() => {
+            let cert = unsafe {
+                &*(certificate as *const S::Certificate as *const secp256r1::Certificate)
             };
             Some(cert.signatures.len())
         }

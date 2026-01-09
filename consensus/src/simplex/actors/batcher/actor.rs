@@ -3,7 +3,7 @@ use crate::{
     simplex::{
         actors::voter,
         interesting,
-        metrics::Inbound,
+        metrics::{Inbound, Peer},
         scheme::Scheme,
         types::{Activity, Certificate, Vote},
     },
@@ -13,14 +13,23 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::histogram::{self, Buckets},
+    telemetry::metrics::{
+        histogram::{self, Buckets},
+        status::GaugeExt,
+    },
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::ordered::{Quorum, Set};
+use commonware_utils::{
+    channels::fallible::OneshotExt,
+    ordered::{Quorum, Set},
+};
 use futures::{channel::mpsc, StreamExt};
-use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
+use prometheus_client::metrics::{
+    counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
+};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace, warn};
@@ -31,6 +40,7 @@ pub struct Actor<
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
 > {
     context: ContextCell<E>,
 
@@ -39,6 +49,7 @@ pub struct Actor<
 
     blocker: B,
     reporter: R,
+    strategy: T,
 
     activity_timeout: ViewDelta,
     skip_timeout: ViewDelta,
@@ -49,6 +60,7 @@ pub struct Actor<
     added: Counter,
     verified: Counter,
     inbound_messages: Family<Inbound, Counter>,
+    latest_vote: Family<Peer, Gauge>,
     batch_size: Histogram,
     verify_latency: histogram::Timed<E>,
     recover_latency: histogram::Timed<E>,
@@ -60,9 +72,10 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
-    > Actor<E, S, B, D, R>
+        T: Strategy,
+    > Actor<E, S, B, D, R, T>
 {
-    pub fn new(context: E, cfg: Config<S, B, R>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, B, R, T>) -> (Self, Mailbox<S, D>) {
         let added = Counter::default();
         let verified = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
@@ -79,6 +92,15 @@ impl<
             "number of inbound messages",
             inbound_messages.clone(),
         );
+        let latest_vote = Family::<Peer, Gauge>::default();
+        context.register(
+            "latest_vote",
+            "view of latest vote received per peer",
+            latest_vote.clone(),
+        );
+        for participant in cfg.scheme.participants().iter() {
+            latest_vote.get_or_create(&Peer::new(participant)).set(0);
+        }
         context.register(
             "batch_size",
             "number of messages in a signature verification batch",
@@ -99,16 +121,16 @@ impl<
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-        let participants = cfg.scheme.participants().clone();
         (
             Self {
                 context: ContextCell::new(context),
 
-                participants,
+                participants: cfg.scheme.participants().clone(),
                 scheme: cfg.scheme,
 
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
+                strategy: cfg.strategy,
 
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
@@ -119,6 +141,7 @@ impl<
                 added,
                 verified,
                 inbound_messages,
+                latest_vote,
                 batch_size,
                 verify_latency: histogram::Timed::new(verify_latency, clock.clone()),
                 recover_latency: histogram::Timed::new(recover_latency, clock),
@@ -199,7 +222,7 @@ impl<
                                 work.len() < skip_timeout
                                 // Leader active in at least one recent round
                                 || work.iter().rev().take(skip_timeout).any(|(_, round)| round.is_active(leader));
-                            active.send(is_active).unwrap();
+                            active.send_lossy(is_active);
 
                             // Setting leader may enable batch verification
                             updated_view = current;
@@ -283,6 +306,7 @@ impl<
                             if !notarization.verify(
                                 &mut self.context,
                                 &self.scheme,
+                                &self.strategy,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid notarization");
                                 self.blocker.block(sender).await;
@@ -309,6 +333,7 @@ impl<
                             if !nullification.verify::<_, D>(
                                 &mut self.context,
                                 &self.scheme,
+                                &self.strategy,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid nullification");
                                 self.blocker.block(sender).await;
@@ -335,6 +360,7 @@ impl<
                             if !finalization.verify(
                                 &mut self.context,
                                 &self.scheme,
+                                &self.strategy,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid finalization");
                                 self.blocker.block(sender).await;
@@ -397,12 +423,19 @@ impl<
                     }
 
                     // Add the vote to the verifier
+                    let peer = Peer::new(&sender);
                     if work
                         .entry(view)
                         .or_insert_with(|| self.new_round())
                         .add_network(sender, message)
                         .await {
                             self.added.inc();
+
+                            // Update per-peer latest vote metric (only if higher than current)
+                            let _ = self
+                                .latest_vote
+                                .get_or_create(&peer)
+                                .try_set_max(view.get());
                         }
                     updated_view = view;
                 },
@@ -438,11 +471,11 @@ impl<
             // Batch verify votes if ready
             let mut timer = self.verify_latency.timer();
             let verified = if round.ready_notarizes() {
-                Some(round.verify_notarizes(&mut self.context))
+                Some(round.verify_notarizes(&mut self.context, &self.strategy))
             } else if round.ready_nullifies() {
-                Some(round.verify_nullifies(&mut self.context))
+                Some(round.verify_nullifies(&mut self.context, &self.strategy))
             } else if round.ready_finalizes() {
-                Some(round.verify_finalizes(&mut self.context))
+                Some(round.verify_finalizes(&mut self.context, &self.strategy))
             } else {
                 None
             };
@@ -481,7 +514,7 @@ impl<
             // Try to construct and forward certificates
             if let Some(notarization) = self
                 .recover_latency
-                .time_some(|| round.try_construct_notarization(&self.scheme))
+                .time_some(|| round.try_construct_notarization(&self.scheme, &self.strategy))
             {
                 debug!(view = %updated_view, "constructed notarization, forwarding to voter");
                 voter
@@ -490,7 +523,7 @@ impl<
             }
             if let Some(nullification) = self
                 .recover_latency
-                .time_some(|| round.try_construct_nullification(&self.scheme))
+                .time_some(|| round.try_construct_nullification(&self.scheme, &self.strategy))
             {
                 debug!(view = %updated_view, "constructed nullification, forwarding to voter");
                 voter
@@ -499,7 +532,7 @@ impl<
             }
             if let Some(finalization) = self
                 .recover_latency
-                .time_some(|| round.try_construct_finalization(&self.scheme))
+                .time_some(|| round.try_construct_finalization(&self.scheme, &self.strategy))
             {
                 debug!(view = %updated_view, "constructed finalization, forwarding to voter");
                 voter

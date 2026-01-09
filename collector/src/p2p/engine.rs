@@ -13,7 +13,7 @@ use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::futures::Pool;
+use commonware_utils::{channels::fallible::OneshotExt, futures::Pool};
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
@@ -152,11 +152,11 @@ where
                             ).await {
                                 Ok(recipients) => {
                                     entry.0.extend(recipients.iter().cloned());
-                                    let _ = responder.send(Ok(recipients));
+                                    responder.send_lossy(Ok(recipients));
                                 }
                                 Err(err) => {
                                     error!(?err, ?commitment, "failed to send message");
-                                    let _ = responder.send(Err(Error::SendFailed(err.into())));
+                                    responder.send_lossy(Err(Error::SendFailed(err.into())));
                                 }
                             }
                         },

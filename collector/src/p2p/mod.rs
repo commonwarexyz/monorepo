@@ -60,7 +60,7 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Recipients, Sender as _,
     };
-    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::NZU32;
     use futures::StreamExt;
     use std::time::Duration;
@@ -116,7 +116,7 @@ mod tests {
 
         let mut connections = Vec::new();
         for peer in &peers {
-            let mut control = oracle.control(peer.clone());
+            let control = oracle.control(peer.clone());
             let (sender1, receiver1) = control.register(0, TEST_QUOTA).await.unwrap();
             let (sender2, receiver2) = control.register(1, TEST_QUOTA).await.unwrap();
             connections.push(((sender1, receiver1), (sender2, receiver2)));
@@ -828,7 +828,7 @@ mod tests {
                 .0
                 .send(
                     Recipients::One(peers[0].clone()),
-                    response_to_peer1.encode().into(),
+                    response_to_peer1.encode(),
                     true,
                 )
                 .await
@@ -854,5 +854,137 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn spawn_engines_with_handles(
+        context: deterministic::Context,
+        oracle: &Oracle<PublicKey, deterministic::Context>,
+        schemes: Vec<PrivateKey>,
+        connections: Vec<(
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+            (
+                Sender<PublicKey, deterministic::Context>,
+                Receiver<PublicKey>,
+            ),
+        )>,
+    ) -> (
+        Vec<Mailbox<PublicKey, Request>>,
+        Vec<commonware_runtime::Handle<()>>,
+    ) {
+        let engine_context = context.with_label("engine");
+        let mut mailboxes = Vec::new();
+        let mut handles = Vec::new();
+
+        for (idx, (scheme, conn)) in schemes.into_iter().zip(connections).enumerate() {
+            let ctx = engine_context.with_label(&format!("peer_{idx}"));
+            let (mon, _) = MockMonitor::new();
+            let (handler, _) = MockHandler::new(true);
+            let (engine, mailbox) = Engine::new(
+                ctx,
+                Config {
+                    blocker: oracle.control(scheme.public_key()),
+                    monitor: mon,
+                    handler,
+                    mailbox_size: MAILBOX_SIZE,
+                    priority_request: false,
+                    request_codec: (),
+                    priority_response: false,
+                    response_codec: (),
+                },
+            );
+            handles.push(engine.start(conn.0, conn.1));
+            mailboxes.push(mailbox);
+        }
+
+        (mailboxes, handles)
+    }
+
+    #[test_traced]
+    fn test_operations_after_shutdown_do_not_panic() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let (mut mailboxes, handles) =
+                spawn_engines_with_handles(context.clone(), &oracle, schemes, connections);
+
+            // Abort all engines immediately
+            for handle in handles {
+                handle.abort();
+            }
+
+            // All operations should not panic after shutdown
+
+            // Send should not panic (returns error)
+            let request = Request { id: 1, data: 1 };
+            let result = mailboxes[0]
+                .send(Recipients::One(peers[1].clone()), request.clone())
+                .await;
+            assert!(result.is_err(), "send after shutdown should return error");
+
+            // Cancel should not panic
+            mailboxes[0].cancel(request.commitment()).await;
+        });
+    }
+
+    fn clean_shutdown(seed: u64) {
+        let cfg = deterministic::Config::default()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|context| async move {
+            let (mut oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let (mut mailboxes, handles) =
+                spawn_engines_with_handles(context.clone(), &oracle, schemes, connections);
+
+            // Allow tasks to start
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Count running tasks under the engine prefix
+            let running_before = count_running_tasks(&context, "engine");
+            assert!(
+                running_before > 0,
+                "at least one engine task should be running"
+            );
+
+            // Verify network is functional - send a request and expect a response
+            let request = Request { id: 1, data: 1 };
+            let recipients = mailboxes[0]
+                .send(Recipients::One(peers[1].clone()), request.clone())
+                .await
+                .expect("send failed");
+            assert_eq!(recipients, vec![peers[1].clone()]);
+
+            // Abort all engines
+            for handle in handles {
+                handle.abort();
+            }
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify all engine tasks are stopped
+            let running_after = count_running_tasks(&context, "engine");
+            assert_eq!(
+                running_after, 0,
+                "all engine tasks should be stopped, but {running_after} still running"
+            );
+        });
+    }
+
+    #[test]
+    fn test_clean_shutdown() {
+        for seed in 0..25 {
+            clean_shutdown(seed);
+        }
     }
 }

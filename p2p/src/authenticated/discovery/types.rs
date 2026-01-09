@@ -384,7 +384,7 @@ impl<C: PublicKey> InfoVerifier<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::{Bytes, BytesMut};
+    use bytes::Bytes;
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
@@ -469,7 +469,7 @@ mod tests {
             index: 1234,
             bits: BitMap::ones(100),
         };
-        let encoded: BytesMut = Payload::<PublicKey>::BitVec(original.clone()).encode();
+        let encoded: Bytes = Payload::<PublicKey>::BitVec(original.clone()).encode();
         let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<PublicKey>::BitVec(b)) => b,
             _ => panic!(),

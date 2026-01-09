@@ -43,9 +43,7 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
         let encoded = message.encode();
-        self.sender
-            .send(recipients, encoded.freeze(), priority)
-            .await
+        self.sender.send(recipients, encoded, priority).await
     }
 
     /// Check if a message can be sent to a set of recipients, returning a [CheckedWrappedSender]
@@ -77,7 +75,7 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'a> as CheckedSender>::Error> {
         let encoded = message.encode();
-        self.sender.send(encoded.freeze(), priority).await
+        self.sender.send(encoded, priority).await
     }
 }
 
@@ -85,17 +83,12 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
 pub struct WrappedReceiver<R: Receiver, V: Codec> {
     config: V::Cfg,
     receiver: R,
-    _phantom_v: std::marker::PhantomData<V>,
 }
 
 impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
     /// Create a new [WrappedReceiver] with the given [Receiver].
     pub const fn new(config: V::Cfg, receiver: R) -> Self {
-        Self {
-            config,
-            receiver,
-            _phantom_v: std::marker::PhantomData,
-        }
+        Self { config, receiver }
     }
 
     /// Receive a message from an arbitrary recipient.

@@ -38,12 +38,14 @@ tracing.workspace = true
 [dev-dependencies]
 commonware-conformance.workspace = true
 commonware-math.workspace = true
+commonware-runtime = { workspace = true, features = ["test-utils"] }
 tracing-subscriber.workspace = true
 
 [features]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
+	"commonware-runtime/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 	"num-bigint/arbitrary",

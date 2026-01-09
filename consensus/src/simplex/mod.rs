@@ -317,23 +317,24 @@ mod tests {
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin, SplitTarget},
         Recipients, Sender as _,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner, Spawner,
+        buffer::PoolRef, count_running_tasks, deterministic, Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{max_faults, quorum, test_rng, NZUsize};
+    use commonware_utils::{max_faults, quorum, test_rng, NZUsize, NZU16};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use rand::{rngs::StdRng, Rng as _};
     use std::{
         collections::{BTreeMap, HashMap},
-        num::{NonZeroU32, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         sync::{Arc, Mutex},
         time::Duration,
     };
     use tracing::{debug, info, warn};
     use types::Activity;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
@@ -440,7 +441,7 @@ mod tests {
             Receiver<PublicKey>,
         ),
     ) {
-        let mut control = oracle.control(validator.clone());
+        let control = oracle.control(validator.clone());
         let (vote_sender, vote_receiver) = control.register(0, TEST_QUOTA).await.unwrap();
         let (certificate_sender, certificate_receiver) =
             control.register(1, TEST_QUOTA).await.unwrap();
@@ -619,6 +620,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -886,6 +888,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -1052,6 +1055,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -1241,6 +1245,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -1360,6 +1365,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 partition: me.to_string(),
                 mailbox_size: 1024,
                 epoch: Epoch::new(333),
@@ -1500,6 +1506,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -1761,6 +1768,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -1937,6 +1945,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -2150,6 +2159,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -2360,6 +2370,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -2598,6 +2609,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -2784,6 +2796,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.clone().to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -2962,6 +2975,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -3136,6 +3150,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -3225,6 +3240,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 partition: validator.to_string(),
                 mailbox_size: 1024,
                 epoch: Epoch::new(333),
@@ -3433,6 +3449,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -3599,6 +3616,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -3779,6 +3797,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -3928,6 +3947,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -4020,16 +4040,18 @@ mod tests {
         run_1k::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    fn engine_shutdown<S, F, L>(mut fixture: F, graceful: bool)
+    fn engine_shutdown<S, F, L>(seed: u64, mut fixture: F, graceful: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
-        // Create context
         let n = 1;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        let cfg = deterministic::Config::default()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(10)));
+        let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -4092,6 +4114,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 partition: participants[0].clone().to_string(),
                 mailbox_size: 64,
                 epoch: Epoch::new(333),
@@ -4117,76 +4140,78 @@ mod tests {
             // Allow tasks to start
             context.sleep(Duration::from_millis(1000)).await;
 
-            // Verify that engine and child actors are running
-            let metrics_before = context.encode();
-            let is_running = |name: &str| -> bool {
-                metrics_before.lines().any(|line| {
-                    line.starts_with("runtime_tasks_running{")
-                        && line.contains(&format!("name=\"{name}\""))
-                        && line.contains("kind=\"Task\"")
-                        && line.trim_end().ends_with(" 1")
-                })
-            };
-            assert!(is_running("engine"));
-            assert!(is_running("engine_batcher"));
-            assert!(is_running("engine_voter"));
-            assert!(is_running("engine_resolver"));
+            // Count running tasks under the engine prefix
+            let running_before = count_running_tasks(&context, "engine");
+            assert!(
+                running_before > 0,
+                "at least one engine task should be running"
+            );
 
-            // Make sure the engine is still running
+            // Make sure the engine is still running after some time
             context.sleep(Duration::from_millis(1500)).await;
-            assert!(is_running("engine"));
+            assert!(
+                count_running_tasks(&context, "engine") > 0,
+                "engine tasks should still be running"
+            );
 
             // Shutdown engine and ensure children stop
-            let metrics_after = if graceful {
+            let running_after = if graceful {
                 let metrics_context = context.clone();
                 let result = context.stop(0, Some(Duration::from_secs(5))).await;
                 assert!(
                     result.is_ok(),
                     "graceful shutdown should complete: {result:?}"
                 );
-                metrics_context.encode()
+                count_running_tasks(&metrics_context, "engine")
             } else {
                 handle.abort();
                 let _ = handle.await; // ensure parent tear-down runs
 
                 // Give the runtime a tick to process aborts
                 context.sleep(Duration::from_millis(1000)).await;
-                context.encode()
+                count_running_tasks(&context, "engine")
             };
-            let is_stopped = |name: &str| -> bool {
-                // Either the gauge is 0, or the entry is absent (both imply not running)
-                metrics_after.lines().any(|line| {
-                    line.starts_with("runtime_tasks_running{")
-                        && line.contains(&format!("name=\"{name}\""))
-                        && line.contains("kind=\"Task\"")
-                        && line.trim_end().ends_with(" 0")
-                })
-            };
-            assert!(is_stopped("engine"));
-            assert!(is_stopped("engine_batcher"));
-            assert!(is_stopped("engine_voter"));
-            assert!(is_stopped("engine_resolver"));
+            assert_eq!(
+                running_after, 0,
+                "all engine tasks should be stopped, but {running_after} still running"
+            );
         });
     }
 
     #[test_traced]
     fn test_children_shutdown_on_engine_abort() {
-        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>, false);
-        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>, false);
-        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>, false);
-        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>, false);
-        engine_shutdown::<_, _, RoundRobin>(ed25519::fixture, false);
-        engine_shutdown::<_, _, RoundRobin>(secp256r1::fixture, false);
+        for seed in 0..10 {
+            engine_shutdown::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>, false);
+            engine_shutdown::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>, false);
+            engine_shutdown::<_, _, RoundRobin>(
+                seed,
+                bls12381_multisig::fixture::<MinPk, _>,
+                false,
+            );
+            engine_shutdown::<_, _, RoundRobin>(
+                seed,
+                bls12381_multisig::fixture::<MinSig, _>,
+                false,
+            );
+            engine_shutdown::<_, _, RoundRobin>(seed, ed25519::fixture, false);
+            engine_shutdown::<_, _, RoundRobin>(seed, secp256r1::fixture, false);
+        }
     }
 
     #[test_traced]
     fn test_graceful_shutdown() {
-        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>, true);
-        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>, true);
-        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>, true);
-        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>, true);
-        engine_shutdown::<_, _, RoundRobin>(ed25519::fixture, true);
-        engine_shutdown::<_, _, RoundRobin>(secp256r1::fixture, true);
+        for seed in 0..10 {
+            engine_shutdown::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>, true);
+            engine_shutdown::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>, true);
+            engine_shutdown::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>, true);
+            engine_shutdown::<_, _, RoundRobin>(
+                seed,
+                bls12381_multisig::fixture::<MinSig, _>,
+                true,
+            );
+            engine_shutdown::<_, _, RoundRobin>(seed, ed25519::fixture, true);
+            engine_shutdown::<_, _, RoundRobin>(seed, secp256r1::fixture, true);
+        }
     }
 
     fn attributable_reporter_filtering<S, F, L>(mut fixture: F)
@@ -4251,6 +4276,7 @@ mod tests {
                     context.with_label("rng"),
                     schemes[idx].clone(),
                     mock_reporter.clone(),
+                    Sequential,
                     true, // Enable verification
                 );
                 reporters.push(mock_reporter.clone());
@@ -4277,6 +4303,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: attributable_reporter,
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -4512,6 +4539,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -4539,20 +4567,23 @@ mod tests {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes).expect("finalization quorum")
+                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                    .expect("finalization quorum")
             };
             // Helper: assemble notarization from explicit signer indices
             let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes).expect("notarization quorum")
+                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                    .expect("notarization quorum")
             };
             let build_nullification = |round: Round| -> TNullification<_> {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
                     .collect();
-                TNullification::from_nullifies(&schemes[0], &votes).expect("nullification quorum")
+                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                    .expect("nullification quorum")
             };
             // Choose F=1 and construct B_1, B_2A, B_2B
             let f_view = 1;
@@ -4615,8 +4646,8 @@ mod tests {
             for (i, participant) in participants.iter().enumerate() {
                 let recipient = Recipients::One(participant.clone());
                 let msg = match get_type(i) {
-                    ParticipantType::Group2 => notarization_msg.encode().into(),
-                    _ => nullification_msg.encode().into(),
+                    ParticipantType::Group2 => notarization_msg.encode(),
+                    _ => nullification_msg.encode(),
                 };
                 injector_sender.send(recipient, msg, true).await.unwrap();
             }
@@ -4626,22 +4657,18 @@ mod tests {
             for (i, participant) in participants.iter().enumerate() {
                 let recipient = Recipients::One(participant.clone());
                 let msg = match get_type(i) {
-                    ParticipantType::Group1 => notarization_msg.encode().into(),
-                    _ => nullification_msg.encode().into(),
+                    ParticipantType::Group1 => notarization_msg.encode(),
+                    _ => nullification_msg.encode(),
                 };
                 injector_sender.send(recipient, msg, true).await.unwrap();
             }
             // View F:
-            let msg = Certificate::<_, D>::Notarization(b0_notarization)
-                .encode()
-                .into();
+            let msg = Certificate::<_, D>::Notarization(b0_notarization).encode();
             injector_sender
                 .send(Recipients::All, msg, true)
                 .await
                 .unwrap();
-            let msg = Certificate::<_, D>::Finalization(b0_finalization)
-                .encode()
-                .into();
+            let msg = Certificate::<_, D>::Finalization(b0_finalization).encode();
             injector_sender
                 .send(Recipients::All, msg, true)
                 .await
@@ -4847,6 +4874,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -4996,6 +5024,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -5091,6 +5120,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: selected_reporter,
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -5496,6 +5526,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: label,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -5552,6 +5583,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: label,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),

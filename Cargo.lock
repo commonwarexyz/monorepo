@@ -893,6 +893,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmov"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c11ed919bd3bae4af5ab56372b627dfc32622aba6cec36906e8ab46746037c9d"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -919,6 +925,7 @@ dependencies = [
  "commonware-macros",
  "commonware-math",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
  "commonware-stream",
@@ -1020,6 +1027,7 @@ dependencies = [
  "commonware-conformance",
  "commonware-cryptography",
  "commonware-math",
+ "commonware-parallel",
  "commonware-storage",
  "commonware-utils",
  "criterion",
@@ -1041,6 +1049,7 @@ dependencies = [
  "arbitrary",
  "commonware-coding",
  "commonware-cryptography",
+ "commonware-parallel",
  "libfuzzer-sys",
  "rand_chacha 0.3.1",
 ]
@@ -1119,6 +1128,7 @@ dependencies = [
  "commonware-macros",
  "commonware-math",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-resolver",
  "commonware-runtime",
  "commonware-storage",
@@ -1127,6 +1137,7 @@ dependencies = [
  "pin-project",
  "prometheus-client",
  "rand 0.8.5",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "rand_distr",
  "rstest",
@@ -1147,6 +1158,7 @@ dependencies = [
  "commonware-macros",
  "commonware-math",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
  "futures",
@@ -1173,8 +1185,12 @@ dependencies = [
  "commonware-codec",
  "commonware-conformance",
  "commonware-math",
+ "commonware-parallel",
  "commonware-utils",
+ "crc",
+ "crc-fast",
  "criterion",
+ "ctutils",
  "ecdsa",
  "ed25519-consensus",
  "getrandom 0.2.16",
@@ -1201,6 +1217,8 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-math",
+ "commonware-parallel",
+ "commonware-utils",
  "ed25519-zebra",
  "libfuzzer-sys",
  "p256",
@@ -1284,6 +1302,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
@@ -1320,12 +1339,12 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-parallel",
  "commonware-utils",
  "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
- "rayon",
 ]
 
 [[package]]
@@ -1375,6 +1394,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-parallel"
+version = "0.0.64"
+dependencies = [
+ "cfg-if",
+ "proptest",
+ "rayon",
+]
+
+[[package]]
 name = "commonware-reshare"
 version = "0.0.64"
 dependencies = [
@@ -1388,6 +1416,7 @@ dependencies = [
  "commonware-macros",
  "commonware-math",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-resolver",
  "commonware-runtime",
  "commonware-storage",
@@ -1430,12 +1459,16 @@ dependencies = [
 name = "commonware-runtime"
 version = "0.0.64"
 dependencies = [
+ "arbitrary",
  "async-lock",
  "axum",
  "bytes",
  "cfg-if",
  "commonware-codec",
+ "commonware-conformance",
+ "commonware-cryptography",
  "commonware-macros",
+ "commonware-parallel",
  "commonware-utils",
  "console-subscriber",
  "criterion",
@@ -1450,6 +1483,7 @@ dependencies = [
  "pin-project",
  "prometheus-client",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "rayon",
  "sha2 0.10.9",
  "sysinfo",
@@ -1483,10 +1517,10 @@ dependencies = [
  "commonware-cryptography",
  "commonware-macros",
  "commonware-math",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
- "crc32fast",
  "criterion",
  "futures",
  "futures-util",
@@ -1584,6 +1618,7 @@ dependencies = [
  "cfg-if",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-macros",
  "criterion",
  "futures",
  "getrandom 0.2.16",
@@ -1734,6 +1769,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5eb8a2a1cd12ab0d987a5d5e825195d372001a4094a0376319d5a0ad71c1ba0d"
+dependencies = [
+ "crc-catalog",
+]
+
+[[package]]
+name = "crc-catalog"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19d374276b40fb8bbdee95aef7c7fa6b5316ec764510eb64b8dd0e2ed0d7e7f5"
+
+[[package]]
+name = "crc-fast"
+version = "1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e75b2483e97a5a7da73ac68a05b629f9c53cff58d8ed1c77866079e18b00dba5"
+dependencies = [
+ "digest 0.10.7",
+ "spin",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1879,6 +1939,15 @@ dependencies = [
  "generic-array",
  "rand_core 0.6.4",
  "typenum",
+]
+
+[[package]]
+name = "ctutils"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c67c81499f542d1dd38c6a2a2fe825f4dd4bca5162965dd2eea0c8119873d3c"
+dependencies = [
+ "cmov",
 ]
 
 [[package]]
@@ -4573,6 +4642,12 @@ dependencies = [
  "libc",
  "windows-sys 0.60.2",
 ]
+
+[[package]]
+name = "spin"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5fe4ccb98d9c292d56fec89a5e07da7fc4cf0dc11e156b41793132775d3e591"
 
 [[package]]
 name = "spinning_top"

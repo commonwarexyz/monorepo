@@ -4,11 +4,16 @@ use commonware_storage::archive::Archive as _;
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
+#[cfg(not(full_bench))]
+const ITEMS: [u64; 1] = [10_000];
+#[cfg(full_bench)]
+const ITEMS: [u64; 3] = [10_000, 50_000, 100_000];
+
 fn bench_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     for variant in [Variant::Prunable, Variant::Immutable] {
         for compression in [None, Some(3)] {
-            for items in [10_000, 50_000, 100_000] {
+            for items in ITEMS {
                 let label = format!(
                     "{}/variant={} items={} comp={}",
                     module_path!(),

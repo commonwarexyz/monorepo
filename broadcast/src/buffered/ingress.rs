@@ -2,10 +2,8 @@ use crate::Broadcaster;
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
-};
+use commonware_utils::channels::fallible::AsyncFallibleExt;
+use futures::channel::{mpsc, oneshot};
 
 /// Message types that can be sent to the `Mailbox`
 pub enum Message<P: PublicKey, M: Committable + Digestible> {
@@ -55,6 +53,8 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
     /// The responder will be sent the first message for an commitment when it is available; either
     /// instantly (if cached) or when it is received from the network. The request can be canceled
     /// by dropping the responder.
+    ///
+    /// If the engine has shut down, the returned receiver will resolve to `Canceled`.
     pub async fn subscribe(
         &mut self,
         peer: Option<P>,
@@ -63,14 +63,13 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
     ) -> oneshot::Receiver<M> {
         let (responder, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Subscribe {
+            .send_lossy(Message::Subscribe {
                 peer,
                 commitment,
                 digest,
                 responder,
             })
-            .await
-            .expect("mailbox closed");
+            .await;
         receiver
     }
 
@@ -80,6 +79,8 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
     /// The responder will be sent the first message for an commitment when it is available; either
     /// instantly (if cached) or when it is received from the network. The request can be canceled
     /// by dropping the responder.
+    ///
+    /// If the engine has shut down, this is a no-op.
     pub async fn subscribe_prepared(
         &mut self,
         peer: Option<P>,
@@ -88,34 +89,33 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
         responder: oneshot::Sender<M>,
     ) {
         self.sender
-            .send(Message::Subscribe {
+            .send_lossy(Message::Subscribe {
                 peer,
                 commitment,
                 digest,
                 responder,
             })
-            .await
-            .expect("mailbox closed");
+            .await;
     }
 
     /// Get all messages for an commitment.
+    ///
+    /// If the engine has shut down, returns an empty vector.
     pub async fn get(
         &mut self,
         peer: Option<P>,
         commitment: M::Commitment,
         digest: Option<M::Digest>,
     ) -> Vec<M> {
-        let (responder, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Get {
+            .request(|responder| Message::Get {
                 peer,
                 commitment,
                 digest,
                 responder,
             })
             .await
-            .expect("mailbox closed");
-        receiver.await.expect("mailbox closed")
+            .unwrap_or_default()
     }
 }
 
@@ -124,6 +124,9 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Broadcaster for Mailbox<
     type Message = M;
     type Response = Vec<P>;
 
+    /// Broadcast a message to recipients.
+    ///
+    /// If the engine has shut down, the returned receiver will resolve to `Canceled`.
     async fn broadcast(
         &mut self,
         recipients: Self::Recipients,
@@ -131,13 +134,12 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Broadcaster for Mailbox<
     ) -> oneshot::Receiver<Self::Response> {
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Broadcast {
+            .send_lossy(Message::Broadcast {
                 recipients,
                 message,
                 responder: sender,
             })
-            .await
-            .expect("mailbox closed");
+            .await;
         receiver
     }
 }

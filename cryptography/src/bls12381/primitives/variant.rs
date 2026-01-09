@@ -14,10 +14,10 @@ use blst::{
     BLS12_381_NEG_G2,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
-};
+use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
 use commonware_math::algebra::{HashToGroup, Random as _, Space};
+use commonware_parallel::Strategy;
+use commonware_utils::Participant;
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
@@ -58,11 +58,12 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     ) -> Result<(), Error>;
 
     /// Verify a batch of signatures from the provided public keys and pre-hashed messages.
-    fn batch_verify<R: CryptoRngCore>(
+    fn batch_verify<R: CryptoRngCore, S: Strategy>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
+        strategy: &S,
     ) -> Result<(), Error>;
 
     /// Compute the pairing `e(G1, G2) -> GT`.
@@ -144,11 +145,12 @@ impl Variant for MinPk {
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify<R: CryptoRngCore>(
+    fn batch_verify<R: CryptoRngCore, S: Strategy>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
+        strategy: &S,
     ) -> Result<(), Error> {
         // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());
@@ -163,7 +165,7 @@ impl Variant for MinPk {
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
-        let s_agg = G2::msm(signatures, &scalars, 1);
+        let s_agg = G2::msm(signatures, &scalars, strategy);
 
         // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);
@@ -290,11 +292,12 @@ impl Variant for MinSig {
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify<R: CryptoRngCore>(
+    fn batch_verify<R: CryptoRngCore, S: Strategy>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
+        strategy: &S,
     ) -> Result<(), Error> {
         // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());
@@ -309,7 +312,7 @@ impl Variant for MinSig {
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
-        let s_agg = G1::msm(signatures, &scalars, 1);
+        let s_agg = G1::msm(signatures, &scalars, strategy);
 
         // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);
@@ -366,13 +369,13 @@ impl Debug for MinSig {
 /// c.f. [`super::ops`] for how to manipulate these.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PartialSignature<V: Variant> {
-    pub index: u32,
+    pub index: Participant,
     pub value: V::Signature,
 }
 
 impl<V: Variant> Write for PartialSignature<V> {
     fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.index).write(buf);
+        self.index.write(buf);
         self.value.write(buf);
     }
 }
@@ -381,7 +384,7 @@ impl<V: Variant> Read for PartialSignature<V> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let index = UInt::read(buf)?.into();
+        let index = Participant::read(buf)?;
         let value = V::Signature::read(buf)?;
         Ok(Self { index, value })
     }
@@ -389,7 +392,7 @@ impl<V: Variant> Read for PartialSignature<V> {
 
 impl<V: Variant> EncodeSize for PartialSignature<V> {
     fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + V::Signature::SIZE
+        self.index.encode_size() + V::Signature::SIZE
     }
 }
 
@@ -410,7 +413,8 @@ mod tests {
     use super::*;
     use crate::bls12381::primitives::{group::Scalar, ops};
     use commonware_math::algebra::{CryptoGroup, Random};
-    use commonware_utils::test_rng;
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::{test_rng, NZUsize};
 
     fn batch_verify_correct<V: Variant>() {
         let mut rng = test_rng();
@@ -435,8 +439,19 @@ mod tests {
             &[public1, public2, public3],
             &[hm1, hm2, hm3],
             &[sig1, sig2, sig3],
+            &Sequential,
         )
         .expect("valid batch should pass");
+
+        let parallel = Rayon::new(NZUsize!(2)).unwrap();
+        V::batch_verify(
+            &mut rng,
+            &[public1, public2, public3],
+            &[hm1, hm2, hm3],
+            &[sig1, sig2, sig3],
+            &parallel,
+        )
+        .expect("valid batch should pass with parallel strategy");
     }
 
     #[test]
@@ -487,6 +502,7 @@ mod tests {
             &[public1, public2],
             &[hm1, hm2],
             &[forged_sig1, forged_sig2],
+            &Sequential,
         );
         assert!(
             result.is_err(),
@@ -494,8 +510,14 @@ mod tests {
         );
 
         // Valid signatures should still pass
-        V::batch_verify(&mut rng, &[public1, public2], &[hm1, hm2], &[sig1, sig2])
-            .expect("valid signatures should pass batch_verify");
+        V::batch_verify(
+            &mut rng,
+            &[public1, public2],
+            &[hm1, hm2],
+            &[sig1, sig2],
+            &Sequential,
+        )
+        .expect("valid signatures should pass batch_verify");
     }
 
     #[test]

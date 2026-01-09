@@ -23,6 +23,7 @@
 //! This implementation is only available on Linux systems that support io_uring.
 
 use crate::iouring::{self, should_retry};
+use bytes::{Buf, BufMut, BytesMut};
 use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
@@ -240,8 +241,12 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), crate::Error> {
-        let mut msg = msg.into();
+    async fn send(&mut self, mut msg: impl Buf + Send) -> Result<(), crate::Error> {
+        // TODO(#2705): Use writev to avoid this copy.
+        let mut msg: StableBuf = {
+            let buf = msg.copy_to_bytes(msg.remaining());
+            BytesMut::from(buf).into()
+        };
         let mut bytes_sent = 0;
         let msg_len = msg.len();
 
@@ -404,17 +409,17 @@ impl Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, crate::Error> {
-        let mut buf = buf.into();
+    async fn recv(&mut self, mut buf: impl BufMut + Send) -> Result<(), crate::Error> {
+        let mut owned_buf: StableBuf = BytesMut::zeroed(buf.remaining_mut()).into();
         let mut bytes_received = 0;
-        let buf_len = buf.len();
+        let buf_len = owned_buf.len();
 
         while bytes_received < buf_len {
             // First drain any buffered data
             let buffered = self.buffer_len - self.buffer_pos;
             if buffered > 0 {
                 let to_copy = std::cmp::min(buffered, buf_len - bytes_received);
-                buf.as_mut()[bytes_received..bytes_received + to_copy]
+                owned_buf.as_mut()[bytes_received..bytes_received + to_copy]
                     .copy_from_slice(&self.buffer[self.buffer_pos..self.buffer_pos + to_copy]);
                 self.buffer_pos += to_copy;
                 bytes_received += to_copy;
@@ -427,8 +432,9 @@ impl crate::Stream for Stream {
             // to fill the buffer and immediately drain it
             let buffer_len = self.buffer.len();
             if buffer_len == 0 || remaining >= buffer_len {
-                let (returned_buf, result) = self.submit_recv(buf, bytes_received, remaining).await;
-                buf = returned_buf;
+                let (returned_buf, result) =
+                    self.submit_recv(owned_buf, bytes_received, remaining).await;
+                owned_buf = returned_buf;
                 bytes_received += result?;
             } else {
                 // Fill internal buffer, then loop will copy
@@ -436,7 +442,8 @@ impl crate::Stream for Stream {
             }
         }
 
-        Ok(buf)
+        buf.put_slice(owned_buf.as_ref());
+        Ok(())
     }
 }
 
@@ -516,20 +523,21 @@ mod tests {
             let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
             // Read a small message (much smaller than the 64KB buffer)
-            let buf = stream.recv(vec![0u8; 10]).await.unwrap();
+            let mut buf = [0u8; 10];
+            stream.recv(&mut buf[..]).await.unwrap();
             buf
         });
 
         // Connect and send a small message
         let (mut sink, _stream) = network.dial(addr).await.unwrap();
         let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        sink.send(msg.clone()).await.unwrap();
+        sink.send(msg.as_ref()).await.unwrap();
 
         // Wait for the reader to complete
         let received = reader.await.unwrap();
 
         // Verify we got the right data
-        assert_eq!(received.as_ref(), &msg[..]);
+        assert_eq!(received.as_slice(), &msg[..]);
     }
 
     #[tokio::test]
@@ -561,7 +569,8 @@ mod tests {
 
             // Try to read 100 bytes, but only 5 will be sent
             let start = Instant::now();
-            let result = stream.recv(vec![0u8; 100]).await;
+            let mut buf = [0u8; 100];
+            let result = stream.recv(&mut buf[..]).await;
             let elapsed = start.elapsed();
 
             (result, elapsed)
@@ -569,7 +578,7 @@ mod tests {
 
         // Connect and send only partial data
         let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        sink.send(vec![1u8, 2, 3, 4, 5]).await.unwrap();
+        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
 
         // Wait for the reader to complete
         let (result, elapsed) = reader.await.unwrap();
@@ -608,21 +617,23 @@ mod tests {
             let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
             // Read messages without buffering
-            let buf1 = stream.recv(vec![0u8; 5]).await.unwrap();
-            let buf2 = stream.recv(vec![0u8; 5]).await.unwrap();
+            let mut buf1 = [0u8; 5];
+            let mut buf2 = [0u8; 5];
+            stream.recv(&mut buf1[..]).await.unwrap();
+            stream.recv(&mut buf2[..]).await.unwrap();
             (buf1, buf2)
         });
 
         // Connect and send two messages
         let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        sink.send(vec![1u8, 2, 3, 4, 5]).await.unwrap();
-        sink.send(vec![6u8, 7, 8, 9, 10]).await.unwrap();
+        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
+        sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
 
         // Wait for the reader to complete
         let (buf1, buf2) = reader.await.unwrap();
 
         // Verify we got the right data
-        assert_eq!(buf1.as_ref(), &[1u8, 2, 3, 4, 5]);
-        assert_eq!(buf2.as_ref(), &[6u8, 7, 8, 9, 10]);
+        assert_eq!(buf1.as_slice(), &[1u8, 2, 3, 4, 5]);
+        assert_eq!(buf2.as_slice(), &[6u8, 7, 8, 9, 10]);
     }
 }

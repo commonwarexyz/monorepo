@@ -6,53 +6,13 @@
 use crate::{
     codec::{EncodeSize, Read, Write},
     error::Error,
+    types::read_ordered_set,
     RangeCfg,
 };
 use bytes::{Buf, BufMut};
-use std::{cmp::Ordering, collections::HashSet, hash::Hash};
+use std::{collections::HashSet, hash::Hash};
 
 const HASHSET_TYPE: &str = "HashSet";
-
-/// Read items from [Buf] in ascending order.
-fn read_ordered_set<K, F>(
-    buf: &mut impl Buf,
-    len: usize,
-    cfg: &K::Cfg,
-    mut insert: F,
-    set_type: &'static str,
-) -> Result<(), Error>
-where
-    K: Read + Ord,
-    F: FnMut(K) -> bool,
-{
-    let mut last: Option<K> = None;
-    for _ in 0..len {
-        // Read item
-        let item = K::read_cfg(buf, cfg)?;
-
-        // Check if items are in ascending order
-        if let Some(ref last) = last {
-            match item.cmp(last) {
-                Ordering::Equal => return Err(Error::Invalid(set_type, "Duplicate item")),
-                Ordering::Less => return Err(Error::Invalid(set_type, "Items must ascend")),
-                _ => {}
-            }
-        }
-
-        // Add previous item, if exists
-        if let Some(last) = last.take() {
-            insert(last);
-        }
-        last = Some(item);
-    }
-
-    // Add last item, if exists
-    if let Some(last) = last {
-        insert(last);
-    }
-
-    Ok(())
-}
 
 impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
     fn write(&self, buf: &mut impl BufMut) {
@@ -253,7 +213,7 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(1u32);
 
-        let mut encoded = set.encode();
+        let mut encoded = set.encode_mut();
         encoded.put_u8(0xFF); // Add extra byte
 
         // Use decode_cfg which enforces buffer is fully consumed

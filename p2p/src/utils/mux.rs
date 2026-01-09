@@ -9,10 +9,11 @@
 //!   even if the muxer is already running.
 
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
-use bytes::{BufMut, Bytes, BytesMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, ReadExt, Write};
+use bytes::{Buf, Bytes};
+use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_utils::channels::fallible::FallibleExt;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -278,7 +279,7 @@ impl<R: Receiver> Drop for SubReceiver<R> {
             .expect("SubReceiver::drop called twice");
 
         // Deregister the subchannel immediately.
-        let _ = control_tx.unbounded_send(Control::Deregister {
+        control_tx.send_lossy(Control::Deregister {
             subchannel: self.subchannel,
         });
     }
@@ -301,7 +302,7 @@ impl<S: Sender> GlobalSender<S> {
         &mut self,
         subchannel: Channel,
         recipients: Recipients<S::PublicKey>,
-        payload: Bytes,
+        payload: impl Buf + Send,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
         match self.check(recipients).await {
@@ -354,14 +355,13 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
 
     async fn send(
         self,
-        message: Bytes,
+        message: impl Buf + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
-        let mut buf = BytesMut::with_capacity(subchannel.encode_size() + message.len());
-        subchannel.write(&mut buf);
-        buf.put_slice(&message);
-        self.inner.send(buf.freeze(), priority).await
+        self.inner
+            .send(subchannel.encode().chain(message), priority)
+            .await
     }
 }
 
@@ -870,12 +870,7 @@ mod tests {
             assert_eq!(subchannel, 1);
             assert_eq!(from, pk1);
             global_sender2
-                .send(
-                    subchannel,
-                    Recipients::One(pk1),
-                    b"TEST".to_vec().into(),
-                    true,
-                )
+                .send(subchannel, Recipients::One(pk1), &b"TEST"[..], true)
                 .await
                 .unwrap();
 

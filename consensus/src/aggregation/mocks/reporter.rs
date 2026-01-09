@@ -1,12 +1,13 @@
 use crate::{
     aggregation::{
         scheme,
-        types::{Ack, Activity, Certificate, Index},
+        types::{Ack, Activity, Certificate},
     },
-    types::Epoch,
+    types::{Epoch, Height},
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_parallel::Sequential;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -18,10 +19,10 @@ use std::collections::{btree_map::Entry, BTreeMap, HashSet};
 enum Message<S: Scheme, D: Digest> {
     Ack(Ack<S, D>),
     Certified(Certificate<S, D>),
-    Tip(Index),
-    GetTip(oneshot::Sender<Option<(Index, Epoch)>>),
-    GetContiguousTip(oneshot::Sender<Option<Index>>),
-    Get(Index, oneshot::Sender<Option<(D, Epoch)>>),
+    Tip(Height),
+    GetTip(oneshot::Sender<Option<(Height, Epoch)>>),
+    GetContiguousTip(oneshot::Sender<Option<Height>>),
+    Get(Height, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
 pub struct Reporter<R: CryptoRngCore, S: Scheme, D: Digest> {
@@ -34,16 +35,16 @@ pub struct Reporter<R: CryptoRngCore, S: Scheme, D: Digest> {
     scheme: S,
 
     // Received acks (for validation)
-    acks: HashSet<(Index, Epoch)>,
+    acks: HashSet<(Height, Epoch)>,
 
     // All known digests
-    digests: BTreeMap<Index, (D, Epoch)>,
+    digests: BTreeMap<Height, (D, Epoch)>,
 
     // Highest contiguous known height
-    contiguous: Option<Index>,
+    contiguous: Option<Height>,
 
     // Highest known height (and epoch)
-    highest: Option<(Index, Epoch)>,
+    highest: Option<(Height, Epoch)>,
 
     // Current epoch (tracked from acks)
     current_epoch: Epoch,
@@ -77,7 +78,7 @@ where
             match msg {
                 Message::Ack(ack) => {
                     // Verify properly constructed (not needed in production)
-                    assert!(ack.verify(&mut self.rng, &self.scheme));
+                    assert!(ack.verify(&mut self.rng, &self.scheme, &Sequential));
 
                     // Test encoding/decoding
                     let encoded = ack.encode();
@@ -87,11 +88,11 @@ where
                     self.current_epoch = ack.epoch;
 
                     // Store the ack
-                    self.acks.insert((ack.item.index, ack.epoch));
+                    self.acks.insert((ack.item.height, ack.epoch));
                 }
                 Message::Certified(certificate) => {
                     // Verify certificate
-                    assert!(certificate.verify(&mut self.rng, &self.scheme));
+                    assert!(certificate.verify(&mut self.rng, &self.scheme, &Sequential));
 
                     // Test encoding/decoding
                     let encoded = certificate.encode();
@@ -99,7 +100,7 @@ where
                     Certificate::<S, D>::decode_cfg(encoded, &cfg).unwrap();
 
                     // Update the reporter
-                    let entry = self.digests.entry(certificate.item.index);
+                    let entry = self.digests.entry(certificate.item.height);
                     match entry {
                         Entry::Occupied(mut entry) => {
                             // It should never be possible to get a conflicting payload
@@ -117,22 +118,26 @@ where
                     }
 
                     // Update the highest height
-                    if self.highest.is_none_or(|(h, _)| certificate.item.index > h) {
-                        self.highest = Some((certificate.item.index, self.current_epoch));
+                    if self
+                        .highest
+                        .is_none_or(|(h, _)| certificate.item.height > h)
+                    {
+                        self.highest = Some((certificate.item.height, self.current_epoch));
                     }
 
                     // Update the highest contiguous height
-                    let mut next_contiguous = self.contiguous.map(|c| c + 1).unwrap_or(0);
+                    let mut next_contiguous =
+                        self.contiguous.map(|c| c.next()).unwrap_or(Height::zero());
                     while self.digests.contains_key(&next_contiguous) {
-                        next_contiguous += 1;
+                        next_contiguous = next_contiguous.next();
                     }
-                    if next_contiguous > 0 {
-                        self.contiguous = Some(next_contiguous.checked_sub(1).unwrap());
+                    if !next_contiguous.is_zero() {
+                        self.contiguous = Some(next_contiguous.previous().unwrap());
                     }
                 }
-                Message::Tip(index) => {
-                    if self.highest.is_none_or(|(h, _)| index > h) {
-                        self.highest = Some((index, self.current_epoch));
+                Message::Tip(height) => {
+                    if self.highest.is_none_or(|(h, _)| height > h) {
+                        self.highest = Some((height, self.current_epoch));
                     }
                 }
                 Message::GetTip(sender) => {
@@ -141,8 +146,8 @@ where
                 Message::GetContiguousTip(sender) => {
                     sender.send(self.contiguous).unwrap();
                 }
-                Message::Get(index, sender) => {
-                    let digest = self.digests.get(&index).cloned();
+                Message::Get(height, sender) => {
+                    let digest = self.digests.get(&height).cloned();
                     sender.send(digest).unwrap();
                 }
             }
@@ -176,9 +181,9 @@ where
                     .await
                     .expect("Failed to send certified signature");
             }
-            Activity::Tip(index) => {
+            Activity::Tip(height) => {
                 self.sender
-                    .send(Message::Tip(index))
+                    .send(Message::Tip(height))
                     .await
                     .expect("Failed to send tip");
             }
@@ -191,13 +196,13 @@ where
     S: Scheme,
     D: Digest,
 {
-    pub async fn get_tip(&mut self) -> Option<(Index, Epoch)> {
+    pub async fn get_tip(&mut self) -> Option<(Height, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         self.sender.send(Message::GetTip(sender)).await.unwrap();
         receiver.await.unwrap()
     }
 
-    pub async fn get_contiguous_tip(&mut self) -> Option<Index> {
+    pub async fn get_contiguous_tip(&mut self) -> Option<Height> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::GetContiguousTip(sender))
@@ -206,9 +211,12 @@ where
         receiver.await.unwrap()
     }
 
-    pub async fn get(&mut self, index: Index) -> Option<(D, Epoch)> {
+    pub async fn get(&mut self, height: Height) -> Option<(D, Epoch)> {
         let (sender, receiver) = oneshot::channel();
-        self.sender.send(Message::Get(index, sender)).await.unwrap();
+        self.sender
+            .send(Message::Get(height, sender))
+            .await
+            .unwrap();
         receiver.await.unwrap()
     }
 }

@@ -1,7 +1,8 @@
 //! Benchmarks of QMDB variants on variable-sized values.
 
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
+use commonware_parallel::ThreadPool;
+use commonware_runtime::{buffer::PoolRef, tokio::Context, RayonPoolSpawner};
 use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
     qmdb::{
@@ -15,9 +16,9 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 pub mod generate;
 pub mod init;
@@ -46,10 +47,10 @@ const PARTITION_SUFFIX: &str = "any_variable_bench_partition";
 
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
 /// configured to provide 8 cores.
-const THREADS: usize = 8;
+const THREADS: NonZeroUsize = NZUsize!(8);
 
 /// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: NonZeroUsize = NZUsize!(16384);
+const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
 
 /// The number of pages to cache in the buffer pool.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
@@ -82,13 +83,13 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
 }
 
 async fn get_any_unordered(ctx: Context) -> UVariableDb {
-    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let pool = ctx.clone().create_pool(THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     UVariableDb::init(ctx, any_cfg).await.unwrap()
 }
 
 async fn get_any_ordered(ctx: Context) -> OVariableDb {
-    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let pool = ctx.clone().create_pool(THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     OVariableDb::init(ctx, any_cfg).await.unwrap()
 }
@@ -167,18 +168,14 @@ where
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
         assert!(batch.update(rand_key, v).await.is_ok());
         if rng.next_u32() % commit_frequency == 0 {
-            let iter = batch.into_iter();
-            assert!(db.write_batch(iter).await.is_ok());
+            assert!(db.write_batch(batch.into_iter()).await.is_ok());
             let (durable, _) = db.commit(None).await.unwrap();
             db = durable.into_mutable();
             batch = db.start_batch();
         }
     }
 
-    let iter = batch.into_iter();
-    db.write_batch(iter)
-        .await
-        .expect("write_batch shouldn't fail");
+    assert!(db.write_batch(batch.into_iter()).await.is_ok());
     let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
     durable
 }

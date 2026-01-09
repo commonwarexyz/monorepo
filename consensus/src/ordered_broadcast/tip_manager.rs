@@ -56,9 +56,12 @@ impl<C: PublicKey, S: Scheme, D: Digest> TipManager<C, S, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ordered_broadcast::{
-        scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
-        types::{Chunk, ChunkSigner},
+    use crate::{
+        ordered_broadcast::{
+            scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
+            types::{Chunk, ChunkSigner},
+        },
+        types::Height,
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -78,7 +81,7 @@ mod tests {
     fn create_node<S: Scheme<PublicKey, Sha256Digest>>(
         fixture: &Fixture<S>,
         sequencer_idx: usize,
-        height: u64,
+        height: Height,
         payload: &str,
     ) -> Node<PublicKey, S, Sha256Digest> {
         let sequencer = fixture.participants[sequencer_idx].clone();
@@ -108,7 +111,7 @@ mod tests {
     {
         let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
-        let node = create_node(&fixture, 0, 1, "payload");
+        let node = create_node(&fixture, 0, Height::new(1), "payload");
         let key = node.chunk.sequencer.clone();
         assert!(manager.put(&node));
         let got = manager.get(&key).unwrap();
@@ -134,7 +137,7 @@ mod tests {
     {
         let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
-        let node = create_node(&fixture, 0, 1, "payload");
+        let node = create_node(&fixture, 0, Height::new(1), "payload");
         let key = node.chunk.sequencer.clone();
         assert!(manager.put(&node));
         assert!(!manager.put(&node));
@@ -161,10 +164,10 @@ mod tests {
     {
         let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
-        let node1 = create_node(&fixture, 0, 1, "payload1");
+        let node1 = create_node(&fixture, 0, Height::new(1), "payload1");
         let key = node1.chunk.sequencer.clone();
         assert!(manager.put(&node1));
-        let node2 = create_node(&fixture, 0, 2, "payload2");
+        let node2 = create_node(&fixture, 0, Height::new(2), "payload2");
         assert!(manager.put(&node2));
         let got = manager.get(&key).unwrap();
         assert_eq!(got.chunk, node2.chunk);
@@ -189,9 +192,9 @@ mod tests {
     {
         let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
-        let node1 = create_node(&fixture, 0, 2, "payload");
+        let node1 = create_node(&fixture, 0, Height::new(2), "payload");
         assert!(manager.put(&node1));
-        let node2 = create_node(&fixture, 0, 1, "payload");
+        let node2 = create_node(&fixture, 0, Height::new(1), "payload");
         manager.put(&node2); // Should panic
     }
 
@@ -221,9 +224,9 @@ mod tests {
     {
         let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
-        let node1 = create_node(&fixture, 0, 1, "payload1");
+        let node1 = create_node(&fixture, 0, Height::new(1), "payload1");
         assert!(manager.put(&node1));
-        let node2 = create_node(&fixture, 0, 1, "payload2");
+        let node2 = create_node(&fixture, 0, Height::new(1), "payload2");
         manager.put(&node2); // Should panic
     }
 
@@ -279,8 +282,8 @@ mod tests {
     {
         let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
-        let node1 = create_node(&fixture, 0, 1, "payload1");
-        let node2 = create_node(&fixture, 1, 2, "payload2");
+        let node1 = create_node(&fixture, 0, Height::new(1), "payload1");
+        let node2 = create_node(&fixture, 1, Height::new(2), "payload2");
         let key1 = node1.chunk.sequencer.clone();
         let key2 = node2.chunk.sequencer.clone();
         manager.put(&node1);
@@ -311,35 +314,35 @@ mod tests {
         let mut manager = TipManager::<PublicKey, S, Sha256Digest>::new();
 
         // Insert tip with height 1.
-        let node1 = create_node(&fixture, 0, 1, "payload1");
+        let node1 = create_node(&fixture, 0, Height::new(1), "payload1");
         let key = node1.chunk.sequencer.clone();
         manager.put(&node1);
         let got1 = manager.get(&key).unwrap();
-        assert_eq!(got1.chunk.height, 1);
+        assert_eq!(got1.chunk.height, Height::new(1));
         assert_eq!(got1.chunk.payload, node1.chunk.payload);
 
         // Insert tip with height 2.
-        let node2 = create_node(&fixture, 0, 2, "payload2");
+        let node2 = create_node(&fixture, 0, Height::new(2), "payload2");
         manager.put(&node2);
         let got2 = manager.get(&key).unwrap();
-        assert_eq!(got2.chunk.height, 2);
+        assert_eq!(got2.chunk.height, Height::new(2));
         assert_eq!(got2.chunk.payload, node2.chunk.payload);
 
         // Insert tip with height 3.
-        let node3 = create_node(&fixture, 0, 3, "payload3");
+        let node3 = create_node(&fixture, 0, Height::new(3), "payload3");
         manager.put(&node3);
         let got3 = manager.get(&key).unwrap();
-        assert_eq!(got3.chunk.height, 3);
+        assert_eq!(got3.chunk.height, Height::new(3));
         assert_eq!(got3.chunk.payload, node3.chunk.payload);
 
         // Re-inserting the same tip should return false.
         assert!(!manager.put(&node3));
 
         // Insert tip with height 4.
-        let node4 = create_node(&fixture, 0, 4, "payload4");
+        let node4 = create_node(&fixture, 0, Height::new(4), "payload4");
         manager.put(&node4);
         let got4 = manager.get(&key).unwrap();
-        assert_eq!(got4.chunk.height, 4);
+        assert_eq!(got4.chunk.height, Height::new(4));
         assert_eq!(got4.chunk.payload, node4.chunk.payload);
     }
 

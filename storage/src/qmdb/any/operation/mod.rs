@@ -125,11 +125,11 @@ mod tests {
     where
         T: Codec + PartialEq + std::fmt::Debug,
     {
-        let encoded = value.encode().freeze();
+        let encoded = value.encode();
         let decoded = T::decode_cfg(encoded.clone(), cfg).expect("decode");
         assert_eq!(decoded, *value);
         let encoded2 = decoded.encode();
-        assert_eq!(encoded, encoded2.freeze());
+        assert_eq!(encoded, encoded2);
     }
 
     #[test]

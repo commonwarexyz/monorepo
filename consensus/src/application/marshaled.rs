@@ -42,7 +42,7 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
-use commonware_utils::futures::ClosedExt;
+use commonware_utils::{channels::fallible::OneshotExt, futures::ClosedExt};
 use futures::{
     channel::oneshot::{self, Canceled},
     future::{select, try_join, Either, Ready},
@@ -356,9 +356,9 @@ where
                         .expect("current epoch should exist");
                     if block.height() == last_in_epoch {
                         marshal.verified(context.round, block).await;
-                        let _ = tx.send(true);
+                        tx.send_lossy(true);
                     } else {
-                        let _ = tx.send(false);
+                        tx.send_lossy(false);
                     }
                     return;
                 }
@@ -367,14 +367,14 @@ where
                 // a re-proposal of the boundary block.
                 let Some(block_bounds) = epocher.containing(block.height()) else {
                     debug!(
-                        height = block.height(),
+                        height = %block.height(),
                         "block height not covered by epoch strategy"
                     );
-                    let _ = tx.send(false);
+                    tx.send_lossy(false);
                     return;
                 };
                 if block_bounds.epoch() != context.epoch() {
-                    let _ = tx.send(false);
+                    tx.send_lossy(false);
                     return;
                 }
 
@@ -385,18 +385,18 @@ where
                         expected_parent = %parent.commitment(),
                         "block parent commitment does not match expected parent"
                     );
-                    let _ = tx.send(false);
+                    tx.send_lossy(false);
                     return;
                 }
 
                 // Validate that heights are contiguous.
-                if parent.height().checked_add(1) != Some(block.height()) {
+                if parent.height().next() != block.height() {
                     debug!(
-                        parent_height = parent.height(),
-                        block_height = block.height(),
+                        parent_height = %parent.height(),
+                        block_height = %block.height(),
                         "block height is not contiguous with parent height"
                     );
-                    let _ = tx.send(false);
+                    tx.send_lossy(false);
                     return;
                 }
 
@@ -422,7 +422,7 @@ where
                 if application_valid {
                     marshal.verified(context.round, block).await;
                 }
-                let _ = tx.send(application_valid);
+                tx.send_lossy(application_valid);
             });
         rx
     }
@@ -468,7 +468,7 @@ where
             warn!(
                 round = %round,
                 commitment = %block.commitment(),
-                height = block.height(),
+                height = %block.height(),
                 "skipping requested broadcast of block with mismatched commitment"
             );
             return;
@@ -477,7 +477,7 @@ where
         debug!(
             round = %round,
             commitment = %block.commitment(),
-            height = block.height(),
+            height = %block.height(),
             "requested broadcast of built block"
         );
         self.marshal.proposed(round, block).await;

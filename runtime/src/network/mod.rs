@@ -45,12 +45,10 @@ mod tests {
         let server = runtime.spawn(async move {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
-            let read = stream
-                .recv(vec![0; CLIENT_SEND_DATA.len()])
-                .await
-                .expect("Failed to receive");
-            assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
-            sink.send(Vec::from(SERVER_SEND_DATA))
+            let mut read = vec![0; CLIENT_SEND_DATA.len()];
+            stream.recv(&mut read[..]).await.expect("Failed to receive");
+            assert_eq!(&read[..], CLIENT_SEND_DATA.as_bytes());
+            sink.send(SERVER_SEND_DATA.as_bytes())
                 .await
                 .expect("Failed to send");
         });
@@ -63,15 +61,16 @@ mod tests {
                 .await
                 .expect("Failed to dial server");
 
-            sink.send(Vec::from(CLIENT_SEND_DATA))
+            sink.send(CLIENT_SEND_DATA.as_bytes())
                 .await
                 .expect("Failed to send data");
 
-            let read = stream
-                .recv(vec![0; SERVER_SEND_DATA.len()])
+            let mut read = vec![0; SERVER_SEND_DATA.len()];
+            stream
+                .recv(&mut read[..])
                 .await
                 .expect("Failed to receive data");
-            assert_eq!(read.as_ref(), SERVER_SEND_DATA.as_bytes());
+            assert_eq!(&read[..], SERVER_SEND_DATA.as_bytes());
         });
 
         // Wait for both tasks to complete
@@ -97,13 +96,11 @@ mod tests {
             for _ in 0..3 {
                 let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
-                let read = stream
-                    .recv(vec![0; CLIENT_SEND_DATA.len()])
-                    .await
-                    .expect("Failed to receive");
-                assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
+                let mut read = vec![0; CLIENT_SEND_DATA.len()];
+                stream.recv(&mut read[..]).await.expect("Failed to receive");
+                assert_eq!(&read[..], CLIENT_SEND_DATA.as_bytes());
 
-                sink.send(Vec::from(SERVER_SEND_DATA))
+                sink.send(SERVER_SEND_DATA.as_bytes())
                     .await
                     .expect("Failed to send");
             }
@@ -119,17 +116,18 @@ mod tests {
                     .expect("Failed to dial server");
 
                 // Send a message to the server
-                sink.send(Vec::from(CLIENT_SEND_DATA))
+                sink.send(CLIENT_SEND_DATA.as_bytes())
                     .await
                     .expect("Failed to send data");
 
                 // Receive a message from the server
-                let read = stream
-                    .recv(vec![0; SERVER_SEND_DATA.len()])
+                let mut read = vec![0; SERVER_SEND_DATA.len()];
+                stream
+                    .recv(&mut read[..])
                     .await
                     .expect("Failed to receive data");
                 // Verify the received data
-                assert_eq!(read.as_ref(), SERVER_SEND_DATA.as_bytes());
+                assert_eq!(&read[..], SERVER_SEND_DATA.as_bytes());
             }
         });
 
@@ -156,11 +154,12 @@ mod tests {
 
             // Receive and echo large data in chunks
             for _ in 0..NUM_CHUNKS {
-                let read = stream
-                    .recv(vec![0; CHUNK_SIZE])
+                let mut read = vec![0; CHUNK_SIZE];
+                stream
+                    .recv(&mut read[..])
                     .await
                     .expect("Failed to receive chunk");
-                sink.send(read).await.expect("Failed to send chunk");
+                sink.send(&read[..]).await.expect("Failed to send chunk");
             }
         });
 
@@ -177,14 +176,13 @@ mod tests {
 
             // Send and verify data in chunks
             for _ in 0..NUM_CHUNKS {
-                sink.send(pattern.clone())
-                    .await
-                    .expect("Failed to send chunk");
-                let read = stream
-                    .recv(vec![0; CHUNK_SIZE])
+                sink.send(&pattern[..]).await.expect("Failed to send chunk");
+                let mut read = vec![0; CHUNK_SIZE];
+                stream
+                    .recv(&mut read[..])
                     .await
                     .expect("Failed to receive chunk");
-                assert_eq!(read.as_ref(), pattern);
+                assert_eq!(&read[..], &pattern[..]);
             }
         });
 
@@ -240,8 +238,9 @@ mod tests {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
                 tokio::spawn(async move {
                     for _ in 0..NUM_MESSAGES {
-                        let data = stream.recv(vec![0; MESSAGE_SIZE]).await.unwrap();
-                        sink.send(data).await.unwrap();
+                        let mut data = vec![0; MESSAGE_SIZE];
+                        stream.recv(&mut data[..]).await.unwrap();
+                        sink.send(&data[..]).await.unwrap();
                     }
                 });
             }
@@ -255,9 +254,10 @@ mod tests {
                 let (mut sink, mut stream) = network.dial(addr).await.unwrap();
                 let payload = vec![42u8; MESSAGE_SIZE];
                 for _ in 0..NUM_MESSAGES {
-                    sink.send(payload.clone()).await.unwrap();
-                    let echo = stream.recv(vec![0; MESSAGE_SIZE]).await.unwrap();
-                    assert_eq!(echo.as_ref(), payload);
+                    sink.send(&payload[..]).await.unwrap();
+                    let mut echo = vec![0; MESSAGE_SIZE];
+                    stream.recv(&mut echo[..]).await.unwrap();
+                    assert_eq!(&echo[..], &payload[..]);
                 }
             }));
         }

@@ -125,7 +125,7 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Create the simulated network and oracle for controlling it
-        let (network, mut oracle) = simulated::Network::new(context.with_label("network"), p2p_cfg);
+        let (network, oracle) = simulated::Network::new(context.with_label("network"), p2p_cfg);
         let _network_handle = network.start();
 
         // Track registered channels: (peer_idx, channel_id) -> (sender, receiver)

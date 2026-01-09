@@ -869,13 +869,16 @@ pub mod test {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        num::{NonZeroU16, NonZeroUsize},
+    };
     use tracing::warn;
 
-    const PAGE_SIZE: usize = 88;
-    const PAGE_CACHE_SIZE: usize = 8;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(88);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
 
     fn current_db_config(partition_prefix: &str) -> Config<TwoCap> {
         Config {
@@ -889,7 +892,7 @@ pub mod test {
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -1674,5 +1677,37 @@ pub mod test {
             let prefix = format!("current_unordered_batch_{seed}");
             open_db(ctx, &prefix).await.into_mutable()
         });
+    }
+
+    /// Compile-time check that Db is Send + Sync when its type parameters are.
+    const _: () = {
+        const fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CleanCurrentTest>();
+        assert_send_sync::<DirtyCurrentTest>();
+    };
+
+    /// Helper to assert a future is Send at compile time.
+    fn assert_send<T: Send>(_: T) {}
+
+    /// Test that futures returned by Clean (Merkleized, Durable) Db methods are Send.
+    #[allow(dead_code)]
+    fn test_clean_futures_are_send(db: &mut CleanCurrentTest) {
+        use crate::mmr::Location;
+
+        // Durable-specific operations
+        assert_send(db.sync());
+        assert_send(db.prune(Location::new_unchecked(0)));
+    }
+
+    /// Test that futures returned by Dirty (Unmerkleized, NonDurable) Db methods are Send.
+    #[allow(dead_code)]
+    fn test_dirty_futures_are_send(mut db: DirtyCurrentTest, key: Digest) {
+        // Mutation operations
+        assert_send(db.update(key, key));
+        assert_send(db.create(key, key));
+        assert_send(db.delete(key));
+
+        // Commit (consumes self)
+        assert_send(db.commit(None));
     }
 }

@@ -52,7 +52,7 @@ fn main() {
     println!("polynomial: {}", hex(&public.encode()));
     println!("public: {}", public.public());
     for share in shares {
-        let validator = validators[share.index as usize].0;
+        let validator = validators[usize::from(share.index)].0;
         println!(
             "share (index={} validator={}): {}",
             share.index,

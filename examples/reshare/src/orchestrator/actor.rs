@@ -19,17 +19,18 @@ use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
     Blocker, Receiver, Sender,
 };
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{vec::NonEmptyVec, NZUsize};
+use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use futures::{channel::mpsc, StreamExt};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
 use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
-pub struct Config<B, V, C, H, A, S, L>
+pub struct Config<B, V, C, H, A, S, L, T>
 where
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
@@ -39,11 +40,13 @@ where
         + Relay<Digest = H::Digest>,
     S: Scheme,
     L: Elector<S>,
+    T: Strategy,
 {
     pub oracle: B,
     pub application: A,
     pub provider: Provider<S, C>,
     pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
+    pub strategy: T,
 
     pub muxer_size: usize,
     pub mailbox_size: usize,
@@ -54,7 +57,7 @@ where
     pub _phantom: PhantomData<L>,
 }
 
-pub struct Actor<E, B, V, C, H, A, S, L>
+pub struct Actor<E, B, V, C, H, A, S, L, T>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -65,6 +68,7 @@ where
         + Relay<Digest = H::Digest>,
     S: Scheme,
     L: Elector<S>,
+    T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
@@ -74,6 +78,7 @@ where
     oracle: B,
     marshal: marshal::Mailbox<S, Block<H, C, V>>,
     provider: Provider<S, C>,
+    strategy: T,
 
     muxer_size: usize,
     partition_prefix: String,
@@ -81,7 +86,7 @@ where
     _phantom: PhantomData<L>,
 }
 
-impl<E, B, V, C, H, A, S, L> Actor<E, B, V, C, H, A, S, L>
+impl<E, B, V, C, H, A, S, L, T> Actor<E, B, V, C, H, A, S, L, T>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -92,14 +97,15 @@ where
         + Relay<Digest = H::Digest>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
+    T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(
         context: E,
-        config: Config<B, V, C, H, A, S, L>,
+        config: Config<B, V, C, H, A, S, L, T>,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
-        let pool_ref = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));
+        let pool_ref = PoolRef::new(NZU16!(16_384), NZUsize!(10_000));
 
         (
             Self {
@@ -109,6 +115,7 @@ where
                 oracle: config.oracle,
                 marshal: config.marshal,
                 provider: config.provider,
+                strategy: config.strategy,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 pool_ref,
@@ -213,7 +220,7 @@ where
                     ?from,
                     %their_epoch,
                     %our_epoch,
-                    boundary_height,
+                    %boundary_height,
                     "received backup message from future epoch, ensuring boundary finalization"
                 );
                 self.marshal.hint_finalized(boundary_height, NonEmptyVec::new(from)).await;
@@ -309,6 +316,7 @@ where
                 skip_timeout: ViewDelta::new(10),
                 fetch_concurrent: 32,
                 buffer_pool: self.pool_ref.clone(),
+                strategy: self.strategy.clone(),
             },
         );
 

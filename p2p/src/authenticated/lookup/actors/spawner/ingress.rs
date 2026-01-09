@@ -2,6 +2,7 @@ use crate::authenticated::{lookup::actors::tracker::Reservation, Mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::{Receiver, Sender};
+use commonware_utils::channels::fallible::AsyncFallibleExt;
 
 /// Messages that can be processed by the spawner actor.
 pub enum Message<Si: Sink, St: Stream, P: PublicKey> {
@@ -18,17 +19,20 @@ pub enum Message<Si: Sink, St: Stream, P: PublicKey> {
 
 impl<Si: Sink, St: Stream, P: PublicKey> Mailbox<Message<Si, St, P>> {
     /// Send a message to the actor to spawn a new task for the given peer.
+    ///
+    /// This may fail during shutdown if the spawner has already exited,
+    /// which is harmless since no new connections need to be spawned.
     pub async fn spawn(
         &mut self,
         connection: (Sender<Si>, Receiver<St>),
         reservation: Reservation<P>,
     ) {
-        self.send(Message::Spawn {
-            peer: reservation.metadata().public_key().clone(),
-            connection,
-            reservation,
-        })
-        .await
-        .unwrap();
+        self.0
+            .send_lossy(Message::Spawn {
+                peer: reservation.metadata().public_key().clone(),
+                connection,
+                reservation,
+            })
+            .await;
     }
 }

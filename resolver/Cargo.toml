@@ -20,7 +20,7 @@ commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-p2p.workspace = true
-commonware-runtime.workspace = true
+commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-stream.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
@@ -48,6 +48,7 @@ arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
 	"commonware-p2p/arbitrary",
+	"commonware-runtime/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 ]
