@@ -8,9 +8,9 @@
 //!
 //! # Format
 //!
-//! Data stored in a `fixed::Journal` is persisted in one of many Blobs within a caller-provided
-//! `partition`. Each `Blob` contains a configurable maximum of `items_per_blob`, with page-level
-//! data integrity provided by a buffer pool.
+//! Data stored in a `fixed::Journal` is persisted in one of many Blobs. Each `Blob` contains a
+//! configurable maximum of `items_per_blob`, with page-level data integrity provided by a buffer
+//! pool.
 //!
 //! ```text
 //! +--------+----- --+--- -+----------+
@@ -29,7 +29,7 @@
 //! # Open Blobs
 //!
 //! All `Blobs` in a given `partition` are kept open during the lifetime of `Journal`. You can limit
-//! the number of open blobs by using a higher number of `items_per_blob` or pruning old items.
+//! the number of open blobs by using a higher number of `items_per_blob` and/or pruning old items.
 //!
 //! # Consistency
 //!
@@ -62,7 +62,7 @@ use crate::{
     },
     Persistable,
 };
-use commonware_codec::{CodecFixedShared, DecodeExt};
+use commonware_codec::CodecFixedShared;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -115,15 +115,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
     /// used to iterate over all items in the `Journal`.
-    ///
-    /// # Repair
-    ///
-    /// Like
-    /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
-    /// and
-    /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-    /// the first invalid data read will be considered the new end of the journal (and the
-    /// underlying blob will be truncated to the last valid item).
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         let items_per_blob = cfg.items_per_blob.get();
 
@@ -133,10 +124,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             write_buffer: cfg.write_buffer,
         };
 
-        let inner = SegmentedJournal::init(context, segmented_cfg).await?;
+        let mut inner = SegmentedJournal::init(context, segmented_cfg).await?;
 
         // Calculate size and pruning_boundary from the inner journal's state
         let (size, pruning_boundary) = Self::compute_state(&inner, items_per_blob).await?;
+
+        // Invariant: Tail blob must exist, even if empty. This ensures we can reconstruct size on
+        // reopen even after pruning all items. The tail blob is at `size / items_per_blob` (where
+        // the next append would go).
+        let tail_section = size / items_per_blob;
+        inner.ensure_section_exists(tail_section).await?;
 
         Ok(Self {
             inner,
@@ -148,8 +145,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Initialize a new `Journal` instance in a pruned state at a given size.
     ///
-    /// This is used for state sync to create a journal that appears to have had
-    /// `size` items appended and then pruned up to that point.
+    /// This is used for state sync to create a journal that appears to have had `size` items
+    /// appended and then pruned up to that point.
     ///
     /// # Arguments
     /// * `context` - The storage context
@@ -157,9 +154,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// * `size` - The number of operations that have been "pruned"
     ///
     /// # Behavior
-    /// - Creates only the tail blob at the index that would contain the operation at `size`
-    /// - Sets the tail blob size to represent the "leftover" operations within that blob
+    /// - Creates only the tail blob at the section that would contain position `size-1`
     /// - The items in the tail blob before `size` are filled with zeros (dummy data)
+    /// - `oldest_retained_pos()` returns the start of the tail section, matching behavior if the
+    ///   journal were reopened normally
+    /// - Positions within the tail section but before `size` contain dummy zero data
     ///
     /// # Invariants
     /// - The directory given by `cfg.partition` should be empty
@@ -170,13 +169,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let tail_section = size / items_per_blob;
         let tail_items = size % items_per_blob;
 
-        tracing::debug!(
-            size,
-            tail_section,
-            tail_items,
-            "Initializing fresh journal at size"
-        );
-
         // Initialize the segmented journal (empty)
         let segmented_cfg = SegmentedConfig {
             partition: cfg.partition,
@@ -186,18 +178,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         let mut inner = SegmentedJournal::init(context, segmented_cfg).await?;
 
-        // Append zero-filled dummy items through the journal's append mechanism.
-        // This ensures proper page checksums are written.
-        if tail_items > 0 {
-            let zeros = vec![0u8; A::SIZE];
-            for _ in 0..tail_items {
-                let zero_item = A::decode(&zeros[..]).map_err(Error::Codec)?;
-                inner.append(tail_section, zero_item).await?;
-            }
-            inner.sync_all().await?;
-        }
+        // Initialize the tail section with zero-filled items if needed. This uses resize internally
+        // which appropriately uses the underlying page-oriented layout with checksums.
+        inner.init_section_at_size(tail_section, tail_items).await?;
+        inner.sync_all().await?;
 
-        // Pruning boundary is at the start of the tail section
+        // Pruning boundary is set to the start of the tail section.
+        // This matches what we'd get if we reopened the journal normally.
+        // Positions within the tail section (but before `size`) contain dummy zeros.
         let pruning_boundary = tail_section * items_per_blob;
 
         Ok(Self {
@@ -209,6 +197,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Compute size and pruning_boundary from the segmented journal state.
+    ///
+    /// Since we maintain the invariant that:
+    /// 1. At least one blob (the tail) always exists
+    /// 2. All blobs before the tail are full and synced
+    ///
+    /// We only need to look at the tail blob to compute size.
     async fn compute_state(
         inner: &SegmentedJournal<E, A>,
         items_per_blob: u64,
@@ -216,36 +210,27 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let oldest_section = inner.oldest_section();
         let newest_section = inner.newest_section();
 
-        match (oldest_section, newest_section) {
-            (Some(oldest), Some(newest)) => {
-                // Compute pruning boundary from oldest section
-                let pruning_boundary = oldest * items_per_blob;
+        let (Some(oldest), Some(newest)) = (oldest_section, newest_section) else {
+            // Empty journal
+            return Ok((0, 0));
+        };
 
-                // Compute size from newest section
-                let newest_len = inner.section_len(newest).await?;
-                let size = newest * items_per_blob + newest_len;
+        // Compute pruning boundary from oldest section
+        let pruning_boundary = oldest * items_per_blob;
 
-                Ok((size, pruning_boundary))
-            }
-            _ => {
-                // Empty journal
-                Ok((0, 0))
-            }
-        }
+        // Compute size from the tail (newest) section
+        let tail_len = inner.section_len(newest).await?;
+        let size = newest * items_per_blob + tail_len;
+
+        Ok((size, pruning_boundary))
     }
 
     /// Convert a global position to (section, position_in_section).
     #[inline]
-    fn position_to_section(&self, position: u64) -> (u64, u64) {
+    const fn position_to_section(&self, position: u64) -> (u64, u64) {
         let section = position / self.items_per_blob;
         let pos_in_section = position % self.items_per_blob;
         (section, pos_in_section)
-    }
-
-    /// Convert (section, position_in_section) to a global position.
-    #[inline]
-    fn section_to_position(&self, section: u64, pos_in_section: u64) -> u64 {
-        section * self.items_per_blob + pos_in_section
     }
 
     /// Sync any pending updates to disk.
@@ -267,6 +252,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         self.inner.append(section, item).await?;
         self.size += 1;
+
+        // If we just filled up a section, sync it and create the next tail blob. This maintains the
+        // invariant that the tail blob always exists.
+        if self.size.is_multiple_of(self.items_per_blob) {
+            self.inner.sync(section).await?;
+            // Create the new tail blob.
+            self.inner.ensure_section_exists(section + 1).await?;
+        }
 
         Ok(position)
     }
@@ -328,30 +321,17 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return Err(Error::ItemPruned(pos));
         }
 
+        // Get the relevant blob to read from.
         let (section, pos_in_section) = self.position_to_section(pos);
-
-        // Check if the section has been pruned
-        if let Some(oldest) = self.inner.oldest_section() {
-            if section < oldest {
-                return Err(Error::ItemPruned(pos));
-            }
-        } else {
-            // No sections exist - all items have been pruned
-            return Err(Error::ItemPruned(pos));
-        }
 
         self.inner.get(section, pos_in_section).await.map_err(|e| {
             // Map segmented errors to contiguous errors
             match e {
-                Error::SectionOutOfRange(_) => {
+                Error::SectionOutOfRange(_)
+                | Error::AlreadyPrunedToSection(_)
+                | Error::ItemOutOfRange(_) => {
                     unreachable!("range should have already been checked")
                 }
-
-                Error::AlreadyPrunedToSection(_) => {
-                    unreachable!("range should have already been checked")
-                }
-
-                Error::ItemOutOfRange(_) => unreachable!("range should have already been checked"),
                 other => other,
             }
         })
@@ -378,7 +358,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let items_per_blob = self.items_per_blob;
         let newest_section = self.inner.newest_section();
 
-        let inner_stream = self.inner.replay(start_section, buffer).await?;
+        let inner_stream = self
+            .inner
+            .replay(start_section, start_pos_in_section, buffer)
+            .await?;
 
         // Transform (section, pos_in_section, item) to (global_pos, item)
         // and validate that non-tail sections are complete.
@@ -387,7 +370,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             .scan(
                 (None::<u64>, 0u64), // (last_section, last_pos_in_section)
                 move |(last_section, last_pos), result| {
-                    let output = match result {
+                    match result {
                         Ok((section, pos_in_section, item)) => {
                             // Check if we transitioned to a new section
                             if let Some(prev_section) = *last_section {
@@ -426,17 +409,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                             *last_section = Some(section);
                             *last_pos = pos_in_section;
 
-                            // Skip items before start_pos in the first section
-                            if section == start_section && pos_in_section < start_pos_in_section {
-                                return futures::future::ready(Some(None));
-                            }
-
                             let global_pos = section * items_per_blob + pos_in_section;
                             futures::future::ready(Some(Some(Ok((global_pos, item)))))
                         }
                         Err(e) => futures::future::ready(Some(Some(Err(e)))),
-                    };
-                    output
+                    }
                 },
             )
             .filter_map(futures::future::ready))
@@ -449,14 +426,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.
     pub async fn prune(&mut self, min_item_pos: u64) -> Result<bool, Error> {
-        // Calculate the minimum section to keep
-        let min_section = std::cmp::min(
-            min_item_pos / self.items_per_blob,
-            self.size / self.items_per_blob,
-        );
+        // Calculate the section that would contain min_item_pos
+        let target_section = min_item_pos / self.items_per_blob;
+
+        // Calculate the tail section.
+        let tail_section = self.size / self.items_per_blob;
+
+        // Cap to tail section. The tail section is guaranteed to exist by our invariant.
+        let min_section = std::cmp::min(target_section, tail_section);
 
         let pruned = self.inner.prune(min_section).await?;
-
         if pruned {
             self.pruning_boundary = min_section * self.items_per_blob;
         }
@@ -642,6 +621,8 @@ mod tests {
 
             // Check no-op pruning
             journal.prune(0).await.expect("no-op pruning failed");
+            assert_eq!(journal.inner.oldest_section(), Some(1));
+            assert_eq!(journal.inner.newest_section(), Some(5));
             assert_eq!(journal.oldest_retained_pos(), Some(2));
 
             // Prune first 3 blobs (6 items)
@@ -649,6 +630,8 @@ mod tests {
                 .prune(3 * cfg.items_per_blob.get())
                 .await
                 .expect("failed to prune journal 2");
+            assert_eq!(journal.inner.oldest_section(), Some(3));
+            assert_eq!(journal.inner.newest_section(), Some(5));
             assert_eq!(journal.oldest_retained_pos(), Some(6));
 
             // Try pruning (more than) everything in the journal.
@@ -658,6 +641,8 @@ mod tests {
                 .expect("failed to max-prune journal");
             let size = journal.size();
             assert_eq!(size, 10);
+            assert_eq!(journal.inner.oldest_section(), Some(5));
+            assert_eq!(journal.inner.newest_section(), Some(5));
             // Since the size of the journal is currently a multiple of items_per_blob, the newest blob
             // will be empty, and there will be no retained items.
             assert_eq!(journal.oldest_retained_pos(), None);
@@ -873,20 +858,23 @@ mod tests {
             let expected_size = ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2;
             assert_eq!(journal.size(), expected_size);
 
-            // Replay should detect that section 40 is incomplete when it encounters section 41
+            // Replay should detect corruption (trailing bytes) in section 40
             let stream = journal.replay(NZUsize!(1024), 0).await.unwrap();
             pin_mut!(stream);
             let mut found_error = false;
             while let Some(result) = stream.next().await {
-                if let Err(Error::SectionIncomplete { section, .. }) = &result {
-                    assert_eq!(*section, 40, "Error should be for section 40");
+                if let Err(Error::Corruption(msg)) = &result {
+                    assert!(msg.contains("section 40"), "Error should be for section 40");
                     found_error = true;
                     break;
                 } else if result.is_err() {
                     panic!("Unexpected error: {:?}", result);
                 }
             }
-            assert!(found_error, "SectionIncomplete error should be detected during replay");
+            assert!(
+                found_error,
+                "Corruption error should be detected during replay"
+            );
         });
     }
 

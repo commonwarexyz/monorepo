@@ -146,9 +146,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         A::decode(buf.as_ref()).map_err(Error::Codec).map(Some)
     }
 
-    /// Returns a stream of all items starting from the given section.
+    /// Returns a stream of all items starting from the given section and position.
     ///
     /// Each item is returned as (section, position, item).
+    ///
+    /// # Arguments
+    /// * `start_section` - The section to start replaying from
+    /// * `start_position` - The position within the start section to begin at (0-indexed)
+    /// * `buffer` - Buffer size for reading
     ///
     /// # Repair
     ///
@@ -156,63 +161,103 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn replay(
         &self,
         start_section: u64,
+        start_position: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u64, A), Error>> + Send + '_, Error> {
+        let start_byte_offset = start_position * Self::CHUNK_SIZE_U64;
+
         // Pre-create readers from blobs (async operation)
         let mut blob_info = Vec::new();
+        let mut is_first = true;
         for (&section, blob) in self.manager.sections_from(start_section) {
             let blob_size = blob.size().await;
-            let reader = blob.as_blob_reader(buffer).await?;
-            blob_info.push((section, blob.clone(), reader, blob_size));
+            let mut reader = blob.as_blob_reader(buffer).await?;
+            // For the first section, seek to the start position
+            let initial_offset = if is_first {
+                reader.seek_to(start_byte_offset)?;
+                start_byte_offset
+            } else {
+                0
+            };
+            is_first = false;
+            blob_info.push((section, blob.clone(), reader, blob_size, initial_offset));
         }
 
-        Ok(stream::iter(blob_info).flat_map(
-            move |(section, blob, reader, blob_size)| {
-                let buf = vec![0u8; Self::CHUNK_SIZE];
+        Ok(
+            stream::iter(blob_info).flat_map(
+                move |(section, blob, reader, blob_size, initial_offset)| {
+                    let buf = vec![0u8; Self::CHUNK_SIZE];
 
-                stream::unfold(
-                    (section, buf, blob, reader, 0u64, 0u64, blob_size),
-                    move |(section, mut buf, blob, mut reader, offset, valid_size, blob_size)| async move {
-                        if offset >= blob_size {
-                            return None;
-                        }
+                    stream::unfold(
+                        (
+                            section,
+                            buf,
+                            blob,
+                            reader,
+                            initial_offset,
+                            initial_offset,
+                            blob_size,
+                        ),
+                        move |(
+                            section,
+                            mut buf,
+                            blob,
+                            mut reader,
+                            offset,
+                            valid_size,
+                            blob_size,
+                        )| async move {
+                            if offset >= blob_size {
+                                return None;
+                            }
 
-                        let position = offset / Self::CHUNK_SIZE_U64;
-                        match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
-                            Ok(()) => {
-                                let next_offset = offset + Self::CHUNK_SIZE_U64;
-                                match A::decode(buf.as_slice()).map_err(Error::Codec) {
-                                    Ok(item) => Some((
-                                        Ok((section, position, item)),
-                                        (section, buf, blob, reader, next_offset, next_offset, blob_size),
-                                    )),
-                                    Err(err) => {
-                                        Some((Err(err), (section, buf, blob, reader, offset, valid_size, blob_size)))
+                            let position = offset / Self::CHUNK_SIZE_U64;
+                            match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
+                                Ok(()) => {
+                                    let next_offset = offset + Self::CHUNK_SIZE_U64;
+                                    match A::decode(buf.as_slice()).map_err(Error::Codec) {
+                                        Ok(item) => Some((
+                                            Ok((section, position, item)),
+                                            (
+                                                section,
+                                                buf,
+                                                blob,
+                                                reader,
+                                                next_offset,
+                                                next_offset,
+                                                blob_size,
+                                            ),
+                                        )),
+                                        Err(err) => Some((
+                                            Err(err),
+                                            (
+                                                section, buf, blob, reader, offset, valid_size,
+                                                blob_size,
+                                            ),
+                                        )),
                                     }
                                 }
+                                Err(RError::BlobInsufficientLength) => {
+                                    Some((
+                                        Err(Error::Corruption(format!(
+                                            "trailing bytes in section {section} at position {position}"
+                                        ))),
+                                        (section, buf, blob, reader, blob_size, valid_size, blob_size),
+                                    ))
+                                }
+                                Err(err) => {
+                                    warn!(section, position, ?err, "unexpected error");
+                                    Some((
+                                        Err(Error::Runtime(err)),
+                                        (section, buf, blob, reader, offset, valid_size, blob_size),
+                                    ))
+                                }
                             }
-                            Err(RError::BlobInsufficientLength) => {
-                                warn!(
-                                    section,
-                                    position,
-                                    new_size = valid_size,
-                                    "trailing bytes detected: truncating"
-                                );
-                                blob.resize(valid_size).await.ok()?;
-                                None
-                            }
-                            Err(err) => {
-                                warn!(section, position, ?err, "unexpected error");
-                                Some((
-                                    Err(Error::Runtime(err)),
-                                    (section, buf, blob, reader, offset, valid_size, blob_size),
-                                ))
-                            }
-                        }
-                    },
-                )
-            },
-        ))
+                        },
+                    )
+                },
+            ),
+        )
     }
 
     /// Sync the given section to storage.
@@ -274,6 +319,40 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Remove all underlying blobs.
     pub async fn destroy(self) -> Result<(), Error> {
         self.manager.destroy().await
+    }
+
+    /// Initialize a section with a specific number of zero-filled items.
+    ///
+    /// This creates the section's blob and fills it with `item_count` items worth of zeros.
+    /// The data is written through the Append wrapper which handles checksums properly.
+    ///
+    /// # Arguments
+    /// * `section` - The section number to initialize
+    /// * `item_count` - Number of zero-filled items to write
+    pub async fn init_section_at_size(
+        &mut self,
+        section: u64,
+        item_count: u64,
+    ) -> Result<(), Error> {
+        // Get or create the blob for this section
+        let blob = self.manager.get_or_create(section).await?;
+
+        // Calculate the target byte size
+        let target_size = item_count * Self::CHUNK_SIZE_U64;
+
+        // Resize grows the blob by appending zeros, which handles checksums properly
+        blob.resize(target_size).await?;
+
+        Ok(())
+    }
+
+    /// Ensure a section exists, creating an empty blob if needed.
+    ///
+    /// This is used to maintain the invariant that at least one blob always exists
+    /// (the "tail" blob), which allows reconstructing journal size on reopen.
+    pub async fn ensure_section_exists(&mut self, section: u64) -> Result<(), Error> {
+        self.manager.get_or_create(section).await?;
+        Ok(())
     }
 }
 
@@ -379,7 +458,7 @@ mod tests {
 
             let items = {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -525,7 +604,7 @@ mod tests {
             // Verify data integrity via replay
             {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -597,7 +676,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_segmented_fixed_corruption_recovery() {
+    fn test_segmented_fixed_corruption_detection() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
@@ -614,6 +693,7 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
+            // Truncate by 1 byte to create trailing bytes (corruption)
             let (blob, size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
@@ -625,21 +705,31 @@ mod tests {
                 .await
                 .expect("failed to re-init");
 
-            let count = {
+            // Replay should return corruption error for trailing bytes
+            let (count, found_corruption) = {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
 
                 let mut count = 0;
+                let mut found_corruption = false;
                 while let Some(result) = stream.next().await {
-                    result.expect("should be ok");
-                    count += 1;
+                    match result {
+                        Ok(_) => count += 1,
+                        Err(Error::Corruption(msg)) => {
+                            assert!(msg.contains("trailing bytes"));
+                            found_corruption = true;
+                            break;
+                        }
+                        Err(e) => panic!("unexpected error: {e:?}"),
+                    }
                 }
-                count
+                (count, found_corruption)
             };
-            assert_eq!(count, 4);
+            assert_eq!(count, 4); // 4 valid items before corruption
+            assert!(found_corruption, "should detect corruption");
 
             journal.destroy().await.expect("failed to destroy");
         });
