@@ -198,7 +198,7 @@ impl<B: Blob> Read<B> {
     /// # Cross-Page Boundary Handling
     ///
     /// If the buffer contains less than one item's worth of data but the blob has more data
-    /// available, this method uses `read_fixed` internally to handle the cross-page read.
+    /// available, this method uses [`read_bytes`](Self::read_bytes) to handle the cross-page read.
     pub async fn decode_batch_fixed<T, R, F>(
         &mut self,
         batch: &mut Vec<R>,
