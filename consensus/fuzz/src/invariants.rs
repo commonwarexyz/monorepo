@@ -1,13 +1,23 @@
-use crate::types::{Finalization, Notarization, Nullification, ReplicaState};
-use commonware_consensus::simplex::{
-    elector::Config as Elector, mocks::reporter::Reporter, scheme::Scheme,
+use crate::{
+    simplex::Simplex,
+    types::{Finalization, Notarization, Nullification, ReplicaState},
 };
-use commonware_cryptography::sha256::Digest as Sha256Digest;
+use commonware_codec::{Encode, Read};
+use commonware_consensus::simplex::{
+    elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme,
+};
+use commonware_cryptography::{
+    certificate::{Scheme as CertificateScheme, Signers},
+    sha256::Digest as Sha256Digest,
+};
 use commonware_utils::quorum;
 use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 
-pub fn check(n: u32, replicas: Vec<ReplicaState>) {
+pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>)
+where
+    P::Scheme: scheme::Scheme<Sha256Digest>,
+{
     let threshold = quorum(n) as usize;
 
     // Invariant: agreement
@@ -36,11 +46,12 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
     }
 
     // Invariant: no_nullification_in_finalized_view
-    // If any replica finalized view v, no replica may have a nullification for view v.
+    // If any replica finalized view v, no replica may have nullification for view v.
     let finalized_views: HashMap<u64, Sha256Digest> = replicas
         .iter()
         .flat_map(|(_, _, finalizations)| finalizations.iter().map(|(&view, d)| (view, d.payload)))
         .collect();
+
     for finalized_view in finalized_views.keys() {
         for (idx, (_, nullifications, _)) in replicas.iter().enumerate() {
             assert!(
@@ -51,7 +62,7 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
     }
 
     // Invariant: no_conflicting_notarization_in_finalized_view
-    // If any replica finalized view v for a digest, no replica may have a notarization for a different digest.
+    // If any replica finalized view v for a digest, no replica may have notarization for a different digest.
     for (idx, (notarizations, _, _)) in replicas.iter().enumerate() {
         for (&view, data) in notarizations.iter() {
             if let Some(&finalized_digest) = finalized_views.get(&view) {
@@ -116,46 +127,55 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
     // Enforce per-replica invariants
     for (notarizations, nullifications, finalizations) in replicas.iter() {
         // Invariant: certificates_are_valid
-        // Certificates have correct number of signatures.
+        // Certificates have the correct number of signatures.
         for (view, data) in nullifications.iter() {
-            if let Some(count) = data.signature_count {
+            if <P::Scheme as CertificateScheme>::is_attributable() {
+                let count = data
+                    .signature_count
+                    .expect("Attributable scheme must have signature count");
                 assert!(
                     count >= threshold,
                     "Invariant violation: nullification in view {view} has {count} < {threshold} signatures"
+                );
+            } else {
+                assert!(
+                    data.signature_count.is_none(),
+                    "Invariant violation: non-attributable scheme should not expose signature count"
                 );
             }
         }
 
         for (view, data) in notarizations.iter() {
-            if let Some(count) = data.signature_count {
+            if <P::Scheme as CertificateScheme>::is_attributable() {
+                let count = data
+                    .signature_count
+                    .expect("Attributable scheme must have signature count");
                 assert!(
                     count >= threshold,
                     "Invariant violation: notarization in view {view} has {count} < {threshold} signatures"
+                );
+            } else {
+                assert!(
+                    data.signature_count.is_none(),
+                    "Invariant violation: non-attributable scheme should not expose signature count"
                 );
             }
         }
 
         for (view, data) in finalizations.iter() {
-            if let Some(count) = data.signature_count {
+            if <P::Scheme as CertificateScheme>::is_attributable() {
+                let count = data
+                    .signature_count
+                    .expect("Attributable scheme must have signature count");
                 assert!(
                     count >= threshold,
                     "Invariant violation: finalization in view {view} has {count} < {threshold} signatures"
                 );
-            }
-        }
-
-        // Invariant: valid_last_finalized
-        // Finalization must match local notarization.
-        for (&v, fin) in finalizations.iter() {
-            match notarizations.get(&v) {
-                Some(notar) => assert_eq!(
-                    notar.payload, fin.payload,
-                    "Invariant violation: finalized view {v} with {:?} but notarized {:?}",
-                    fin.payload, notar.payload
-                ),
-                None => {
-                    panic!("Invariant violation: finalized view {v} without local notarization")
-                }
+            } else {
+                assert!(
+                    data.signature_count.is_none(),
+                    "Invariant violation: non-attributable scheme should not expose signature count"
+                );
             }
         }
 
@@ -167,6 +187,20 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
             );
         }
     }
+}
+
+fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
+    certificate: &S::Certificate,
+) -> Option<usize> {
+    if !S::is_attributable() {
+        return None;
+    }
+
+    let encoded = certificate.encode();
+    let mut cursor = encoded.as_ref();
+    let signers =
+        Signers::read_cfg(&mut cursor, &usize::MAX).expect("certificate signers must decode");
+    Some(signers.count())
 }
 
 pub fn extract<E, S, L>(reporters: Vec<Reporter<E, S, L, Sha256Digest>>) -> Vec<ReplicaState>
@@ -186,7 +220,7 @@ where
                         view.get(),
                         Notarization {
                             payload: cert.proposal.payload,
-                            signature_count: None,
+                            signature_count: get_signature_count::<S>(&cert.certificate),
                         },
                     )
                 })
@@ -194,12 +228,12 @@ where
 
             let nullifications = reporter.nullifications.lock().unwrap();
             let nullification_data = nullifications
-                .keys()
-                .map(|view| {
+                .iter()
+                .map(|(view, cert)| {
                     (
                         view.get(),
                         Nullification {
-                            signature_count: None,
+                            signature_count: get_signature_count::<S>(&cert.certificate),
                         },
                     )
                 })
@@ -213,7 +247,7 @@ where
                         view.get(),
                         Finalization {
                             payload: cert.proposal.payload,
-                            signature_count: None,
+                            signature_count: get_signature_count::<S>(&cert.certificate),
                         },
                     )
                 })

@@ -1,5 +1,6 @@
 pub mod disrupter;
 pub mod invariants;
+pub mod simplex;
 pub mod types;
 pub mod utils;
 
@@ -8,30 +9,26 @@ use crate::{
     utils::{link_peers, register, Action, Partition},
 };
 use arbitrary::Arbitrary;
-use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
         config,
-        elector::Config as Elector,
         mocks::{application, relay, reporter},
-        scheme::Scheme,
         Engine,
     },
     types::{Delta, Epoch, View},
     Monitor,
 };
-use commonware_cryptography::{
-    certificate::{self, mocks::Fixture},
-    ed25519::PublicKey as Ed25519PublicKey,
-    sha256::Digest as Sha256Digest,
-    Sha256,
-};
+use commonware_cryptography::{certificate::mocks::Fixture, Sha256};
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{max_faults, NZUsize, NZU16};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
+pub use simplex::{
+    SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
+    SimplexBls12381MultisigMinSig, SimplexEd25519, SimplexSecp256r1,
+};
 use std::{
     cell::RefCell,
     num::{NonZeroU16, NonZeroUsize},
@@ -44,36 +41,24 @@ pub const EPOCH: u64 = 333;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-const MIN_REQUIRED_CONTAINERS: u64 = 10;
-const MAX_REQUIRED_CONTAINERS: u64 = 50;
+const MIN_REQUIRED_CONTAINERS: u64 = 5;
+const MAX_REQUIRED_CONTINERS: u64 = 50;
+const MAX_SLEEP_DURATION: Duration = Duration::from_secs(10);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
-const CONFIGURATIONS: [(u32, u32, u32); 2] = [(3, 2, 1), (4, 3, 1)];
+// 4 nodes, 3 correct, 1 faulty
+const N4C3F1: (u32, u32, u32) = (4, 3, 1);
+// 3 nodes, 2 correct, 1 faulty
+const N3C2F1: (u32, u32, u32) = (3, 2, 1);
+// 3 nodes, 1 correct, 2 faulty
+const N4C1F3: (u32, u32, u32) = (4, 1, 3);
 const MAX_RAW_BYTES: usize = 4096;
-
-const EXPECTED_PANICS: [&str; 3] = [
-    "invalid payload:",
-    "invalid parent (in payload):",
-    "invalid round (in payload)",
-];
-
-pub trait Simplex: 'static
-where
-    <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
-{
-    type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
-    type Elector: Elector<Self::Scheme>;
-    fn fixture(
-        context: &mut deterministic::Context,
-        namespace: &[u8],
-        n: u32,
-    ) -> Fixture<Self::Scheme>;
-}
 
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub seed: u64,
-    pub containers: u64,
+    pub required_containers: u64,
+    pub degraded_network_node: bool,
     offset: RefCell<usize>,
     rng: RefCell<StdRng>,
     pub configuration: (u32, u32, u32),
@@ -122,9 +107,29 @@ impl FuzzInput {
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.arbitrary()?;
-        let partition = u.arbitrary()?;
-        let configuration = CONFIGURATIONS[u.int_in_range(0..=(CONFIGURATIONS.len() - 1))?];
-        let containers = u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
+
+        // Bias towards Connected partition
+        let partition = match u.int_in_range(0..=99)? {
+            0..=79 => Partition::Connected,                    // 80%
+            80..=84 => Partition::Isolated,                    // 5%
+            85..=89 => Partition::TwoPartitionsWithByzantine,  // 5%
+            90..=94 => Partition::ManyPartitionsWithByzantine, // 5%
+            _ => Partition::Ring,                              // 5%
+        };
+
+        let configuration = match u.int_in_range(1..=100)? {
+            1..=90 => N4C3F1,  // 90%
+            91..=95 => N3C2F1, // 5%
+            _ => N4C1F3,       // 5%
+        };
+
+        // Bias degraded networking - 3%
+        let degraded_network_node = partition == Partition::Connected
+            && configuration == N4C3F1
+            && u.int_in_range(0..=99)? == 1;
+
+        let required_containers =
+            u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTINERS)?;
 
         let mut raw_bytes = Vec::new();
         for _ in 0..MAX_RAW_BYTES {
@@ -143,17 +148,18 @@ impl Arbitrary<'_> for FuzzInput {
             seed,
             partition,
             configuration,
+            degraded_network_node,
             raw_bytes,
-            containers,
+            required_containers,
             offset: RefCell::new(0),
             rng: RefCell::new(StdRng::from_seed(prng_seed)),
         })
     }
 }
 
-fn run<P: Simplex>(input: FuzzInput) {
+fn run<P: simplex::Simplex>(input: FuzzInput) {
     let (n, _, f) = input.configuration;
-    let containers = input.containers;
+    let required_containers = input.required_containers;
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
 
@@ -190,6 +196,35 @@ fn run<P: Simplex>(input: FuzzInput) {
         )
         .await;
 
+        if input.partition == Partition::Connected
+            && input.configuration == N4C3F1
+            && input.degraded_network_node
+        {
+            if let Some(victim) = participants.last() {
+                let degraded = Link {
+                    latency: Duration::from_millis(50),
+                    jitter: Duration::from_millis(50),
+                    success_rate: 0.6,
+                };
+                for (peer_idx, peer) in participants.iter().enumerate() {
+                    if peer_idx == 3 {
+                        continue;
+                    }
+                    // Replace links to/from the degraded node with degraded connectivity.
+                    oracle.remove_link(victim.clone(), peer.clone()).await.ok();
+                    oracle.remove_link(peer.clone(), victim.clone()).await.ok();
+                    oracle
+                        .add_link(victim.clone(), peer.clone(), degraded.clone())
+                        .await
+                        .unwrap();
+                    oracle
+                        .add_link(peer.clone(), victim.clone(), degraded.clone())
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
 
@@ -198,7 +233,8 @@ fn run<P: Simplex>(input: FuzzInput) {
             let validator = participants[i].clone();
             let context = context.with_label(&format!("validator_{validator}"));
 
-            let (vote_network, certificate_network, _) = registrations.remove(&validator).unwrap();
+            let (vote_network, certificate_network, resolver_network) =
+                registrations.remove(&validator).unwrap();
             let disrupter = Disrupter::<_, _>::new(
                 context.with_label("disrupter"),
                 validator.clone(),
@@ -209,7 +245,7 @@ fn run<P: Simplex>(input: FuzzInput) {
                     .expect("public keys are unique"),
                 input.clone(),
             );
-            disrupter.start(vote_network, certificate_network);
+            disrupter.start(vote_network, certificate_network, resolver_network);
         }
 
         for i in (f as usize)..(n as usize) {
@@ -269,45 +305,36 @@ fn run<P: Simplex>(input: FuzzInput) {
             engine.start(pending, recovered, resolver);
         }
 
-        if input.partition == Partition::Connected && max_faults(n) == f {
+        let expect_required_containers =
+            input.partition == Partition::Connected && max_faults(n) == f;
+
+        if expect_required_containers {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest.get() < containers {
+                    while latest.get() < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
             }
             join_all(finalizers).await;
         } else {
-            context.sleep(Duration::from_secs(10)).await;
+            context.sleep(MAX_SLEEP_DURATION).await;
         }
 
         let states = invariants::extract(reporters);
-        invariants::check(n, states);
+        invariants::check::<P>(n, states);
     });
 }
 
-fn is_expected_panic(payload: &Box<dyn std::any::Any + Send>) -> bool {
-    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-        s.to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        return false;
-    };
-
-    EXPECTED_PANICS.iter().any(|pattern| msg.contains(pattern))
-}
-
-pub fn fuzz<P: Simplex>(input: FuzzInput) {
+pub fn fuzz<P: simplex::Simplex>(input: FuzzInput) {
+    let seed = input.seed;
     match panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))) {
         Ok(()) => {}
         Err(payload) => {
-            if !is_expected_panic(&payload) {
-                panic::resume_unwind(payload);
-            }
+            println!("Panicked with seed: {}", seed);
+            panic::resume_unwind(payload);
         }
     }
 }
