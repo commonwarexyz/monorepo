@@ -641,5 +641,4 @@ mod tests {
         assert_eq!(bpe::FP_1E3, (bpe_1e3 * 65536.0).round() as u64);
         assert_eq!(bpe::FP_1E4, (bpe_1e4 * 65536.0).round() as u64);
     }
-
 }
