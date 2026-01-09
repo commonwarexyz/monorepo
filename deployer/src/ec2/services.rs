@@ -1,5 +1,7 @@
 //! Service configuration for Prometheus, Loki, Grafana, Promtail, and a caller-provided binary
 
+use super::Architecture;
+
 /// Version of Prometheus to download and install
 pub const PROMETHEUS_VERSION: &str = "3.2.0";
 
@@ -225,20 +227,22 @@ pub fn install_monitoring_cmd(
     loki_version: &str,
     pyroscope_version: &str,
     tempo_version: &str,
+    architecture: Architecture,
 ) -> String {
+    let arch = architecture.download_arch();
     let prometheus_url = format!(
-    "https://github.com/prometheus/prometheus/releases/download/v{prometheus_version}/prometheus-{prometheus_version}.linux-arm64.tar.gz",
+    "https://github.com/prometheus/prometheus/releases/download/v{prometheus_version}/prometheus-{prometheus_version}.linux-{arch}.tar.gz",
 );
     let grafana_url =
-        format!("https://dl.grafana.com/oss/release/grafana_{grafana_version}_arm64.deb");
+        format!("https://dl.grafana.com/oss/release/grafana_{grafana_version}_{arch}.deb");
     let loki_url = format!(
-        "https://github.com/grafana/loki/releases/download/v{loki_version}/loki-linux-arm64.zip",
+        "https://github.com/grafana/loki/releases/download/v{loki_version}/loki-linux-{arch}.zip",
     );
     let pyroscope_url = format!(
-        "https://github.com/grafana/pyroscope/releases/download/v{pyroscope_version}/pyroscope_{pyroscope_version}_linux_arm64.tar.gz",
+        "https://github.com/grafana/pyroscope/releases/download/v{pyroscope_version}/pyroscope_{pyroscope_version}_linux_{arch}.tar.gz",
     );
     let tempo_url = format!(
-        "https://github.com/grafana/tempo/releases/download/v{tempo_version}/tempo_{tempo_version}_linux_arm64.tar.gz",
+        "https://github.com/grafana/tempo/releases/download/v{tempo_version}/tempo_{tempo_version}_linux_{arch}.tar.gz",
     );
     format!(
         r#"
@@ -279,8 +283,8 @@ done
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
 sudo chown -R ubuntu:ubuntu /opt/prometheus
 tar xvfz /home/ubuntu/prometheus.tar.gz -C /home/ubuntu
-sudo mv /home/ubuntu/prometheus-{prometheus_version}.linux-arm64 /opt/prometheus/prometheus-{prometheus_version}.linux-arm64
-sudo ln -s /opt/prometheus/prometheus-{prometheus_version}.linux-arm64/prometheus /opt/prometheus/prometheus
+sudo mv /home/ubuntu/prometheus-{prometheus_version}.linux-{arch} /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}
+sudo ln -s /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}/prometheus /opt/prometheus/prometheus
 sudo chmod +x /opt/prometheus/prometheus
 
 # Install Grafana
@@ -291,7 +295,7 @@ sudo apt-get install -f -y
 sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compactor /loki/wal
 sudo chown -R ubuntu:ubuntu /loki
 unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
-sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
+sudo mv /home/ubuntu/loki-linux-{arch} /opt/loki/loki
 
 # Install Pyroscope
 sudo mkdir -p /opt/pyroscope /var/lib/pyroscope
@@ -394,9 +398,10 @@ sudo systemctl enable --now pyroscope-agent.timer
 }
 
 /// Command to set up Promtail on binary instances
-pub fn setup_promtail_cmd(promtail_version: &str) -> String {
+pub fn setup_promtail_cmd(promtail_version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
     let promtail_url = format!(
-        "https://github.com/grafana/loki/releases/download/v{promtail_version}/promtail-linux-arm64.zip",
+        "https://github.com/grafana/loki/releases/download/v{promtail_version}/promtail-linux-{arch}.zip",
     );
     format!(
         r#"
@@ -412,7 +417,7 @@ done
 # Install Promtail
 sudo mkdir -p /opt/promtail
 unzip /home/ubuntu/promtail.zip -d /home/ubuntu
-sudo mv /home/ubuntu/promtail-linux-arm64 /opt/promtail/promtail
+sudo mv /home/ubuntu/promtail-linux-{arch} /opt/promtail/promtail
 sudo chmod +x /opt/promtail/promtail
 sudo mkdir -p /etc/promtail
 sudo mv /home/ubuntu/promtail.yml /etc/promtail/promtail.yml
@@ -458,9 +463,10 @@ scrape_configs:
 }
 
 /// Command to install Node Exporter on instances
-pub fn setup_node_exporter_cmd(node_exporter_version: &str) -> String {
+pub fn setup_node_exporter_cmd(node_exporter_version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
     let node_exporter_url = format!(
-        "https://github.com/prometheus/node_exporter/releases/download/v{node_exporter_version}/node_exporter-{node_exporter_version}.linux-arm64.tar.gz",
+        "https://github.com/prometheus/node_exporter/releases/download/v{node_exporter_version}/node_exporter-{node_exporter_version}.linux-{arch}.tar.gz",
     );
     format!(
         r#"
@@ -476,8 +482,8 @@ done
 # Install Node Exporter
 sudo mkdir -p /opt/node_exporter
 tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
-sudo mv /home/ubuntu/node_exporter-{node_exporter_version}.linux-arm64 /opt/node_exporter/node_exporter-{node_exporter_version}.linux-arm64
-sudo ln -s /opt/node_exporter/node_exporter-{node_exporter_version}.linux-arm64/node_exporter /opt/node_exporter/node_exporter
+sudo mv /home/ubuntu/node_exporter-{node_exporter_version}.linux-{arch} /opt/node_exporter/node_exporter-{node_exporter_version}.linux-{arch}
+sudo ln -s /opt/node_exporter/node_exporter-{node_exporter_version}.linux-{arch}/node_exporter /opt/node_exporter/node_exporter
 sudo chmod +x /opt/node_exporter/node_exporter
 sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
 
@@ -554,14 +560,17 @@ pub const LOGROTATE_CONF: &str = r#"
 /// Configuration for BBR sysctl settings
 pub const BBR_CONF: &str = "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n";
 
-/// Systemd service file content for the deployed binary
-pub const BINARY_SERVICE: &str = r#"
+/// Generates systemd service file content for the deployed binary with the correct jemalloc path
+pub fn binary_service(architecture: Architecture) -> String {
+    let lib_arch = architecture.linux_lib_arch();
+    format!(
+        r#"
 [Unit]
 Description=Deployed Binary Service
 After=network.target
 
 [Service]
-Environment="LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2"
+Environment="LD_PRELOAD=/usr/lib/{lib_arch}/libjemalloc.so.2"
 ExecStart=/home/ubuntu/binary --hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf
 TimeoutStopSec=60
 Restart=always
@@ -572,7 +581,9 @@ StandardError=append:/var/log/binary.log
 
 [Install]
 WantedBy=multi-user.target
-"#;
+"#
+    )
+}
 
 /// Shell script content for the Pyroscope agent (perf + wget)
 pub fn generate_pyroscope_script(

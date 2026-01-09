@@ -54,7 +54,7 @@
 //!
 //! ### Monitoring
 //!
-//! * Deployed in `us-east-1` with a configurable ARM64 instance type (e.g., `t4g.small`) and storage (e.g., 10GB gp2).
+//! * Deployed in `us-east-1` with a configurable instance type (e.g., `t4g.small` for ARM64, `t3.small` for x86_64) and storage (e.g., 10GB gp2).
 //! * Runs:
 //!     * **Prometheus**: Scrapes binary metrics from all instances at `:9090` and system metrics from all instances at `:9100`.
 //!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
@@ -67,7 +67,7 @@
 //!
 //! ### Binary
 //!
-//! * Deployed in user-specified regions with configurable ARM64 instance types and storage.
+//! * Deployed in user-specified regions with configurable instance types (ARM64 or x86_64) and storage.
 //! * Run:
 //!     * **Custom Binary**: Executes with `--hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090`.
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
@@ -136,6 +136,7 @@
 //! tag: ffa638a0-991c-442c-8ec4-aa4e418213a5
 //! monitoring:
 //!   instance_type: t4g.small
+//!   architecture: arm64  # optional, defaults to arm64
 //!   storage_size: 10
 //!   storage_class: gp2
 //!   dashboard: /path/to/dashboard.json
@@ -143,6 +144,7 @@
 //!   - name: node1
 //!     region: us-east-1
 //!     instance_type: t4g.small
+//!     architecture: arm64  # optional, defaults to arm64
 //!     storage_size: 10
 //!     storage_class: gp2
 //!     binary: /path/to/binary
@@ -150,7 +152,8 @@
 //!     profiling: true
 //!   - name: node2
 //!     region: us-west-2
-//!     instance_type: t4g.small
+//!     instance_type: t3.small
+//!     architecture: x86_64  # use x86_64 for Intel/AMD instances
 //!     storage_size: 10
 //!     storage_class: gp2
 //!     binary: /path/to/binary2
@@ -163,7 +166,53 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
+use std::{fmt, net::IpAddr};
+
+/// CPU architecture for EC2 instances
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum Architecture {
+    /// ARM64 architecture (e.g., Graviton instances like t4g, m7g)
+    #[default]
+    Arm64,
+    /// x86_64 architecture (e.g., Intel/AMD instances like t3, m7i)
+    X86_64,
+}
+
+impl fmt::Display for Architecture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Architecture::Arm64 => write!(f, "arm64"),
+            Architecture::X86_64 => write!(f, "x86_64"),
+        }
+    }
+}
+
+impl Architecture {
+    /// Returns the architecture string used in Ubuntu AMI names
+    pub fn ami_arch(&self) -> &'static str {
+        match self {
+            Architecture::Arm64 => "arm64",
+            Architecture::X86_64 => "amd64",
+        }
+    }
+
+    /// Returns the architecture string used in download URLs (Go/Prometheus style)
+    pub fn download_arch(&self) -> &'static str {
+        match self {
+            Architecture::Arm64 => "arm64",
+            Architecture::X86_64 => "amd64",
+        }
+    }
+
+    /// Returns the Linux library path prefix for this architecture
+    pub fn linux_lib_arch(&self) -> &'static str {
+        match self {
+            Architecture::Arm64 => "aarch64-linux-gnu",
+            Architecture::X86_64 => "x86_64-linux-gnu",
+        }
+    }
+}
 
 cfg_if::cfg_if! {
     if #[cfg(feature="aws")] {
@@ -316,8 +365,12 @@ pub struct InstanceConfig {
     /// AWS region where the instance is deployed
     pub region: String,
 
-    /// Instance type (only ARM-based instances are supported)
+    /// Instance type (e.g., "t4g.small" for ARM64, "t3.small" for x86_64)
     pub instance_type: String,
+
+    /// CPU architecture (defaults to arm64 if not specified)
+    #[serde(default)]
+    pub architecture: Architecture,
 
     /// Storage size in GB
     pub storage_size: i32,
@@ -338,8 +391,12 @@ pub struct InstanceConfig {
 /// Monitoring configuration
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MonitoringConfig {
-    /// Instance type (only ARM-based instances are supported)
+    /// Instance type (e.g., "t4g.small" for ARM64, "t3.small" for x86_64)
     pub instance_type: String,
+
+    /// CPU architecture (defaults to arm64 if not specified)
+    #[serde(default)]
+    pub architecture: Architecture,
 
     /// Storage size in GB
     pub storage_size: i32,

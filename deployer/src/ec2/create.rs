@@ -1,8 +1,9 @@
 //! `create` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, services::*, utils::*, Config, Error, Host, Hosts, InstanceConfig,
-    CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
+    aws::*, deployer_directory, services::*, utils::*, Architecture, Config, Error, Host, Hosts,
+    InstanceConfig, CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION,
+    PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
 use std::{
@@ -89,16 +90,20 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let mut regions: BTreeSet<String> = config.instances.iter().map(|i| i.region.clone()).collect();
     regions.insert(MONITORING_REGION.to_string());
 
-    // Determine instance types by region
-    let mut instance_types_by_region: HashMap<String, HashSet<String>> = HashMap::new();
+    // Determine instance types by region and architecture
+    let mut instance_types_by_region_arch: HashMap<(String, Architecture), HashSet<String>> =
+        HashMap::new();
     for instance in &config.instances {
-        instance_types_by_region
-            .entry(instance.region.clone())
+        instance_types_by_region_arch
+            .entry((instance.region.clone(), instance.architecture))
             .or_default()
             .insert(instance.instance_type.clone());
     }
-    instance_types_by_region
-        .entry(MONITORING_REGION.to_string())
+    instance_types_by_region_arch
+        .entry((
+            MONITORING_REGION.to_string(),
+            config.monitoring.architecture,
+        ))
         .or_default()
         .insert(config.monitoring.instance_type.clone());
 
@@ -112,13 +117,21 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         ec2_clients.insert(region.clone(), ec2_client);
         info!(region = region.as_str(), "created EC2 client");
 
-        // Assert all instance types are ARM-based
-        let instance_types: Vec<String> =
-            instance_types_by_region[region].iter().cloned().collect();
-        assert_arm64_support(&ec2_clients[region], &instance_types).await?;
+        // Assert all instance types support their specified architecture
+        for ((r, arch), types) in &instance_types_by_region_arch {
+            if r == region {
+                let instance_types: Vec<String> = types.iter().cloned().collect();
+                assert_architecture_support(&ec2_clients[region], &instance_types, *arch).await?;
+            }
+        }
 
-        // Find availability zone that supports all instance types
-        let az = find_availability_zone(&ec2_clients[region], &instance_types).await?;
+        // Find availability zone that supports all instance types in this region
+        let all_instance_types: Vec<String> = instance_types_by_region_arch
+            .iter()
+            .filter(|((r, _), _)| r == region)
+            .flat_map(|(_, types)| types.iter().cloned())
+            .collect();
+        let az = find_availability_zone(&ec2_clients[region], &all_instance_types).await?;
         info!(
             az = az.as_str(),
             region = region.as_str(),
@@ -282,9 +295,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let monitoring_ip;
     let monitoring_private_ip;
     let monitoring_sg_id;
+    let monitoring_architecture = config.monitoring.architecture;
     {
         let monitoring_ec2_client = &ec2_clients[&monitoring_region];
-        let ami_id = find_latest_ami(monitoring_ec2_client).await?;
+        let ami_id = find_latest_ami(monitoring_ec2_client, monitoring_architecture).await?;
         let monitoring_instance_type = InstanceType::try_parse(&config.monitoring.instance_type)
             .expect("Invalid instance type");
         let monitoring_storage_class =
@@ -350,7 +364,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let region = instance.region.clone();
         let resources = region_resources.get(&region).unwrap();
         let ec2_client = ec2_clients.get(&region).unwrap();
-        let ami_id = find_latest_ami(ec2_client).await?;
+        let ami_id = find_latest_ami(ec2_client, instance.architecture).await?;
         let instance_type =
             InstanceType::try_parse(&instance.instance_type).expect("Invalid instance type");
         let storage_class =
@@ -409,8 +423,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&pyroscope_agent_service_path, PYROSCOPE_AGENT_SERVICE)?;
     let pyroscope_agent_timer_path = tag_directory.join("pyroscope-agent.timer");
     std::fs::write(&pyroscope_agent_timer_path, PYROSCOPE_AGENT_TIMER)?;
-    let binary_service_path = tag_directory.join("binary.service");
-    std::fs::write(&binary_service_path, BINARY_SERVICE)?;
+    // Note: binary.service is generated per-instance to support different architectures
 
     // Write logrotate configuration file
     let logrotate_conf_path = tag_directory.join("logrotate.conf");
@@ -534,7 +547,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     ssh_execute(
         private_key,
         &monitoring_ip,
-        &setup_node_exporter_cmd(NODE_EXPORTER_VERSION),
+        &setup_node_exporter_cmd(NODE_EXPORTER_VERSION, monitoring_architecture),
     )
     .await?;
     poll_service_active(private_key, &monitoring_ip, "node_exporter").await?;
@@ -547,6 +560,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             LOKI_VERSION,
             PYROSCOPE_VERSION,
             TEMPO_VERSION,
+            monitoring_architecture,
         ),
     )
     .await?;
@@ -591,7 +605,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let bbr_conf_path = bbr_conf_path.clone();
         let promtail_service_path = promtail_service_path.clone();
         let node_exporter_service_path = node_exporter_service_path.clone();
-        let binary_service_path = binary_service_path.clone();
         let pyroscope_agent_service_path = pyroscope_agent_service_path.clone();
         let pyroscope_agent_timer_path = pyroscope_agent_timer_path.clone();
         let future = async move {
@@ -642,6 +655,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 "/home/ubuntu/node_exporter.service",
             )
             .await?;
+            // Generate binary.service per-instance for correct jemalloc path
+            let binary_service_path =
+                tag_directory.join(format!("binary_{}.service", instance.name));
+            std::fs::write(&binary_service_path, binary_service(instance.architecture))?;
             rsync_file(
                 private_key,
                 binary_service_path.to_str().unwrap(),
@@ -689,12 +706,17 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             )
             .await?;
             enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;
-            ssh_execute(private_key, &ip, &setup_promtail_cmd(PROMTAIL_VERSION)).await?;
+            ssh_execute(
+                private_key,
+                &ip,
+                &setup_promtail_cmd(PROMTAIL_VERSION, instance.architecture),
+            )
+            .await?;
             poll_service_active(private_key, &ip, "promtail").await?;
             ssh_execute(
                 private_key,
                 &ip,
-                &setup_node_exporter_cmd(NODE_EXPORTER_VERSION),
+                &setup_node_exporter_cmd(NODE_EXPORTER_VERSION, instance.architecture),
             )
             .await?;
             poll_service_active(private_key, &ip, "node_exporter").await?;

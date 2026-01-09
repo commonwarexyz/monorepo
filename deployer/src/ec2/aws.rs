@@ -59,16 +59,18 @@ pub async fn delete_key_pair(client: &Ec2Client, key_name: &str) -> Result<(), E
     Ok(())
 }
 
-/// Finds the latest Ubuntu 24.04 ARM64 AMI in the region
-pub async fn find_latest_ami(client: &Ec2Client) -> Result<String, Ec2Error> {
+/// Finds the latest Ubuntu 24.04 AMI in the region for the specified architecture
+pub async fn find_latest_ami(
+    client: &Ec2Client,
+    architecture: super::Architecture,
+) -> Result<String, Ec2Error> {
+    let ami_pattern = format!(
+        "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-{}-server-*",
+        architecture.ami_arch()
+    );
     let resp = client
         .describe_images()
-        .filters(
-            Filter::builder()
-                .name("name")
-                .values("ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*")
-                .build(),
-        )
+        .filters(Filter::builder().name("name").values(&ami_pattern).build())
         .filters(
             Filter::builder()
                 .name("root-device-type")
@@ -80,9 +82,9 @@ pub async fn find_latest_ami(client: &Ec2Client) -> Result<String, Ec2Error> {
         .await?;
     let mut images = resp.images.unwrap_or_default();
     if images.is_empty() {
-        return Err(Ec2Error::from(BuildError::other(
-            "No matching AMI found".to_string(),
-        )));
+        return Err(Ec2Error::from(BuildError::other(format!(
+            "No matching AMI found for architecture {architecture}"
+        ))));
     }
     images.sort_by(|a, b| b.creation_date().cmp(&a.creation_date()));
     let latest_ami = images[0].image_id().unwrap();
@@ -810,10 +812,11 @@ pub async fn delete_vpc(ec2_client: &Ec2Client, vpc_id: &str) -> Result<(), Ec2E
     Ok(())
 }
 
-/// Enforces that all instance types are ARM64-based
-pub async fn assert_arm64_support(
+/// Enforces that all instance types support the specified architecture
+pub async fn assert_architecture_support(
     client: &Ec2Client,
     instance_types: &[String],
+    architecture: super::Architecture,
 ) -> Result<(), Ec2Error> {
     let mut next_token: Option<String> = None;
     let mut supported_instance_types = HashSet::new();
@@ -824,7 +827,7 @@ pub async fn assert_arm64_support(
         let mut request = client.describe_instance_types().filters(
             Filter::builder()
                 .name("processor-info.supported-architecture")
-                .values("arm64")
+                .values(architecture.to_string())
                 .build(),
         );
         if let Some(token) = next_token {
@@ -850,7 +853,7 @@ pub async fn assert_arm64_support(
     for instance_type in instance_types {
         if !supported_instance_types.contains(instance_type) {
             return Err(Ec2Error::from(BuildError::other(format!(
-                "instance type {instance_type} not ARM64-based"
+                "instance type {instance_type} does not support {architecture}"
             ))));
         }
     }
