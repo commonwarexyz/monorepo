@@ -9,7 +9,6 @@ mod combine_signatures;
 mod dkg;
 mod evaluate_point;
 mod msm;
-mod msm_affine;
 mod pairing_verify;
 mod scheme_batch_verify_same_message;
 mod scheme_batch_verify_same_signer;
@@ -36,7 +35,6 @@ criterion_main!(
     scheme_batch_verify_same_message::benches,
     evaluate_point::benches,
     msm::benches,
-    msm_affine::benches,
     pairing_verify::benches,
     threshold_batch_verify_same_message::benches,
     threshold_batch_verify_same_message_precomputed::benches,
