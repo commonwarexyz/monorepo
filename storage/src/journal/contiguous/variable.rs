@@ -203,26 +203,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         })
     }
 
-    /// Initialize a [Journal] in a fully pruned state at a specific logical size.
-    ///
-    /// This creates a journal that reports `size()` as `size` but contains no data.
-    /// The `oldest_retained_pos()` will return `None`, indicating all positions before
-    /// `size` have been pruned. This is useful for state sync when starting from
-    /// a non-zero position without historical data.
-    ///
-    /// # Arguments
-    ///
-    /// * `size` - The logical size to initialize at.
-    ///
-    /// # Post-conditions
-    ///
-    /// * `size()` returns `size`
-    /// * `oldest_retained_pos()` returns `None` (fully pruned)
-    /// * Next append receives position `size`
-    pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
-        crate::qmdb::any::unordered::variable::sync::init_journal_at_size(context, cfg, size).await
-    }
-
     /// Initialize a [Journal] for use in state sync.
     ///
     /// The bounds are item locations (not section numbers). This function prepares the
@@ -277,7 +257,14 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                     "no existing journal data, initializing at sync range start"
                 );
                 journal.destroy().await?;
-                return Ok(Self::init_at_size(context, cfg, range.start).await?);
+                return Ok(
+                    crate::qmdb::any::unordered::variable::sync::init_journal_at_size(
+                        context,
+                        cfg,
+                        range.start,
+                    )
+                    .await?,
+                );
             }
         }
 
@@ -296,7 +283,14 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 range.start, "existing journal data is stale, re-initializing at start position"
             );
             journal.destroy().await?;
-            return Ok(Self::init_at_size(context, cfg, range.start).await?);
+            return Ok(
+                crate::qmdb::any::unordered::variable::sync::init_journal_at_size(
+                    context,
+                    cfg,
+                    range.start,
+                )
+                .await?,
+            );
         }
 
         // Prune to lower bound if needed
@@ -816,6 +810,7 @@ impl<E: Storage + Metrics, V: CodecShared> Persistable for Journal<E, V> {
 mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
+    use crate::qmdb::any::unordered::variable::sync::init_journal_at_size;
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::pool::PoolRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -1547,7 +1542,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 0)
+            let mut journal = init_journal_at_size::<_, u64>(context.clone(), cfg.clone(), 0)
                 .await
                 .unwrap();
 
@@ -1581,7 +1576,7 @@ mod tests {
             };
 
             // Initialize at position 10 (exactly at section 1 boundary with items_per_section=5)
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 10)
+            let mut journal = init_journal_at_size::<_, u64>(context.clone(), cfg.clone(), 10)
                 .await
                 .unwrap();
 
@@ -1620,7 +1615,7 @@ mod tests {
             };
 
             // Initialize at position 7 (middle of section 1 with items_per_section=5)
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 7)
+            let mut journal = init_journal_at_size::<_, u64>(context.clone(), cfg.clone(), 7)
                 .await
                 .unwrap();
 
@@ -1654,7 +1649,7 @@ mod tests {
             };
 
             // Initialize at position 15
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 15)
+            let mut journal = init_journal_at_size::<_, u64>(context.clone(), cfg.clone(), 15)
                 .await
                 .unwrap();
 
@@ -1706,7 +1701,7 @@ mod tests {
             };
 
             // Initialize at a large position (position 1000)
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 1000)
+            let mut journal = init_journal_at_size::<_, u64>(context.clone(), cfg.clone(), 1000)
                 .await
                 .unwrap();
 
@@ -1737,7 +1732,7 @@ mod tests {
             };
 
             // Initialize at position 20
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 20)
+            let mut journal = init_journal_at_size::<_, u64>(context.clone(), cfg.clone(), 20)
                 .await
                 .unwrap();
 
@@ -2225,7 +2220,7 @@ mod tests {
 
             // Initialize at size 13 (2 items in tail section 1)
             // This triggers the partial section case where dummies must be written.
-            let journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 13)
+            let journal = init_journal_at_size::<_, u64>(context.clone(), cfg.clone(), 13)
                 .await
                 .unwrap();
 
@@ -2271,7 +2266,7 @@ mod tests {
             };
 
             // Initialize at size 22 (exactly at section 2 boundary)
-            let journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 22)
+            let journal = init_journal_at_size::<_, u64>(context.clone(), cfg.clone(), 22)
                 .await
                 .unwrap();
 
