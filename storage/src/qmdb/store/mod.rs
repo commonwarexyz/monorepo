@@ -47,8 +47,8 @@ impl private::Sealed for NonDurable {}
 impl State for NonDurable {}
 
 /// A trait for a store based on an append-only log of operations.
-pub trait LogStore {
-    type Value: Codec + Clone;
+pub trait LogStore: Send + Sync {
+    type Value: Codec + Clone + Send + Sync;
 
     /// Returns true if there are no active keys in the database.
     fn is_empty(&self) -> bool;

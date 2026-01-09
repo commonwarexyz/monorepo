@@ -438,7 +438,15 @@ pub(super) mod test {
         const fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<AnyTest>();
         assert_send_sync::<
-            Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, NonDurable>,
+            Db<
+                deterministic::Context,
+                Digest,
+                Vec<u8>,
+                Sha256,
+                TwoCap,
+                Merkleized<Sha256>,
+                NonDurable,
+            >,
         >();
     };
 
@@ -462,7 +470,15 @@ pub(super) mod test {
     /// Test that futures returned by Mutable (Dirty, NonDurable) Db methods are Send.
     #[allow(dead_code)]
     fn test_mutable_futures_are_send(
-        mut db: Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, crate::qmdb::Unmerkleized, crate::qmdb::NonDurable>,
+        mut db: Db<
+            deterministic::Context,
+            Digest,
+            Vec<u8>,
+            Sha256,
+            TwoCap,
+            crate::qmdb::Unmerkleized,
+            crate::qmdb::NonDurable,
+        >,
         key: Digest,
     ) {
         // Mutation operations

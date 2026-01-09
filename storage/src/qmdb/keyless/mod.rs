@@ -69,7 +69,7 @@ pub struct Keyless<
     E: Storage + Clock + Metrics,
     V: VariableValue,
     H: Hasher,
-    M: MerkleizationState<DigestOf<H>> + Send + Sync = Merkleized<H>,
+    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
     D: DurabilityState = Durable,
 > {
     /// Authenticated journal of operations.
@@ -87,7 +87,7 @@ impl<
         E: Storage + Clock + Metrics,
         V: VariableValue,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>> + Send + Sync,
+        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
     > Keyless<E, V, H, M, D>
 {
@@ -360,7 +360,7 @@ impl<
         E: Storage + Clock + Metrics,
         V: VariableValue,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>> + Send + Sync,
+        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
     > LogStore for Keyless<E, V, H, M, D>
 {
