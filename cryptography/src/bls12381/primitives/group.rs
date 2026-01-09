@@ -29,7 +29,6 @@ use blst::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt,
     EncodeSize,
     Error::{self, Invalid},
     FixedSize, Read, ReadExt, Write,
@@ -38,7 +37,7 @@ use commonware_math::algebra::{
     Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::hex;
+use commonware_utils::{hex, Participant};
 use core::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
@@ -500,14 +499,14 @@ impl Random for Scalar {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Share {
     /// The share's index in the polynomial.
-    pub index: u32,
+    pub index: Participant,
     /// The scalar corresponding to the share's secret.
     pub private: Secret<Private>,
 }
 
 impl Share {
     /// Creates a new `Share` with the given index and private key.
-    pub const fn new(index: u32, private: Private) -> Self {
+    pub const fn new(index: Participant, private: Private) -> Self {
         Self {
             index,
             private: Secret::new(private),
@@ -525,7 +524,7 @@ impl Share {
 
 impl Write for Share {
     fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.index).write(buf);
+        self.index.write(buf);
         self.private.expose(|private| private.write(buf));
     }
 }
@@ -534,7 +533,7 @@ impl Read for Share {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let index = UInt::read(buf)?.into();
+        let index = Participant::read(buf)?;
         let private = Private::read(buf)?;
         Ok(Self {
             index,
@@ -545,7 +544,7 @@ impl Read for Share {
 
 impl EncodeSize for Share {
     fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + self.private.expose(|private| private.encode_size())
+        self.index.encode_size() + self.private.expose(|private| private.encode_size())
     }
 }
 
@@ -1569,7 +1568,7 @@ mod tests {
     #[test]
     fn test_share_redacted() {
         let mut rng = test_rng();
-        let share = Share::new(1, Scalar::random(&mut rng));
+        let share = Share::new(Participant::new(1), Scalar::random(&mut rng));
         let debug = format!("{:?}", share);
         let display = format!("{}", share);
         assert!(debug.contains("REDACTED"));

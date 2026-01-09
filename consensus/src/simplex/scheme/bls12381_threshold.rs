@@ -11,7 +11,7 @@ use crate::{
         scheme::{seed_namespace, Namespace},
         types::{Finalization, Notarization, Subject},
     },
-    types::{Epoch, Round, View},
+    types::{Epoch, Participant, Round, View},
     Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
@@ -478,7 +478,7 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
     type Signature = Signature<V>;
     type Certificate = Signature<V>;
 
-    fn me(&self) -> Option<u32> {
+    fn me(&self) -> Option<Participant> {
         match &self.role {
             Role::Signer { share, .. } => Some(share.index),
             _ => None,
@@ -802,7 +802,7 @@ mod tests {
         let participants = ed25519_participants(&mut rng, 4);
         let (polynomial, mut shares) =
             dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
-        shares[0].index = 999;
+        shares[0].index = Participant::new(999);
         Scheme::<V>::signer(
             NAMESPACE,
             participants.keys().clone(),
@@ -1007,7 +1007,7 @@ mod tests {
         assert!(verification.invalid.is_empty());
         assert_eq!(verification.verified.len(), quorum);
 
-        votes[0].signer = 999;
+        votes[0].signer = Participant::new(999);
         let verification = schemes[0].verify_attestations(
             &mut rng,
             Subject::Notarize {
@@ -1015,7 +1015,7 @@ mod tests {
             },
             votes,
         );
-        assert_eq!(verification.invalid, vec![999]);
+        assert_eq!(verification.invalid, vec![Participant::new(999)]);
         assert_eq!(verification.verified.len(), quorum - 1);
     }
 

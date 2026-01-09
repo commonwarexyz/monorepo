@@ -300,7 +300,7 @@ use commonware_math::{
 use commonware_parallel::{Sequential, Strategy as ParStrategy};
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
-    TryCollect, NZU32,
+    Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -522,11 +522,11 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         self.players.max_faults()
     }
 
-    fn player_index(&self, player: &P) -> Result<u32, Error> {
+    fn player_index(&self, player: &P) -> Result<Participant, Error> {
         self.players.index(player).ok_or(Error::UnknownPlayer)
     }
 
-    fn dealer_index(&self, dealer: &P) -> Result<u32, Error> {
+    fn dealer_index(&self, dealer: &P) -> Result<Participant, Error> {
         self.dealers
             .index(dealer)
             .ok_or(Error::UnknownDealer(format!("{dealer:?}")))
@@ -1416,7 +1416,7 @@ pub struct Player<V: Variant, S: Signer> {
     me: S,
     me_pub: S::PublicKey,
     info: Info<V, S::PublicKey>,
-    index: u32,
+    index: Participant,
     transcript: Transcript,
     view: BTreeMap<S::PublicKey, (DealerPubMsg<V>, DealerPrivMsg)>,
 }
@@ -1547,12 +1547,14 @@ pub fn deal<V: Variant, P: Clone + Ord>(
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let i = i as u32;
+            let participant = Participant::from_usize(i);
             let eval = private.eval_msm(
-                &mode.scalar(n, i).expect("player index should be valid"),
+                &mode
+                    .scalar(n, participant)
+                    .expect("player index should be valid"),
                 &Sequential,
             );
-            let share = Share::new(i, eval);
+            let share = Share::new(participant, eval);
             (p.clone(), share)
         })
         .try_collect()
@@ -1592,10 +1594,10 @@ mod test_plan {
         },
         ed25519, PublicKey,
     };
-    use ::core::num::NonZeroI32;
     use anyhow::anyhow;
     use bytes::BytesMut;
     use commonware_utils::{max_faults, quorum, TryCollect};
+    use core::num::NonZeroI32;
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;
 
@@ -1935,7 +1937,10 @@ mod test_plan {
                     let share = match (shares.get(&pk), round.replace_shares.contains(&i_dealer)) {
                         (None, _) => None,
                         (Some(s), false) => Some(s.clone()),
-                        (Some(_), true) => Some(Share::new(i_dealer, Scalar::random(&mut rng))),
+                        (Some(_), true) => Some(Share::new(
+                            Participant::new(i_dealer),
+                            Scalar::random(&mut rng),
+                        )),
                     };
 
                     // Start dealer (with potential modifications)
@@ -2009,7 +2014,7 @@ mod test_plan {
                             .index(&player_pk)
                             .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))?;
                         let player_key_idx = pk_to_key_idx[&player_pk];
-                        let player = &mut players.values_mut()[i_player as usize];
+                        let player = &mut players.values_mut()[usize::from(i_player)];
 
                         let ack = player.dealer_message(pk.clone(), pub_msg.clone(), priv_msg);
                         assert_eq!(ack, ReadExt::read(&mut ack.encode())?);

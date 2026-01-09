@@ -46,6 +46,7 @@ commonware-consensus = { path = ".", features = ["mocks"] }
 commonware-math.workspace = true
 commonware-resolver = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
+rand_chacha.workspace = true
 rstest.workspace = true
 tracing-subscriber.workspace = true
 

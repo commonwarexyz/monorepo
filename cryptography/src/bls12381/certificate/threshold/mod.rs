@@ -21,11 +21,11 @@ use crate::{
     certificate::{Attestation, Namespace, Scheme, Subject, Verification},
     Digest, PublicKey,
 };
-use ::core::fmt::Debug;
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use commonware_parallel::Sequential;
-use commonware_utils::ordered::Set;
+use commonware_utils::{ordered::Set, Participant};
+use core::fmt::Debug;
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
@@ -192,7 +192,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Returns the index of "self" in the participant set, if available.
-    pub const fn me(&self) -> Option<u32> {
+    pub const fn me(&self) -> Option<Participant> {
         match self {
             Self::Signer { share, .. } => Some(share.index),
             _ => None,
@@ -508,7 +508,7 @@ mod macros {
                 type Signature = V::Signature;
                 type Certificate = V::Signature;
 
-                fn me(&self) -> Option<u32> {
+                fn me(&self) -> Option<commonware_utils::Participant> {
                     self.generic.me()
                 }
 
@@ -752,7 +752,7 @@ mod tests {
 
         // Test: Corrupt one attestation - invalid signer index
         let mut attestations_corrupted = attestations.clone();
-        attestations_corrupted[0].signer = 999;
+        attestations_corrupted[0].signer = Participant::new(999);
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             TestSubject {
@@ -760,7 +760,7 @@ mod tests {
             },
             attestations_corrupted,
         );
-        assert_eq!(result.invalid, vec![999]);
+        assert_eq!(result.invalid, vec![Participant::new(999)]);
         assert_eq!(result.verified.len(), quorum - 1);
 
         // Test: Corrupt one attestation - invalid signature
@@ -1203,7 +1203,7 @@ mod tests {
 
         let (polynomial, mut shares) =
             dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
-        shares[0].index = 999;
+        shares[0].index = Participant::new(999);
         Scheme::<ed25519::PublicKey, V>::signer(
             NAMESPACE,
             participants,

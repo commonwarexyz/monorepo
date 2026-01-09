@@ -19,7 +19,10 @@ use crate::{
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
-use commonware_utils::ordered::{BiMap, Quorum, Set};
+use commonware_utils::{
+    ordered::{BiMap, Quorum, Set},
+    Participant,
+};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
@@ -34,7 +37,7 @@ pub struct Generic<P: PublicKey, V: Variant, N: Namespace> {
     /// Participants in the committee.
     pub participants: BiMap<P, V::Public>,
     /// Key used for generating signatures.
-    pub signer: Option<(u32, Private)>,
+    pub signer: Option<(Participant, Private)>,
     /// Pre-computed namespace(s) for this subject type.
     pub namespace: N,
 }
@@ -58,7 +61,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .values()
             .iter()
             .position(|p| p == &public_key)
-            .map(|index| (index as u32, private_key))?;
+            .map(|index| (Participant::from_usize(index), private_key))?;
 
         Some(Self {
             participants,
@@ -86,7 +89,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Returns the index of "self" in the participant set, if available.
-    pub fn me(&self) -> Option<u32> {
+    pub fn me(&self) -> Option<Participant> {
         self.signer.as_ref().map(|(index, _)| *index)
     }
 
@@ -122,7 +125,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         D: Digest,
     {
-        let Some(public_key) = self.participants.value(attestation.signer as usize) else {
+        let Some(public_key) = self.participants.value(attestation.signer.into()) else {
             return false;
         };
 
@@ -153,7 +156,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let mut candidates = Vec::new();
         let mut entries = Vec::new();
         for attestation in attestations.into_iter() {
-            let Some(public_key) = self.participants.value(attestation.signer as usize) else {
+            let Some(public_key) = self.participants.value(attestation.signer.into()) else {
                 invalid.insert(attestation.signer);
                 continue;
             };
@@ -196,7 +199,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
         for Attestation { signer, signature } in attestations {
-            if signer as usize >= self.participants.len() {
+            if usize::from(signer) >= self.participants.len() {
                 return None;
             }
 
@@ -240,7 +243,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         // Collect the public keys.
         let mut publics = Vec::with_capacity(certificate.signers.count());
         for signer in certificate.signers.iter() {
-            let Some(public_key) = self.participants.value(signer as usize) else {
+            let Some(public_key) = self.participants.value(signer.into()) else {
                 return false;
             };
 
@@ -449,7 +452,7 @@ mod macros {
                 type Signature = V::Signature;
                 type Certificate = $crate::bls12381::certificate::multisig::Certificate<V>;
 
-                fn me(&self) -> Option<u32> {
+                fn me(&self) -> Option<commonware_utils::Participant> {
                     self.generic.me()
                 }
 
@@ -563,7 +566,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::{CryptoGroup, Random};
-    use commonware_utils::{ordered::BiMap, quorum, test_rng, TryCollect};
+    use commonware_utils::{ordered::BiMap, quorum, test_rng, Participant, TryCollect};
 
     const NAMESPACE: &[u8] = b"test-bls12381-multisig";
     const MESSAGE: &[u8] = b"test message";
@@ -705,7 +708,7 @@ mod tests {
 
         // Test: Corrupt one attestation - invalid signer index
         let mut attestations_corrupted = attestations.clone();
-        attestations_corrupted[0].signer = 999;
+        attestations_corrupted[0].signer = Participant::new(999);
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             TestSubject {
@@ -713,7 +716,7 @@ mod tests {
             },
             attestations_corrupted,
         );
-        assert_eq!(result.invalid, vec![999]);
+        assert_eq!(result.invalid, vec![Participant::new(999)]);
         assert_eq!(result.verified.len(), quorum - 1);
 
         // Test: Corrupt one attestation - invalid signature
@@ -951,7 +954,7 @@ mod tests {
             .collect();
 
         // Corrupt signer index to be out of range
-        attestations[0].signer = 999;
+        attestations[0].signer = Participant::new(999);
 
         assert!(schemes[0].assemble(attestations).is_none());
     }
@@ -981,7 +984,7 @@ mod tests {
         let mut certificate = schemes[0].assemble(attestations).unwrap();
 
         // Artificially truncate to below quorum
-        let mut signers: Vec<u32> = certificate.signers.iter().collect();
+        let mut signers: Vec<Participant> = certificate.signers.iter().collect();
         signers.pop();
         certificate.signers = Signers::from(participants_len, signers);
 
@@ -1019,7 +1022,7 @@ mod tests {
         let mut certificate = schemes[0].assemble(attestations).unwrap();
 
         // Make the signers bitmap size larger than participants
-        let signers: Vec<u32> = certificate.signers.iter().collect();
+        let signers: Vec<Participant> = certificate.signers.iter().collect();
         certificate.signers = Signers::from(participants_len + 1, signers);
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
@@ -1218,14 +1221,14 @@ mod tests {
 
         // Certificate with no signers is rejected
         let empty = Certificate::<V> {
-            signers: Signers::from(participants_len, std::iter::empty::<u32>()),
+            signers: Signers::from(participants_len, std::iter::empty::<Participant>()),
             signature: certificate.signature.clone(),
         };
         assert!(Certificate::<V>::decode_cfg(empty.encode(), &participants_len).is_err());
 
         // Certificate containing more signers than the participant set is rejected
         let mut signers = certificate.signers.iter().collect::<Vec<_>>();
-        signers.push(participants_len as u32);
+        signers.push(Participant::from_usize(participants_len));
         let extended = Certificate::<V> {
             signers: Signers::from(participants_len + 1, signers),
             signature: certificate.signature,
@@ -1258,8 +1261,8 @@ mod tests {
         let mut certificate = schemes[0].assemble(attestations).unwrap();
 
         // Add an unknown signer (out of range)
-        let mut signers: Vec<u32> = certificate.signers.iter().collect();
-        signers.push(participants_len as u32);
+        let mut signers: Vec<Participant> = certificate.signers.iter().collect();
+        signers.push(Participant::from_usize(participants_len));
         certificate.signers = Signers::from(participants_len + 1, signers);
 
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
