@@ -271,7 +271,7 @@
 //! }
 //!
 //! // Step 5: Observer can also compute the public output
-//! let observer_output = observe::<MinSig, ed25519::PublicKey, _>(
+//! let observer_output = observe::<MinSig, ed25519::PublicKey>(
 //!     info,
 //!     dealer_logs,
 //!     &commonware_parallel::Sequential,
@@ -1315,10 +1315,10 @@ struct ObserveInner<V: Variant, P: PublicKey> {
 }
 
 impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
-    fn reckon<S: ParStrategy>(
+    fn reckon(
         info: Info<V, P>,
         selected: Map<P, DealerLog<V, P>>,
-        strategy: &S,
+        strategy: &impl ParStrategy,
     ) -> Result<Self, Error> {
         // Track players with too many reveals
         let max_faults = info.players.max_faults();
@@ -1398,10 +1398,10 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 /// From this log, we can (potentially, as the DKG can fail) compute the public output.
 ///
 /// This will only ever return [`Error::DkgFailed`].
-pub fn observe<V: Variant, P: PublicKey, S: ParStrategy>(
+pub fn observe<V: Variant, P: PublicKey>(
     info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
-    strategy: &S,
+    strategy: &impl ParStrategy,
 ) -> Result<Output<V, P>, Error> {
     let selected = select(&info, logs)?;
     ObserveInner::<V, P>::reckon(info, selected, strategy).map(|x| x.output)
@@ -2241,7 +2241,7 @@ mod test_plan {
                 }
 
                 let threshold = observer_output.quorum();
-                let threshold_sig = threshold::recover::<V, _, _>(
+                let threshold_sig = threshold::recover::<V, _>(
                     &observer_output.public,
                     &partial_sigs[0..threshold as usize],
                     &Sequential,

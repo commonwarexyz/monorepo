@@ -524,7 +524,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                 attestation.signature.seed_signature,
             ),
         ];
-        batch::verify_same_signer::<_, V, _, _>(rng, &evaluated, entries, strategy).is_ok()
+        batch::verify_same_signer::<_, V, _>(rng, &evaluated, entries, strategy).is_ok()
     }
 
     fn verify_attestations<R, D, I>(
@@ -571,7 +571,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let (vote_invalid, seed_invalid) = strategy.join(
             || {
                 let mut vote_rng = StdRng::from_seed(vote_rng_seed);
-                match threshold::batch_verify_same_message::<_, V, _, _>(
+                match threshold::batch_verify_same_message::<_, V, _>(
                     &mut vote_rng,
                     polynomial,
                     vote_namespace,
@@ -585,7 +585,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             },
             || {
                 let mut seed_rng = StdRng::from_seed(seed_rng_seed);
-                match threshold::batch_verify_same_message::<_, V, _, _>(
+                match threshold::batch_verify_same_message::<_, V, _>(
                     &mut seed_rng,
                     polynomial,
                     &namespace.seed,
@@ -643,7 +643,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             return None;
         }
 
-        let (vote_signature, seed_signature) = threshold::recover_pair::<V, _, _>(
+        let (vote_signature, seed_signature) = threshold::recover_pair::<V, _>(
             quorum,
             vote_partials.iter(),
             seed_partials.iter(),
@@ -683,7 +683,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                 certificate.seed_signature,
             ),
         ];
-        batch::verify_same_signer::<_, V, _, _>(rng, identity, entries, strategy).is_ok()
+        batch::verify_same_signer::<_, V, _>(rng, identity, entries, strategy).is_ok()
     }
 
     fn verify_certificates<'a, R, D, I>(
@@ -730,7 +730,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             .iter()
             .map(|(ns, msg, sig)| (*ns, msg.as_ref(), *sig))
             .collect();
-        batch::verify_same_signer::<_, V, _, _>(rng, identity, &entries_refs, strategy).is_ok()
+        batch::verify_same_signer::<_, V, _>(rng, identity, &entries_refs, strategy).is_ok()
     }
 
     fn is_attributable() -> bool {

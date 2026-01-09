@@ -271,7 +271,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .collect();
 
         let polynomial = self.polynomial();
-        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _, _>(
+        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
             rng,
             polynomial,
             subject.namespace(self.namespace()),
@@ -316,7 +316,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             return None;
         }
 
-        threshold::recover::<V, _, _>(quorum, partials.iter(), strategy).ok()
+        threshold::recover::<V, _>(quorum, partials.iter(), strategy).ok()
     }
 
     /// Verifies a certificate.
@@ -373,8 +373,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .map(|(ns, msg, sig)| (ns.as_ref(), msg.as_ref(), *sig))
             .collect();
 
-        batch::verify_same_signer::<_, V, _, _>(rng, self.identity(), &entries_refs, strategy)
-            .is_ok()
+        batch::verify_same_signer::<_, V, _>(rng, self.identity(), &entries_refs, strategy).is_ok()
     }
 
     pub const fn is_attributable() -> bool {

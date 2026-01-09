@@ -72,7 +72,6 @@ fn benchmark_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) 
                                             _,
                                             MinSig,
                                             _,
-                                            _,
                                         >(
                                             &mut rng,
                                             &polynomial,
@@ -87,7 +86,6 @@ fn benchmark_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) 
                                         primitives::ops::threshold::batch_verify_same_message::<
                                             _,
                                             MinSig,
-                                            _,
                                             _,
                                         >(
                                             &mut rng,

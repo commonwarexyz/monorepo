@@ -127,18 +127,17 @@ pub fn verify_proof_of_possession<V: Variant>(
 /// This function assumes a group check was already performed on each `signature`.
 /// Duplicate messages are safe because random scalar weights ensure each
 /// (message, signature) pair is verified independently.
-pub fn batch_verify_same_signer<'a, R, V, I, S>(
+pub fn batch_verify_same_signer<'a, R, V, I>(
     rng: &mut R,
     sharing: &Sharing<V>,
     index: Participant,
     entries: I,
-    strategy: &S,
+    strategy: &impl Strategy,
 ) -> Result<(), Error>
 where
     R: CryptoRngCore,
     V: Variant,
     I: IntoIterator<Item = &'a (&'a [u8], &'a [u8], PartialSignature<V>)>,
-    S: Strategy,
 {
     // Verify all signatures have the correct index and build combined entries
     let combined: Vec<_> = entries
@@ -154,7 +153,7 @@ where
 
     let public = sharing.partial_public(index)?;
 
-    batch::verify_same_signer::<_, V, _, _>(rng, &public, &combined, strategy)
+    batch::verify_same_signer::<_, V, _>(rng, &public, &combined, strategy)
 }
 
 /// Verify a list of [PartialSignature]s over the same message from different signers,
@@ -169,17 +168,16 @@ where
 /// more verifications than checking each signature individually. If an invalid signer is detected,
 /// consider blocking them from participating in future batches to better amortize the cost of this
 /// search.
-fn batch_verify_same_message_bisect<'a, R, V, S>(
+fn batch_verify_same_message_bisect<'a, R, V>(
     rng: &mut R,
     pending: &[(V::Public, &'a PartialSignature<V>)],
     namespace: &[u8],
     message: &[u8],
-    strategy: &S,
+    strategy: &impl Strategy,
 ) -> Vec<&'a PartialSignature<V>>
 where
     R: CryptoRngCore,
     V: Variant,
-    S: Strategy,
 {
     // Convert to the format expected by verify_same_message
     let entries: Vec<(V::Public, V::Signature)> = pending
@@ -189,7 +187,7 @@ where
 
     // Use the generic verification function
     let invalid_indices =
-        batch::verify_same_message::<_, V, _>(rng, namespace, message, &entries, strategy);
+        batch::verify_same_message::<_, V>(rng, namespace, message, &entries, strategy);
 
     // Map indices back to PartialSignature references
     invalid_indices
@@ -209,19 +207,18 @@ where
 /// This function assumes a group check was already performed on each `signature`.
 /// Duplicate signers are safe because random scalar weights ensure each
 /// (public key, signature) pair is verified independently.
-pub fn batch_verify_same_message<'a, R, V, I, S>(
+pub fn batch_verify_same_message<'a, R, V, I>(
     rng: &mut R,
     sharing: &Sharing<V>,
     namespace: &[u8],
     message: &[u8],
     partials: I,
-    strategy: &S,
+    strategy: &impl Strategy,
 ) -> Result<(), Vec<&'a PartialSignature<V>>>
 where
     R: CryptoRngCore,
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
-    S: Strategy,
 {
     let partials = partials.into_iter();
     let mut pending = Vec::with_capacity(partials.size_hint().0);
@@ -234,7 +231,7 @@ where
     }
 
     // Find any invalid partial signatures
-    let bad = batch_verify_same_message_bisect::<_, V, _>(
+    let bad = batch_verify_same_message_bisect::<_, V>(
         rng,
         pending.as_slice(),
         namespace,
@@ -260,16 +257,15 @@ where
 /// # Warning
 ///
 /// This function assumes that each partial signature is unique.
-pub fn recover<'a, V, I, S>(
+pub fn recover<'a, V, I>(
     sharing: &Sharing<V>,
     partials: I,
-    strategy: &S,
+    strategy: &impl Strategy,
 ) -> Result<V::Signature, Error>
 where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
-    S: Strategy,
 {
     let evals = prepare_evaluations::<V>(sharing.required(), partials)?;
     sharing
@@ -290,16 +286,15 @@ where
 ///
 /// This function assumes that each partial signature is unique and that
 /// each set of partial signatures has the same indices.
-pub fn recover_multiple<'a, V, I, S>(
+pub fn recover_multiple<'a, V, I>(
     sharing: &Sharing<V>,
     many_evals: Vec<I>,
-    strategy: &S,
+    strategy: &impl Strategy,
 ) -> Result<Vec<V::Signature>, Error>
 where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
-    S: Strategy,
 {
     let prepared_evals = many_evals
         .into_iter()
@@ -332,19 +327,18 @@ where
 /// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
 ///
 /// This is just a wrapper around `recover_multiple`.
-pub fn recover_pair<'a, V, I, S>(
+pub fn recover_pair<'a, V, I>(
     sharing: &Sharing<V>,
     first: I,
     second: I,
-    strategy: &S,
+    strategy: &impl Strategy,
 ) -> Result<(V::Signature, V::Signature), Error>
 where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
-    S: Strategy,
 {
-    let mut sigs = recover_multiple::<V, _, _>(sharing, vec![first, second], strategy)?;
+    let mut sigs = recover_multiple::<V, _>(sharing, vec![first, second], strategy)?;
     let second_sig = sigs.pop().unwrap();
     let first_sig = sigs.pop().unwrap();
     Ok((first_sig, second_sig))
@@ -410,7 +404,7 @@ mod tests {
             verify_proof_of_possession::<V>(&sharing, namespace, p)
                 .expect("signature should be valid");
         }
-        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _>(&sharing, &partials, &Sequential).unwrap();
         let threshold_pub = sharing.public();
 
         ops::verify_proof_of_possession::<V>(threshold_pub, namespace, &threshold_sig)
@@ -465,7 +459,7 @@ mod tests {
         for p in &partials {
             verify_message::<V>(&sharing, namespace, msg, p).expect("signature should be valid");
         }
-        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _>(&sharing, &partials, &Sequential).unwrap();
         let threshold_pub = sharing.public();
 
         ops::verify_message::<V>(threshold_pub, namespace, msg, &threshold_sig)
@@ -494,24 +488,12 @@ mod tests {
             .iter()
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
             .collect();
-        batch_verify_same_signer::<_, V, _, _>(
-            &mut rng,
-            &public,
-            signer.index,
-            &entries,
-            &Sequential,
-        )
-        .expect("Verification with namespaced messages should succeed");
+        batch_verify_same_signer::<_, V, _>(&mut rng, &public, signer.index, &entries, &Sequential)
+            .expect("Verification with namespaced messages should succeed");
 
         let strategy = Rayon::new(NZUsize!(4)).unwrap();
-        batch_verify_same_signer::<_, V, _, _>(
-            &mut rng,
-            &public,
-            signer.index,
-            &entries,
-            &strategy,
-        )
-        .expect("Verification with parallel strategy should succeed");
+        batch_verify_same_signer::<_, V, _>(&mut rng, &public, signer.index, &entries, &strategy)
+            .expect("Verification with parallel strategy should succeed");
 
         let messages_alt_ns: &[(&[u8], &[u8])] =
             &[(b"alt", b"msg1"), (b"alt", b"msg2"), (b"alt", b"msg3")];
@@ -519,7 +501,7 @@ mod tests {
             .iter()
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
             .collect();
-        batch_verify_same_signer::<_, V, _, _>(
+        batch_verify_same_signer::<_, V, _>(
             &mut rng,
             &public,
             signer.index,
@@ -534,7 +516,7 @@ mod tests {
             .iter()
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
             .collect();
-        batch_verify_same_signer::<_, V, _, _>(
+        batch_verify_same_signer::<_, V, _>(
             &mut rng,
             &public,
             signer.index,
@@ -544,7 +526,7 @@ mod tests {
         .expect("Verification with mixed namespaces should succeed");
 
         assert!(matches!(
-            batch_verify_same_signer::<_, V, _, _>(
+            batch_verify_same_signer::<_, V, _>(
                 &mut rng,
                 &public,
                 Participant::new(1),
@@ -559,7 +541,7 @@ mod tests {
         entries_swapped[0].2 = entries_swapped[1].2.clone();
         entries_swapped[1].2 = temp_sig;
         assert!(
-            batch_verify_same_signer::<_, V, _, _>(
+            batch_verify_same_signer::<_, V, _>(
                 &mut rng,
                 &public,
                 signer.index,
@@ -575,7 +557,7 @@ mod tests {
         let mut entries_mixed_signers = entries;
         entries_mixed_signers[0].2 = partial2;
         assert!(matches!(
-            batch_verify_same_signer::<_, V, _, _>(
+            batch_verify_same_signer::<_, V, _>(
                 &mut rng,
                 &public,
                 signer.index,
@@ -603,7 +585,7 @@ mod tests {
             .map(|s| sign_message::<V>(s, b"test", b"payload"))
             .collect();
 
-        let sig1 = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
+        let sig1 = recover::<V, _>(&sharing, &partials, &Sequential).unwrap();
 
         ops::verify_message::<V>(sharing.public(), b"test", b"payload", &sig1).unwrap();
     }
@@ -631,14 +613,14 @@ mod tests {
             .collect();
 
         let (sig_1, sig_2) =
-            recover_pair::<V, _, _>(&sharing, &partials_1, &partials_2, &Sequential).unwrap();
+            recover_pair::<V, _>(&sharing, &partials_1, &partials_2, &Sequential).unwrap();
 
         ops::verify_message::<V>(sharing.public(), b"test", b"payload1", &sig_1).unwrap();
         ops::verify_message::<V>(sharing.public(), b"test", b"payload2", &sig_2).unwrap();
 
         let parallel = Rayon::new(NZUsize!(4)).unwrap();
         let (sig_1_par, sig_2_par) =
-            recover_pair::<V, _, _>(&sharing, &partials_1, &partials_2, &parallel).unwrap();
+            recover_pair::<V, _>(&sharing, &partials_1, &partials_2, &parallel).unwrap();
 
         assert_eq!(sig_1, sig_1_par);
         assert_eq!(sig_2, sig_2_par);
@@ -667,7 +649,7 @@ mod tests {
             verify_message::<V>(&sharing, namespace, msg, partial).unwrap();
         });
 
-        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _>(&sharing, &partials, &Sequential).unwrap();
         ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 
@@ -698,7 +680,7 @@ mod tests {
             ));
         });
 
-        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _>(&sharing, &partials, &Sequential).unwrap();
         assert!(matches!(
             ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap_err(),
             Error::InvalidSignature
@@ -731,7 +713,7 @@ mod tests {
         });
 
         assert!(matches!(
-            recover::<V, _, _>(&group, &partials, &Sequential).unwrap_err(),
+            recover::<V, _>(&group, &partials, &Sequential).unwrap_err(),
             Error::NotEnoughPartialSignatures(4, 3)
         ));
     }
@@ -763,7 +745,7 @@ mod tests {
             verify_message::<V>(&sharing, namespace, msg, partial).unwrap();
         });
 
-        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _>(&sharing, &partials, &Sequential).unwrap();
         ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 
@@ -789,7 +771,7 @@ mod tests {
             .collect();
         sharing.precompute_partial_publics();
 
-        batch_verify_same_message::<_, MinSig, _, _>(
+        batch_verify_same_message::<_, MinSig, _>(
             &mut rng,
             &sharing,
             namespace,
@@ -818,7 +800,7 @@ mod tests {
             .collect();
 
         sharing.precompute_partial_publics();
-        let result = batch_verify_same_message::<_, MinSig, _, _>(
+        let result = batch_verify_same_message::<_, MinSig, _>(
             &mut rng,
             &sharing,
             namespace,
@@ -863,7 +845,7 @@ mod tests {
             .collect();
         sharing.precompute_partial_publics();
 
-        let result = batch_verify_same_message::<_, MinSig, _, _>(
+        let result = batch_verify_same_message::<_, MinSig, _>(
             &mut rng,
             &sharing,
             namespace,
@@ -910,7 +892,7 @@ mod tests {
         partials[0].index = Participant::new(100);
 
         sharing.precompute_partial_publics();
-        let result = batch_verify_same_message::<_, MinSig, _, _>(
+        let result = batch_verify_same_message::<_, MinSig, _>(
             &mut rng,
             &sharing,
             namespace,
@@ -948,7 +930,7 @@ mod tests {
             .map(|s| sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        batch_verify_same_message::<_, MinSig, _, _>(
+        batch_verify_same_message::<_, MinSig, _>(
             &mut rng,
             &sharing,
             namespace,
@@ -974,7 +956,7 @@ mod tests {
             .map(|s| sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        let result = batch_verify_same_message::<_, MinSig, _, _>(
+        let result = batch_verify_same_message::<_, MinSig, _>(
             &mut rng,
             &sharing,
             namespace,
@@ -1008,7 +990,7 @@ mod tests {
             .map(|s| sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        let result = batch_verify_same_message::<_, MinSig, _, _>(
+        let result = batch_verify_same_message::<_, MinSig, _>(
             &mut rng,
             &sharing,
             namespace,
@@ -1154,7 +1136,7 @@ mod tests {
             .expect("vulnerable naive verification accepts forged aggregate");
 
         let forged_partials = [forged_partial1, forged_partial2];
-        let result = batch_verify_same_message::<_, V, _, _>(
+        let result = batch_verify_same_message::<_, V, _>(
             &mut rng,
             &sharing,
             namespace,
@@ -1168,7 +1150,7 @@ mod tests {
         );
 
         let valid_partials = [partial1, partial2];
-        batch_verify_same_message::<_, V, _, _>(
+        batch_verify_same_message::<_, V, _>(
             &mut rng,
             &sharing,
             namespace,
@@ -1240,7 +1222,7 @@ mod tests {
             (namespace, msg1, forged_partial1),
             (namespace, msg2, forged_partial2),
         ];
-        let result = batch_verify_same_signer::<_, V, _, _>(
+        let result = batch_verify_same_signer::<_, V, _>(
             &mut rng,
             &sharing,
             signer.index,
@@ -1253,7 +1235,7 @@ mod tests {
         );
 
         let valid_entries = vec![(namespace, msg1, partial1), (namespace, msg2, partial2)];
-        batch_verify_same_signer::<_, V, _, _>(
+        batch_verify_same_signer::<_, V, _>(
             &mut rng,
             &sharing,
             signer.index,
