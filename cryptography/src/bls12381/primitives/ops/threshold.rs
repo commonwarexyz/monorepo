@@ -801,8 +801,15 @@ mod tests {
             .collect();
         sharing.precompute_partial_publics();
 
-        batch_verify_same_message::<_, MinSig, _, _>(&mut rng, &sharing, namespace, msg, &partials, &Sequential)
-            .expect("all signatures should be valid");
+        batch_verify_same_message::<_, MinSig, _, _>(
+            &mut rng,
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+            &Sequential,
+        )
+        .expect("all signatures should be valid");
     }
 
     #[test]
@@ -824,7 +831,12 @@ mod tests {
 
         sharing.precompute_partial_publics();
         let result = batch_verify_same_message::<_, MinSig, _, _>(
-            &mut rng, &sharing, namespace, msg, &partials, &Sequential,
+            &mut rng,
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+            &Sequential,
         );
         match result {
             Err(invalid_sigs) => {
@@ -864,7 +876,12 @@ mod tests {
         sharing.precompute_partial_publics();
 
         let result = batch_verify_same_message::<_, MinSig, _, _>(
-            &mut rng, &sharing, namespace, msg, &partials, &Sequential,
+            &mut rng,
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+            &Sequential,
         );
         match result {
             Err(invalid_sigs) => {
@@ -906,7 +923,12 @@ mod tests {
 
         sharing.precompute_partial_publics();
         let result = batch_verify_same_message::<_, MinSig, _, _>(
-            &mut rng, &sharing, namespace, msg, &partials, &Sequential,
+            &mut rng,
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+            &Sequential,
         );
         match result {
             Err(invalid_sigs) => {
@@ -938,8 +960,15 @@ mod tests {
             .map(|s| sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        batch_verify_same_message::<_, MinSig, _, _>(&mut rng, &sharing, namespace, msg, &partials, &Sequential)
-            .expect("signature should be valid");
+        batch_verify_same_message::<_, MinSig, _, _>(
+            &mut rng,
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+            &Sequential,
+        )
+        .expect("signature should be valid");
     }
 
     #[test]
@@ -958,7 +987,12 @@ mod tests {
             .collect();
 
         let result = batch_verify_same_message::<_, MinSig, _, _>(
-            &mut rng, &sharing, namespace, msg, &partials, &Sequential,
+            &mut rng,
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+            &Sequential,
         );
         match result {
             Err(invalid_sigs) => {
@@ -987,7 +1021,12 @@ mod tests {
             .collect();
 
         let result = batch_verify_same_message::<_, MinSig, _, _>(
-            &mut rng, &sharing, namespace, msg, &partials, &Sequential,
+            &mut rng,
+            &sharing,
+            namespace,
+            msg,
+            &partials,
+            &Sequential,
         );
         match result {
             Err(invalid_sigs) => {
@@ -1142,8 +1181,15 @@ mod tests {
         );
 
         let valid_partials = [partial1, partial2];
-        batch_verify_same_message::<_, V, _, _>(&mut rng, &sharing, namespace, msg, &valid_partials, &Sequential)
-            .expect("secure function should accept valid partial signatures");
+        batch_verify_same_message::<_, V, _, _>(
+            &mut rng,
+            &sharing,
+            namespace,
+            msg,
+            &valid_partials,
+            &Sequential,
+        )
+        .expect("secure function should accept valid partial signatures");
     }
 
     #[test]

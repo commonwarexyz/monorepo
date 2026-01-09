@@ -176,8 +176,13 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         // Verify attestations and return any invalid ones.
         let namespace = subject.namespace(&self.namespace);
         let message = subject.message();
-        let invalid_indices =
-            batch::verify_same_message::<_, V, _>(rng, namespace, message.as_ref(), &entries, strategy);
+        let invalid_indices = batch::verify_same_message::<_, V, _>(
+            rng,
+            namespace,
+            message.as_ref(),
+            &entries,
+            strategy,
+        );
 
         // Mark invalid attestations.
         for idx in invalid_indices {
