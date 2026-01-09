@@ -268,7 +268,8 @@ mod tests {
         journal,
         qmdb::any::unordered::{
             fixed::test::{
-                apply_ops, create_test_config, create_test_db, create_test_ops, AnyTest,
+                apply_ops, create_test_config, create_test_db, create_test_ops,
+                create_test_ops_seeded, AnyTest,
             },
             sync_tests::{self, SyncTestHarness},
         },
@@ -309,6 +310,10 @@ mod tests {
 
         fn create_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
             create_test_ops(n)
+        }
+
+        fn create_ops_seeded(n: usize, seed: u64) -> Vec<Operation<Digest, Digest>> {
+            create_test_ops_seeded(n, seed)
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
