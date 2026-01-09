@@ -1538,7 +1538,10 @@ mod tests {
             journal.sync().await.expect("failed to sync");
 
             // Read from size() - 1
-            let value = journal.read(journal.size() - 1).await.expect("failed to read");
+            let value = journal
+                .read(journal.size() - 1)
+                .await
+                .expect("failed to read");
             assert_eq!(value, test_digest(0));
 
             // === Test 2: Multiple items with single item per blob ===
@@ -1576,7 +1579,10 @@ mod tests {
             assert_eq!(journal.oldest_retained_pos(), Some(5));
 
             // Reading from size() - 1 (position 9) should still work
-            let value = journal.read(journal.size() - 1).await.expect("failed to read");
+            let value = journal
+                .read(journal.size() - 1)
+                .await
+                .expect("failed to read");
             assert_eq!(value, test_digest(9));
 
             // Reading from pruned positions should return ItemPruned
@@ -1620,7 +1626,10 @@ mod tests {
             assert_eq!(journal.oldest_retained_pos(), Some(5));
 
             // Reading from size() - 1 should work after restart
-            let value = journal.read(journal.size() - 1).await.expect("failed to read");
+            let value = journal
+                .read(journal.size() - 1)
+                .await
+                .expect("failed to read");
             assert_eq!(value, test_digest(14));
 
             // Reading all retained positions should work
@@ -1692,7 +1701,10 @@ mod tests {
             // After appending, reading works again
             journal.append(test_digest(205)).await.unwrap();
             assert_eq!(journal.oldest_retained_pos(), Some(5));
-            assert_eq!(journal.read(journal.size() - 1).await.unwrap(), test_digest(205));
+            assert_eq!(
+                journal.read(journal.size() - 1).await.unwrap(),
+                test_digest(205)
+            );
 
             journal.destroy().await.expect("failed to destroy journal");
         });

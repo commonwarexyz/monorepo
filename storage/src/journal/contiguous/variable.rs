@@ -2422,10 +2422,7 @@ mod tests {
 
             // size() - 1 = 4, but position 4 is pruned
             let result = journal.read(journal.size() - 1).await;
-            assert!(matches!(
-                result,
-                Err(crate::journal::Error::ItemPruned(4))
-            ));
+            assert!(matches!(result, Err(crate::journal::Error::ItemPruned(4))));
 
             // After appending, reading works again
             journal.append(500).await.unwrap();
