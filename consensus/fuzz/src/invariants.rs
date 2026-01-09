@@ -2,20 +2,17 @@ use crate::{
     simplex::Simplex,
     types::{Finalization, Notarization, Nullification, ReplicaState},
 };
+use commonware_codec::{Encode, Read};
 use commonware_consensus::simplex::{
     elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::{MinPk, MinSig},
-    certificate::{secp256r1, Scheme as CertificateScheme},
+    certificate::{Scheme as CertificateScheme, Signers},
     sha256::Digest as Sha256Digest,
 };
 use commonware_utils::quorum;
 use rand_core::CryptoRngCore;
-use std::{
-    any::TypeId,
-    collections::{HashMap, HashSet},
-};
+use std::collections::{HashMap, HashSet};
 
 pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>)
 where
@@ -195,39 +192,16 @@ where
 fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
     certificate: &S::Certificate,
 ) -> Option<usize> {
-    use commonware_cryptography::{bls12381::certificate, ed25519};
-
-    let type_id = TypeId::of::<S::Certificate>();
-
-    match type_id {
-        t if t == TypeId::of::<ed25519::certificate::Certificate>() => {
-            let cert = unsafe {
-                &*(certificate as *const S::Certificate as *const ed25519::certificate::Certificate)
-            };
-            Some(cert.signatures.len())
-        }
-        t if t == TypeId::of::<secp256r1::Certificate>() => {
-            let cert = unsafe {
-                &*(certificate as *const S::Certificate as *const secp256r1::Certificate)
-            };
-            Some(cert.signatures.len())
-        }
-        t if t == TypeId::of::<certificate::multisig::Certificate<MinPk>>() => {
-            let cert = unsafe {
-                &*(certificate as *const S::Certificate
-                    as *const certificate::multisig::Certificate<MinPk>)
-            };
-            Some(cert.signers.count())
-        }
-        t if t == TypeId::of::<certificate::multisig::Certificate<MinSig>>() => {
-            let cert = unsafe {
-                &*(certificate as *const S::Certificate
-                    as *const certificate::multisig::Certificate<MinSig>)
-            };
-            Some(cert.signers.count())
-        }
-        _ => None,
+    if !S::is_attributable() {
+        return None;
     }
+
+    let encoded = certificate.encode();
+    let mut cursor = encoded.as_ref();
+    let signers =
+        Signers::read_cfg(&mut cursor, &usize::MAX).expect("certificate signers must decode");
+    println!("{}", signers.count());
+    Some(signers.count())
 }
 
 pub fn extract<E, S, L>(reporters: Vec<Reporter<E, S, L, Sha256Digest>>) -> Vec<ReplicaState>
