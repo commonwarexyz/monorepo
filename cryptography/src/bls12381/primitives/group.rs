@@ -142,7 +142,7 @@ impl SmallScalar {
     }
 
     /// Returns the underlying blst_scalar.
-    pub fn as_blst_scalar(&self) -> &blst_scalar {
+    pub const fn as_blst_scalar(&self) -> &blst_scalar {
         &self.inner
     }
 
