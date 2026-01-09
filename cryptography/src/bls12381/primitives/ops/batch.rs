@@ -91,6 +91,37 @@ fn bisect<V: Variant>(entries: &[(V::Public, V::Signature)], hm: &V::Signature) 
     SumTree::<V>::build(entries).verify(hm)
 }
 
+fn bisect_par<V: Variant>(
+    entries: &[(V::Public, V::Signature)],
+    hm: &V::Signature,
+    par: &impl Strategy,
+) -> Vec<usize> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let par_hint = par.parallelism_hint();
+    let chunk_size = entries.len().div_ceil(par_hint);
+
+    let mut out = par.fold(
+        entries.chunks(chunk_size).enumerate(),
+        || Vec::with_capacity(entries.len()),
+        |mut acc, (i, chunk)| {
+            // We need to correct for the fact that bisect returns indices relative
+            // to the local slice.
+            let shift = i * chunk_size;
+            acc.extend(bisect::<V>(chunk, hm).into_iter().map(|j| shift + j));
+            acc
+        },
+        |mut acc_l, mut acc_r| {
+            acc_l.append(&mut acc_r);
+            acc_l
+        },
+    );
+    // Just in case parallelism ends up re-ordering things.
+    out.sort_unstable();
+    out
+}
+
 /// Verifies multiple signatures over the same message from different public keys,
 /// ensuring each individual signature is valid.
 ///
@@ -151,7 +182,7 @@ where
         scalars.iter().zip(pks.iter().zip(sigs.iter())),
         |(s, (&pk, &sig))| (pk * s, sig * s),
     );
-    bisect::<V>(&weighted_entries, &hm)
+    bisect_par::<V>(&weighted_entries, &hm, par)
 }
 
 /// Verifies multiple signatures over multiple messages from a single public key,
