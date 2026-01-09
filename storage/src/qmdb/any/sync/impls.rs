@@ -10,6 +10,7 @@ use crate::{
         self,
         any::{db::Db, FixedConfig, VariableConfig},
         operation::{Committable, Operation},
+        sync::Journal,
         Durable, Merkleized,
     },
 };
@@ -36,26 +37,6 @@ where
     type Config = FixedConfig<I::Translator>;
     type Digest = H::Digest;
 
-    async fn create_journal(
-        context: Self::Context,
-        config: &Self::Config,
-        range: Range<Location>,
-    ) -> Result<Self::Journal, qmdb::Error> {
-        let journal_config = fixed::Config {
-            partition: config.log_journal_partition.clone(),
-            items_per_blob: config.log_items_per_blob,
-            write_buffer: config.log_write_buffer,
-            buffer_pool: config.buffer_pool.clone(),
-        };
-
-        fixed::Journal::init_sync(
-            context.with_label("log"),
-            journal_config,
-            *range.start..*range.end,
-        )
-        .await
-    }
-
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
@@ -98,14 +79,17 @@ where
     async fn resize_journal(
         mut journal: Self::Journal,
         context: Self::Context,
-        config: &Self::Config,
+        config: &<Self::Journal as Journal>::Config,
         range: Range<Location>,
     ) -> Result<Self::Journal, qmdb::Error> {
         let size = journal.size();
 
         if size <= range.start {
             journal.destroy().await?;
-            Self::create_journal(context, config, range).await
+            <Self::Journal as Journal>::new(context, config.clone(), range)
+                .await
+                .map_err(qmdb::Error::from)
+            // Self::create_journal(context, &config, range).await
         } else {
             journal.prune(*range.start).await?;
             Ok(journal)
@@ -132,28 +116,6 @@ where
     type Config = VariableConfig<I::Translator, O::Cfg>;
     type Digest = H::Digest;
 
-    async fn create_journal(
-        context: Self::Context,
-        config: &Self::Config,
-        range: Range<Location>,
-    ) -> Result<Self::Journal, qmdb::Error> {
-        let journal_config = variable::Config {
-            partition: config.log_partition.clone(),
-            items_per_section: config.log_items_per_blob,
-            compression: config.log_compression,
-            codec_config: config.log_codec_config.clone(),
-            buffer_pool: config.buffer_pool.clone(),
-            write_buffer: config.log_write_buffer,
-        };
-
-        variable::Journal::init_sync(
-            context.with_label("log"),
-            journal_config,
-            *range.start..*range.end,
-        )
-        .await
-    }
-
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
@@ -196,14 +158,17 @@ where
     async fn resize_journal(
         mut journal: Self::Journal,
         context: Self::Context,
-        config: &Self::Config,
+        config: &<Self::Journal as Journal>::Config,
         range: Range<Location>,
     ) -> Result<Self::Journal, qmdb::Error> {
         let size = journal.size();
 
         if size <= range.start {
             journal.destroy().await?;
-            Self::create_journal(context, config, range).await
+            <Self::Journal as Journal>::new(context, config.clone(), range)
+                .await
+                .map_err(qmdb::Error::from)
+            // Self::create_journal(context, &config, range).await
         } else {
             journal.prune(*range.start).await?;
             Ok(journal)

@@ -309,7 +309,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         context: E,
         cfg: Config,
         range: std::ops::Range<u64>,
-    ) -> Result<Self, crate::qmdb::Error> {
+    ) -> Result<Self, Error> {
         assert!(!range.is_empty(), "range must not be empty");
 
         let mut journal = Self::init(context.with_label("journal"), cfg.clone()).await?;
@@ -331,9 +331,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
             journal.prune(range.start).await?;
             journal
         } else {
-            return Err(crate::qmdb::Error::UnexpectedData(
-                crate::mmr::Location::new_unchecked(journal_size),
-            ));
+            return Err(Error::ItemOutOfRange(journal_size));
         };
         let journal_size = journal.size();
         assert!(journal_size <= range.end);
@@ -1862,7 +1860,7 @@ mod tests {
                 )
                 .await;
 
-                assert!(matches!(result, Err(crate::qmdb::Error::UnexpectedData(_))));
+                assert!(matches!(result, Err(Error::ItemOutOfRange(_))));
             }
             context.remove(&cfg.partition, None).await.unwrap();
         });

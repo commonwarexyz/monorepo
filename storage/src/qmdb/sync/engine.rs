@@ -5,6 +5,7 @@ use crate::{
     qmdb::{
         self,
         sync::{
+            database::Config as _,
             error::EngineError,
             requests::Requests,
             resolver::{FetchResult, Resolver},
@@ -172,9 +173,9 @@ where
         }
 
         // Create journal and verifier using the database's factory methods
-        let journal = DB::create_journal(
+        let journal = <DB::Journal as Journal>::new(
             config.context.clone(),
-            &config.db_config,
+            config.db_config.journal_config(),
             config.target.range.clone(),
         )
         .await?;
@@ -275,7 +276,7 @@ where
         let journal = DB::resize_journal(
             self.journal,
             self.context.clone(),
-            &self.config,
+            &self.config.journal_config(),
             new_target.range.clone(),
         )
         .await?;
