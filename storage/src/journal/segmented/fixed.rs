@@ -48,6 +48,16 @@ pub struct Config {
 ///
 /// Each section is stored in a separate blob. Within each blob, items are
 /// fixed-size.
+///
+/// # Repair
+///
+/// Like
+/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+/// and
+/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+/// the first invalid data read will be considered the new end of the journal (and the
+/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
+/// replay (not init) because any blob could have trailing bytes.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     manager: Manager<E, AppendFactory>,
     _array: PhantomData<A>,
@@ -62,10 +72,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// All backing blobs are opened but not read during initialization. Use `replay`
     /// to iterate over all items.
-    ///
-    /// # Repair
-    ///
-    /// Corrupted trailing data in blobs is automatically truncated during replay.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
@@ -149,10 +155,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Returns a stream of all items starting from the given section.
     ///
     /// Each item is returned as (section, position, item).
-    ///
-    /// # Repair
-    ///
-    /// Corrupted trailing data is automatically truncated.
     pub async fn replay(
         &self,
         start_section: u64,

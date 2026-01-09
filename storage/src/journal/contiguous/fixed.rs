@@ -97,7 +97,20 @@ pub struct Config {
     pub write_buffer: NonZeroUsize,
 }
 
-/// Implementation of `Journal` storage.
+/// A contiguous journal with fixed-size entries.
+///
+/// Items are stored sequentially across multiple blobs, with automatic blob rotation
+/// when a blob reaches `items_per_blob` items.
+///
+/// # Repair
+///
+/// Like
+/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+/// and
+/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+/// the first invalid data read will be considered the new end of the journal (and the
+/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
+/// init because only the tail blob can have trailing bytes.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     pub(crate) context: E,
     pub(crate) cfg: Config,
@@ -142,15 +155,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
     /// used to iterate over all items in the `Journal`.
-    ///
-    /// # Repair
-    ///
-    /// Like
-    /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
-    /// and
-    /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-    /// the first invalid data read will be considered the new end of the journal (and the
-    /// underlying [Blob] will be truncated to the last valid item).
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
