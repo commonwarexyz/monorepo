@@ -151,10 +151,10 @@ mod tests {
         qmdb::any::VariableConfig {
             mmr_journal_partition: format!("mmr_journal_{suffix}"),
             mmr_metadata_partition: format!("mmr_metadata_{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
+            mmr_items_per_blob: NZU64!(13),
             mmr_write_buffer: NZUsize!(64),
             log_partition: format!("log_{suffix}"),
-            log_items_per_blob: NZU64!(7),
+            log_items_per_blob: NZU64!(13),
             log_write_buffer: NZUsize!(64),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
