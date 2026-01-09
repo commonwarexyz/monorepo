@@ -69,9 +69,11 @@ where
     let pks: Vec<V::Public> = entries.iter().map(|(pk, _)| *pk).collect();
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, sig)| *sig).collect();
 
-    // Compute MSMs for pk and sig using 128-bit scalars
-    let sum_pk = V::Public::msm(&pks, &scalars, strategy);
-    let sum_sig = V::Signature::msm(&sigs, &scalars, strategy);
+    // Compute MSMs for pk and sig in parallel using 128-bit scalars
+    let (sum_pk, sum_sig) = strategy.join(
+        || V::Public::msm(&pks, &scalars, strategy),
+        || V::Signature::msm(&sigs, &scalars, strategy),
+    );
 
     // Fast path: if all signatures are valid, return empty
     if V::verify(&sum_pk, &hm, &sum_sig).is_ok() {
@@ -161,9 +163,11 @@ where
         .collect();
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
 
-    // Compute weighted sums using MSM with 128-bit scalars
-    let weighted_hm = V::Signature::msm(&hms, &scalars, strategy);
-    let weighted_sig = V::Signature::msm(&sigs, &scalars, strategy);
+    // Compute weighted sums in parallel using MSM with 128-bit scalars
+    let (weighted_hm, weighted_sig) = strategy.join(
+        || V::Signature::msm(&hms, &scalars, strategy),
+        || V::Signature::msm(&sigs, &scalars, strategy),
+    );
 
     // Verify: e(pk, weighted_hm) == e(weighted_sig, G)
     V::verify(public, &weighted_hm, &weighted_sig)

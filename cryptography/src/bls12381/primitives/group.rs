@@ -1017,8 +1017,8 @@ impl Space<Scalar> for G1 {
 impl Space<SmallScalar> for G1 {
     /// Performs MSM on G1 points using Pippenger's algorithm with 128-bit scalars.
     ///
-    /// Uses `SMALL_SCALAR_BITS` (128) which roughly halves computation time
-    /// compared to full 255-bit scalars.
+    /// Uses batch affine conversion (1 field inversion via Montgomery's trick)
+    /// and `SMALL_SCALAR_BITS` (128) for faster computation.
     fn msm(points: &[Self], scalars: &[SmallScalar], _strategy: &impl Strategy) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
 
@@ -1029,7 +1029,7 @@ impl Space<SmallScalar> for G1 {
             if *point == Self::zero() || *scalar == SmallScalar::zero() {
                 continue;
             }
-            points_filtered.push(point.as_blst_p1_affine());
+            points_filtered.push(*point);
             scalars_filtered.push(scalar.as_blst_scalar().clone());
         }
 
@@ -1037,8 +1037,11 @@ impl Space<SmallScalar> for G1 {
             return Self::zero();
         }
 
+        // Batch convert to affine (1 field inversion via Montgomery's trick)
+        let affine_points = Self::batch_to_affine(&points_filtered);
+
         let points_ptr: Vec<*const blst_p1_affine> =
-            points_filtered.iter().map(|p| p as *const _).collect();
+            affine_points.iter().map(|p| p.inner() as *const _).collect();
         let scalars_ptr: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
 
         // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
@@ -1447,8 +1450,8 @@ impl Space<Scalar> for G2 {
 impl Space<SmallScalar> for G2 {
     /// Performs MSM on G2 points using Pippenger's algorithm with 128-bit scalars.
     ///
-    /// Uses `SMALL_SCALAR_BITS` (128) which roughly halves computation time
-    /// compared to full 255-bit scalars.
+    /// Uses batch affine conversion (1 field inversion via Montgomery's trick)
+    /// and `SMALL_SCALAR_BITS` (128) for faster computation.
     fn msm(points: &[Self], scalars: &[SmallScalar], _strategy: &impl Strategy) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
 
@@ -1459,7 +1462,7 @@ impl Space<SmallScalar> for G2 {
             if *point == Self::zero() || *scalar == SmallScalar::zero() {
                 continue;
             }
-            points_filtered.push(point.as_blst_p2_affine());
+            points_filtered.push(*point);
             scalars_filtered.push(scalar.as_blst_scalar().clone());
         }
 
@@ -1467,8 +1470,11 @@ impl Space<SmallScalar> for G2 {
             return Self::zero();
         }
 
+        // Batch convert to affine (1 field inversion via Montgomery's trick)
+        let affine_points = Self::batch_to_affine(&points_filtered);
+
         let points_ptr: Vec<*const blst_p2_affine> =
-            points_filtered.iter().map(|p| p as *const _).collect();
+            affine_points.iter().map(|p| p.inner() as *const _).collect();
         let scalars_ptr: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
 
         // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
