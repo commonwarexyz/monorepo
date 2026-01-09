@@ -80,7 +80,9 @@
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt, Write as CodecWrite};
+use commonware_codec::{
+    varint::UInt, Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
+};
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef, Read},
     Blob, Error as RError, Metrics, Storage,
@@ -185,7 +187,7 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
     codec_config: V::Cfg,
 }
 
-impl<E: Storage + Metrics, V: Codec + Send + Sync> Journal<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during

@@ -10,7 +10,7 @@ use crate::{
     mmr::{Location, Proof},
     qmdb::Error,
 };
-use commonware_codec::Codec;
+use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
 use core::future::Future;
 use std::num::NonZeroU64;
@@ -48,7 +48,7 @@ impl State for NonDurable {}
 
 /// A trait for a store based on an append-only log of operations.
 pub trait LogStore: Send + Sync {
-    type Value: Codec + Clone + Send + Sync;
+    type Value: CodecShared + Clone;
 
     /// Returns true if there are no active keys in the database.
     fn is_empty(&self) -> bool;

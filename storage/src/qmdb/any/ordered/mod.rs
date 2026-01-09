@@ -21,7 +21,7 @@ use crate::{
     },
     Persistable,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -813,7 +813,7 @@ impl<
         D: DurabilityState,
     > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
 where
-    Operation<K, V>: Codec + Send + Sync,
+    Operation<K, V>: CodecShared,
 {
     type Key = K;
     type Value = V::Value;
@@ -836,7 +836,7 @@ impl<
         H: Hasher,
     > kv::Updatable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
-    Operation<K, V>: Codec + Send + Sync,
+    Operation<K, V>: CodecShared,
 {
     fn update(
         &mut self,

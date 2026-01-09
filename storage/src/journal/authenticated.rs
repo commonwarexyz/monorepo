@@ -17,7 +17,7 @@ use crate::{
     },
     Persistable,
 };
-use commonware_codec::{Codec, CodecFixed, Encode};
+use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::{NonZeroU64, NonZeroUsize};
@@ -41,7 +41,7 @@ pub enum Error {
 pub struct Journal<E, C, H, S: State<H::Digest> + Send + Sync = Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: Encode + Send + Sync>,
+    C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
     /// MMR where each leaf is an item digest.
@@ -58,7 +58,7 @@ where
 impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: Encode + Send + Sync>,
+    C: Contiguous<Item: EncodeShared>,
     H: Hasher,
     S: State<DigestOf<H>> + Send + Sync,
 {
@@ -88,7 +88,7 @@ where
 impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode + Send + Sync>,
+    C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
     S: State<DigestOf<H>> + Send + Sync,
 {
@@ -110,7 +110,7 @@ where
 impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: Encode + Send + Sync> + Persistable<Error = JournalError>,
+    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
     S: State<DigestOf<H>> + Send + Sync,
 {
@@ -124,7 +124,7 @@ where
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode + Send + Sync>,
+    C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
 {
     /// Create a new [Journal] from the given components after aligning the MMR with the journal.
@@ -232,7 +232,7 @@ where
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: Encode + Send + Sync>,
+    C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
     /// Generate a proof of inclusion for items starting at `start_loc`.
@@ -321,7 +321,7 @@ where
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: Encode + Send + Sync> + Persistable<Error = JournalError>,
+    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
     /// Destroy the authenticated journal, removing all data from disk.
@@ -347,7 +347,7 @@ where
 impl<E, C, H> Journal<E, C, H, Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: Encode + Send + Sync>,
+    C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
     /// Merkleize the journal and compute the root digest.
@@ -368,7 +368,7 @@ where
 impl<E, C, H> Journal<E, C, H, Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode + Send + Sync>,
+    C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
 {
     /// Create a new dirty journal from aligned components.
@@ -395,7 +395,7 @@ const APPLY_BATCH_SIZE: u64 = 1 << 16;
 impl<E, O, H> Journal<E, fixed::Journal<E, O>, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    O: CodecFixed<Cfg = ()> + Send + Sync,
+    O: CodecFixedShared,
     H: Hasher,
 {
     /// Create a new [Journal] for fixed-length items.
@@ -434,7 +434,7 @@ where
 impl<E, O, H> Journal<E, variable::Journal<E, O>, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    O: Codec + Encode + Send + Sync,
+    O: CodecShared,
     H: Hasher,
 {
     /// Create a new [Journal] for variable-length items.
@@ -474,7 +474,7 @@ where
 impl<E, C, H, S> Contiguous for Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode + Send + Sync>,
+    C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
     S: State<DigestOf<H>> + Send + Sync,
 {
@@ -511,7 +511,7 @@ where
 impl<E, C, H> MutableContiguous for Journal<E, C, H, Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode + Send + Sync>,
+    C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
 {
     async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
@@ -545,7 +545,7 @@ where
 impl<E, C, H> MutableContiguous for Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode + Send + Sync>,
+    C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
 {
     async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
@@ -588,7 +588,7 @@ where
 impl<E, C, H> Persistable for Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: Encode + Send + Sync> + Persistable<Error = JournalError>,
+    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
     type Error = JournalError;

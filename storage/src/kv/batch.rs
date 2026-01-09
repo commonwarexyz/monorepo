@@ -2,7 +2,7 @@
 
 use super::{Deletable, Gettable, Updatable};
 use crate::qmdb::Error;
-use commonware_codec::Codec;
+use commonware_codec::CodecShared;
 use commonware_utils::Array;
 use core::future::Future;
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 pub struct Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone + Send + Sync,
+    V: CodecShared + Clone,
     D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     /// The underlying k/v store.
@@ -30,7 +30,7 @@ where
 impl<'a, K, V, D> Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone + Send + Sync,
+    V: CodecShared + Clone,
     D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     /// Returns a new batch of changes that may be written to the store.
@@ -52,7 +52,7 @@ where
 impl<'a, K, V, D> Gettable for Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone + Send + Sync,
+    V: CodecShared + Clone,
     D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     type Key = K;
@@ -73,7 +73,7 @@ where
 impl<'a, K, V, D> Updatable for Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone + Send + Sync,
+    V: CodecShared + Clone,
     D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     /// Updates the value of `key` to `value` in the batch.
@@ -108,7 +108,7 @@ where
 impl<'a, K, V, D> Deletable for Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone + Send + Sync,
+    V: CodecShared + Clone,
     D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     /// Deletes `key` from the batch.
@@ -136,7 +136,7 @@ where
 impl<'a, K, V, D> IntoIterator for Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone + Send + Sync,
+    V: CodecShared + Clone,
     D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     type Item = (K, Option<V>);
@@ -149,7 +149,7 @@ where
 
 /// A k/v store that supports making batched changes.
 pub trait Batchable:
-    Gettable<Key: Array, Value: Codec + Clone + Send + Sync, Error = Error> + Updatable + Deletable
+    Gettable<Key: Array, Value: CodecShared + Clone, Error = Error> + Updatable + Deletable
 {
     /// Returns a new empty batch of changes.
     fn start_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>

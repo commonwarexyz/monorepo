@@ -19,7 +19,7 @@ use crate::{
     qmdb::any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
     Persistable,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -320,7 +320,7 @@ impl<
         H: Hasher,
     > kv::Deletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
-    Operation<K, V>: Codec + Send + Sync,
+    Operation<K, V>: CodecShared,
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
@@ -335,7 +335,7 @@ where
     C: MutableContiguous<Item = Operation<K, V>>,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    Operation<K, V>: Codec + Send + Sync,
+    Operation<K, V>: CodecShared,
 {
     async fn write_batch(
         &mut self,
@@ -354,7 +354,7 @@ where
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    Operation<K, V>: Codec + Send + Sync,
+    Operation<K, V>: CodecShared,
 {
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
 

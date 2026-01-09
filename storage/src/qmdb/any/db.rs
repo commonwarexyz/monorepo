@@ -21,7 +21,7 @@ use crate::{
     },
     AuthenticatedBitMap, Persistable,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -39,7 +39,7 @@ pub(crate) type AuthenticatedLog<E, C, H, M = Merkleized<H>> = authenticated::Jo
 /// - [crate::qmdb::any::unordered::variable::Db]
 pub struct Db<
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: Codec + Send + Sync>,
+    C: Contiguous<Item: CodecShared>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     U: Send + Sync,

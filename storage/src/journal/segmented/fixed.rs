@@ -22,7 +22,7 @@
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
-use commonware_codec::{CodecFixed, DecodeExt as _};
+use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _};
 use commonware_runtime::{buffer::PoolRef, Blob, Error as RError, Metrics, Storage};
 use futures::{
     stream::{self, Stream},
@@ -53,7 +53,7 @@ pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     _array: PhantomData<A>,
 }
 
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()> + Send + Sync> Journal<E, A> {
+impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Size of each entry.
     pub const CHUNK_SIZE: usize = A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
