@@ -252,7 +252,8 @@ impl<H: Hasher> BloomFilter<H> {
         }
 
         // k = (m/n) * ln(2) using Q16.16 fixed-point
-        let k = (bits as u64 * LN2_Q16) / ((expected_items as u64) << 16);
+        let n_scaled = (expected_items as u64).saturating_mul(1 << 16);
+        let k = (bits as u64).saturating_mul(LN2_Q16) / n_scaled;
         k.clamp(1, 16) as u8
     }
 
@@ -570,6 +571,13 @@ mod tests {
         // Edge case: zero items returns 1
         let k = BloomFilter::<Sha256>::optimal_hashers(0, 1000);
         assert_eq!(k, 1);
+
+        // Edge case: extreme values that would overflow (n << 16 wraps to 0 for n >= 2^48)
+        // Should not panic, should return clamped value
+        let k = BloomFilter::<Sha256>::optimal_hashers(1 << 48, 1000);
+        assert_eq!(k, 1);
+        let k = BloomFilter::<Sha256>::optimal_hashers(usize::MAX, usize::MAX);
+        assert!(k >= 1 && k <= 16);
     }
 
     #[test]
