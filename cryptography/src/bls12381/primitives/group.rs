@@ -46,9 +46,13 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
     ptr,
 };
-use ctutils::CtEq;
+use ctutils::{Choice, CtEq};
 use rand_core::CryptoRngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+fn all_zero(bytes: &[u8]) -> Choice {
+    bytes.iter().fold(Choice::TRUE, |acc, b| acc & b.ct_eq(&0u8))
+}
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
 ///
@@ -503,6 +507,7 @@ const SMALL_SCALAR_BYTES: usize = (SMALL_SCALAR_BITS + 7) / 8;
 ///
 /// In some situations, a full scalar isn't necessary for security, and using
 /// a smaller value provides a considerable performance boost.
+#[derive(Debug)]
 pub struct SmallScalar {
     bytes: [u8; SMALL_SCALAR_BYTES],
 }
@@ -633,7 +638,10 @@ impl G1 {
         }
     }
 
-    fn msm_inner<'a>(iter: impl Iterator<Item = (&'a Self, &'a Scalar)>) -> Self {
+    fn msm_inner<'a>(
+        iter: impl Iterator<Item = (&'a Self, &'a [u8])>,
+        nbits: usize,
+    ) -> Self {
         // Filter out zero points/scalars and convert to blst types.
         // `blst` does not filter out infinity, so we must ensure it is impossible.
         //
@@ -642,10 +650,10 @@ impl G1 {
         // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
         let (points_filtered, scalars_filtered): (Vec<_>, Vec<_>) = iter
             .filter_map(|(point, scalar)| {
-                if *point == Self::zero() || *scalar == Scalar::zero() {
+                if *point == Self::zero() || all_zero(scalar).into() {
                     return None;
                 }
-                Some((point.as_blst_p1_affine(), scalar.as_blst_scalar()))
+                Some((point.as_blst_p1_affine(), scalar))
             })
             .unzip();
 
@@ -655,7 +663,7 @@ impl G1 {
 
         let points: Vec<*const blst_p1_affine> =
             points_filtered.iter().map(|p| p as *const _).collect();
-        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
+        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.as_ptr()).collect();
 
         // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
         let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
@@ -670,7 +678,7 @@ impl G1 {
                 points.as_ptr(),
                 points.len(),
                 scalars.as_ptr(),
-                SCALAR_BITS,
+                nbits,
                 scratch.as_mut_ptr() as *mut _,
             );
         }
@@ -848,7 +856,21 @@ impl<'a> Mul<&'a SmallScalar> for G1 {
 impl Space<Scalar> for G1 {
     fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-        Self::msm_inner(points.iter().zip(scalars.iter()))
+        let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        Self::msm_inner(
+            points.iter().zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
+            SCALAR_BITS,
+        )
+    }
+}
+
+impl Space<SmallScalar> for G1 {
+    fn msm(points: &[Self], scalars: &[SmallScalar], _strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        Self::msm_inner(
+            points.iter().zip(scalars.iter().map(|s| s.bytes.as_slice())),
+            SMALL_SCALAR_BITS,
+        )
     }
 }
 
@@ -925,7 +947,10 @@ impl G2 {
         }
     }
 
-    fn msm_inner<'a>(iter: impl Iterator<Item = (&'a Self, &'a Scalar)>) -> Self {
+    fn msm_inner<'a>(
+        iter: impl Iterator<Item = (&'a Self, &'a [u8])>,
+        nbits: usize,
+    ) -> Self {
         // Filter out zero points/scalars and convert to blst types.
         // `blst` does not filter out infinity, so we must ensure it is impossible.
         //
@@ -934,10 +959,10 @@ impl G2 {
         // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
         let (points_filtered, scalars_filtered): (Vec<_>, Vec<_>) = iter
             .filter_map(|(point, scalar)| {
-                if *point == Self::zero() || *scalar == Scalar::zero() {
+                if *point == Self::zero() || all_zero(scalar).into() {
                     return None;
                 }
-                Some((point.as_blst_p2_affine(), scalar.as_blst_scalar()))
+                Some((point.as_blst_p2_affine(), scalar))
             })
             .unzip();
 
@@ -947,7 +972,7 @@ impl G2 {
 
         let points: Vec<*const blst_p2_affine> =
             points_filtered.iter().map(|p| p as *const _).collect();
-        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
+        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.as_ptr()).collect();
 
         // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
         let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
@@ -962,7 +987,7 @@ impl G2 {
                 points.as_ptr(),
                 points.len(),
                 scalars.as_ptr(),
-                SCALAR_BITS,
+                nbits,
                 scratch.as_mut_ptr() as *mut _,
             );
         }
@@ -1140,7 +1165,21 @@ impl<'a> Mul<&'a SmallScalar> for G2 {
 impl Space<Scalar> for G2 {
     fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-        Self::msm_inner(points.iter().zip(scalars.iter()))
+        let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        Self::msm_inner(
+            points.iter().zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
+            SCALAR_BITS,
+        )
+    }
+}
+
+impl Space<SmallScalar> for G2 {
+    fn msm(points: &[Self], scalars: &[SmallScalar], _strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        Self::msm_inner(
+            points.iter().zip(scalars.iter().map(|s| s.bytes.as_slice())),
+            SMALL_SCALAR_BITS,
+        )
     }
 }
 
@@ -1227,6 +1266,17 @@ mod tests {
         }
     }
 
+    impl Arbitrary for SmallScalar {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+            any::<[u8; 32]>()
+                .prop_map(|seed| Self::random(&mut StdRng::from_seed(seed)))
+                .boxed()
+        }
+    }
+
     #[test]
     fn test_scalar_as_field() {
         test_suites::test_field(file!(), &any::<Scalar>());
@@ -1240,6 +1290,16 @@ mod tests {
     #[test]
     fn test_g2_as_space() {
         test_suites::test_space_ring(file!(), &any::<Scalar>(), &any::<G2>());
+    }
+
+    #[test]
+    fn test_g1_as_space_small_scalar() {
+        test_suites::test_space(file!(), &any::<SmallScalar>(), &any::<G1>());
+    }
+
+    #[test]
+    fn test_g2_as_space_small_scalar() {
+        test_suites::test_space(file!(), &any::<SmallScalar>(), &any::<G2>());
     }
 
     #[test]
