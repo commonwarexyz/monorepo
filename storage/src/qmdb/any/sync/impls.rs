@@ -89,7 +89,6 @@ where
             <Self::Journal as Journal>::new(context, config.clone(), range)
                 .await
                 .map_err(qmdb::Error::from)
-            // Self::create_journal(context, &config, range).await
         } else {
             journal.prune(*range.start).await?;
             Ok(journal)
@@ -168,7 +167,6 @@ where
             <Self::Journal as Journal>::new(context, config.clone(), range)
                 .await
                 .map_err(qmdb::Error::from)
-            // Self::create_journal(context, &config, range).await
         } else {
             journal.prune(*range.start).await?;
             Ok(journal)
