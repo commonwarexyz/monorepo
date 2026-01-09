@@ -273,7 +273,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns a nullify vote for contradiction if conditions are met.
     ///
     /// In minimmit, after notarizing a proposal, we can nullify if we observe M (2f+1)
-    /// conflicting votes (notarizes for different payloads or nullifies).
+    /// conflicting votes from OTHER replicas (notarizes for different payloads or nullifies).
     ///
     /// Returns `Some(())` if we should send a contradiction nullify, `None` otherwise.
     pub fn construct_nullify_by_contradiction(&mut self, m_threshold: usize) -> Option<()> {
@@ -285,11 +285,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.contradiction_nullify_sent {
             return None;
         }
-        // Check if we have M conflicting votes
+        // Get our signer index (returns None for verifier-only instances)
+        let our_signer = self.scheme.me()?;
+        // Check if we have M conflicting votes from OTHER replicas
         let our_payload = self.proposal.proposal().map(|p| &p.payload)?;
         if !self
             .votes
-            .should_nullify_by_contradiction(Some(our_payload), m_threshold)
+            .should_nullify_by_contradiction(Some(our_payload), our_signer, m_threshold)
         {
             return None;
         }
@@ -694,5 +696,99 @@ mod tests {
         // Still shouldn't trigger because we need to recheck after notarizing
         // The conflicting votes were already there, just recheck
         assert!(round.construct_nullify_by_contradiction(3).is_some());
+    }
+
+    #[test]
+    fn nullify_by_contradiction_excludes_own_nullify() {
+        // Tests that our own nullify vote (from timeout) is NOT counted as a conflict.
+        // This ensures we don't trigger at M-1 external conflicts when we've also
+        // sent a timeout nullify.
+        let mut rng = StdRng::seed_from_u64(42);
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, 6);
+        let local_scheme = schemes[0].clone();
+
+        let now = SystemTime::UNIX_EPOCH;
+        let round_id = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal_a = Proposal::new(round_id, View::new(0), Sha256Digest::from([1u8; 32]));
+        let proposal_b = Proposal::new(round_id, View::new(0), Sha256Digest::from([2u8; 32]));
+
+        let mut round = Round::new(local_scheme.clone(), round_id, now, 6);
+        round.set_leader(0);
+
+        // Notarize proposal_a
+        assert!(round.set_proposal(proposal_a.clone()));
+        assert!(round.verified());
+        assert!(round.construct_notarize().is_some());
+
+        let m_threshold = 3; // For n=6, f=1, M=3
+
+        // Add our own nullify vote (simulating what happens after a timeout)
+        let our_nullify =
+            Nullify::sign::<Sha256Digest>(NAMESPACE, &local_scheme, round_id).expect("sign");
+        assert!(round.votes_mut().insert_nullify(our_nullify));
+
+        // Add exactly 2 conflicting notarizes (M-1)
+        for scheme in schemes.iter().skip(1).take(2) {
+            let vote = Notarize::sign(NAMESPACE, scheme, proposal_b.clone()).expect("sign");
+            assert!(round.votes_mut().insert_notarize(vote));
+        }
+
+        // Should NOT trigger - we have 1 own nullify (excluded) + 2 conflicting notarizes = 2 < M
+        assert!(
+            round.construct_nullify_by_contradiction(m_threshold).is_none(),
+            "should not trigger when own nullify is the only third vote"
+        );
+
+        // Add one more conflicting notarize from another replica
+        let vote = Notarize::sign(NAMESPACE, &schemes[3], proposal_b.clone()).expect("sign");
+        assert!(round.votes_mut().insert_notarize(vote));
+
+        // Now should trigger - 3 conflicting votes from OTHER replicas
+        assert!(
+            round.construct_nullify_by_contradiction(m_threshold).is_some(),
+            "should trigger when M external conflicting votes observed"
+        );
+    }
+
+    #[test]
+    fn nullify_by_contradiction_counts_other_nullifies() {
+        // Tests that nullify votes from OTHER replicas are correctly counted as conflicts.
+        let mut rng = StdRng::seed_from_u64(42);
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, 6);
+        let local_scheme = schemes[0].clone();
+
+        let now = SystemTime::UNIX_EPOCH;
+        let round_id = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal_a = Proposal::new(round_id, View::new(0), Sha256Digest::from([1u8; 32]));
+        let proposal_b = Proposal::new(round_id, View::new(0), Sha256Digest::from([2u8; 32]));
+
+        let mut round = Round::new(local_scheme.clone(), round_id, now, 6);
+        round.set_leader(0);
+
+        // Notarize proposal_a
+        assert!(round.set_proposal(proposal_a.clone()));
+        assert!(round.verified());
+        assert!(round.construct_notarize().is_some());
+
+        let m_threshold = 3; // For n=6, f=1, M=3
+
+        // Add 2 nullify votes from OTHER replicas
+        for scheme in schemes.iter().skip(1).take(2) {
+            let vote = Nullify::sign::<Sha256Digest>(NAMESPACE, scheme, round_id).expect("sign");
+            assert!(round.votes_mut().insert_nullify(vote));
+        }
+
+        // 2 nullifies < M, should not trigger yet
+        assert!(round.construct_nullify_by_contradiction(m_threshold).is_none());
+
+        // Add 1 conflicting notarize from another replica
+        let vote = Notarize::sign(NAMESPACE, &schemes[3], proposal_b.clone()).expect("sign");
+        assert!(round.votes_mut().insert_notarize(vote));
+
+        // Now we have 2 nullifies + 1 conflicting notarize = 3 >= M
+        assert!(
+            round.construct_nullify_by_contradiction(m_threshold).is_some(),
+            "should trigger when 2 external nullifies + 1 conflicting notarize = M"
+        );
     }
 }

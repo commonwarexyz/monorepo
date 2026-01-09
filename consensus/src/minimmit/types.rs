@@ -208,19 +208,31 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         self.notarize_payloads.clear();
     }
 
-    /// Counts votes that conflict with the given proposal.
+    /// Counts votes from OTHER replicas that conflict with the given proposal.
     ///
     /// A conflicting vote is either:
     /// - A nullify vote (always conflicts with any proposal)
     /// - A notarize vote for a different payload
     ///
     /// Used to implement nullify-by-contradiction: if a validator has notarized
-    /// a proposal but sees M conflicting votes, they know finalization is impossible
-    /// and should broadcast nullify.
-    pub fn count_conflicting(&self, our_payload: &D) -> usize {
-        let mut count = self.nullifies.len();
-        for payload in self.notarize_payloads.values() {
-            if payload != our_payload {
+    /// a proposal but sees M conflicting votes from other replicas, they know
+    /// finalization is impossible and should broadcast nullify.
+    ///
+    /// The spec states "observing messages from ≥ M distinct replicas" which means
+    /// we should only count votes from OTHER replicas, not including ourselves.
+    pub fn count_conflicting(&self, our_payload: &D, our_signer: u32) -> usize {
+        let mut count = 0;
+
+        // Count nullify votes from OTHER replicas
+        for nullify in self.nullifies.iter() {
+            if nullify.signer() != our_signer {
+                count += 1;
+            }
+        }
+
+        // Count notarize votes for different payloads from OTHER replicas
+        for (signer, payload) in &self.notarize_payloads {
+            if *signer != our_signer && payload != our_payload {
                 count += 1;
             }
         }
@@ -230,16 +242,18 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     /// Checks if nullify-by-contradiction should be triggered.
     ///
     /// Returns true if the validator has notarized a proposal but has seen M (2f+1)
-    /// conflicting votes, meaning their proposal cannot possibly reach finalization.
+    /// conflicting votes from OTHER replicas, meaning their proposal cannot possibly
+    /// reach finalization.
     pub fn should_nullify_by_contradiction(
         &self,
         our_payload: Option<&D>,
+        our_signer: u32,
         m_threshold: usize,
     ) -> bool {
         let Some(payload) = our_payload else {
             return false;
         };
-        self.count_conflicting(payload) >= m_threshold
+        self.count_conflicting(payload, our_signer) >= m_threshold
     }
 }
 

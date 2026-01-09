@@ -140,6 +140,16 @@ impl<
             "minimmit requires at least 5 participants (n >= 5f + 1)"
         );
 
+        // Warn about degenerate configurations with no fault tolerance
+        if n < 6 {
+            tracing::warn!(
+                n,
+                "minimmit with n={} provides no Byzantine fault tolerance (f=0). \
+                 Minimum n=6 is recommended for production use.",
+                n
+            );
+        }
+
         assert!(
             self.leader_timeout > Duration::default(),
             "leader timeout must be greater than zero"
