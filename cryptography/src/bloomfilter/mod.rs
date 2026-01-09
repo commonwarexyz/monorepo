@@ -13,6 +13,61 @@ use core::{
     num::{NonZeroU64, NonZeroU8, NonZeroUsize},
 };
 
+/// ln(2) in Q16.16 fixed-point format.
+/// Used for computing optimal number of hash functions.
+const LN2_Q16: u64 = 45_426;
+
+/// Scale factor for false positive rate normalization (4 decimal places).
+const FP_RATE_SCALE: u64 = 10_000;
+
+/// Bits-per-element constants in Q16.16 fixed-point format.
+/// Pre-computed as `bpe = -ln(p) / (ln(2))^2` for common false positive rates.
+mod bpe {
+    pub const FP_1E1: u64 = 314_083; // ~10% FP rate (4.79 bits/element)
+    pub const FP_1E2: u64 = 628_166; // ~1% FP rate (9.59 bits/element)
+    pub const FP_1E3: u64 = 942_250; // ~0.1% FP rate (14.38 bits/element)
+    pub const FP_1E4: u64 = 1_256_333; // ~0.01% FP rate (19.17 bits/element)
+}
+
+/// Convert false positive rate to normalized integer (4 decimal places).
+/// Uses explicit round-half-up for determinism.
+///
+/// # Determinism
+///
+/// This function is deterministic across platforms because:
+/// - Clamping to 0.0001-0.9999 keeps values in a safe range where f64 arithmetic
+///   is well-behaved (no subnormals, no precision loss near 0 or 1)
+/// - After scaling by 10000, results are in range 1-9999 which are all exactly
+///   representable as f64 (integers up to 2^53 are exact)
+/// - All operations (*, +, floor) are IEEE 754 basic operations, which are
+///   required to be correctly rounded to the same result on all compliant systems
+/// - We use round-half-up (`+ 0.5` then `floor`) instead of `f64::round()` which
+///   uses "round half to even" (banker's rounding) that could theoretically vary
+///
+/// # Panics
+///
+/// Panics if `p` is not between 0.0 and 1.0 (exclusive).
+#[inline]
+fn normalize_fp_rate(p: f64) -> u64 {
+    assert!(p > 0.0 && p < 1.0);
+    // Clamp to supported bucket range
+    let p = p.clamp(0.0001, 0.9999);
+    // Round-half-up: add 0.5 then floor
+    ((p * FP_RATE_SCALE as f64) + 0.5).floor() as u64
+}
+
+/// Map normalized false positive rate to bits-per-element bucket.
+/// Uses discrete buckets for simplicity and robustness.
+#[inline]
+const fn bpe_for_rate(p_normalized: u64) -> u64 {
+    match p_normalized {
+        0..=1 => bpe::FP_1E4,    // <= 0.0001
+        2..=10 => bpe::FP_1E3,   // <= 0.001
+        11..=100 => bpe::FP_1E2, // <= 0.01
+        _ => bpe::FP_1E1,        // > 0.01 (loose filter)
+    }
+}
+
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///
 /// This implementation uses the Kirsch-Mitzenmacher optimization to derive `k` hash functions
@@ -80,10 +135,12 @@ impl<H: Hasher> BloomFilter<H> {
     /// Creates a new [BloomFilter] with optimal parameters for the expected number
     /// of items and desired false positive rate.
     ///
+    /// The false positive rate is quantized to one of four buckets (~10%, ~1%, ~0.1%, ~0.01%)
+    /// using integer math for determinism across all platforms.
+    ///
     /// # Panics
     ///
     /// Panics if `false_positive_rate` is not between 0.0 and 1.0 (exclusive).
-    #[cfg(feature = "std")]
     pub fn with_rate(expected_items: NonZeroUsize, false_positive_rate: f64) -> Self {
         let bits = Self::optimal_bits(expected_items.get(), false_positive_rate);
         let hashers = Self::optimal_hashers(expected_items.get(), bits);
@@ -171,30 +228,38 @@ impl<H: Hasher> BloomFilter<H> {
 
     /// Calculates the optimal number of hash functions for a given capacity and bit count.
     ///
-    /// Uses the formula `k = (m/n) * ln(2)` where `m` is the number of bits and `n` is
-    /// the expected number of items.
-    #[cfg(feature = "std")]
+    /// Uses integer math with Q16.16 fixed-point for determinism. The result is clamped to
+    /// [1, 16] since beyond ~10-12 hashes provides negligible improvement while increasing
+    /// CPU cost.
     pub fn optimal_hashers(expected_items: usize, bits: usize) -> u8 {
-        let k = (bits as f64 / expected_items as f64) * core::f64::consts::LN_2;
-        (k.round() as u8).clamp(1, 255)
+        if expected_items == 0 {
+            return 1;
+        }
+
+        // k = (m/n) * ln(2) using Q16.16 fixed-point
+        let k = (bits as u64 * LN2_Q16) / ((expected_items as u64) << 16);
+        k.clamp(1, 16) as u8
     }
 
     /// Calculates the optimal number of bits for a given capacity and false positive rate.
     ///
-    /// Uses the formula `m = -n * ln(p) / (ln(2))^2` where `n` is the expected number
-    /// of items and `p` is the desired false positive rate. The result is rounded up
-    /// to the next power of 2. If that would overflow, the maximum power of 2 for the
-    /// platform (2^63 on 64-bit) is used.
+    /// Uses pre-computed bits-per-element values and integer math for determinism. The
+    /// false positive rate is quantized to one of four buckets (~10%, ~1%, ~0.1%, ~0.01%).
+    /// The result is rounded up to the next power of 2. If that would overflow, the maximum
+    /// power of 2 for the platform (2^63 on 64-bit) is used.
     ///
     /// # Panics
     ///
     /// Panics if `false_positive_rate` is not between 0.0 and 1.0 (exclusive).
-    #[cfg(feature = "std")]
     pub fn optimal_bits(expected_items: usize, false_positive_rate: f64) -> usize {
-        assert!(false_positive_rate > 0.0 && false_positive_rate < 1.0);
-        let ln2_sq = core::f64::consts::LN_2 * core::f64::consts::LN_2;
-        let m = -(expected_items as f64) * false_positive_rate.ln() / ln2_sq;
-        (m.ceil() as usize)
+        let fp_normalized = normalize_fp_rate(false_positive_rate);
+        let bpe = bpe_for_rate(fp_normalized);
+        // ceil(n * bpe) using Q16.16 fixed-point, with overflow protection
+        let raw = (expected_items as u64)
+            .saturating_mul(bpe)
+            .saturating_add(0xFFFF)
+            >> 16;
+        (raw as usize)
             .checked_next_power_of_two()
             .unwrap_or(1 << (usize::BITS - 1))
     }
@@ -468,17 +533,27 @@ mod tests {
 
     #[test]
     fn test_optimal_hashers() {
-        // For 1000 items in 10000 bits, optimal k = (10000/1000) * ln(2) = 6.93 -> 7
+        // For 1000 items in 10000 bits, optimal k = (10000/1000) * ln(2) = 6.93
+        // Integer math truncates to 6
         let k = BloomFilter::<Sha256>::optimal_hashers(1000, 10000);
-        assert_eq!(k, 7);
+        assert_eq!(k, 6);
 
-        // For 100 items in 1000 bits, optimal k = (1000/100) * ln(2) = 6.93 -> 7
+        // For 100 items in 1000 bits, optimal k = (1000/100) * ln(2) = 6.93
+        // Integer math truncates to 6
         let k = BloomFilter::<Sha256>::optimal_hashers(100, 1000);
-        assert_eq!(k, 7);
+        assert_eq!(k, 6);
 
-        // Edge case: very few bits per item
+        // Edge case: very few bits per item, clamped to 1
         let k = BloomFilter::<Sha256>::optimal_hashers(1000, 100);
-        assert!(k >= 1);
+        assert_eq!(k, 1);
+
+        // Edge case: many bits per item, clamped to 16
+        let k = BloomFilter::<Sha256>::optimal_hashers(100, 100000);
+        assert_eq!(k, 16);
+
+        // Edge case: zero items returns 1
+        let k = BloomFilter::<Sha256>::optimal_hashers(0, 1000);
+        assert_eq!(k, 1);
     }
 
     #[test]
@@ -499,18 +574,44 @@ mod tests {
     }
 
     #[test]
-    fn test_bits_overflow_fallback() {
-        // When bits would overflow on next_power_of_two, fallback to max power of 2
-        let max_pow2 = 1usize << (usize::BITS - 1);
+    fn test_bits_extreme_values() {
+        // Very large expected_items, uses saturation arithmetic
+        let bits = BloomFilter::<Sha256>::optimal_bits(usize::MAX / 2, 0.0001);
+        assert!(bits.is_power_of_two());
+        assert!(bits > 0);
 
-        // Test optimal_bits with extreme values that would overflow
-        // Using a very large expected_items with very low FP rate
-        let bits = BloomFilter::<Sha256>::optimal_bits(usize::MAX / 2, 0.0000001);
-        assert_eq!(bits, max_pow2);
+        // Large but reasonable values
+        let bits = BloomFilter::<Sha256>::optimal_bits(1_000_000_000, 0.0001);
         assert!(bits.is_power_of_two());
 
-        // NOTE: We don't test new() with overflow values because that would
-        // attempt to allocate an impossibly large bitmap.
+        // Zero items
+        let bits = BloomFilter::<Sha256>::optimal_bits(0, 0.01);
+        assert!(bits.is_power_of_two());
+        assert_eq!(bits, 1); // 0 * bpe rounds up to 1
+    }
+
+    #[test]
+    fn test_q16_constants() {
+        // Verify Q16.16 fixed-point constants match the formulas
+
+        // LN2_Q16 = ln(2) * 65536
+        let ln2 = core::f64::consts::LN_2;
+        let expected_ln2_q16 = (ln2 * 65536.0).round() as u64;
+        assert_eq!(LN2_Q16, expected_ln2_q16);
+
+        // bpe = -ln(p) / (ln(2))^2
+        // bpe_q16 = bpe * 65536
+        let ln2_sq = ln2 * ln2;
+
+        let bpe_1e1 = -0.1_f64.ln() / ln2_sq;
+        let bpe_1e2 = -0.01_f64.ln() / ln2_sq;
+        let bpe_1e3 = -0.001_f64.ln() / ln2_sq;
+        let bpe_1e4 = -0.0001_f64.ln() / ln2_sq;
+
+        assert_eq!(bpe::FP_1E1, (bpe_1e1 * 65536.0).round() as u64);
+        assert_eq!(bpe::FP_1E2, (bpe_1e2 * 65536.0).round() as u64);
+        assert_eq!(bpe::FP_1E3, (bpe_1e3 * 65536.0).round() as u64);
+        assert_eq!(bpe::FP_1E4, (bpe_1e4 * 65536.0).round() as u64);
     }
 
     #[cfg(feature = "arbitrary")]
