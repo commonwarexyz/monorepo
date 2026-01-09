@@ -4,8 +4,6 @@
 //! _If the values you wish to store all have the same size, use [crate::qmdb::any::unordered::fixed]
 //! instead for better performance._
 
-pub mod sync;
-
 use crate::{
     index::unordered::Index,
     journal::{
@@ -89,27 +87,35 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
 }
 
 #[cfg(test)]
-pub(super) mod test {
+pub(crate) mod test {
     use super::*;
-    use crate::{index::Unordered as _, qmdb::store::batch_tests, translator::TwoCap};
+    use crate::{
+        index::Unordered as _,
+        qmdb::{store::batch_tests, NonDurable, Unmerkleized},
+        translator::TwoCap,
+    };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
+    use commonware_runtime::{
+        buffer::PoolRef,
+        deterministic::{self, Context},
+        Runner as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
-    use rand::RngCore;
+    use rand::{rngs::StdRng, RngCore, SeedableRng};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn db_config(suffix: &str) -> VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
+    pub(crate) fn create_test_config(seed: u64) -> VarConfig {
         VariableConfig {
-            mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
+            mmr_journal_partition: format!("journal_{seed}"),
+            mmr_metadata_partition: format!("metadata_{seed}"),
+            mmr_items_per_blob: NZU64!(13),
             mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log_journal_{suffix}"),
+            log_partition: format!("log_journal_{seed}"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
@@ -120,9 +126,20 @@ pub(super) mod test {
         }
     }
 
+    pub(crate) type VarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
+
     /// A type alias for the concrete [Db] type used in these unit tests.
-    type AnyTest =
+    pub(crate) type AnyTest =
         Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+    type MutableAnyTest =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
+
+    /// Create a test database with unique partition names
+    pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
+        let seed = context.next_u64();
+        let config = create_test_config(seed);
+        AnyTest::init(context, config).await.unwrap()
+    }
 
     /// Deterministic byte vector generator for variable-value tests.
     fn to_bytes(i: u64) -> Vec<u8> {
@@ -130,11 +147,50 @@ pub(super) mod test {
         vec![(i % 255) as u8; len]
     }
 
+    /// Create n random operations. Some portion of the updates are deletes.
+    /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
+    pub(crate) fn create_test_ops(
+        n: usize,
+    ) -> Vec<unordered::Operation<Digest, VariableEncoding<Vec<u8>>>> {
+        let mut rng = StdRng::seed_from_u64(1337);
+        let mut prev_key = Digest::random(&mut rng);
+        let mut ops = Vec::new();
+        for i in 0..n {
+            let key = Digest::random(&mut rng);
+            if i % 10 == 0 && i > 0 {
+                ops.push(unordered::Operation::Delete(prev_key));
+            } else {
+                let value = to_bytes(rng.next_u64());
+                ops.push(unordered::Operation::Update(unordered::Update(key, value)));
+                prev_key = key;
+            }
+        }
+        ops
+    }
+
+    /// Applies the given operations to the database.
+    pub(crate) async fn apply_ops(
+        db: &mut MutableAnyTest,
+        ops: Vec<unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>,
+    ) {
+        for op in ops {
+            match op {
+                unordered::Operation::Update(unordered::Update(key, value)) => {
+                    db.update(key, value).await.unwrap();
+                }
+                unordered::Operation::Delete(key) => {
+                    db.delete(key).await.unwrap();
+                }
+                unordered::Operation::CommitFloor(_, _) => {
+                    panic!("CommitFloor not supported in apply_ops");
+                }
+            }
+        }
+    }
+
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        AnyTest::init(context, db_config("partition"))
-            .await
-            .unwrap()
+        AnyTest::init(context, create_test_config(0)).await.unwrap()
     }
 
     #[test_traced("WARN")]
@@ -384,7 +440,7 @@ pub(super) mod test {
     fn test_any_unordered_variable_batch() {
         batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
-            let cfg = db_config(&format!("batch_{seed}"));
+            let cfg = create_test_config(seed);
             AnyTest::init(ctx, cfg).await.unwrap().into_mutable()
         });
     }
@@ -404,7 +460,7 @@ pub(super) mod test {
         use super::*;
         use crate::{
             mmr::{iterator::nodes_to_pin, journaled::Mmr, mem::Clean, Position},
-            qmdb::any::unordered::sync_tests::FromSyncTestable,
+            qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
 

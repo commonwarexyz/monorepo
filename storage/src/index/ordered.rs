@@ -149,6 +149,13 @@ impl<T: Translator, V: Eq> Index<T, V> {
     }
 }
 
+impl<T: Translator, V: Eq> crate::qmdb::any::sync::Index for Index<T, V> {
+    type Translator = T;
+    fn new(ctx: impl Metrics, translator: T) -> Self {
+        Self::new(ctx, translator)
+    }
+}
+
 impl<T: Translator, V: Eq> Ordered for Index<T, V> {
     type Iterator<'a>
         = ImmutableCursor<'a, V>

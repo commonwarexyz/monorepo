@@ -10,15 +10,13 @@ use crate::{
         },
         delete_known_loc,
         operation::Operation as OperationTrait,
-        update_known_loc, DurabilityState, Error, MerkleizationState, NonDurable, Unmerkleized,
+        update_known_loc, DurabilityState, Durable, Error, MerkleizationState, Merkleized,
+        NonDurable, Unmerkleized,
     },
 };
 #[cfg(any(test, feature = "test-traits"))]
 use crate::{
-    qmdb::{
-        any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
-        Durable, Merkleized,
-    },
+    qmdb::any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
     Persistable,
 };
 use commonware_codec::Codec;
