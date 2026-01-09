@@ -49,6 +49,7 @@ mod bpe {
 ///
 /// Panics if `p` is not between 0.0 and 1.0 (exclusive).
 #[inline]
+#[cfg(feature = "std")]
 fn normalize_fp_rate(p: f64) -> u64 {
     assert!(p > 0.0 && p < 1.0);
     // Clamp to supported bucket range
