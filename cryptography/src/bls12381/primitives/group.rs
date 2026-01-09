@@ -496,6 +496,25 @@ impl Random for Scalar {
     }
 }
 
+const SMALL_SCALAR_BITS: usize = SCALAR_BITS / 2;
+const SMALL_SCALAR_BYTES: usize = (SMALL_SCALAR_BITS + 7) / 8;
+
+/// A small scalar suitable for more limited operations than [`Scalar`].
+///
+/// In some situations, a full scalar isn't necessary for security, and using
+/// a smaller value provides a considerable performance boost.
+pub struct SmallScalar {
+    bytes: [u8; SMALL_SCALAR_BYTES],
+}
+
+impl Random for SmallScalar {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
+        let mut bytes = [0u8; SMALL_SCALAR_BYTES];
+        rng.fill_bytes(&mut bytes);
+        Self { bytes }
+    }
+}
+
 /// A share of a threshold signing key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Share {
@@ -604,6 +623,14 @@ impl G1 {
     /// Creates a G1 point from a raw `blst_p1`.
     pub(crate) const fn from_blst_p1(p: blst_p1) -> Self {
         Self(p)
+    }
+
+    fn mul_assign_bytes(&mut self, scalar: &[u8], nbits: usize) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_p1_mult supports in-place (ret==a). Raw pointer avoids aliased refs.
+        unsafe {
+            blst_p1_mult(ptr, ptr, scalar.as_ptr(), nbits);
+        }
     }
 }
 
@@ -740,14 +767,12 @@ impl Additive for G1 {
 
 impl<'a> MulAssign<&'a Scalar> for G1 {
     fn mul_assign(&mut self, rhs: &'a Scalar) {
-        let ptr = &raw mut self.0;
-        let mut scalar: blst_scalar = blst_scalar::default();
-        // SAFETY: blst_p1_mult supports in-place (ret==a). Using SCALAR_BITS (255) ensures
-        // constant-time execution. Raw pointer avoids aliased refs.
+        let mut scalar = blst_scalar::default();
+        // SAFETY: blst_scalar_from_fr writes to a valid blst_scalar.
         unsafe {
             blst_scalar_from_fr(&mut scalar, &rhs.0);
-            blst_p1_mult(ptr, ptr, scalar.b.as_ptr(), SCALAR_BITS);
         }
+        self.mul_assign_bytes(&scalar.b, SCALAR_BITS);
     }
 }
 
@@ -755,6 +780,21 @@ impl<'a> Mul<&'a Scalar> for G1 {
     type Output = Self;
 
     fn mul(mut self, rhs: &'a Scalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl<'a> MulAssign<&'a SmallScalar> for G1 {
+    fn mul_assign(&mut self, rhs: &'a SmallScalar) {
+        self.mul_assign_bytes(&rhs.bytes, SMALL_SCALAR_BITS);
+    }
+}
+
+impl<'a> Mul<&'a SmallScalar> for G1 {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a SmallScalar) -> Self::Output {
         self *= rhs;
         self
     }
@@ -888,6 +928,14 @@ impl G2 {
     /// Creates a G2 point from a raw `blst_p2`.
     pub(crate) const fn from_blst_p2(p: blst_p2) -> Self {
         Self(p)
+    }
+
+    fn mul_assign_bytes(&mut self, scalar: &[u8], nbits: usize) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_p2_mult supports in-place (ret==a). Raw pointer avoids aliased refs.
+        unsafe {
+            blst_p2_mult(ptr, ptr, scalar.as_ptr(), nbits);
+        }
     }
 }
 
@@ -1025,13 +1073,11 @@ impl Additive for G2 {
 impl<'a> MulAssign<&'a Scalar> for G2 {
     fn mul_assign(&mut self, rhs: &'a Scalar) {
         let mut scalar = blst_scalar::default();
-        let ptr = &raw mut self.0;
-        // SAFETY: blst_p2_mult supports in-place (ret==a). Using SCALAR_BITS (255) ensures
-        // constant-time execution. Raw pointer avoids aliased refs.
+        // SAFETY: blst_scalar_from_fr writes to a valid blst_scalar.
         unsafe {
             blst_scalar_from_fr(&mut scalar, &rhs.0);
-            blst_p2_mult(ptr, ptr, scalar.b.as_ptr(), SCALAR_BITS);
         }
+        self.mul_assign_bytes(&scalar.b, SCALAR_BITS);
     }
 }
 
@@ -1039,6 +1085,21 @@ impl<'a> Mul<&'a Scalar> for G2 {
     type Output = Self;
 
     fn mul(mut self, rhs: &'a Scalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl<'a> MulAssign<&'a SmallScalar> for G2 {
+    fn mul_assign(&mut self, rhs: &'a SmallScalar) {
+        self.mul_assign_bytes(&rhs.bytes, SMALL_SCALAR_BITS);
+    }
+}
+
+impl<'a> Mul<&'a SmallScalar> for G2 {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a SmallScalar) -> Self::Output {
         self *= rhs;
         self
     }
