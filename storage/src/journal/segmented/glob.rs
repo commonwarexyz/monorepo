@@ -29,7 +29,7 @@
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
 use bytes::BufMut;
-use commonware_codec::{Codec, FixedSize};
+use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{Blob as _, Error as RError, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
@@ -66,7 +66,7 @@ pub struct Glob<E: Storage + Metrics, V: Codec> {
     codec_config: V::Cfg,
 }
 
-impl<E: Storage + Metrics, V: Codec> Glob<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
     /// Initialize blob storage, opening existing section blobs.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {

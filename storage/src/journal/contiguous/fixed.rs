@@ -58,7 +58,7 @@ use crate::{
     journal::{contiguous::MutableContiguous, Error},
     Persistable,
 };
-use commonware_codec::{CodecFixed, DecodeExt as _};
+use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _};
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef},
     telemetry::metrics::status::GaugeExt,
@@ -134,7 +134,7 @@ pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     pub(crate) _array: PhantomData<A>,
 }
 
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
+impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub(crate) const CHUNK_SIZE: usize = A::SIZE;
     pub(crate) const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
@@ -596,7 +596,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 }
 
 // Implement Contiguous trait for fixed-length journals
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journal<E, A> {
+impl<E: Storage + Metrics, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
 
     fn size(&self) -> u64 {
@@ -624,7 +624,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journa
     }
 }
 
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> MutableContiguous for Journal<E, A> {
+impl<E: Storage + Metrics, A: CodecFixedShared> MutableContiguous for Journal<E, A> {
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
@@ -638,7 +638,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> MutableContiguous for Journa
     }
 }
 
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Persistable for Journal<E, A> {
+impl<E: Storage + Metrics, A: CodecFixedShared> Persistable for Journal<E, A> {
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Error> {

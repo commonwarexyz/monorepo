@@ -5,7 +5,7 @@ use crate::{
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{varint::UInt, CodecShared, EncodeSize, Read, ReadExt, Write};
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Storage};
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -13,26 +13,26 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
 /// Record stored in the `Cache`.
-struct Record<V: Codec> {
+struct Record<V: CodecShared> {
     index: u64,
     value: V,
 }
 
-impl<V: Codec> Record<V> {
+impl<V: CodecShared> Record<V> {
     /// Create a new `Record`.
     const fn new(index: u64, value: V) -> Self {
         Self { index, value }
     }
 }
 
-impl<V: Codec> Write for Record<V> {
+impl<V: CodecShared> Write for Record<V> {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.index).write(buf);
         self.value.write(buf);
     }
 }
 
-impl<V: Codec> Read for Record<V> {
+impl<V: CodecShared> Read for Record<V> {
     type Cfg = V::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -42,14 +42,14 @@ impl<V: Codec> Read for Record<V> {
     }
 }
 
-impl<V: Codec> EncodeSize for Record<V> {
+impl<V: CodecShared> EncodeSize for Record<V> {
     fn encode_size(&self) -> usize {
         UInt(self.index).encode_size() + self.value.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Codec> arbitrary::Arbitrary<'_> for Record<V>
+impl<V: CodecShared> arbitrary::Arbitrary<'_> for Record<V>
 where
     V: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -59,7 +59,7 @@ where
 }
 
 /// Implementation of `Cache` storage.
-pub struct Cache<E: Storage + Metrics, V: Codec> {
+pub struct Cache<E: Storage + Metrics, V: CodecShared> {
     items_per_blob: u64,
     journal: Journal<E, Record<V>>,
     pending: BTreeSet<u64>,
@@ -75,7 +75,7 @@ pub struct Cache<E: Storage + Metrics, V: Codec> {
     syncs: Counter,
 }
 
-impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     /// Calculate the section for a given index.
     const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_blob) * self.items_per_blob
@@ -304,7 +304,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
     }
 }
 
-impl<E: Storage + Metrics, V: Codec> kv::Gettable for Cache<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> kv::Gettable for Cache<E, V> {
     type Key = u64;
     type Value = V;
     type Error = Error;

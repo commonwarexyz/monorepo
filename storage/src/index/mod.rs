@@ -39,9 +39,9 @@ pub mod unordered;
 ///
 /// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or
 /// `remove()` from [Unordered] instead._
-pub trait Cursor {
+pub trait Cursor: Send + Sync {
     /// The type of values the cursor iterates over.
-    type Value: Eq;
+    type Value: Eq + Send + Sync;
 
     /// Advances the cursor to the next value in the chain, returning a reference to it.
     ///
@@ -103,9 +103,9 @@ pub trait Cursor {
 
 /// A trait defining the operations provided by a memory-efficient index that maps translated keys
 /// to arbitrary values, with no ordering assumed over the key space.
-pub trait Unordered {
+pub trait Unordered: Send + Sync {
     /// The type of values the index stores.
-    type Value: Eq;
+    type Value: Eq + Send + Sync;
 
     /// The type of cursor returned by this index to iterate over values with conflicting keys.
     type Cursor<'a>: Cursor<Value = Self::Value>
@@ -113,7 +113,7 @@ pub trait Unordered {
         Self: 'a;
 
     /// Returns an iterator over all values associated with a translated key.
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + Send + 'a
     where
         Self::Value: 'a;
 
@@ -163,8 +163,8 @@ pub trait Unordered {
 
 /// A trait defining the additional operations provided by a memory-efficient index that allows
 /// ordered traversal of the indexed keys.
-pub trait Ordered: Unordered {
-    type Iterator<'a>: Iterator<Item = &'a Self::Value>
+pub trait Ordered: Unordered + Send + Sync {
+    type Iterator<'a>: Iterator<Item = &'a Self::Value> + Send
     where
         Self: 'a;
 

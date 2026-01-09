@@ -85,7 +85,7 @@ pub struct Immutable<
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
+    M: MerkleizationState<DigestOf<H>> + Send + Sync = Merkleized<H>,
     D: DurabilityState = Durable,
 > {
     /// Authenticated journal of operations.
@@ -112,7 +112,7 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > Immutable<E, K, V, H, T, M, D>
 {
@@ -504,7 +504,7 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > kv::Gettable for Immutable<E, K, V, H, T, M, D>
 {
@@ -523,7 +523,7 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > crate::qmdb::store::LogStore for Immutable<E, K, V, H, T, M, D>
 {

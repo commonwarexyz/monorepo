@@ -6,7 +6,7 @@ use crate::{
     kv, Persistable,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
 use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
 use commonware_utils::{Array, Span};
@@ -370,7 +370,7 @@ where
 }
 
 /// Implementation of [Freezer].
-pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
+pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,
 
@@ -407,7 +407,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     resizes: Counter,
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -1131,7 +1131,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> kv::Gettable for Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Gettable for Freezer<E, K, V> {
     type Key = K;
     type Value = V;
     type Error = Error;
@@ -1141,14 +1141,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> kv::Gettable for Freezer<
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> kv::Updatable for Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Updatable for Freezer<E, K, V> {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await?;
         Ok(())
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Persistable for Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Persistable for Freezer<E, K, V> {
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Self::Error> {

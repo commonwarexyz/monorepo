@@ -431,4 +431,62 @@ pub(super) mod test {
             }
         }
     }
+
+    /// Compile-time check that Db is Send + Sync when its type parameters are.
+    const _: () = {
+        use crate::qmdb::NonDurable;
+        const fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<AnyTest>();
+        assert_send_sync::<
+            Db<
+                deterministic::Context,
+                Digest,
+                Vec<u8>,
+                Sha256,
+                TwoCap,
+                Merkleized<Sha256>,
+                NonDurable,
+            >,
+        >();
+    };
+
+    /// Helper to assert a future is Send at compile time.
+    fn assert_send<T: Send>(_: T) {}
+
+    /// Test that futures returned by Durable Db methods are Send.
+    #[allow(dead_code)]
+    fn test_durable_futures_are_send(db: &mut AnyTest) {
+        use crate::mmr::Location;
+        use std::num::NonZeroU64;
+
+        // Durable-specific operations
+        assert_send(db.sync());
+        assert_send(db.prune(Location::new_unchecked(0)));
+
+        // Proof operations (Merkleized)
+        assert_send(db.proof(Location::new_unchecked(0), NonZeroU64::new(1).unwrap()));
+    }
+
+    /// Test that futures returned by Mutable (Dirty, NonDurable) Db methods are Send.
+    #[allow(dead_code)]
+    fn test_mutable_futures_are_send(
+        mut db: Db<
+            deterministic::Context,
+            Digest,
+            Vec<u8>,
+            Sha256,
+            TwoCap,
+            crate::qmdb::Unmerkleized,
+            crate::qmdb::NonDurable,
+        >,
+        key: Digest,
+    ) {
+        // Mutation operations
+        assert_send(db.update(key, vec![]));
+        assert_send(db.create(key, vec![]));
+        assert_send(db.delete(key));
+
+        // Commit (consumes self)
+        assert_send(db.commit(None));
+    }
 }

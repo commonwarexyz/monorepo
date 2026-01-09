@@ -8,13 +8,14 @@ use std::hash::{BuildHasher, Hash, Hasher};
 ///
 /// The output of [Translator::transform] is often used as a key in a hash table. If the output is
 /// not uniformly distributed, the performance of said hash table will degrade substantially.
-pub trait Translator: Clone + BuildHasher {
+pub trait Translator: Clone + BuildHasher + Send + Sync + 'static {
     /// The type of the internal representation of keys.
     ///
     /// Although [Translator] is a [BuildHasher], the `Key` type must still implement [Hash] for
     /// compatibility with any hash table that wraps [Translator]. We also require [Ord] for
-    /// compatibility with ordered collections.
-    type Key: Ord + Hash + Copy;
+    /// compatibility with ordered collections. [Send] and [Sync] are required for thread-safe
+    /// concurrent access.
+    type Key: Ord + Hash + Copy + Send + Sync;
 
     /// Transform a key into its new representation.
     fn transform(&self, key: &[u8]) -> Self::Key;

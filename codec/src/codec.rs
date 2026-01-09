@@ -99,6 +99,14 @@ pub trait Encode: Write + EncodeSize {
 // Automatically implement `Encode` for types that implement `Write` and `EncodeSize`.
 impl<T: Write + EncodeSize> Encode for T {}
 
+/// Convenience trait combining `Encode` with thread-safety bounds.
+///
+/// Represents types that can be fully encoded and safely shared across threads.
+pub trait EncodeShared: Encode + Send + Sync {}
+
+// Automatically implement `EncodeShared` for types that meet all bounds.
+impl<T: Encode + Send + Sync> EncodeShared for T {}
+
 /// Trait combining [Read] with a check for remaining bytes.
 ///
 /// Ensures that *all* bytes from the input buffer were consumed during decoding.
@@ -168,6 +176,23 @@ pub trait CodecFixed: Codec + FixedSize {}
 
 // Automatically implement `CodecFixed` for types that implement `Codec` and `FixedSize`.
 impl<T: Codec + FixedSize> CodecFixed for T {}
+
+/// Convenience trait combining `Codec` with thread-safety bounds.
+///
+/// Represents types that can be fully encoded/decoded and safely shared across threads.
+pub trait CodecShared: Codec + Send + Sync {}
+
+// Automatically implement `CodecShared` for types that meet all bounds.
+impl<T: Codec + Send + Sync> CodecShared for T {}
+
+/// Convenience trait combining `CodecFixed` with thread-safety bounds and unit config.
+///
+/// Represents fixed-size types that can be fully encoded/decoded, require no configuration,
+/// and can be safely shared across threads.
+pub trait CodecFixedShared: CodecFixed<Cfg = ()> + Send + Sync {}
+
+// Automatically implement `CodecFixedShared` for types that meet all bounds.
+impl<T: CodecFixed<Cfg = ()> + Send + Sync> CodecFixedShared for T {}
 
 #[cfg(test)]
 mod tests {
