@@ -75,6 +75,7 @@ use std::{
     collections::BTreeMap,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
 };
 use tracing::{debug, trace, warn};
 
@@ -285,6 +286,134 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             pruned,
             _array: PhantomData,
         })
+    }
+
+    /// Initialize a [Journal] in a fully pruned state at a specific logical size.
+    ///
+    /// Creates a journal that reports `size()` as `size` but contains no data.
+    /// The `oldest_retained_pos()` will return `None`, indicating all positions before
+    /// `size` have been pruned. This is useful for state sync when starting from
+    /// a non-zero position without historical data.
+    ///
+    /// # Behavior
+    ///
+    /// - Creates only the tail blob at the index that would contain the item at `size`
+    /// - Sets the tail blob size to represent the "leftover" items within that blob
+    /// - No blobs are created for pruned indices
+    ///
+    /// For example, if `items_per_blob = 10` and `size = 25`:
+    /// - Tail blob index would be 25 / 10 = 2 (third blob, 0-indexed)
+    /// - Tail blob size would be (25 % 10) * CHUNK_SIZE = 5 * CHUNK_SIZE
+    /// - No blobs are created for indices 0 and 1 (the pruned range)
+    /// - Reading from positions 0-19 will return `ItemPruned`
+    pub(crate) async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
+        let tail_index = size / cfg.items_per_blob;
+        let tail_items = size % cfg.items_per_blob;
+        let tail_size = tail_items * Self::CHUNK_SIZE_U64;
+
+        debug!(
+            size,
+            tail_index, tail_items, tail_size, "initializing journal at size"
+        );
+
+        // Create the tail blob with the correct size
+        let (tail_blob, tail_actual_size) = context
+            .open(&cfg.partition, &tail_index.to_be_bytes())
+            .await?;
+        assert_eq!(
+            tail_actual_size, 0,
+            "expected empty blob for fresh initialization"
+        );
+
+        let tail = Append::new(
+            tail_blob,
+            0,
+            cfg.write_buffer.into(),
+            cfg.buffer_pool.clone(),
+        )
+        .await?;
+        if tail_items > 0 {
+            tail.resize(tail_size).await?;
+        }
+        let pruning_boundary = size - (size % cfg.items_per_blob);
+
+        // Initialize metrics
+        let tracked = Gauge::default();
+        let _ = tracked.try_set(tail_index + 1);
+        let synced = Counter::default();
+        let pruned = Counter::default();
+        context.register("tracked", "Number of blobs", tracked.clone());
+        context.register("synced", "Number of syncs", synced.clone());
+        context.register("pruned", "Number of blobs pruned", pruned.clone());
+
+        Ok(Self {
+            context,
+            cfg,
+            blobs: BTreeMap::new(),
+            tail,
+            tail_index,
+            tracked,
+            synced,
+            pruned,
+            size,
+            pruning_boundary,
+            _array: PhantomData,
+        })
+    }
+
+    /// Initialize a [Journal] for use in state sync.
+    ///
+    /// Prepares the journal so that subsequent appends go to the correct physical
+    /// location for the requested range.
+    ///
+    /// # Behavior
+    ///
+    /// - Fresh (no data): returns journal initialized at `range.start`
+    /// - Stale (all data before `range.start`): destroys and recreates at `range.start`
+    /// - Overlap within range: prunes to `range.start`
+    /// - Unexpected data beyond `range.end`: returns error
+    ///
+    /// # Returns
+    ///
+    /// A journal ready for sync operations with size in the given range.
+    pub(crate) async fn init_sync(
+        context: E,
+        cfg: Config,
+        range: Range<u64>,
+    ) -> Result<Self, crate::qmdb::Error> {
+        use crate::mmr::Location;
+
+        assert!(!range.is_empty(), "range must not be empty");
+
+        let mut journal = Self::init(context.with_label("journal"), cfg.clone()).await?;
+        let journal_size = journal.size();
+
+        let journal = if journal_size <= range.start {
+            debug!(
+                journal_size,
+                range.start, "existing journal data is stale, re-initializing at start"
+            );
+            journal.destroy().await?;
+            Self::init_at_size(context, cfg, range.start).await?
+        } else if journal_size <= range.end {
+            debug!(
+                journal_size,
+                range.start,
+                range.end,
+                "existing journal data within range, pruning to lower bound"
+            );
+            journal.prune(range.start).await?;
+            journal
+        } else {
+            return Err(crate::qmdb::Error::UnexpectedData(Location::new_unchecked(
+                journal_size,
+            )));
+        };
+
+        let journal_size = journal.size();
+        assert!(journal_size <= range.end);
+        assert!(journal_size >= range.start);
+        Ok(journal)
     }
 
     /// Sync any pending updates to disk.

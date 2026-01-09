@@ -450,26 +450,18 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(offset)
     }
 
-    /// Counts the number of items in a section starting from `start_offset`.
+    /// Counts the number of items in a section.
     ///
     /// This scans varint length prefixes without decoding item data, allowing
     /// it to count size-0 dummy items that cannot be decoded.
-    pub async fn count_items_in_section(
-        &self,
-        section: u64,
-        start_offset: u64,
-    ) -> Result<u64, Error> {
+    pub async fn count_items_in_section(&self, section: u64) -> Result<u64, Error> {
         let blob = match self.manager.get(section)? {
             Some(blob) => blob,
             None => return Ok(0),
         };
 
         let blob_size = blob.size().await;
-        if start_offset >= blob_size {
-            return Ok(0);
-        }
-
-        let mut offset = start_offset;
+        let mut offset = 0u64;
         let mut count = 0u64;
 
         while offset < blob_size {
@@ -2006,7 +1998,7 @@ mod tests {
             assert!(offset2 > offset1);
 
             // Count should include dummies
-            let count = journal.count_items_in_section(0, 0).await.unwrap();
+            let count = journal.count_items_in_section(0).await.unwrap();
             assert_eq!(count, 3);
 
             // Reading real items works
@@ -2040,7 +2032,7 @@ mod tests {
             journal.sync(0).await.unwrap();
 
             // Count should be exactly 10
-            let count = journal.count_items_in_section(0, 0).await.unwrap();
+            let count = journal.count_items_in_section(0).await.unwrap();
             assert_eq!(count, 10);
 
             // Add some real items
@@ -2049,7 +2041,7 @@ mod tests {
             journal.sync(0).await.unwrap();
 
             // Count should now be 12
-            let count = journal.count_items_in_section(0, 0).await.unwrap();
+            let count = journal.count_items_in_section(0).await.unwrap();
             assert_eq!(count, 12);
 
             journal.destroy().await.unwrap();
@@ -2070,10 +2062,10 @@ mod tests {
             let journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
 
             // Count on non-existent section should return 0
-            let count = journal.count_items_in_section(0, 0).await.unwrap();
+            let count = journal.count_items_in_section(0).await.unwrap();
             assert_eq!(count, 0);
 
-            let count = journal.count_items_in_section(999, 0).await.unwrap();
+            let count = journal.count_items_in_section(999).await.unwrap();
             assert_eq!(count, 0);
 
             journal.destroy().await.unwrap();
