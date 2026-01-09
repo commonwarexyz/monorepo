@@ -112,9 +112,6 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
-/// Maximum size of a varint for u32 (also the minimum useful read size for parsing item headers).
-const MAX_VARINT_SIZE: usize = 5;
-
 /// Decodes a varint length prefix from a buffer.
 /// Returns (item_size, varint_len).
 #[inline]
@@ -142,7 +139,7 @@ enum Item<'a> {
 
 /// Find an item in a buffer by decoding its length prefix.
 ///
-/// Returns (next_offset, size, item).
+/// Returns (next_offset, item).
 fn find_item(buf: &[u8], available: usize, offset: u64) -> Result<(u64, Item<'_>), Error> {
     let (size, varint_len) = decode_length_prefix(&buf[..available])?;
     let next_offset = offset
@@ -244,11 +241,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 read_offset,
             } => {
                 let mut buffer = vec![0u8; item_size];
-                let item_size = buffer.len() as u32;
                 buffer[..prefix.len()].copy_from_slice(prefix);
                 blob.read_into(&mut buffer[prefix.len()..], read_offset)
                     .await?;
-                (Cow::Owned(buffer), item_size)
+                (Cow::Owned(buffer), item_size as u32)
             }
         };
 
