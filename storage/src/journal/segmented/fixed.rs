@@ -187,42 +187,41 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Stream items as they are read to avoid occupying too much memory.
         // Each blob is processed sequentially, yielding batches of items that are then
         // flattened into individual stream elements.
-        Ok(stream::iter(blob_info)
-            .flat_map(move |(section, reader)| {
-                stream::unfold(
-                    (section, reader, 0u64),
-                    move |(section, mut reader, mut offset)| async move {
-                        let blob_size = reader.blob_size();
-                        let mut batch = Vec::new();
+        Ok(stream::iter(blob_info).flat_map(move |(section, reader)| {
+            stream::unfold(
+                (section, reader, 0u64),
+                move |(section, mut reader, mut offset)| async move {
+                    let blob_size = reader.blob_size();
+                    let mut batch = Vec::new();
 
-                        // Decode a batch of items from the buffer. The callback transforms each
-                        // decoded item into (section, position, item) tuple or an error.
-                        let count = match reader
-                            .decode_batch_fixed::<A, _, _>(&mut batch, |i, result| {
-                                let position = offset / Self::CHUNK_SIZE_U64 + i as u64;
-                                result
-                                    .map(|item| (section, position, item))
-                                    .map_err(Error::Codec)
-                            })
-                            .await
-                        {
-                            Ok((0, _)) => return None, // End of blob
-                            Ok((count, _)) => count,
-                            Err(err) => {
-                                return Some((
-                                    vec![Err(Error::Runtime(err))],
-                                    (section, reader, blob_size),
-                                ))
-                            }
-                        };
+                    // Decode a batch of items from the buffer. The callback transforms each
+                    // decoded item into (section, position, item) tuple or an error.
+                    let count = match reader
+                        .decode_batch_fixed::<A, _, _>(&mut batch, |i, result| {
+                            let position = offset / Self::CHUNK_SIZE_U64 + i as u64;
+                            result
+                                .map(|item| (section, position, item))
+                                .map_err(Error::Codec)
+                        })
+                        .await
+                    {
+                        Ok((0, _)) => return None, // End of blob
+                        Ok((count, _)) => count,
+                        Err(err) => {
+                            return Some((
+                                vec![Err(Error::Runtime(err))],
+                                (section, reader, blob_size),
+                            ))
+                        }
+                    };
 
-                        offset += (count * Self::CHUNK_SIZE) as u64;
+                    offset += (count * Self::CHUNK_SIZE) as u64;
 
-                        Some((batch, (section, reader, offset)))
-                    },
-                )
-                .flat_map(stream::iter)
-            }))
+                    Some((batch, (section, reader, offset)))
+                },
+            )
+            .flat_map(stream::iter)
+        }))
     }
 
     /// Sync the given section to storage.

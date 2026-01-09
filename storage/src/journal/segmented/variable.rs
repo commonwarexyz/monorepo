@@ -288,7 +288,15 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 }
 
                 stream::unfold(
-                    (section, blob, reader, offset, 0u64, codec_config, compressed),
+                    (
+                        section,
+                        blob,
+                        reader,
+                        offset,
+                        0u64,
+                        codec_config,
+                        compressed,
+                    ),
                     move |(
                         section,
                         blob,
@@ -349,9 +357,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                     next_offset,
                                     size,
                                     Item::Incomplete {
-                                        mut buffer,
-                                        filled,
-                                        ..
+                                        mut buffer, filled, ..
                                     },
                                 )) => {
                                     // Item::Incomplete means the item spans buffer boundary: we have

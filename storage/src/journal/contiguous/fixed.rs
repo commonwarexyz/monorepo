@@ -484,51 +484,45 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Note: Unlike segmented journals, contiguous journals handle trailing byte truncation
         // during `init` rather than during replay. This is because contiguous journals validate
         // blob sizes at initialization time.
-        let stream = stream::iter(readers)
-            .flat_map(move |(blob_index, mut reader)| {
-                // If this is the very first blob then we need to seek to the starting position.
-                let initial_offset = if blob_index == start_blob {
-                    reader.seek_to(start_offset).expect("invalid start_pos");
-                    start_offset
-                } else {
-                    0
-                };
+        let stream = stream::iter(readers).flat_map(move |(blob_index, mut reader)| {
+            // If this is the very first blob then we need to seek to the starting position.
+            let initial_offset = if blob_index == start_blob {
+                reader.seek_to(start_offset).expect("invalid start_pos");
+                start_offset
+            } else {
+                0
+            };
 
-                stream::unfold(
-                    (reader, initial_offset),
-                    move |(mut reader, mut blob_offset)| async move {
-                        let mut batch = Vec::new();
+            stream::unfold(
+                (reader, initial_offset),
+                move |(mut reader, mut blob_offset)| async move {
+                    let mut batch = Vec::new();
 
-                        // Decode a batch of items from the buffer. The callback transforms each
-                        // decoded item into (position, item) tuple or an error.
-                        let (count, _trailing) = match reader
-                            .decode_batch_fixed::<A, _, _>(&mut batch, |i, result| {
-                                let item_pos = items_per_blob * blob_index
-                                    + blob_offset / Self::CHUNK_SIZE_U64
-                                    + i as u64;
-                                result
-                                    .map(|item| (item_pos, item))
-                                    .map_err(Error::Codec)
-                            })
-                            .await
-                        {
-                            Ok((0, _)) => return None, // End of blob
-                            Ok((count, trailing)) => (count, trailing),
-                            Err(err) => {
-                                let blob_size = reader.blob_size();
-                                return Some((
-                                    vec![Err(Error::Runtime(err))],
-                                    (reader, blob_size),
-                                ));
-                            }
-                        };
+                    // Decode a batch of items from the buffer. The callback transforms each
+                    // decoded item into (position, item) tuple or an error.
+                    let (count, _trailing) = match reader
+                        .decode_batch_fixed::<A, _, _>(&mut batch, |i, result| {
+                            let item_pos = items_per_blob * blob_index
+                                + blob_offset / Self::CHUNK_SIZE_U64
+                                + i as u64;
+                            result.map(|item| (item_pos, item)).map_err(Error::Codec)
+                        })
+                        .await
+                    {
+                        Ok((0, _)) => return None, // End of blob
+                        Ok((count, trailing)) => (count, trailing),
+                        Err(err) => {
+                            let blob_size = reader.blob_size();
+                            return Some((vec![Err(Error::Runtime(err))], (reader, blob_size)));
+                        }
+                    };
 
-                        blob_offset += (count * Self::CHUNK_SIZE) as u64;
-                        Some((batch, (reader, blob_offset)))
-                    },
-                )
-                .flat_map(stream::iter)
-            });
+                    blob_offset += (count * Self::CHUNK_SIZE) as u64;
+                    Some((batch, (reader, blob_offset)))
+                },
+            )
+            .flat_map(stream::iter)
+        });
 
         Ok(stream)
     }
