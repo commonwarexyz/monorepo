@@ -8,7 +8,7 @@ use std::hash::{BuildHasher, Hash, Hasher};
 ///
 /// The output of [Translator::transform] is often used as a key in a hash table. If the output is
 /// not uniformly distributed, the performance of said hash table will degrade substantially.
-pub trait Translator: Clone + BuildHasher + Send + Sync {
+pub trait Translator: Clone + BuildHasher + Send + Sync + 'static {
     /// The type of the internal representation of keys.
     ///
     /// Although [Translator] is a [BuildHasher], the `Key` type must still implement [Hash] for
