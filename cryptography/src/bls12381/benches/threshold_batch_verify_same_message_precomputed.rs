@@ -6,11 +6,11 @@ use commonware_cryptography::{
     ed25519::PrivateKey,
     Signer as _,
 };
-use commonware_parallel::Sequential;
+use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{quorum, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
-use std::hint::black_box;
+use std::{hint::black_box, num::NonZeroUsize};
 
 fn benchmark_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) {
     let namespace = b"benchmark";
@@ -19,65 +19,97 @@ fn benchmark_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) 
         let t = quorum(n);
         let f = n - t;
         for invalid in [0, f] {
-            c.bench_function(
-                &format!("{}/n={} t={} invalid={}", module_path!(), n, t, invalid),
-                |b| {
-                    b.iter_batched(
-                        || {
-                            let mut rng = StdRng::seed_from_u64(0);
-                            let players = (0..n)
-                                .map(|i| PrivateKey::from_seed(i as u64).public_key())
-                                .try_collect()
-                                .unwrap();
-                            let (output, shares) =
-                                deal::<MinSig, _>(&mut rng, Default::default(), players)
-                                    .expect("deal should succeed");
-                            let polynomial = output.public().clone();
-                            polynomial.precompute_partial_publics();
-                            let signatures = shares
-                                .values()
-                                .iter()
-                                .enumerate()
-                                .map(|(idx, s)| {
-                                    if idx < invalid as usize {
-                                        primitives::ops::threshold::sign_message::<MinSig>(
-                                            s, b"wrong", msg,
-                                        )
-                                    } else {
-                                        primitives::ops::threshold::sign_message::<MinSig>(
-                                            s, namespace, msg,
-                                        )
-                                    }
-                                })
-                                .collect::<Vec<_>>();
-                            (rng, polynomial, signatures)
-                        },
-                        |(mut rng, polynomial, mut signatures): (_, _, Vec<_>)| {
-                            // Shuffle faults
-                            if invalid > 0 {
-                                signatures.shuffle(&mut rng);
-                            }
+            for concurrency in [1, 8] {
+                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                c.bench_function(
+                    &format!(
+                        "{}/n={} t={} invalid={} conc={}",
+                        module_path!(),
+                        n,
+                        t,
+                        invalid,
+                        concurrency
+                    ),
+                    |b| {
+                        b.iter_batched(
+                            || {
+                                let mut rng = StdRng::seed_from_u64(0);
+                                let players = (0..n)
+                                    .map(|i| PrivateKey::from_seed(i as u64).public_key())
+                                    .try_collect()
+                                    .unwrap();
+                                let (output, shares) =
+                                    deal::<MinSig, _>(&mut rng, Default::default(), players)
+                                        .expect("deal should succeed");
+                                let polynomial = output.public().clone();
+                                polynomial.precompute_partial_publics();
+                                let signatures = shares
+                                    .values()
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(idx, s)| {
+                                        if idx < invalid as usize {
+                                            primitives::ops::threshold::sign_message::<MinSig>(
+                                                s, b"wrong", msg,
+                                            )
+                                        } else {
+                                            primitives::ops::threshold::sign_message::<MinSig>(
+                                                s, namespace, msg,
+                                            )
+                                        }
+                                    })
+                                    .collect::<Vec<_>>();
+                                (rng, polynomial, signatures)
+                            },
+                            |(mut rng, polynomial, mut signatures): (_, _, Vec<_>)| {
+                                if invalid > 0 {
+                                    signatures.shuffle(&mut rng);
+                                }
 
-                            // Verify
-                            let result =
-                                black_box(primitives::ops::threshold::batch_verify_same_message::<
-                                    _,
-                                    MinSig,
-                                    _,
-                                    _,
-                                >(
-                                    &mut rng, &polynomial, namespace, msg, &signatures, &Sequential,
-                                ));
-                            if invalid == 0 {
-                                assert!(result.is_ok());
-                            } else {
-                                assert!(result.is_err());
-                            }
-                        },
-                        BatchSize::SmallInput,
-                    );
-                },
-            );
+                                let result = if concurrency > 1 {
+                                    black_box(
+                                        primitives::ops::threshold::batch_verify_same_message::<
+                                            _,
+                                            MinSig,
+                                            _,
+                                            _,
+                                        >(
+                                            &mut rng,
+                                            &polynomial,
+                                            namespace,
+                                            msg,
+                                            &signatures,
+                                            &strategy,
+                                        ),
+                                    )
+                                } else {
+                                    black_box(
+                                        primitives::ops::threshold::batch_verify_same_message::<
+                                            _,
+                                            MinSig,
+                                            _,
+                                            _,
+                                        >(
+                                            &mut rng,
+                                            &polynomial,
+                                            namespace,
+                                            msg,
+                                            &signatures,
+                                            &Sequential,
+                                        ),
+                                    )
+                                };
+                                if invalid == 0 {
+                                    assert!(result.is_ok());
+                                } else {
+                                    assert!(result.is_err());
+                                }
+                            },
+                            BatchSize::SmallInput,
+                        );
+                    },
+                );
+            }
         }
     }
 }

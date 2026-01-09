@@ -280,6 +280,38 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
             },
         )
     }
+
+    /// Executes two closures, potentially in parallel, and returns both results.
+    ///
+    /// For [`Sequential`], this executes `a` then `b` on the current thread.
+    /// For [`Rayon`], this executes `a` and `b` in parallel using the thread pool.
+    ///
+    /// # Arguments
+    ///
+    /// - `a`: First closure to execute
+    /// - `b`: Second closure to execute
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// let strategy = Sequential;
+    ///
+    /// let (sum, product) = strategy.join(
+    ///     || (1..=5).sum::<i32>(),
+    ///     || (1..=5).product::<i32>(),
+    /// );
+    ///
+    /// assert_eq!(sum, 15);
+    /// assert_eq!(product, 120);
+    /// ```
+    fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+    where
+        A: FnOnce() -> RA + Send,
+        B: FnOnce() -> RB + Send,
+        RA: Send,
+        RB: Send;
 }
 
 /// A sequential execution strategy.
@@ -327,6 +359,16 @@ impl Strategy for Sequential {
         let mut init_val = init();
         iter.into_iter()
             .fold(identity(), |acc, item| fold_op(acc, &mut init_val, item))
+    }
+
+    fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+    where
+        A: FnOnce() -> RA + Send,
+        B: FnOnce() -> RB + Send,
+        RA: Send,
+        RB: Send,
+    {
+        (a(), b())
     }
 }
 
@@ -433,6 +475,16 @@ cfg_if! {
                         .map(|(_, acc)| acc)
                         .reduce(&identity, reduce_op)
                 })
+            }
+
+            fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+            where
+                A: FnOnce() -> RA + Send,
+                B: FnOnce() -> RB + Send,
+                RA: Send,
+                RB: Send,
+            {
+                self.thread_pool.install(|| rayon::join(a, b))
             }
         }
     }
