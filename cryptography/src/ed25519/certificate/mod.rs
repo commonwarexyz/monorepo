@@ -584,6 +584,7 @@ mod macros {
                     _rng: &mut R,
                     subject: Self::Subject<'_, D>,
                     attestation: &$crate::certificate::Attestation<Self>,
+                    _strategy: &impl commonware_parallel::Strategy,
                 ) -> bool
                 where
                     R: rand_core::CryptoRngCore,
@@ -598,6 +599,7 @@ mod macros {
                     rng: &mut R,
                     subject: Self::Subject<'_, D>,
                     attestations: I,
+                    _strategy: &impl commonware_parallel::Strategy,
                 ) -> $crate::certificate::Verification<Self>
                 where
                     R: rand_core::CryptoRngCore,
@@ -608,7 +610,11 @@ mod macros {
                         .verify_attestations::<_, _, D, _>(rng, subject, attestations)
                 }
 
-                fn assemble<I>(&self, attestations: I) -> Option<Self::Certificate>
+                fn assemble<I>(
+                    &self,
+                    attestations: I,
+                    _strategy: &impl commonware_parallel::Strategy,
+                ) -> Option<Self::Certificate>
                 where
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
@@ -620,12 +626,18 @@ mod macros {
                     rng: &mut R,
                     subject: Self::Subject<'_, D>,
                     certificate: &Self::Certificate,
+                    _strategy: &impl commonware_parallel::Strategy,
                 ) -> bool {
                     self.generic
                         .verify_certificate::<Self, _, D>(rng, subject, certificate)
                 }
 
-                fn verify_certificates<'a, R, D, I>(&self, rng: &mut R, certificates: I) -> bool
+                fn verify_certificates<'a, R, D, I>(
+                    &self,
+                    rng: &mut R,
+                    certificates: I,
+                    _strategy: &impl commonware_parallel::Strategy,
+                ) -> bool
                 where
                     R: rand::Rng + rand::CryptoRng,
                     D: $crate::Digest,
@@ -667,6 +679,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_utils::{ordered::Set, quorum, test_rng, Participant, TryCollect};
 
     const NAMESPACE: &[u8] = b"test-ed25519";
@@ -747,7 +760,8 @@ mod tests {
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &attestation
+            &attestation,
+            &Sequential,
         ));
     }
 
@@ -785,6 +799,7 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             attestations.clone(),
+            &Sequential,
         );
         assert!(result.invalid.is_empty());
         assert_eq!(result.verified.len(), quorum);
@@ -798,6 +813,7 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             attestations_corrupted,
+            &Sequential,
         );
         assert_eq!(result.invalid, vec![Participant::new(999)]);
         assert_eq!(result.verified.len(), quorum - 1);
@@ -811,6 +827,7 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             attestations_corrupted,
+            &Sequential,
         );
         // Batch verification may detect either signer 0 (wrong sig) or signer 1 (duplicate sig)
         assert_eq!(result.invalid.len(), 1);
@@ -834,7 +851,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations).unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Verify certificate has correct number of signers
         assert_eq!(certificate.signers.count(), quorum);
@@ -869,7 +886,7 @@ mod tests {
                 .unwrap(),
         ];
 
-        let certificate = schemes[0].assemble(attestations).unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Verify signers are sorted by signer index
         let expected: Vec<_> = indexed.iter().map(|(idx, _)| *idx).collect();
@@ -893,14 +910,15 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations).unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             TestSubject {
                 message: Bytes::from_static(MESSAGE)
             },
-            &certificate
+            &certificate,
+            &Sequential,
         ));
     }
 
@@ -921,7 +939,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations).unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
@@ -929,7 +947,8 @@ mod tests {
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &certificate
+            &certificate,
+            &Sequential,
         ));
 
         // Corrupted certificate fails
@@ -940,7 +959,8 @@ mod tests {
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &corrupted
+            &corrupted,
+            &Sequential,
         ));
     }
 
@@ -961,7 +981,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations).unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
         let encoded = certificate.encode();
         let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
         assert_eq!(decoded, certificate);
@@ -984,7 +1004,7 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0].assemble(attestations).is_none());
+        assert!(schemes[0].assemble(attestations, &Sequential).is_none());
     }
 
     #[test]
@@ -1007,7 +1027,7 @@ mod tests {
         // Corrupt signer index to be out of range
         attestations[0].signer = Participant::new(999);
 
-        assert!(schemes[0].assemble(attestations).is_none());
+        assert!(schemes[0].assemble(attestations, &Sequential).is_none());
     }
 
     #[test]
@@ -1027,7 +1047,7 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble(attestations).unwrap();
+        let mut certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Artificially truncate to below quorum
         let mut signers: Vec<Participant> = certificate.signers.iter().collect();
@@ -1040,7 +1060,8 @@ mod tests {
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &certificate
+            &certificate,
+            &Sequential,
         ));
     }
 
@@ -1060,7 +1081,7 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble(attestations).unwrap();
+        let mut certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Remove one signature but keep signers bitmap unchanged
         certificate.signatures.pop();
@@ -1070,7 +1091,8 @@ mod tests {
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &certificate
+            &certificate,
+            &Sequential,
         ));
     }
 
@@ -1097,7 +1119,7 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble(attestations).unwrap());
+            certificates.push(schemes[0].assemble(attestations, &Sequential).unwrap());
         }
 
         let certs_iter = messages.iter().zip(&certificates).map(|(msg, cert)| {
@@ -1109,7 +1131,11 @@ mod tests {
             )
         });
 
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, certs_iter));
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            certs_iter,
+            &Sequential
+        ));
     }
 
     #[test]
@@ -1135,7 +1161,7 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble(attestations).unwrap());
+            certificates.push(schemes[0].assemble(attestations, &Sequential).unwrap());
         }
 
         // Corrupt second certificate
@@ -1150,7 +1176,11 @@ mod tests {
             )
         });
 
-        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, certs_iter));
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            certs_iter,
+            &Sequential
+        ));
     }
 
     #[test]
@@ -1174,7 +1204,7 @@ mod tests {
         attestations.push(attestations.last().unwrap().clone());
 
         // This should panic due to duplicate signer
-        schemes[0].assemble(attestations);
+        schemes[0].assemble(attestations, &Sequential);
     }
 
     #[test]
@@ -1223,7 +1253,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations).unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Well-formed certificate decodes successfully
         let encoded = certificate.encode();
@@ -1274,7 +1304,7 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble(attestations).unwrap();
+        let mut certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Add an unknown signer (out of range)
         let mut signers: Vec<Participant> = certificate.signers.iter().collect();
@@ -1290,6 +1320,7 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             &certificate,
+            &Sequential,
         ));
     }
 
@@ -1310,7 +1341,7 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble(attestations).unwrap();
+        let mut certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
@@ -1319,6 +1350,7 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             &certificate,
+            &Sequential,
         ));
 
         // Make the signers bitmap size larger (mismatched with participants)
@@ -1332,6 +1364,7 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             &certificate,
+            &Sequential,
         ));
     }
 
@@ -1352,7 +1385,7 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble(attestations).unwrap();
+        let mut certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Make the signers bitmap size larger than participants
         let signers: Vec<Participant> = certificate.signers.iter().collect();
@@ -1366,7 +1399,8 @@ mod tests {
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
             },
-            &certificate
+            &certificate,
+            &Sequential,
         ));
     }
 

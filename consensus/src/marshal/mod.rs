@@ -148,7 +148,7 @@ mod tests {
     type B = Block<D>;
     type K = PublicKey;
     type V = MinPk;
-    type S = bls12381_threshold::Scheme<K, V, Sequential>;
+    type S = bls12381_threshold::Scheme<K, V>;
     type P = ConstantProvider<S, Epoch>;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -193,6 +193,7 @@ mod tests {
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            strategy: Sequential,
         };
 
         // Create the resolver
@@ -330,7 +331,7 @@ mod tests {
             .collect();
 
         // Generate certificate signatures
-        Finalization::from_finalizes(&schemes[0], &finalizes).unwrap()
+        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
     }
 
     fn make_notarization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Notarization<S, D> {
@@ -342,7 +343,7 @@ mod tests {
             .collect();
 
         // Generate certificate signatures
-        Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()
+        Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
     }
 
     fn setup_network(

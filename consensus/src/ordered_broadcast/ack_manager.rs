@@ -4,6 +4,7 @@ use commonware_cryptography::{
     certificate::{Attestation, Scheme},
     Digest, PublicKey,
 };
+use commonware_parallel::Strategy;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A struct representing a set of votes for a payload digest.
@@ -60,7 +61,12 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
     /// Adds a vote to the evidence.
     ///
     /// If-and-only-if the quorum is newly-reached, the certificate is returned.
-    pub fn add_ack(&mut self, ack: &Ack<P, S, D>, scheme: &S) -> Option<S::Certificate> {
+    pub fn add_ack(
+        &mut self,
+        ack: &Ack<P, S, D>,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Option<S::Certificate> {
         let evidence = self
             .acks
             .entry(ack.chunk.sequencer.clone())
@@ -83,7 +89,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
                 attestations.push(ack.attestation.clone());
 
                 // Try to assemble certificate
-                let certificate = scheme.assemble(attestations.iter().cloned())?;
+                let certificate = scheme.assemble(attestations.iter().cloned(), strategy)?;
 
                 // Take ownership of the votes, which must exist
                 p.attestations.remove(&ack.chunk.payload);
@@ -164,6 +170,7 @@ mod tests {
         ed25519::PublicKey,
         Hasher, Sha256,
     };
+    use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
     use helpers::Sha256Digest;
     use rand::{rngs::StdRng, SeedableRng as _};
@@ -232,7 +239,7 @@ mod tests {
             let acks = create_acks_for_indices(schemes, chunk, epoch, indices);
             let mut certificate = None;
             for ack in acks {
-                if let Some(cert) = manager.add_ack(&ack, &schemes[0]) {
+                if let Some(cert) = manager.add_ack(&ack, &schemes[0], &Sequential) {
                     certificate = Some(cert);
                 }
             }
@@ -504,8 +511,12 @@ mod tests {
         let chunk = Chunk::new(sequencer, height, Sha256::hash(b"payload"));
 
         let ack = helpers::create_ack(&fixture.schemes[0], chunk, epoch);
-        assert!(acks.add_ack(&ack, &fixture.schemes[0]).is_none());
-        assert!(acks.add_ack(&ack, &fixture.schemes[0]).is_none());
+        assert!(acks
+            .add_ack(&ack, &fixture.schemes[0], &Sequential)
+            .is_none());
+        assert!(acks
+            .add_ack(&ack, &fixture.schemes[0], &Sequential)
+            .is_none());
     }
 
     #[test]
@@ -536,14 +547,16 @@ mod tests {
             helpers::create_acks_for_indices(&fixture.schemes, chunk.clone(), epoch, &[0, 1, 2]);
         let mut produced = None;
         for ack in acks_vec {
-            if let Some(cert) = acks.add_ack(&ack, &fixture.schemes[0]) {
+            if let Some(cert) = acks.add_ack(&ack, &fixture.schemes[0], &Sequential) {
                 produced = Some(cert);
             }
         }
         assert!(produced.is_some());
 
         let ack = helpers::create_ack(&fixture.schemes[3], chunk, epoch);
-        assert!(acks.add_ack(&ack, &fixture.schemes[0]).is_none());
+        assert!(acks
+            .add_ack(&ack, &fixture.schemes[0], &Sequential)
+            .is_none());
     }
 
     #[test]
@@ -612,7 +625,9 @@ mod tests {
 
         let acks_vec = helpers::create_acks_for_indices(&fixture.schemes, chunk, epoch, &[0, 1]);
         for ack in acks_vec {
-            assert!(acks.add_ack(&ack, &fixture.schemes[0]).is_none());
+            assert!(acks
+                .add_ack(&ack, &fixture.schemes[0], &Sequential)
+                .is_none());
         }
         assert_eq!(acks.get_certificate(&sequencer, height), None);
     }
@@ -656,14 +671,14 @@ mod tests {
         for i in 0..14 {
             // Add payload1 ack
             let ack1 = helpers::create_ack(&fixture.schemes[i], chunk1.clone(), epoch);
-            if let Some(cert) = acks.add_ack(&ack1, &fixture.schemes[0]) {
+            if let Some(cert) = acks.add_ack(&ack1, &fixture.schemes[0], &Sequential) {
                 certificates.push((chunk1.payload, cert));
             }
 
             // Add payload2 ack (from validators 6-19)
             if i + 6 < 20 {
                 let ack2 = helpers::create_ack(&fixture.schemes[i + 6], chunk2.clone(), epoch);
-                if let Some(cert) = acks.add_ack(&ack2, &fixture.schemes[0]) {
+                if let Some(cert) = acks.add_ack(&ack2, &fixture.schemes[0], &Sequential) {
                     certificates.push((chunk2.payload, cert));
                 }
             }

@@ -33,7 +33,6 @@ use commonware_codec::Encode;
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, PublicKey, Sha256,
 };
-use commonware_parallel::Strategy;
 use commonware_utils::{modulo, ordered::Set};
 use std::marker::PhantomData;
 
@@ -185,15 +184,14 @@ impl Random {
     }
 }
 
-impl<P, V, S> Config<bls12381_threshold::Scheme<P, V, S>> for Random
+impl<P, V> Config<bls12381_threshold::Scheme<P, V>> for Random
 where
     P: PublicKey,
     V: Variant,
-    S: Strategy,
 {
-    type Elector = RandomElector<bls12381_threshold::Scheme<P, V, S>>;
+    type Elector = RandomElector<bls12381_threshold::Scheme<P, V>>;
 
-    fn build(self, participants: &Set<P>) -> RandomElector<bls12381_threshold::Scheme<P, V, S>> {
+    fn build(self, participants: &Set<P>) -> RandomElector<bls12381_threshold::Scheme<P, V>> {
         assert!(!participants.is_empty(), "no participants");
         RandomElector {
             n: participants.len() as u32,
@@ -211,12 +209,11 @@ pub struct RandomElector<S: Scheme> {
     _phantom: PhantomData<S>,
 }
 
-impl<P, V, S> Elector<bls12381_threshold::Scheme<P, V, S>>
-    for RandomElector<bls12381_threshold::Scheme<P, V, S>>
+impl<P, V> Elector<bls12381_threshold::Scheme<P, V>>
+    for RandomElector<bls12381_threshold::Scheme<P, V>>
 where
     P: PublicKey,
     V: Variant,
-    S: Strategy,
 {
     fn elect(
         &self,
@@ -247,7 +244,7 @@ mod tests {
     const NAMESPACE: &[u8] = b"test";
 
     type ThresholdScheme =
-        bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk, Sequential>;
+        bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
 
     #[test]
     fn round_robin_rotates_through_participants() {
@@ -431,7 +428,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert1 = schemes[0].assemble(attestations1).unwrap();
+        let cert1 = schemes[0].assemble(attestations1, &Sequential).unwrap();
 
         // Create certificate for round (1, 3) (different round -> different seed signature)
         let round2 = Round::new(Epoch::new(1), View::new(3));
@@ -443,7 +440,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert2 = schemes[0].assemble(attestations2).unwrap();
+        let cert2 = schemes[0].assemble(attestations2, &Sequential).unwrap();
 
         // Same certificate always gives same leader
         let leader1a = elector.elect(round1, Some(&cert1));
@@ -550,7 +547,7 @@ mod tests {
                     .take(quorum)
                     .map(|s| s.sign::<Sha256Digest>(Subject::Nullify { round }).unwrap())
                     .collect();
-                let cert = schemes[0].assemble(attestations).unwrap();
+                let cert = schemes[0].assemble(attestations, &Sequential).unwrap();
 
                 // Elect leader using the certificate
                 let leader = elector.elect(round, Some(&cert));

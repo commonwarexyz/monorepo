@@ -625,6 +625,7 @@ mod tests {
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::futures::AbortablePool;
     use std::time::Duration;
@@ -664,8 +665,9 @@ mod tests {
                 .iter()
                 .map(|scheme| Notarize::sign(scheme, notarize_proposal.clone()).unwrap())
                 .collect();
-            let notarization = Notarization::from_notarizes(&verifier, notarize_votes.iter())
-                .expect("notarization");
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
             state.add_notarization(notarization);
 
             // Produce candidate once
@@ -683,7 +685,8 @@ mod tests {
                 })
                 .collect();
             let nullification =
-                Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
+                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
+                    .expect("nullification");
             state.add_nullification(nullification);
 
             // Produce candidate once
@@ -700,8 +703,9 @@ mod tests {
                 .iter()
                 .map(|scheme| Finalize::sign(scheme, finalize_proposal.clone()).unwrap())
                 .collect();
-            let finalization = Finalization::from_finalizes(&verifier, finalize_votes.iter())
-                .expect("finalization");
+            let finalization =
+                Finalization::from_finalizes(&verifier, finalize_votes.iter(), &Sequential)
+                    .expect("finalization");
             state.add_finalization(finalization);
 
             // Produce candidate once
@@ -803,8 +807,9 @@ mod tests {
                 .iter()
                 .map(|scheme| Finalize::sign(scheme, proposal_a.clone()).unwrap())
                 .collect();
-            let finalization = Finalization::from_finalizes(&verifier, finalization_votes.iter())
-                .expect("finalization");
+            let finalization =
+                Finalization::from_finalizes(&verifier, finalization_votes.iter(), &Sequential)
+                    .expect("finalization");
             state.add_finalization(finalization);
 
             // Update last finalize to be in the future
@@ -867,7 +872,8 @@ mod tests {
                 .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+                Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                    .unwrap();
             state.add_notarization(notarization);
 
             // The parent is still not certified
@@ -912,8 +918,9 @@ mod tests {
                 .iter()
                 .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
-            let notarization = Notarization::from_notarizes(&verifier, notarize_votes.iter())
-                .expect("notarization");
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
             state.add_notarization(notarization.clone());
 
             // Insert proposal at view 2 with parent at view 1
@@ -933,8 +940,9 @@ mod tests {
                 .iter()
                 .map(|scheme| Finalize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
-            let finalization = Finalization::from_finalizes(&verifier, finalize_votes.iter())
-                .expect("finalization");
+            let finalization =
+                Finalization::from_finalizes(&verifier, finalize_votes.iter(), &Sequential)
+                    .expect("finalization");
             state.add_finalization(finalization.clone());
 
             // parent_certificate now returns the finalization (preferred)
@@ -975,7 +983,8 @@ mod tests {
                 .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+                Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                    .unwrap();
             state.add_notarization(notarization);
             state.create_round(View::new(2));
 
@@ -1017,7 +1026,8 @@ mod tests {
                         .unwrap()
                 })
                 .collect();
-            let nullification = Nullification::from_nullifies(&verifier, &nullify_votes).unwrap();
+            let nullification =
+                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential).unwrap();
             state.add_nullification(nullification);
 
             // Get genesis payload
@@ -1062,8 +1072,9 @@ mod tests {
                 .iter()
                 .map(|scheme| Finalize::sign(scheme, proposal_a.clone()).unwrap())
                 .collect();
-            let finalization = Finalization::from_finalizes(&verifier, finalization_votes.iter())
-                .expect("finalization");
+            let finalization =
+                Finalization::from_finalizes(&verifier, finalization_votes.iter(), &Sequential)
+                    .expect("finalization");
             state.add_finalization(finalization);
 
             // Attempt to verify before finalized
@@ -1116,8 +1127,8 @@ mod tests {
                 .take(3)
                 .map(|scheme| Notarize::sign(scheme, proposal_b.clone()).unwrap())
                 .collect();
-            let conflicting =
-                Notarization::from_notarizes(&verifier, votes_b.iter()).expect("certificate");
+            let conflicting = Notarization::from_notarizes(&verifier, votes_b.iter(), &Sequential)
+                .expect("certificate");
             state.add_notarization(conflicting.clone());
             state.replay(&Artifact::Notarization(conflicting.clone()));
 
@@ -1178,7 +1189,7 @@ mod tests {
                     .iter()
                     .map(|s| Notarize::sign(s, proposal.clone()).unwrap())
                     .collect();
-                Notarization::from_notarizes(&verifier, votes.iter()).unwrap()
+                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap()
             };
 
             // Helper to create finalization for a view
@@ -1192,7 +1203,7 @@ mod tests {
                     .iter()
                     .map(|s| Finalize::sign(s, proposal.clone()).unwrap())
                     .collect();
-                Finalization::from_finalizes(&verifier, votes.iter()).unwrap()
+                Finalization::from_finalizes(&verifier, votes.iter(), &Sequential).unwrap()
             };
 
             let mut pool = AbortablePool::<()>::default();

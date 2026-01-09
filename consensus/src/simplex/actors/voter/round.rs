@@ -562,6 +562,7 @@ mod tests {
         types::{Epoch, Participant, View},
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
+    use commonware_parallel::Sequential;
     use commonware_utils::{futures::AbortablePool, test_rng};
 
     #[test]
@@ -603,7 +604,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal_b.clone()).unwrap())
             .collect();
         let certificate =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
         let (accepted, equivocator) = round.add_notarization(certificate.clone());
         assert!(accepted);
         assert!(equivocator.is_some());
@@ -656,7 +658,8 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal_b.clone()).unwrap())
             .collect();
         let certificate =
-            Finalization::from_finalizes(&verifier, finalization_votes.iter()).unwrap();
+            Finalization::from_finalizes(&verifier, finalization_votes.iter(), &Sequential)
+                .unwrap();
         let (accepted, equivocator) = round.add_finalization(certificate.clone());
         assert!(accepted);
         assert!(equivocator.is_some());
@@ -670,7 +673,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal_b.clone()).unwrap())
             .collect();
         let certificate =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
         let (accepted, equivocator) = round.add_notarization(certificate.clone());
         assert!(accepted);
         assert_eq!(equivocator, None); // already detected
@@ -708,7 +712,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let certificate =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
         let (accepted, equivocator) = round.add_notarization(certificate);
         assert!(accepted);
         assert!(equivocator.is_none());
@@ -736,7 +741,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
+            Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                .expect("notarization");
 
         // Create nullification
         let nullify_local = Nullify::sign::<Sha256Digest>(&local_scheme, round).expect("nullify");
@@ -744,8 +750,8 @@ mod tests {
             .iter()
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).expect("nullify"))
             .collect();
-        let nullification =
-            Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
+        let nullification = Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
+            .expect("nullification");
 
         // Create finalize
         let finalize_local = Finalize::sign(&local_scheme, proposal.clone()).expect("finalize");
@@ -754,7 +760,8 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let finalization =
-            Finalization::from_finalizes(&verifier, finalize_votes.iter()).expect("finalization");
+            Finalization::from_finalizes(&verifier, finalize_votes.iter(), &Sequential)
+                .expect("finalization");
 
         // Replay messages and verify broadcast flags
         let mut round = Round::new(local_scheme, round, now);
@@ -850,7 +857,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
@@ -891,7 +899,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
@@ -931,7 +940,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
@@ -973,7 +983,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
@@ -1005,7 +1016,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 

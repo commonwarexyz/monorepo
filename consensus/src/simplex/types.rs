@@ -11,6 +11,7 @@ use commonware_cryptography::{
     certificate::{Attestation, Scheme},
     Digest, PublicKey,
 };
+use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
@@ -786,7 +787,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Verifies the notarize vote against the provided signing scheme.
     ///
     /// This ensures that the notarize signature is valid for the claimed proposal.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
@@ -797,6 +798,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
                 proposal: &self.proposal,
             },
             &self.attestation,
+            strategy,
         )
     }
 
@@ -901,10 +903,11 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     pub fn from_notarizes<'a>(
         scheme: &S,
         notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
+        strategy: &impl Strategy,
     ) -> Option<Self> {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
-        let certificate = scheme.assemble(iter.map(|n| n.attestation.clone()))?;
+        let certificate = scheme.assemble(iter.map(|n| n.attestation.clone()), strategy)?;
 
         Some(Self {
             proposal,
@@ -915,7 +918,12 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Verifies the notarization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R: CryptoRngCore>(
+        &self,
+        rng: &mut R,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> bool
     where
         S: scheme::Scheme<D>,
     {
@@ -925,6 +933,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
                 proposal: &self.proposal,
             },
             &self.certificate,
+            strategy,
         )
     }
 
@@ -1043,7 +1052,7 @@ impl<S: Scheme> Nullify<S> {
     /// Verifies the nullify vote against the provided signing scheme.
     ///
     /// This ensures that the nullify signature is valid for the given round.
-    pub fn verify<R, D: Digest>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R, D: Digest>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
@@ -1052,6 +1061,7 @@ impl<S: Scheme> Nullify<S> {
             rng,
             Subject::Nullify { round: self.round },
             &self.attestation,
+            strategy,
         )
     }
 
@@ -1130,10 +1140,11 @@ impl<S: Scheme> Nullification<S> {
     pub fn from_nullifies<'a>(
         scheme: &S,
         nullifies: impl IntoIterator<Item = &'a Nullify<S>>,
+        strategy: &impl Strategy,
     ) -> Option<Self> {
         let mut iter = nullifies.into_iter().peekable();
         let round = iter.peek()?.round;
-        let certificate = scheme.assemble(iter.map(|n| n.attestation.clone()))?;
+        let certificate = scheme.assemble(iter.map(|n| n.attestation.clone()), strategy)?;
 
         Some(Self { round, certificate })
     }
@@ -1141,7 +1152,12 @@ impl<S: Scheme> Nullification<S> {
     /// Verifies the nullification certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed round.
-    pub fn verify<R: CryptoRngCore, D: Digest>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R: CryptoRngCore, D: Digest>(
+        &self,
+        rng: &mut R,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> bool
     where
         S: scheme::Scheme<D>,
     {
@@ -1149,6 +1165,7 @@ impl<S: Scheme> Nullification<S> {
             rng,
             Subject::Nullify { round: self.round },
             &self.certificate,
+            strategy,
         )
     }
 
@@ -1251,7 +1268,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     /// Verifies the finalize vote against the provided signing scheme.
     ///
     /// This ensures that the finalize signature is valid for the claimed proposal.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
@@ -1262,6 +1279,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
                 proposal: &self.proposal,
             },
             &self.attestation,
+            strategy,
         )
     }
 
@@ -1366,10 +1384,11 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     pub fn from_finalizes<'a>(
         scheme: &S,
         finalizes: impl IntoIterator<Item = &'a Finalize<S, D>>,
+        strategy: &impl Strategy,
     ) -> Option<Self> {
         let mut iter = finalizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
-        let certificate = scheme.assemble(iter.map(|f| f.attestation.clone()))?;
+        let certificate = scheme.assemble(iter.map(|f| f.attestation.clone()), strategy)?;
 
         Some(Self {
             proposal,
@@ -1380,7 +1399,12 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Verifies the finalization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R: CryptoRngCore>(
+        &self,
+        rng: &mut R,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> bool
     where
         S: scheme::Scheme<D>,
     {
@@ -1390,6 +1414,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
                 proposal: &self.proposal,
             },
             &self.certificate,
+            strategy,
         )
     }
 
@@ -1649,7 +1674,12 @@ impl<S: Scheme, D: Digest> Response<S, D> {
     }
 
     /// Verifies the certificates contained in this response against the signing scheme.
-    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R: CryptoRngCore>(
+        &self,
+        rng: &mut R,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> bool
     where
         S: scheme::Scheme<D>,
     {
@@ -1674,7 +1704,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
             (context, &nullification.certificate)
         });
 
-        scheme.verify_certificates::<_, D, _>(rng, notarizations.chain(nullifications))
+        scheme.verify_certificates::<_, D, _>(rng, notarizations.chain(nullifications), strategy)
     }
 }
 
@@ -1883,21 +1913,26 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// This method **always** performs verification regardless of whether the activity has been
     /// previously verified. Callers can use [`Activity::verified`] to check if verification is
     /// necessary before calling this method.
-    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R: CryptoRngCore>(
+        &self,
+        rng: &mut R,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> bool
     where
         S: scheme::Scheme<D>,
     {
         match self {
-            Self::Notarize(n) => n.verify(rng, scheme),
-            Self::Notarization(n) => n.verify(rng, scheme),
-            Self::Certification(n) => n.verify(rng, scheme),
-            Self::Nullify(n) => n.verify(rng, scheme),
-            Self::Nullification(n) => n.verify(rng, scheme),
-            Self::Finalize(f) => f.verify(rng, scheme),
-            Self::Finalization(f) => f.verify(rng, scheme),
-            Self::ConflictingNotarize(c) => c.verify(rng, scheme),
-            Self::ConflictingFinalize(c) => c.verify(rng, scheme),
-            Self::NullifyFinalize(c) => c.verify(rng, scheme),
+            Self::Notarize(n) => n.verify(rng, scheme, strategy),
+            Self::Notarization(n) => n.verify(rng, scheme, strategy),
+            Self::Certification(n) => n.verify(rng, scheme, strategy),
+            Self::Nullify(n) => n.verify(rng, scheme, strategy),
+            Self::Nullification(n) => n.verify(rng, scheme, strategy),
+            Self::Finalize(f) => f.verify(rng, scheme, strategy),
+            Self::Finalization(f) => f.verify(rng, scheme, strategy),
+            Self::ConflictingNotarize(c) => c.verify(rng, scheme, strategy),
+            Self::ConflictingFinalize(c) => c.verify(rng, scheme, strategy),
+            Self::NullifyFinalize(c) => c.verify(rng, scheme, strategy),
         }
     }
 }
@@ -2147,12 +2182,13 @@ impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.notarize_1.verify(rng, scheme) && self.notarize_2.verify(rng, scheme)
+        self.notarize_1.verify(rng, scheme, strategy)
+            && self.notarize_2.verify(rng, scheme, strategy)
     }
 }
 
@@ -2262,12 +2298,13 @@ impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.finalize_1.verify(rng, scheme) && self.finalize_2.verify(rng, scheme)
+        self.finalize_1.verify(rng, scheme, strategy)
+            && self.finalize_2.verify(rng, scheme, strategy)
     }
 }
 
@@ -2375,12 +2412,12 @@ impl<S: Scheme, D: Digest> NullifyFinalize<S, D> {
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.nullify.verify(rng, scheme) && self.finalize.verify(rng, scheme)
+        self.nullify.verify(rng, scheme, strategy) && self.finalize.verify(rng, scheme, strategy)
     }
 }
 
@@ -2458,6 +2495,7 @@ mod tests {
         certificate::mocks::Fixture,
         sha256::Digest as Sha256,
     };
+    use commonware_parallel::Sequential;
     use commonware_utils::{quorum, quorum_from_slice, test_rng};
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -2512,7 +2550,7 @@ mod tests {
         let decoded = Notarize::decode(encoded).unwrap();
 
         assert_eq!(notarize, decoded);
-        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -2542,12 +2580,13 @@ mod tests {
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes).unwrap();
+        let notarization =
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
         let encoded = notarization.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Notarization::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(notarization, decoded);
-        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -2572,7 +2611,7 @@ mod tests {
         let encoded = nullify.encode();
         let decoded = Nullify::decode(encoded).unwrap();
         assert_eq!(nullify, decoded);
-        assert!(decoded.verify::<_, Sha256>(&mut rng, &fixture.schemes[0]));
+        assert!(decoded.verify::<_, Sha256>(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -2598,12 +2637,13 @@ mod tests {
             .iter()
             .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
             .collect();
-        let nullification = Nullification::from_nullifies(&fixture.schemes[0], &nullifies).unwrap();
+        let nullification =
+            Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
         let encoded = nullification.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Nullification::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(nullification, decoded);
-        assert!(decoded.verify::<_, Sha256>(&mut rng, &fixture.schemes[0]));
+        assert!(decoded.verify::<_, Sha256>(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -2629,7 +2669,7 @@ mod tests {
         let encoded = finalize.encode();
         let decoded = Finalize::decode(encoded).unwrap();
         assert_eq!(finalize, decoded);
-        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -2656,12 +2696,13 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let finalization = Finalization::from_finalizes(&fixture.schemes[0], &finalizes).unwrap();
+        let finalization =
+            Finalization::from_finalizes(&fixture.schemes[0], &finalizes, &Sequential).unwrap();
         let encoded = finalization.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Finalization::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(finalization, decoded);
-        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -2700,14 +2741,16 @@ mod tests {
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes).unwrap();
+        let notarization =
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
 
         let nullifies: Vec<_> = fixture
             .schemes
             .iter()
             .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
             .collect();
-        let nullification = Nullification::from_nullifies(&fixture.schemes[0], &nullifies).unwrap();
+        let nullification =
+            Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
 
         let response = Response::<S, Sha256>::new(1, vec![notarization], vec![nullification]);
         let encoded_response = Backfiller::<S, Sha256>::Response(response.clone()).encode();
@@ -2753,14 +2796,16 @@ mod tests {
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes).unwrap();
+        let notarization =
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
 
         let nullifies: Vec<_> = fixture
             .schemes
             .iter()
             .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
             .collect();
-        let nullification = Nullification::from_nullifies(&fixture.schemes[0], &nullifies).unwrap();
+        let nullification =
+            Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
 
         let response = Response::<S, Sha256>::new(1, vec![notarization], vec![nullification]);
         let cfg = fixture.schemes[0].certificate_codec_config();
@@ -2770,13 +2815,13 @@ mod tests {
         assert_eq!(response.notarizations.len(), decoded.notarizations.len());
         assert_eq!(response.nullifications.len(), decoded.nullifications.len());
 
-        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
 
         decoded.nullifications[0].round = Round::new(
             decoded.nullifications[0].round.epoch(),
             decoded.nullifications[0].round.view().next(),
         );
-        assert!(!decoded.verify(&mut rng, &fixture.schemes[0]));
+        assert!(!decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -2814,7 +2859,7 @@ mod tests {
         let decoded = ConflictingNotarize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting, decoded);
-        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -2852,7 +2897,7 @@ mod tests {
         let decoded = ConflictingFinalize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting, decoded);
-        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -2882,7 +2927,7 @@ mod tests {
         let decoded = NullifyFinalize::<S, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflict, decoded);
-        assert!(decoded.verify(&mut rng, &fixture.schemes[0]));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -2908,8 +2953,8 @@ mod tests {
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
         let notarize = Notarize::sign(&fixture.schemes[0], proposal).unwrap();
 
-        assert!(notarize.verify(&mut rng, &fixture.schemes[0]));
-        assert!(!notarize.verify(&mut rng, &wrong_fixture.schemes[0]));
+        assert!(notarize.verify(&mut rng, &fixture.schemes[0], &Sequential));
+        assert!(!notarize.verify(&mut rng, &wrong_fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -2934,8 +2979,8 @@ mod tests {
         let proposal = Proposal::new(round, View::new(5), sample_digest(2));
         let notarize = Notarize::sign(&fixture.schemes[0], proposal).unwrap();
 
-        assert!(notarize.verify(&mut rng, &fixture.schemes[0]));
-        assert!(!notarize.verify(&mut rng, &wrong_fixture.verifier));
+        assert!(notarize.verify(&mut rng, &fixture.schemes[0], &Sequential));
+        assert!(!notarize.verify(&mut rng, &wrong_fixture.verifier, &Sequential));
     }
 
     #[test]
@@ -2966,10 +3011,11 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes)
-            .expect("quorum notarization");
-        assert!(notarization.verify(&mut rng, &fixture.schemes[0]));
-        assert!(!notarization.verify(&mut rng, &wrong_fixture.verifier));
+        let notarization =
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
+                .expect("quorum notarization");
+        assert!(notarization.verify(&mut rng, &fixture.schemes[0], &Sequential));
+        assert!(!notarization.verify(&mut rng, &wrong_fixture.verifier, &Sequential));
     }
 
     #[test]
@@ -3001,11 +3047,12 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let notarization = Notarization::from_notarizes(&fixture.schemes[0], &notarizes)
-            .expect("quorum notarization");
-        assert!(notarization.verify(&mut rng, &fixture.schemes[0]));
+        let notarization =
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
+                .expect("quorum notarization");
+        assert!(notarization.verify(&mut rng, &fixture.schemes[0], &Sequential));
 
-        assert!(!notarization.verify(&mut rng, &wrong_fixture.schemes[0]));
+        assert!(!notarization.verify(&mut rng, &wrong_fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -3037,7 +3084,7 @@ mod tests {
             .collect();
 
         assert!(
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes).is_none(),
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).is_none(),
             "insufficient votes should not form a notarization"
         );
     }
@@ -3070,9 +3117,9 @@ mod tests {
         let notarize2 = Notarize::sign(&fixture.schemes[0], proposal2).unwrap();
         let conflict = ConflictingNotarize::new(notarize1, notarize2);
 
-        assert!(conflict.verify(&mut rng, &fixture.schemes[0]));
-        assert!(!conflict.verify(&mut rng, &wrong_ns_fixture.schemes[0]));
-        assert!(!conflict.verify(&mut rng, &wrong_scheme_fixture.verifier));
+        assert!(conflict.verify(&mut rng, &fixture.schemes[0], &Sequential));
+        assert!(!conflict.verify(&mut rng, &wrong_ns_fixture.schemes[0], &Sequential));
+        assert!(!conflict.verify(&mut rng, &wrong_scheme_fixture.verifier, &Sequential));
     }
 
     #[test]
@@ -3102,9 +3149,9 @@ mod tests {
         let finalize = Finalize::sign(&fixture.schemes[0], proposal).unwrap();
         let conflict = NullifyFinalize::new(nullify, finalize);
 
-        assert!(conflict.verify(&mut rng, &fixture.schemes[0]));
-        assert!(!conflict.verify(&mut rng, &wrong_ns_fixture.schemes[0]));
-        assert!(!conflict.verify(&mut rng, &wrong_scheme_fixture.verifier));
+        assert!(conflict.verify(&mut rng, &fixture.schemes[0], &Sequential));
+        assert!(!conflict.verify(&mut rng, &wrong_ns_fixture.schemes[0], &Sequential));
+        assert!(!conflict.verify(&mut rng, &wrong_scheme_fixture.verifier, &Sequential));
     }
 
     #[test]
@@ -3135,10 +3182,11 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let finalization = Finalization::from_finalizes(&fixture.schemes[0], &finalizes)
-            .expect("quorum finalization");
-        assert!(finalization.verify(&mut rng, &fixture.schemes[0]));
-        assert!(!finalization.verify(&mut rng, &wrong_fixture.verifier));
+        let finalization =
+            Finalization::from_finalizes(&fixture.schemes[0], &finalizes, &Sequential)
+                .expect("quorum finalization");
+        assert!(finalization.verify(&mut rng, &fixture.schemes[0], &Sequential));
+        assert!(!finalization.verify(&mut rng, &wrong_fixture.verifier, &Sequential));
     }
 
     #[test]
@@ -3239,9 +3287,7 @@ mod tests {
         use crate::simplex::scheme::bls12381_threshold;
         use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
-        use commonware_parallel::Sequential;
-
-        type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig, Sequential>;
+        type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Vote<Scheme, Sha256Digest>>,

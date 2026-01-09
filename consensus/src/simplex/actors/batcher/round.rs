@@ -12,6 +12,7 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
+use commonware_parallel::Strategy;
 use commonware_utils::ordered::{Quorum, Set};
 use rand_core::CryptoRngCore;
 use tracing::warn;
@@ -313,8 +314,9 @@ impl<
     pub fn verify_notarizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
+        strategy: &impl Strategy,
     ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
-        self.verifier.verify_notarizes(rng)
+        self.verifier.verify_notarizes(rng, strategy)
     }
 
     pub fn ready_nullifies(&self) -> bool {
@@ -328,8 +330,9 @@ impl<
     pub fn verify_nullifies<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
+        strategy: &impl Strategy,
     ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
-        self.verifier.verify_nullifies(rng)
+        self.verifier.verify_nullifies(rng, strategy)
     }
 
     pub fn ready_finalizes(&self) -> bool {
@@ -343,8 +346,9 @@ impl<
     pub fn verify_finalizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
+        strategy: &impl Strategy,
     ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
-        self.verifier.verify_finalizes(rng)
+        self.verifier.verify_finalizes(rng, strategy)
     }
 
     /// Returns true if the leader was active in this round.
@@ -380,7 +384,11 @@ impl<
     /// Attempts to construct a notarization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_notarization(&mut self, scheme: &S) -> Option<Notarization<S, D>> {
+    pub fn try_construct_notarization(
+        &mut self,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Option<Notarization<S, D>> {
         if self.has_notarization() {
             return None;
         }
@@ -388,7 +396,7 @@ impl<
             return None;
         }
         let notarization =
-            Notarization::from_notarizes(scheme, self.verified_votes.iter_notarizes())?;
+            Notarization::from_notarizes(scheme, self.verified_votes.iter_notarizes(), strategy)?;
         self.set_notarization(notarization.clone());
         Some(notarization)
     }
@@ -396,7 +404,11 @@ impl<
     /// Attempts to construct a nullification certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_nullification(&mut self, scheme: &S) -> Option<Nullification<S>> {
+    pub fn try_construct_nullification(
+        &mut self,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Option<Nullification<S>> {
         if self.has_nullification() {
             return None;
         }
@@ -404,7 +416,7 @@ impl<
             return None;
         }
         let nullification =
-            Nullification::from_nullifies(scheme, self.verified_votes.iter_nullifies())?;
+            Nullification::from_nullifies(scheme, self.verified_votes.iter_nullifies(), strategy)?;
         self.set_nullification(nullification.clone());
         Some(nullification)
     }
@@ -412,7 +424,11 @@ impl<
     /// Attempts to construct a finalization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_finalization(&mut self, scheme: &S) -> Option<Finalization<S, D>> {
+    pub fn try_construct_finalization(
+        &mut self,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Option<Finalization<S, D>> {
         if self.has_finalization() {
             return None;
         }
@@ -420,7 +436,7 @@ impl<
             return None;
         }
         let finalization =
-            Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes())?;
+            Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes(), strategy)?;
         self.set_finalization(finalization.clone());
         Some(finalization)
     }

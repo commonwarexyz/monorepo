@@ -11,6 +11,7 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Namespace, Provider, Scheme},
     Digest, PublicKey, Signer,
 };
+use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, union};
 use futures::channel::oneshot;
 use rand_core::CryptoRngCore;
@@ -637,6 +638,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         rng: &mut R,
         verifier: &ChunkVerifier,
         provider: &impl Provider<Scope = Epoch, Scheme = S>,
+        strategy: &impl Strategy,
     ) -> Result<Option<Chunk<P, D>>, Error>
     where
         S: scheme::Scheme<P, D>,
@@ -662,7 +664,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             chunk: &parent_chunk,
             epoch: parent.epoch,
         };
-        if !parent_scheme.verify_certificate::<R, D>(rng, ctx, &parent.certificate) {
+        if !parent_scheme.verify_certificate::<R, D>(rng, ctx, &parent.certificate, strategy) {
             return Err(Error::InvalidCertificate);
         }
         Ok(Some(parent_chunk))
@@ -792,7 +794,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     /// using the provided scheme.
     ///
     /// Returns true if the attestation is valid, false otherwise.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRngCore,
         S: scheme::Scheme<P, D>,
@@ -801,7 +803,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_attestation::<_, D>(rng, ctx, &self.attestation)
+        scheme.verify_attestation::<_, D>(rng, ctx, &self.attestation, strategy)
     }
 
     /// Generate a new Ack by signing with the provided scheme.
@@ -1064,7 +1066,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
     /// using the provided scheme.
     ///
     /// Returns true if the signature is valid, false otherwise.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRngCore,
         S: scheme::Scheme<P, D>,
@@ -1073,7 +1075,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_certificate::<R, D>(rng, ctx, &self.certificate)
+        scheme.verify_certificate::<R, D>(rng, ctx, &self.certificate, strategy)
     }
 }
 
@@ -1140,6 +1142,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Signer,
     };
+    use commonware_parallel::Sequential;
     use commonware_utils::{quorum, test_rng};
     use rand::{rngs::StdRng, SeedableRng};
     use std::panic::catch_unwind;
@@ -1209,7 +1212,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble(attestations)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create and test parent
@@ -1270,7 +1273,7 @@ mod tests {
             .collect();
 
         let parent_certificate = fixture.schemes[0]
-            .assemble(parent_attestations)
+            .assemble(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create proper parent with valid certificate
@@ -1352,7 +1355,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble(parent_attestations)
+            .assemble(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         let parent =
@@ -1494,14 +1497,14 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble(attestations)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk.clone(), epoch, certificate);
 
         // Verify lock
-        assert!(lock.verify(&mut rng, &fixture.verifier));
+        assert!(lock.verify(&mut rng, &fixture.verifier, &Sequential));
 
         // Test activity with the lock
         let activity = Activity::<PublicKey, S, Sha256Digest>::Lock(lock.clone());
@@ -1513,7 +1516,7 @@ mod tests {
             Activity::Lock(l) => {
                 assert_eq!(l.chunk, chunk);
                 assert_eq!(l.epoch, epoch);
-                assert!(l.verify(&mut rng, &fixture.verifier));
+                assert!(l.verify(&mut rng, &fixture.verifier, &Sequential));
             }
             _ => panic!("Decoded activity has wrong type"),
         }
@@ -1576,7 +1579,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble(attestations)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock, encode and decode
@@ -1590,7 +1593,7 @@ mod tests {
         assert_eq!(decoded.epoch, lock.epoch);
 
         // Verify the signature in the decoded lock
-        assert!(decoded.verify(&mut rng, &fixture.verifier));
+        assert!(decoded.verify(&mut rng, &fixture.verifier, &Sequential));
     }
 
     #[test]
@@ -1620,7 +1623,7 @@ mod tests {
         let node: Node<PublicKey, S, Sha256Digest> =
             Node::sign(&mut signer, Height::zero(), sample_digest(1), None);
         let provider = ConstantProvider::new(fixture.verifier.clone());
-        let result = node.verify(&mut rng, &verifier, &provider);
+        let result = node.verify(&mut rng, &verifier, &provider, &Sequential);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
 
@@ -1638,7 +1641,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble(parent_attestations)
+            .assemble(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         let parent = Some(Parent::<S, Sha256Digest>::new(
@@ -1649,7 +1652,7 @@ mod tests {
         let node: Node<PublicKey, S, Sha256Digest> =
             Node::sign(&mut signer, Height::new(1), sample_digest(2), parent);
 
-        let result = node.verify(&mut rng, &verifier, &provider);
+        let result = node.verify(&mut rng, &verifier, &provider, &Sequential);
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
     }
@@ -1676,7 +1679,7 @@ mod tests {
         let epoch = Epoch::new(5);
 
         let ack = Ack::sign(&fixture.schemes[0], chunk, epoch).expect("Should sign ack");
-        assert!(ack.verify(&mut rng, &fixture.verifier));
+        assert!(ack.verify(&mut rng, &fixture.verifier, &Sequential));
     }
 
     #[test]
@@ -1713,14 +1716,14 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble(attestations)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock with certificate
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk, epoch, certificate);
 
         // Verify lock
-        assert!(lock.verify(&mut rng, &fixture.verifier));
+        assert!(lock.verify(&mut rng, &fixture.verifier, &Sequential));
     }
 
     #[test]
@@ -1755,14 +1758,14 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble(attestations)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk, epoch, certificate);
 
         // Verify lock
-        assert!(lock.verify(&mut rng, &fixture.verifier));
+        assert!(lock.verify(&mut rng, &fixture.verifier, &Sequential));
     }
 
     #[test]
@@ -1819,7 +1822,9 @@ mod tests {
         // Verification should succeed
         let provider = ConstantProvider::new(fixture.verifier);
         let verifier = chunk_verifier();
-        assert!(node.verify(&mut rng, &verifier, &provider).is_ok());
+        assert!(node
+            .verify(&mut rng, &verifier, &provider, &Sequential)
+            .is_ok());
 
         // Now create a node with invalid signature
         let tampered_signature = scheme.sign(chunk_namespace.as_ref(), &node.encode());
@@ -1827,7 +1832,7 @@ mod tests {
 
         // Verification should fail
         assert!(matches!(
-            invalid_node.verify(&mut rng, &verifier, &provider),
+            invalid_node.verify(&mut rng, &verifier, &provider, &Sequential),
             Err(Error::InvalidSequencerSignature)
         ));
     }
@@ -1868,7 +1873,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble(parent_attestations)
+            .assemble(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create parent with valid certificate
@@ -1887,7 +1892,9 @@ mod tests {
         // Verification should succeed
         let provider = ConstantProvider::new(fixture.verifier.clone());
         let verifier = chunk_verifier();
-        assert!(node.verify(&mut rng, &verifier, &provider).is_ok());
+        assert!(node
+            .verify(&mut rng, &verifier, &provider, &Sequential)
+            .is_ok());
 
         // Now create a parent with invalid certificate
         // Generate certificate with the wrong keys (sign with schemes[1..] but pretend it's from schemes[0..])
@@ -1900,7 +1907,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(wrong_ctx.clone()).unwrap())
             .collect();
         let wrong_certificate = fixture.schemes[0]
-            .assemble(wrong_attestations)
+            .assemble(wrong_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create parent with certificate signed for wrong context (wrong epoch)
@@ -1916,7 +1923,7 @@ mod tests {
 
         // Verification should fail because the parent certificate was signed for different epoch
         assert!(matches!(
-            node.verify(&mut rng, &verifier, &provider),
+            node.verify(&mut rng, &verifier, &provider, &Sequential),
             Err(Error::InvalidCertificate)
         ));
     }
@@ -1949,7 +1956,7 @@ mod tests {
                 .expect("Should sign ack");
 
         // Verification should succeed
-        assert!(ack.verify(&mut rng, &fixture.verifier));
+        assert!(ack.verify(&mut rng, &fixture.verifier, &Sequential));
 
         // Create an ack with tampered signature by signing with a different scheme
         let ctx = AckSubject {
@@ -1965,7 +1972,7 @@ mod tests {
         let invalid_ack = Ack::<PublicKey, S, Sha256Digest>::new(chunk, epoch, tampered_vote);
 
         // Verification should fail because the signer index doesn't match the signature
-        assert!(!invalid_ack.verify(&mut rng, &fixture.verifier));
+        assert!(!invalid_ack.verify(&mut rng, &fixture.verifier, &Sequential));
     }
 
     #[test]
@@ -1996,10 +2003,10 @@ mod tests {
             .expect("Should sign ack");
 
         // Verification should succeed with correct verifier
-        assert!(ack.verify(&mut rng, &fixture.verifier));
+        assert!(ack.verify(&mut rng, &fixture.verifier, &Sequential));
 
         // Verification should fail with wrong verifier
-        assert!(!ack.verify(&mut rng, &wrong_fixture.verifier));
+        assert!(!ack.verify(&mut rng, &wrong_fixture.verifier, &Sequential));
     }
 
     #[test]
@@ -2035,14 +2042,14 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble(attestations)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock
         let lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk.clone(), epoch, certificate);
 
         // Verification should succeed
-        assert!(lock.verify(&mut rng, &fixture.verifier));
+        assert!(lock.verify(&mut rng, &fixture.verifier, &Sequential));
 
         // Generate certificate with the wrong keys
         let wrong_attestations: Vec<_> = wrong_fixture.schemes[..quorum_size]
@@ -2050,17 +2057,17 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let wrong_certificate = wrong_fixture.schemes[0]
-            .assemble(wrong_attestations)
+            .assemble(wrong_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock with wrong signature
         let wrong_lock = Lock::<PublicKey, S, Sha256Digest>::new(chunk, epoch, wrong_certificate);
 
         // Verification should fail with the original public key
-        assert!(!wrong_lock.verify(&mut rng, &fixture.verifier));
+        assert!(!wrong_lock.verify(&mut rng, &fixture.verifier, &Sequential));
 
         // But succeed with the matching wrong verifier
-        assert!(wrong_lock.verify(&mut rng, &wrong_fixture.verifier));
+        assert!(wrong_lock.verify(&mut rng, &wrong_fixture.verifier, &Sequential));
     }
 
     #[test]
@@ -2139,7 +2146,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble(attestations)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         let parent = Parent::<S, Sha256Digest>::new(sample_digest(0), Epoch::new(5), certificate);
@@ -2224,7 +2231,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble(parent_attestations)
+            .assemble(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         let parent =

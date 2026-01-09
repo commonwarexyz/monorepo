@@ -224,6 +224,7 @@ mod tests {
         certificate::mocks::Fixture, ed25519::PublicKey, sha256::Digest as Sha256Digest,
     };
     use commonware_macros::test_async;
+    use commonware_parallel::Sequential;
     use commonware_utils::{test_rng, vec::NonEmptyVec};
     use std::{
         collections::BTreeSet,
@@ -311,7 +312,7 @@ mod tests {
             .iter()
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).unwrap())
             .collect();
-        Nullification::from_nullifies(verifier, &votes).expect("nullification quorum")
+        Nullification::from_nullifies(verifier, &votes, &Sequential).expect("nullification quorum")
     }
 
     fn build_notarization(
@@ -328,7 +329,7 @@ mod tests {
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(verifier, &votes).expect("notarization quorum")
+        Notarization::from_notarizes(verifier, &votes, &Sequential).expect("notarization quorum")
     }
 
     fn build_finalization(
@@ -345,7 +346,7 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(verifier, &votes).expect("finalization quorum")
+        Finalization::from_finalizes(verifier, &votes, &Sequential).expect("finalization quorum")
     }
 
     #[test_async]

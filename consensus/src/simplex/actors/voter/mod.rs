@@ -70,6 +70,7 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config as NConfig, Network};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::{quorum, NZUsize, NZU16};
     use futures::{channel::mpsc, FutureExt, StreamExt};
@@ -96,7 +97,7 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let certificate = Notarization::from_notarizes(&schemes[0], &votes)
+        let certificate = Notarization::from_notarizes(&schemes[0], &votes, &Sequential)
             .expect("notarization requires a quorum of votes");
         (votes, certificate)
     }
@@ -114,7 +115,7 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let certificate = Finalization::from_finalizes(&schemes[0], &votes)
+        let certificate = Finalization::from_finalizes(&schemes[0], &votes, &Sequential)
             .expect("finalization requires a quorum of votes");
         (votes, certificate)
     }

@@ -4,6 +4,7 @@ use crate::{
     Automaton, Monitor, Relay, Reporter,
 };
 use commonware_cryptography::{certificate::Provider, Digest, Signer};
+use commonware_parallel::Strategy;
 use commonware_runtime::buffer::PoolRef;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -20,6 +21,7 @@ pub struct Config<
     R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
+    T: Strategy,
 > {
     /// The signer used when this engine acts as a sequencer.
     ///
@@ -94,4 +96,7 @@ pub struct Config<
 
     /// Buffer pool for the journal.
     pub journal_buffer_pool: PoolRef,
+
+    /// Strategy for parallel operations.
+    pub strategy: T,
 }
