@@ -68,26 +68,28 @@ pub type DST = &'static [u8];
 #[repr(transparent)]
 pub struct Scalar(blst_fr);
 
+impl Scalar {
+    /// Creates a non-zero Scalar from 64 bytes of input key material.
+    ///
+    /// Uses `blst_keygen` which follows IETF BLS KeyGen and guarantees
+    /// the result is non-zero by looping internally if needed.
+    fn from_ikm(ikm: &[u8; 64]) -> Self {
+        let mut sc = blst_scalar::default();
+        let mut ret = blst_fr::default();
+        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
+        unsafe {
+            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
+            blst_fr_from_scalar(&mut ret, &sc);
+        }
+        Self(ret)
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Scalar {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        // Generate 32 bytes and convert to scalar with automatic modular reduction
-        let bytes = u.arbitrary::<[u8; SCALAR_LENGTH]>()?;
-        let mut fr = blst_fr::default();
-        // SAFETY: bytes is a valid 32-byte array; blst_scalar_from_bendian handles reduction.
-        unsafe {
-            let mut scalar = blst_scalar::default();
-            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            blst_fr_from_scalar(&mut fr, &scalar);
-        }
-        let result = Self(fr);
-        // We avoid generating zero scalars, since this module assumes that scalars
-        // can't be zero, since they're punned to private keys.
-        if result == <Self as Additive>::zero() {
-            Ok(BLST_FR_ONE)
-        } else {
-            Ok(result)
-        }
+        let ikm = u.arbitrary::<[u8; 64]>()?;
+        Ok(Self::from_ikm(&ikm))
     }
 }
 
@@ -125,13 +127,11 @@ pub struct SmallScalar {
 }
 
 impl SmallScalar {
-    /// Generates a random 128-bit scalar.
-    pub fn random(mut rng: impl CryptoRngCore) -> Self {
-        let mut bytes = [0u8; 32]; // blst_scalar is 32 bytes
-                                   // Fill the last 16 bytes (128 bits) with entropy.
-                                   // In big-endian, bytes[16..32] are the least significant.
-                                   // Leaving bytes[0..16] as zero ensures the scalar is < 2^128.
-        rng.fill_bytes(&mut bytes[SMALL_SCALAR_LENGTH..]);
+    /// Creates a SmallScalar from 16 bytes (128 bits) in big-endian format.
+    fn from_bytes(small_bytes: [u8; SMALL_SCALAR_LENGTH]) -> Self {
+        let mut bytes = [0u8; 32];
+        // Copy to the last 16 bytes (big-endian: lower bits)
+        bytes[SMALL_SCALAR_LENGTH..].copy_from_slice(&small_bytes);
 
         let mut scalar = blst_scalar::default();
         // SAFETY: bytes is a valid 32-byte array.
@@ -139,6 +139,13 @@ impl SmallScalar {
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
         }
         Self { inner: scalar }
+    }
+
+    /// Generates a random 128-bit scalar.
+    pub fn random(mut rng: impl CryptoRngCore) -> Self {
+        let mut small_bytes = [0u8; SMALL_SCALAR_LENGTH];
+        rng.fill_bytes(&mut small_bytes);
+        Self::from_bytes(small_bytes)
     }
 
     /// Returns the underlying blst_scalar.
@@ -152,6 +159,40 @@ impl SmallScalar {
             inner: blst_scalar::default(),
         }
     }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for SmallScalar {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let bytes = u.arbitrary::<[u8; SMALL_SCALAR_LENGTH]>()?;
+        Ok(Self::from_bytes(bytes))
+    }
+}
+
+impl Write for SmallScalar {
+    fn write(&self, buf: &mut impl BufMut) {
+        // Extract and write only the lower 128 bits (16 bytes) in big-endian
+        let mut bytes = [0u8; 32];
+        // SAFETY: bytes is a valid 32-byte array.
+        unsafe {
+            blst_bendian_from_scalar(bytes.as_mut_ptr(), &self.inner);
+        }
+        // Write only the last 16 bytes (the lower 128 bits in big-endian)
+        buf.put_slice(&bytes[SMALL_SCALAR_LENGTH..]);
+    }
+}
+
+impl Read for SmallScalar {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let bytes = <[u8; SMALL_SCALAR_LENGTH]>::read(buf)?;
+        Ok(Self::from_bytes(bytes))
+    }
+}
+
+impl FixedSize for SmallScalar {
+    const SIZE: usize = SMALL_SCALAR_LENGTH;
 }
 
 /// This constant serves as the multiplicative identity (i.e., "one") in the
@@ -568,20 +609,9 @@ impl Random for Scalar {
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut ikm = [0u8; 64];
         rng.fill_bytes(&mut ikm);
-
-        let mut sc = blst_scalar::default();
-        let mut ret = blst_fr::default();
-        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
-        unsafe {
-            // blst_keygen loops until a non-zero value is produced (in accordance with IETF BLS KeyGen 4+).
-            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
-            blst_fr_from_scalar(&mut ret, &sc);
-        }
-
-        // Zeroize the ikm buffer
+        let result = Self::from_ikm(&ikm);
         ikm.zeroize();
-
-        Self(ret)
+        result
     }
 }
 
@@ -1633,6 +1663,15 @@ mod tests {
     }
 
     #[test]
+    fn test_small_scalar_codec() {
+        let original = SmallScalar::random(&mut test_rng());
+        let mut encoded = original.encode();
+        assert_eq!(encoded.len(), SmallScalar::SIZE);
+        let decoded = SmallScalar::decode(&mut encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
     fn test_g1_codec() {
         let original = G1::generator() * &Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
@@ -1978,6 +2017,7 @@ mod tests {
             CodecConformance<G1>,
             CodecConformance<G2>,
             CodecConformance<Scalar>,
+            CodecConformance<SmallScalar>,
             CodecConformance<Share>
         }
     }
