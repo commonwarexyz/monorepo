@@ -87,7 +87,7 @@ mod test {
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+    use commonware_utils::{sequence::FixedBytes, test_rng, NZUsize, NZU16, NZU64};
     use rand::{rngs::StdRng, seq::IteratorRandom, RngCore, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -155,7 +155,7 @@ mod test {
     /// Create n random operations. Some portion of the updates are deletes.
     /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
     fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
-        let mut rng = StdRng::seed_from_u64(1337);
+        let mut rng = test_rng();
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {

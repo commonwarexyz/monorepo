@@ -562,12 +562,11 @@ mod tests {
         types::{Epoch, Participant, View},
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
-    use commonware_utils::futures::AbortablePool;
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{futures::AbortablePool, test_rng};
 
     #[test]
     fn equivocation_detected_on_proposal_notarization_conflict() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
             schemes,
@@ -620,7 +619,7 @@ mod tests {
 
     #[test]
     fn equivocation_detected_on_proposal_finalization_conflict() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
             schemes,
@@ -686,7 +685,7 @@ mod tests {
 
     #[test]
     fn no_equivocation_on_matching_certificate() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..
@@ -717,7 +716,7 @@ mod tests {
 
     #[test]
     fn replay_message_sets_broadcast_flags() {
-        let mut rng = StdRng::seed_from_u64(2029);
+        let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..
@@ -784,7 +783,7 @@ mod tests {
 
     #[test]
     fn construct_nullify_blocked_by_finalize() {
-        let mut rng = StdRng::seed_from_u64(2029);
+        let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, namespace, 4);
         let local_scheme = schemes[0].clone();
@@ -809,7 +808,7 @@ mod tests {
 
     #[test]
     fn try_certify_requires_notarization() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, namespace, 4);
         let local_scheme = schemes[0].clone();
@@ -829,7 +828,7 @@ mod tests {
 
     #[test]
     fn try_certify_blocked_when_already_certified() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..
@@ -870,7 +869,7 @@ mod tests {
 
     #[test]
     fn try_certify_blocked_when_handle_exists() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..
@@ -910,7 +909,7 @@ mod tests {
 
     #[test]
     fn try_certify_blocked_after_abort() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..
@@ -953,7 +952,7 @@ mod tests {
 
     #[test]
     fn try_certify_returns_proposal_from_certificate() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..
@@ -985,7 +984,7 @@ mod tests {
 
     #[test]
     fn certified_after_abort_handles_race_condition() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
             schemes, verifier, ..

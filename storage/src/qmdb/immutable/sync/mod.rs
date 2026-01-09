@@ -168,9 +168,9 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{test_rng, test_rng_seeded, NZUsize, NZU16, NZU64};
     use futures::{channel::mpsc, SinkExt as _};
-    use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use rand::RngCore as _;
     use rstest::rstest;
     use std::{
         collections::HashMap,
@@ -230,7 +230,7 @@ mod tests {
     /// Create n random Set operations.
     /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
     fn create_test_ops(n: usize) -> Vec<Operation<sha256::Digest, sha256::Digest>> {
-        let mut rng = StdRng::seed_from_u64(1337);
+        let mut rng = test_rng();
         let mut ops = Vec::new();
         for _i in 0..n {
             let key = sha256::Digest::random(&mut rng);
@@ -321,7 +321,7 @@ mod tests {
 
             // Put more key-value pairs into both databases
             let mut new_ops = Vec::new();
-            let mut rng = StdRng::seed_from_u64(42);
+            let mut rng = test_rng_seeded(1);
             let mut new_kvs: HashMap<sha256::Digest, sha256::Digest> = HashMap::new();
             for _i in 0..expected_kvs.len() {
                 let key = sha256::Digest::random(&mut rng);

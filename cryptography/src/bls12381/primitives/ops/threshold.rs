@@ -352,8 +352,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{quorum, test_rng, union_unique, NZUsize, Participant, NZU32};
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{quorum, test_rng, union_unique, NZUsize, NZU32};
 
     fn blst_verify_proof_of_possession<V: Variant>(
         public: &V::Public,
@@ -578,7 +577,7 @@ mod tests {
     }
 
     fn recover_with_weights_correct<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(3333);
+        let mut rng = test_rng();
         let (n, t) = (6, quorum(6));
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
 
@@ -600,7 +599,7 @@ mod tests {
     }
 
     fn recover_multiple_test<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(3333);
+        let mut rng = test_rng();
         let (n, t) = (6, quorum(6));
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
 
@@ -1053,7 +1052,7 @@ mod tests {
     }
 
     fn batch_verify_same_message_rejects_malleability<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(12345);
+        let mut rng = test_rng();
         let n = 5;
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
@@ -1124,7 +1123,7 @@ mod tests {
     }
 
     fn batch_verify_same_signer_rejects_malleability<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(54321);
+        let mut rng = test_rng();
         let n = 5;
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
         let namespace: &[u8] = b"test";
