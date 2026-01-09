@@ -23,7 +23,7 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
-use commonware_parallel::Sequential;
+use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Participant};
 use core::fmt::Debug;
 use rand_core::CryptoRngCore;
@@ -294,10 +294,11 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Assembles a certificate from a collection of attestations.
-    pub fn assemble<S, I>(&self, attestations: I) -> Option<V::Signature>
+    pub fn assemble<S, I, St>(&self, attestations: I, strategy: &St) -> Option<V::Signature>
     where
         S: Scheme<Signature = V::Signature>,
         I: IntoIterator<Item = Attestation<S>>,
+        St: Strategy,
     {
         let partials: Vec<_> = attestations
             .into_iter()
@@ -312,7 +313,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             return None;
         }
 
-        threshold::recover::<V, _>(quorum, partials.iter()).ok()
+        threshold::recover::<V, _, _>(quorum, partials.iter(), strategy).ok()
     }
 
     /// Verifies a certificate.
@@ -338,13 +339,19 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Verifies multiple certificates in a batch.
-    pub fn verify_certificates<'a, S, R, D, I>(&self, rng: &mut R, certificates: I) -> bool
+    pub fn verify_certificates<'a, S, R, D, I, St>(
+        &self,
+        rng: &mut R,
+        certificates: I,
+        strategy: &St,
+    ) -> bool
     where
         S: Scheme,
         S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a V::Signature)>,
+        St: Strategy,
     {
         let mut entries: Vec<_> = Vec::new();
 
@@ -363,7 +370,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .map(|(ns, msg, sig)| (ns.as_ref(), msg.as_ref(), *sig))
             .collect();
 
-        batch::verify_same_signer::<_, V, _, _>(rng, self.identity(), &entries_refs, &Sequential)
+        batch::verify_same_signer::<_, V, _, _>(rng, self.identity(), &entries_refs, strategy)
             .is_ok()
     }
 
@@ -557,12 +564,12 @@ mod macros {
                 fn assemble<I>(
                     &self,
                     attestations: I,
-                    _strategy: &impl commonware_parallel::Strategy,
+                    strategy: &impl commonware_parallel::Strategy,
                 ) -> Option<Self::Certificate>
                 where
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
-                    self.generic.assemble(attestations)
+                    self.generic.assemble(attestations, strategy)
                 }
 
                 fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: $crate::Digest>(
@@ -580,7 +587,7 @@ mod macros {
                     &self,
                     rng: &mut R,
                     certificates: I,
-                    _strategy: &impl commonware_parallel::Strategy,
+                    strategy: &impl commonware_parallel::Strategy,
                 ) -> bool
                 where
                     R: rand::Rng + rand::CryptoRng,
@@ -588,7 +595,7 @@ mod macros {
                     I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 {
                     self.generic
-                        .verify_certificates::<Self, _, D, _>(rng, certificates)
+                        .verify_certificates::<Self, _, D, _, _>(rng, certificates, strategy)
                 }
 
                 fn is_attributable() -> bool {
