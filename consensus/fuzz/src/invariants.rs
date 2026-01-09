@@ -200,7 +200,6 @@ fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
     let mut cursor = encoded.as_ref();
     let signers =
         Signers::read_cfg(&mut cursor, &usize::MAX).expect("certificate signers must decode");
-    println!("{}", signers.count());
     Some(signers.count())
 }
 
