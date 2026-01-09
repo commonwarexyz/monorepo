@@ -2,9 +2,13 @@
 n_cases = 65536
 hash = "d01e3ef0dd81919abd3f149649940ae2e8cff6dc4aa9f927d544aece387b12d1"
 
-["commonware_cryptography::bloomfilter::tests::conformance::CodecConformance<BloomFilter>"]
+["commonware_cryptography::bloomfilter::conformance::CodecConformance<BloomFilter>"]
 n_cases = 65536
-hash = "a75d6312366816126114abdc9d7fbd246891cab210eeae6a02781625aa1ad6a4"
+hash = "698dac6cf35fcd1557a962e7215da4251d7e42f68a2331b70ff0dd542c4116dd"
+
+["commonware_cryptography::bloomfilter::conformance::FpRateBuckets"]
+n_cases = 1024
+hash = "723f3a5fd8b147f722d5fa990f39b3ffd6a2f0df46d00dcb1e294647b565eb85"
 
 ["commonware_cryptography::bls12381::certificate::multisig::tests::conformance::CodecConformance<Certificate<MinSig>>"]
 n_cases = 65536
