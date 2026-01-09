@@ -220,8 +220,14 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// * `oldest_retained_pos()` returns `None` (fully pruned)
     /// * Next append receives position `size`
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
-        // Initialize empty data journal
-        let data = variable::Journal::init(
+        let items_per_section = cfg.items_per_section.get();
+
+        // Calculate tail section state
+        let tail_section = size / items_per_section;
+        let tail_items = size % items_per_section;
+
+        // Initialize data journal (empty initially)
+        let mut data = variable::Journal::init(
             context.clone(),
             variable::Config {
                 partition: cfg.data_partition(),
@@ -233,26 +239,81 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         )
         .await?;
 
-        // Initialize offsets journal at the target size
-        let offsets = crate::qmdb::any::unordered::fixed::sync::init_journal_at_size(
-            context,
-            fixed::Config {
-                partition: cfg.offsets_partition(),
-                items_per_blob: cfg.items_per_section,
-                buffer_pool: cfg.buffer_pool,
-                write_buffer: cfg.write_buffer,
-            },
-            size,
-        )
-        .await?;
+        if tail_items > 0 {
+            // Size is NOT at section boundary - need to write dummies for crash recovery.
+            // Only write dummies to the tail section (not full sections that would be pruned).
+            // This ensures align_journals can count items correctly on recovery.
 
-        Ok(Self {
-            data,
-            offsets,
-            items_per_section: cfg.items_per_section.get(),
-            size,
-            oldest_retained_pos: size,
-        })
+            let mut offsets = fixed::Journal::init(
+                context,
+                fixed::Config {
+                    partition: cfg.offsets_partition(),
+                    items_per_blob: cfg.items_per_section,
+                    buffer_pool: cfg.buffer_pool,
+                    write_buffer: cfg.write_buffer,
+                },
+            )
+            .await?;
+
+            // Write dummy items for all positions 0..size
+            for pos in 0..size {
+                let section = pos / items_per_section;
+
+                // Append size-0 dummy to data journal, get byte offset
+                let offset = data.append_dummy(section).await?;
+                // Append offset to offsets journal
+                offsets.append(offset).await?;
+
+                // Sync at section boundaries
+                if (pos + 1) % items_per_section == 0 {
+                    data.sync(section).await?;
+                    offsets.sync().await?;
+                }
+            }
+
+            // Final sync for partial tail section
+            data.sync(tail_section).await?;
+            offsets.sync().await?;
+
+            // Prune complete sections to minimize storage
+            if tail_section > 0 {
+                data.prune(tail_section).await?;
+                offsets.prune(tail_section * items_per_section).await?;
+            }
+
+            // Set oldest_retained_pos = size so that oldest_retained_pos() returns None,
+            // indicating no "real" data is retained (only dummies for alignment).
+            // After crash recovery via init(), this will be updated to the section boundary.
+            Ok(Self {
+                data,
+                offsets,
+                items_per_section,
+                size,
+                oldest_retained_pos: size,
+            })
+        } else {
+            // Size is exactly at section boundary - use init_journal_at_size for offsets.
+            // No dummies needed because align_journals handles the "both empty" case correctly.
+            let offsets = crate::qmdb::any::unordered::fixed::sync::init_journal_at_size(
+                context,
+                fixed::Config {
+                    partition: cfg.offsets_partition(),
+                    items_per_blob: cfg.items_per_section,
+                    buffer_pool: cfg.buffer_pool,
+                    write_buffer: cfg.write_buffer,
+                },
+                size,
+            )
+            .await?;
+
+            Ok(Self {
+                data,
+                offsets,
+                items_per_section,
+                size,
+                oldest_retained_pos: size,
+            })
+        }
     }
 
     /// Initialize a [Journal] for use in state sync.
@@ -601,17 +662,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
         // === Handle empty data journal case ===
+        // Use count_items_in_section to count items without decoding them.
+        // This allows counting size-0 dummy items that cannot be decoded.
         let items_in_last_section = match data.newest_section() {
-            Some(last_section) => {
-                let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
-                futures::pin_mut!(stream);
-                let mut count = 0u64;
-                while let Some(result) = stream.next().await {
-                    result?; // Propagate replay errors (corruption, etc.)
-                    count += 1;
-                }
-                count
-            }
+            Some(last_section) => data.count_items_in_section(last_section, 0).await?,
             None => 0,
         };
 
@@ -2239,6 +2293,100 @@ mod tests {
             let pos = journal.append(999).await.unwrap();
             assert_eq!(pos, 15);
             assert_eq!(journal.read(15).await.unwrap(), 999);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that `init_at_size` with partial section survives crash recovery.
+    ///
+    /// This is a regression test for the bug where `init_at_size` left the data journal
+    /// empty but initialized the offsets journal, causing `align_journals` to rewind
+    /// the offsets to 0 on crash recovery.
+    #[test_traced]
+    fn test_init_at_size_partial_section_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init_at_size_recovery".to_string(),
+                items_per_section: NZU64!(11),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Initialize at size 13 (2 items in tail section 1)
+            // This triggers the partial section case where dummies must be written.
+            let journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 13)
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 13);
+            // Initially, oldest_retained_pos() returns None (fully pruned state)
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            drop(journal);
+
+            // Simulate crash recovery via init()
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Should recover to size 13 (this was the bug - it used to recover to 0)
+            assert_eq!(journal.size(), 13);
+
+            // After recovery, oldest_retained_pos is at the section boundary
+            // because we have dummy items in section 1 (positions 11, 12)
+            assert_eq!(journal.oldest_retained_pos(), Some(11));
+
+            // Can append new items starting at position 13
+            let pos = journal.append(9999).await.unwrap();
+            assert_eq!(pos, 13);
+            assert_eq!(journal.read(13).await.unwrap(), 9999);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that `init_at_size` at section boundary survives crash recovery.
+    #[test_traced]
+    fn test_init_at_size_boundary_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init_at_size_boundary_recovery".to_string(),
+                items_per_section: NZU64!(11),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Initialize at size 22 (exactly at section 2 boundary)
+            let journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 22)
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 22);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            drop(journal);
+
+            // Simulate crash recovery via init()
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Should recover to size 22
+            assert_eq!(journal.size(), 22);
+            // No data retained (fully pruned)
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Can append new items starting at position 22
+            let pos = journal.append(2200).await.unwrap();
+            assert_eq!(pos, 22);
+            assert_eq!(journal.read(22).await.unwrap(), 2200);
 
             journal.destroy().await.unwrap();
         });

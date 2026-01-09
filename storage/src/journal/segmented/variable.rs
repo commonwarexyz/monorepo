@@ -434,6 +434,64 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         ))
     }
 
+    /// Appends a dummy (size-0) entry to the journal.
+    ///
+    /// This writes just a varint(0) header with no data bytes. Used for
+    /// placeholder entries that need to be counted but never read.
+    ///
+    /// Returns the byte offset where the dummy was written.
+    pub async fn append_dummy(&mut self, section: u64) -> Result<u64, Error> {
+        // varint(0) is a single 0x00 byte
+        let buf = vec![0u8];
+        let blob = self.manager.get_or_create(section).await?;
+        let offset = blob.size().await;
+        blob.append(&buf).await?;
+        trace!(blob = section, offset, "appended dummy item");
+        Ok(offset)
+    }
+
+    /// Counts the number of items in a section starting from `start_offset`.
+    ///
+    /// This scans varint length prefixes without decoding item data, allowing
+    /// it to count size-0 dummy items that cannot be decoded.
+    pub async fn count_items_in_section(
+        &self,
+        section: u64,
+        start_offset: u64,
+    ) -> Result<u64, Error> {
+        let blob = match self.manager.get(section)? {
+            Some(blob) => blob,
+            None => return Ok(0),
+        };
+
+        let blob_size = blob.size().await;
+        if start_offset >= blob_size {
+            return Ok(0);
+        }
+
+        let mut offset = start_offset;
+        let mut count = 0u64;
+
+        while offset < blob_size {
+            // Read varint header (max 5 bytes for u32)
+            let buf = vec![0u8; MAX_VARINT_SIZE];
+            let (buf, available) = blob.read_up_to(buf, offset).await?;
+            if available == 0 {
+                break;
+            }
+
+            let (size, varint_len) = decode_length_prefix(&buf.as_ref()[..available])?;
+            offset = offset
+                .checked_add(varint_len as u64)
+                .ok_or(Error::OffsetOverflow)?
+                .checked_add(size as u64)
+                .ok_or(Error::OffsetOverflow)?;
+            count += 1;
+        }
+
+        Ok(count)
+    }
+
     /// Appends an item to `Journal` in a given `section`, returning the offset
     /// where the item was written and the size of the item (which may now be smaller
     /// than the encoded size from the codec, if compression is enabled).
@@ -1919,6 +1977,104 @@ mod tests {
                 let items: Vec<_> = stream.collect().await;
                 assert!(items.is_empty());
             }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_append_dummy_and_count() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_dummy".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
+
+            // Append mix of real and dummy items
+            let (offset0, _) = journal.append(0, 42u64).await.unwrap();
+            let offset1 = journal.append_dummy(0).await.unwrap();
+            let (offset2, _) = journal.append(0, 43u64).await.unwrap();
+            journal.sync(0).await.unwrap();
+
+            // Offsets should be sequential
+            assert!(offset1 > offset0);
+            assert!(offset2 > offset1);
+
+            // Count should include dummies
+            let count = journal.count_items_in_section(0, 0).await.unwrap();
+            assert_eq!(count, 3);
+
+            // Reading real items works
+            assert_eq!(journal.get(0, offset0).await.unwrap(), 42u64);
+            assert_eq!(journal.get(0, offset2).await.unwrap(), 43u64);
+
+            // Reading dummy should fail with codec error (size-0 item has no data to decode)
+            assert!(journal.get(0, offset1).await.is_err());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_count_items_multiple_dummies() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_multi_dummy".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
+
+            // Append multiple dummies in a row
+            for _ in 0..10 {
+                journal.append_dummy(0).await.unwrap();
+            }
+            journal.sync(0).await.unwrap();
+
+            // Count should be exactly 10
+            let count = journal.count_items_in_section(0, 0).await.unwrap();
+            assert_eq!(count, 10);
+
+            // Add some real items
+            journal.append(0, 100u64).await.unwrap();
+            journal.append(0, 200u64).await.unwrap();
+            journal.sync(0).await.unwrap();
+
+            // Count should now be 12
+            let count = journal.count_items_in_section(0, 0).await.unwrap();
+            assert_eq!(count, 12);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_count_items_empty_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_count_empty".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
+
+            // Count on non-existent section should return 0
+            let count = journal.count_items_in_section(0, 0).await.unwrap();
+            assert_eq!(count, 0);
+
+            let count = journal.count_items_in_section(999, 0).await.unwrap();
+            assert_eq!(count, 0);
 
             journal.destroy().await.unwrap();
         });
