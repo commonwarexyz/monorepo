@@ -54,7 +54,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, V: CodecShared>(
     )
     .await?;
 
-    // Write exactly tail_items dummies to tail_section (NOT 0..size!)
+    // Write `tail_items` dummy entries to tail to make it the right `size`
     if tail_items > 0 {
         for _ in 0..tail_items {
             data.append_dummy(tail_section).await?;
@@ -62,8 +62,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, V: CodecShared>(
         data.sync(tail_section).await?;
     }
 
-    // Initialize offsets journal at size using the efficient fixed journal method
-    // (O(1) - just creates/resizes tail blob, fills with zeros)
+    // Initialize offsets journal
     let mut offsets = crate::qmdb::any::unordered::fixed::sync::init_journal_at_size(
         context,
         fixed::Config {
@@ -79,13 +78,13 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, V: CodecShared>(
     // Sync to ensure the resized blob is persisted
     offsets.sync().await?;
 
-    Ok(variable::Journal::from_parts(
+    Ok(variable::Journal {
         data,
         offsets,
         items_per_section,
         size,
-        size, // oldest_retained_pos = size means "fully pruned"
-    ))
+        oldest_retained_pos: size, // oldest_retained_pos == size means fully pruned
+    })
 }
 
 impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T, Merkleized<H>, Durable>

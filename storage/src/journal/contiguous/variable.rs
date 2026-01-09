@@ -119,11 +119,11 @@ impl<C> Config<C> {
 /// before the offsets journal.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
-    data: variable::Journal<E, V>,
+    pub(crate) data: variable::Journal<E, V>,
 
     /// Index mapping positions to byte offsets within the data journal.
     /// The section can be calculated from the position using items_per_section.
-    offsets: fixed::Journal<E, u64>,
+    pub(crate) offsets: fixed::Journal<E, u64>,
 
     /// The number of items per section.
     ///
@@ -131,14 +131,14 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
     ///
     /// This value is immutable after initialization and must remain consistent
     /// across restarts. Changing this value will result in data loss or corruption.
-    items_per_section: u64,
+    pub(crate) items_per_section: u64,
 
     /// The next position to be assigned on append (total items appended).
     ///
     /// # Invariant
     ///
     /// Always >= `oldest_retained_pos`. Equal when data journal is empty or fully pruned.
-    size: u64,
+    pub(crate) size: u64,
 
     /// The position of the first item that remains after pruning.
     ///
@@ -146,30 +146,10 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
     ///
     /// Always section-aligned: `oldest_retained_pos % items_per_section == 0`.
     /// Never decreases (pruning only moves forward).
-    oldest_retained_pos: u64,
+    pub(crate) oldest_retained_pos: u64,
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
-    /// Construct a Journal from its component parts.
-    ///
-    /// This is used by `init_journal_at_size` to efficiently create a journal
-    /// at a specific size without iterating over all positions.
-    pub(crate) const fn from_parts(
-        data: variable::Journal<E, V>,
-        offsets: fixed::Journal<E, u64>,
-        items_per_section: u64,
-        size: u64,
-        oldest_retained_pos: u64,
-    ) -> Self {
-        Self {
-            data,
-            offsets,
-            items_per_section,
-            size,
-            oldest_retained_pos,
-        }
-    }
-
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
