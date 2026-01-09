@@ -9,13 +9,10 @@ use super::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use blst::{
-    blst_final_exp, blst_fp12, blst_miller_loop, Pairing as blst_pairing, BLS12_381_NEG_G1,
-    BLS12_381_NEG_G2,
-};
+use blst::{blst_final_exp, blst_fp12, blst_miller_loop};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
-use commonware_math::algebra::{HashToGroup, Space};
+use commonware_math::algebra::{CryptoGroup, HashToGroup, Space};
 use commonware_parallel::Strategy;
 use commonware_utils::Participant;
 use core::{
@@ -90,32 +87,7 @@ impl Variant for MinPk {
         hm: &Self::Signature,
         signature: &Self::Signature,
     ) -> Result<(), Error> {
-        // Create a pairing context
-        //
-        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
-        let mut pairing = blst_pairing::new(false, &[]);
-
-        // Convert `sig` into affine and aggregate `e(sig,-G1::one())`
-        let q = signature.as_blst_p2_affine();
-        // SAFETY: raw_aggregate takes (G2, G1) affine points; both are valid and in correct groups.
-        unsafe {
-            pairing.raw_aggregate(&q, &BLS12_381_NEG_G1);
-        }
-
-        // Convert `pk` and `hm` into affine
-        let p = public.as_blst_p1_affine();
-        let q = hm.as_blst_p2_affine();
-
-        // Aggregate `e(hm,pk)`
-        // SAFETY: raw_aggregate takes (G2, G1) affine points; both are valid and in correct groups.
-        pairing.raw_aggregate(&q, &p);
-
-        // Finalize the pairing accumulation and verify the result
-        //
-        // If `finalverify()` returns `true`, it means `e(hm,pk) * e(sig,-G1::one()) == 1`. This
-        // is equivalent to `e(hm,pk) == e(sig,G1::one())`.
-        pairing.commit();
-        if !pairing.finalverify(None) {
+        if !G2::multi_pairing_check(&[*hm], &[*public], signature, &-G1::generator()) {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -152,7 +124,7 @@ impl Variant for MinPk {
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
-        strategy: &impl Strategy,
+        par: &impl Strategy,
     ) -> Result<(), Error> {
         // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());
@@ -167,39 +139,9 @@ impl Variant for MinPk {
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using MSM with 128-bit scalars.
-        let s_agg = G2::msm(signatures, &scalars, strategy);
-
-        // Initialize pairing context. DST is empty as we use pre-hashed messages.
-        let mut pairing = blst_pairing::new(false, &[]);
-
-        // Aggregate the single term corresponding to signatures: e(-G1::one(),S_agg)
-        let s_agg_affine = s_agg.as_blst_p2_affine();
-        // SAFETY: raw_aggregate takes (G2, G1) affine points; s_agg is valid G2, NEG_G1 is valid G1.
-        unsafe {
-            pairing.raw_aggregate(&s_agg_affine, &BLS12_381_NEG_G1);
-        }
-
-        // Pre-compute r_i * pk_i using 128-bit scalar multiplication
-        let scaled_pks: Vec<G1> = publics
-            .iter()
-            .zip(&scalars)
-            .map(|(pk, s)| *pk * s)
-            .collect();
-
-        // Batch convert scaled_pks to affine (1 inversion instead of n)
-        let scaled_pks_affine = G1::batch_to_affine(&scaled_pks);
-
-        // Batch convert hms to affine
-        let hms_affine = G2::batch_to_affine(hms);
-
-        // Aggregate the `n` terms corresponding to public keys and messages: e(r_i * pk_i, hm_i)
-        for (pk_affine, hm_affine) in scaled_pks_affine.iter().zip(hms_affine.iter()) {
-            pairing.raw_aggregate(hm_affine.inner(), pk_affine.inner());
-        }
-
-        // Perform the final verification on the product of (n+1) pairing terms.
-        pairing.commit();
-        if !pairing.finalverify(None) {
+        let s_agg = G2::msm(signatures, &scalars, par);
+        let scaled_pks = par.map_collect_vec(publics.iter().zip(scalars.iter()), |(&pk, s)| pk * s);
+        if !G2::multi_pairing_check(hms, &scaled_pks, &s_agg, &-G1::generator()) {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -246,32 +188,7 @@ impl Variant for MinSig {
         hm: &Self::Signature,
         signature: &Self::Signature,
     ) -> Result<(), Error> {
-        // Create a pairing context
-        //
-        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
-        let mut pairing = blst_pairing::new(false, &[]);
-
-        // Convert `sig` into affine and aggregate `e(-G2::one(), sig)`
-        let q = signature.as_blst_p1_affine();
-        // SAFETY: raw_aggregate takes (G2, G1) affine points; NEG_G2 is valid G2, sig is valid G1.
-        unsafe {
-            pairing.raw_aggregate(&BLS12_381_NEG_G2, &q);
-        }
-
-        // Convert `pk` and `hm` into affine
-        let p = public.as_blst_p2_affine();
-        let q = hm.as_blst_p1_affine();
-
-        // SAFETY: raw_aggregate takes (G2, G1) affine points; pk is valid G2, hm is valid G1.
-        // Aggregate `e(pk,hm)`
-        pairing.raw_aggregate(&p, &q);
-
-        // Finalize the pairing accumulation and verify the result
-        //
-        // If `finalverify()` returns `true`, it means `e(pk,hm) * e(-G2::one(),sig) == 1`. This
-        // is equivalent to `e(pk,hm) == e(G2::one(),sig)`.
-        pairing.commit();
-        if !pairing.finalverify(None) {
+        if !G1::multi_pairing_check(&[*hm], &[*public], signature, &-G2::generator()) {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -308,7 +225,7 @@ impl Variant for MinSig {
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
-        strategy: &impl Strategy,
+        par: &impl Strategy,
     ) -> Result<(), Error> {
         // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());
@@ -323,39 +240,9 @@ impl Variant for MinSig {
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using MSM with 128-bit scalars.
-        let s_agg = G1::msm(signatures, &scalars, strategy);
-
-        // Initialize pairing context. DST is empty as we use pre-hashed messages.
-        let mut pairing = blst_pairing::new(false, &[]);
-
-        // Aggregate the single term corresponding to signatures: e(S_agg,-G2::one())
-        let s_agg_affine = s_agg.as_blst_p1_affine();
-        // SAFETY: raw_aggregate takes (G2, G1) affine points; NEG_G2 is valid G2, s_agg is valid G1.
-        unsafe {
-            pairing.raw_aggregate(&BLS12_381_NEG_G2, &s_agg_affine);
-        }
-
-        // Pre-compute r_i * pk_i using 128-bit scalar multiplication
-        let scaled_pks: Vec<G2> = publics
-            .iter()
-            .zip(&scalars)
-            .map(|(pk, s)| *pk * s)
-            .collect();
-
-        // Batch convert scaled_pks to affine (1 inversion instead of n)
-        let scaled_pks_affine = G2::batch_to_affine(&scaled_pks);
-
-        // Batch convert hms to affine
-        let hms_affine = G1::batch_to_affine(hms);
-
-        // Aggregate the `n` terms corresponding to public keys and messages: e(hm_i, r_i * pk_i)
-        for (pk_affine, hm_affine) in scaled_pks_affine.iter().zip(hms_affine.iter()) {
-            pairing.raw_aggregate(pk_affine.inner(), hm_affine.inner());
-        }
-
-        // Perform the final verification on the product of (n+1) pairing terms.
-        pairing.commit();
-        if !pairing.finalverify(None) {
+        let s_agg = G1::msm(signatures, &scalars, par);
+        let scaled_pks = par.map_collect_vec(publics.iter().zip(scalars.iter()), |(&pk, s)| pk * s);
+        if !G1::multi_pairing_check(hms, &scaled_pks, &s_agg, &-G2::generator()) {
             return Err(Error::InvalidSignature);
         }
         Ok(())
