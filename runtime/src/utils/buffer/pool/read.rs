@@ -219,7 +219,7 @@ impl<B: Blob> Read<B> {
             // Use read_bytes which handles cross-page reads via chaining.
             match self.read_bytes(T::SIZE).await {
                 Ok(bytes) => {
-                    let item = T::decode(bytes).map_err(|e| Error::Codec(e.to_string()))?;
+                    let item = T::decode(bytes)?;
                     batch.push(f(0, Ok(item)));
 
                     // After cross-page read, check remaining bytes. If less than one item,
@@ -282,30 +282,27 @@ impl<B: Blob> Read<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Allocate new BytesMut for this fill. Old Bytes stays alive if anyone holds a reference.
-        let buf = BytesMut::zeroed(bytes_to_read);
+        // Read physical data into a temporary buffer
+        let physical_buf = vec![0u8; bytes_to_read];
+        let physical_buf = self.blob.read_at(physical_buf, start_offset).await?;
+        let physical_buf = physical_buf.as_ref();
 
-        // Read physical data into BytesMut
-        let stable_buf: StableBuf = buf.into();
-        let stable_buf = self.blob.read_at(stable_buf, start_offset).await?;
+        // Calculate max logical size and pre-allocate destination buffer.
+        // Each physical page has logical_page_size data + Checksum::SIZE overhead.
+        let num_full_pages = bytes_to_read / self.page_size;
+        let partial_page_bytes = bytes_to_read % self.page_size;
+        let max_logical_size =
+            num_full_pages * logical_page_size + partial_page_bytes.saturating_sub(Checksum::SIZE);
+        let mut logical_buf = BytesMut::with_capacity(max_logical_size);
 
-        // Convert back to BytesMut for in-place compaction
-        let mut buf: BytesMut = match stable_buf {
-            StableBuf::BytesMut(b) => b,
-            StableBuf::Vec(v) => BytesMut::from(v.as_slice()),
-        };
-
-        // Validate CRCs and compact by removing CRC records in-place.
+        // Validate CRCs and copy each page's logical data directly to destination
         let mut read_offset = 0;
-        let mut write_offset = 0;
-        let physical_len = buf.len();
-
-        while read_offset < physical_len {
-            let remaining = physical_len - read_offset;
+        while read_offset < bytes_to_read {
+            let remaining = bytes_to_read - read_offset;
 
             // Check if full page or partial
             if remaining >= self.page_size {
-                let page_slice = &buf[read_offset..read_offset + self.page_size];
+                let page_slice = &physical_buf[read_offset..read_offset + self.page_size];
                 let Some(record) = Checksum::validate_page(page_slice) else {
                     error!(
                         page = self.blob_page + (read_offset / self.page_size) as u64,
@@ -313,7 +310,6 @@ impl<B: Blob> Read<B> {
                     );
                     return Err(Error::InvalidChecksum);
                 };
-                // For non-last pages, the validated length must equal logical_page_size.
                 let (len, _) = record.get_crc();
                 let len = len as usize;
                 let is_last_page = start_offset + read_offset as u64 + self.page_size as u64
@@ -327,12 +323,7 @@ impl<B: Blob> Read<B> {
                     );
                     return Err(Error::InvalidChecksum);
                 }
-                // Compact: move logical data to remove CRC record gap
-                if write_offset != read_offset {
-                    buf.as_mut()
-                        .copy_within(read_offset..read_offset + len, write_offset);
-                }
-                write_offset += len;
+                logical_buf.extend_from_slice(&page_slice[..len]);
                 read_offset += self.page_size;
                 continue;
             }
@@ -345,7 +336,7 @@ impl<B: Blob> Read<B> {
                 );
                 return Err(Error::InvalidChecksum);
             }
-            let page_slice = &buf[read_offset..];
+            let page_slice = &physical_buf[read_offset..];
             let Some(record) = Checksum::validate_page(page_slice) else {
                 error!(
                     page = self.blob_page + (read_offset / self.page_size) as u64,
@@ -354,19 +345,11 @@ impl<B: Blob> Read<B> {
                 return Err(Error::InvalidChecksum);
             };
             let (len, _) = record.get_crc();
-            let logical_len = len as usize;
-            // Compact: move logical data
-            if write_offset != read_offset {
-                buf.as_mut()
-                    .copy_within(read_offset..read_offset + logical_len, write_offset);
-            }
-            write_offset += logical_len;
+            logical_buf.extend_from_slice(&page_slice[..len as usize]);
             break;
         }
 
-        // Truncate buffer to only contain logical data and freeze to Bytes
-        buf.truncate(write_offset);
-        self.buffer = buf.freeze();
+        self.buffer = logical_buf.freeze();
 
         // If we sought to a position that is beyond the end of what we just read, error.
         if self.buffer_position >= self.buffer.len() {
