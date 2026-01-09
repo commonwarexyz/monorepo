@@ -577,7 +577,7 @@ mod tests {
         let k = BloomFilter::<Sha256>::optimal_hashers(1 << 48, 1000);
         assert_eq!(k, 1);
         let k = BloomFilter::<Sha256>::optimal_hashers(usize::MAX, usize::MAX);
-        assert!(k >= 1 && k <= 16);
+        assert!((1..=16).contains(&k));
     }
 
     #[test]
