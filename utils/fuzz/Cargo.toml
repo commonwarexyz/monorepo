@@ -116,3 +116,10 @@ path = "fuzz_targets/channels.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "roaring"
+path = "fuzz_targets/roaring.rs"
+test = false
+doc = false
+bench = false
