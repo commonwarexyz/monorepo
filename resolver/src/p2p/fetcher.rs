@@ -501,12 +501,14 @@ where
 
     /// Blocks a peer from being used to fetch data.
     ///
-    /// Also removes the peer from all target sets.
+    /// Also removes the peer from all target sets. If a target set becomes empty after removing
+    /// the peer, the entire entry is removed to allow fallback to other available peers.
     pub fn block(&mut self, peer: P) {
-        // Remove peer from all target sets (keeping empty entries)
-        for targets in self.targets.values_mut() {
+        // Remove peer from all target sets and clean up empty entries
+        self.targets.retain(|_, targets| {
             targets.remove(&peer);
-        }
+            !targets.is_empty()
+        });
 
         self.excluded.insert(peer);
     }
@@ -1563,18 +1565,16 @@ mod tests {
             // Block peer2 - should remove from MockKey(1) and MockKey(3)
             fetcher.block(peer2);
 
-            // MockKey(1) now has empty targets (entry kept to prevent fallback)
-            assert!(fetcher.targets.contains_key(&MockKey(1)));
-            assert!(fetcher.targets.get(&MockKey(1)).unwrap().is_empty());
+            // MockKey(1) entry removed (all targets blocked, allowing fallback)
+            assert!(!fetcher.targets.contains_key(&MockKey(1)));
 
             // MockKey(2) still has peer3
             let key2_targets = fetcher.targets.get(&MockKey(2)).unwrap();
             assert_eq!(key2_targets.len(), 1);
             assert!(key2_targets.contains(&peer3));
 
-            // MockKey(3) now has empty targets (entry kept to prevent fallback)
-            assert!(fetcher.targets.contains_key(&MockKey(3)));
-            assert!(fetcher.targets.get(&MockKey(3)).unwrap().is_empty());
+            // MockKey(3) entry removed (all targets blocked, allowing fallback)
+            assert!(!fetcher.targets.contains_key(&MockKey(3)));
         });
     }
 
