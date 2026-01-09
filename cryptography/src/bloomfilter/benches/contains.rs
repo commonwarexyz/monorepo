@@ -8,7 +8,11 @@ const NUM_ITEMS: usize = 10000;
 const FP_RATES: [f64; 2] = [0.1, 0.001];
 
 fn run_contains_bench<H: Hasher>(c: &mut Criterion, hasher: &str, query_inserted: bool) {
-    let query_type = if query_inserted { "positive" } else { "negative" };
+    let query_type = if query_inserted {
+        "positive"
+    } else {
+        "negative"
+    };
     for item_size in ITEM_SIZES {
         for fp_rate in FP_RATES {
             // Create and populate the bloom filter
