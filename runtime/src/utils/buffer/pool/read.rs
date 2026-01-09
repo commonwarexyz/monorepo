@@ -449,7 +449,22 @@ impl<B: Blob> Read<B> {
             return Ok(BytesList::Single(result));
         }
 
-        // Slow path: spans buffer boundaries - chain pieces
+        let remaining_in_buffer = self.buffer.len() - self.buffer_position;
+
+        // Check if item spans 3+ buffers (larger than remaining + one full buffer).
+        // Read directly from blob - more efficient than multiple buffer fills.
+        if size > remaining_in_buffer + self.buffer_capacity {
+            let first = self.buffer.slice(self.buffer_position..);
+            self.buffer_position = self.buffer.len();
+
+            let rest_size = size - remaining_in_buffer;
+            let mut rest = vec![0u8; rest_size];
+            self.read_exact(&mut rest, rest_size).await?;
+
+            return Ok(BytesList::Two(first.chain(Bytes::from(rest))));
+        }
+
+        // Slow path: spans 2 buffers - chain pieces
         let first = self.buffer.slice(self.buffer_position..);
         let first_len = first.len();
         self.buffer_position = self.buffer.len();
@@ -460,20 +475,6 @@ impl<B: Blob> Read<B> {
         }
 
         let second_len = size - first_len;
-        if second_len > self.buffer.len() {
-            // Rare case: spans 3+ buffers, fall back to read_exact
-            let mut buf = BytesMut::with_capacity(size);
-            buf.extend_from_slice(&first);
-            buf.extend_from_slice(&self.buffer[..self.buffer.len()]);
-            self.buffer_position = self.buffer.len();
-
-            let remaining = second_len - self.buffer.len();
-            let mut rest = vec![0u8; remaining];
-            self.read_exact(&mut rest, remaining).await?;
-            buf.extend_from_slice(&rest);
-            return Ok(BytesList::Single(buf.freeze()));
-        }
-
         let second = self.buffer.slice(..second_len);
         self.buffer_position = second_len;
         Ok(BytesList::Two(first.chain(second)))
