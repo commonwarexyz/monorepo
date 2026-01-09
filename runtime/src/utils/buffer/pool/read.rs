@@ -315,6 +315,31 @@ impl<B: Blob> Replay<B> {
         }
         Ok(self.buffer.remaining >= n)
     }
+
+    /// Seeks to `offset` in the blob, returning `Err(BlobInsufficientLength)` if `offset` exceeds
+    /// the blob size.
+    pub async fn seek_to(&mut self, offset: usize) -> Result<(), Error> {
+        if offset as u64 > self.reader.blob_size() {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        // Clear existing buffer state
+        self.buffer.buffers.clear();
+        self.buffer.current_page = 0;
+        self.buffer.offset_in_page = 0;
+        self.buffer.remaining = 0;
+        self.exhausted = false;
+
+        let page_size = self.reader.logical_page_size;
+        self.reader.blob_page = (offset / page_size) as u64;
+
+        let remainder = offset % page_size;
+        if remainder > 0 {
+            assert!(self.ensure(remainder).await?, "bounds already checked");
+            self.advance(remainder);
+        }
+        Ok(())
+    }
 }
 
 impl<B: Blob> Buf for Replay<B> {
@@ -497,6 +522,39 @@ mod tests {
 
             // remaining should still be 0
             assert_eq!(replay.remaining(), 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_replay_seek_to() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
+
+            let pool_ref = super::super::PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, pool_ref)
+                .await
+                .unwrap();
+
+            // Write data spanning multiple pages
+            let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+
+            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+
+            // Seek forward, read, then seek backward
+            replay.seek_to(150).await.unwrap();
+            replay.ensure(50).await.unwrap();
+            assert_eq!(replay.chunk()[0], data[150]);
+
+            // Seek back to start
+            replay.seek_to(0).await.unwrap();
+            replay.ensure(1).await.unwrap();
+            assert_eq!(replay.chunk()[0], data[0]);
+
+            // Seek beyond blob size should error
+            assert!(replay.seek_to(data.len() + 1).await.is_err());
         });
     }
 }

@@ -11,12 +11,9 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_cryptography::{DigestOf, Hasher};
-use commonware_runtime::{
-    buffer::pool::Append, telemetry::metrics::status::GaugeExt, Blob, Clock, Metrics, Storage,
-};
+use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
+use std::ops::Range;
 use tracing::debug;
 
 impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T, Merkleized<H>, Durable>
@@ -206,59 +203,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixedShar
     cfg: fixed::Config,
     size: u64,
 ) -> Result<fixed::Journal<E, A>, crate::journal::Error> {
-    // Calculate the tail blob index and number of items in the tail
-    let tail_index = size / cfg.items_per_blob;
-    let tail_items = size % cfg.items_per_blob;
-    let tail_size = tail_items * fixed::Journal::<E, A>::CHUNK_SIZE_U64;
-
-    debug!(
-        size,
-        tail_index, tail_items, tail_size, "Initializing fresh journal at size"
-    );
-
-    // Create the tail blob with the correct size to reflect the position
-    let (tail_blob, tail_actual_size) = context
-        .open(&cfg.partition, &tail_index.to_be_bytes())
-        .await?;
-    assert_eq!(
-        tail_actual_size, 0,
-        "Expected empty blob for fresh initialization"
-    );
-
-    let tail = Append::new(
-        tail_blob,
-        0,
-        cfg.write_buffer.into(),
-        cfg.buffer_pool.clone(),
-    )
-    .await?;
-    if tail_items > 0 {
-        tail.resize(tail_size).await?;
-    }
-    let pruning_boundary = size - (size % cfg.items_per_blob);
-
-    // Initialize metrics
-    let tracked = Gauge::default();
-    let _ = tracked.try_set(tail_index + 1);
-    let synced = Counter::default();
-    let pruned = Counter::default();
-    context.register("tracked", "Number of blobs", tracked.clone());
-    context.register("synced", "Number of syncs", synced.clone());
-    context.register("pruned", "Number of blobs pruned", pruned.clone());
-
-    Ok(fixed::Journal::<E, A> {
-        context,
-        cfg,
-        blobs: BTreeMap::new(),
-        tail,
-        tail_index,
-        tracked,
-        synced,
-        pruned,
-        size,
-        pruning_boundary,
-        _array: PhantomData,
-    })
+    fixed::Journal::init_at_size(context, cfg, size).await
 }
 
 #[cfg(test)]
@@ -465,13 +410,6 @@ mod tests {
             // Verify the journal is initialized at the lower bound
             assert_eq!(sync_journal.size(), lower_bound);
             assert_eq!(sync_journal.oldest_retained_pos(), None);
-
-            // Verify the journal structure matches expected state
-            // With items_per_blob=5 and lower_bound=10, we expect:
-            // - Tail blob at index 2 (10 / 5 = 2)
-            // - No historical blobs (all operations are "pruned")
-            assert_eq!(sync_journal.blobs.len(), 0);
-            assert_eq!(sync_journal.tail_index, 2);
 
             // Verify that operations can be appended starting from the sync position
             let append_pos = sync_journal.append(test_digest(100)).await.unwrap();
@@ -707,8 +645,6 @@ mod tests {
                     .expect("Failed to initialize journal at size 0");
 
                 assert_eq!(journal.size(), 0);
-                assert_eq!(journal.tail_index, 0);
-                assert_eq!(journal.blobs.len(), 0);
                 assert_eq!(journal.oldest_retained_pos(), None);
 
                 // Should be able to append from position 0
@@ -725,8 +661,6 @@ mod tests {
                     .expect("Failed to initialize journal at size 10");
 
                 assert_eq!(journal.size(), 10);
-                assert_eq!(journal.tail_index, 2); // 10 / 5 = 2
-                assert_eq!(journal.blobs.len(), 0); // No historical blobs
                 assert_eq!(journal.oldest_retained_pos(), None); // Tail is empty
 
                 // Operations 0-9 should be pruned
@@ -750,9 +684,7 @@ mod tests {
                     .expect("Failed to initialize journal at size 7");
 
                 assert_eq!(journal.size(), 7);
-                assert_eq!(journal.tail_index, 1); // 7 / 5 = 1
-                assert_eq!(journal.blobs.len(), 0); // No historical blobs
-                                                    // Tail blob should have 2 items worth of space (7 % 5 = 2)
+                // Tail blob should have 2 items worth of space (7 % 5 = 2)
                 assert_eq!(journal.oldest_retained_pos(), Some(5)); // First item in tail blob
 
                 // Operations 0-4 should be pruned (blob 0 doesn't exist)
@@ -782,8 +714,6 @@ mod tests {
                     .expect("Failed to initialize journal at size 23");
 
                 assert_eq!(journal.size(), 23);
-                assert_eq!(journal.tail_index, 4); // 23 / 5 = 4
-                assert_eq!(journal.blobs.len(), 0); // No historical blobs
                 assert_eq!(journal.oldest_retained_pos(), Some(20)); // First item in tail blob
 
                 // Operations 0-19 should be pruned (blobs 0-3 don't exist)
@@ -808,20 +738,12 @@ mod tests {
                 assert_eq!(append_pos, 24);
                 assert_eq!(journal.read(24).await.unwrap(), test_digest(24));
 
-                // Should have moved to a new tail blob
-                assert_eq!(journal.tail_index, 5);
-                assert_eq!(journal.blobs.len(), 1); // Previous tail became historical
-
                 // Fill the tail blob (positions 25-29)
                 for i in 25..30 {
                     let append_pos = journal.append(test_digest(i)).await.unwrap();
                     assert_eq!(append_pos, i);
                     assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
                 }
-
-                // At this point we should have moved to a new tail blob
-                assert_eq!(journal.tail_index, 6);
-                assert_eq!(journal.blobs.len(), 2); // Previous tail became historical
 
                 journal.destroy().await.unwrap();
             }

@@ -187,76 +187,91 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn replay(
         &self,
         start_section: u64,
+        start_position: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u64, A), Error>> + Send + '_, Error> {
         // Pre-create readers from blobs (async operation)
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
-            let replay = blob.replay(buffer).await?;
-            blob_info.push((section, replay));
+            let blob_size = blob.size().await;
+            let mut replay = blob.replay(buffer).await?;
+            // For the first section, seek to the start position
+            let initial_position = if section == start_section {
+                let start = start_position * Self::CHUNK_SIZE_U64;
+                if start > blob_size {
+                    return Err(Error::ItemOutOfRange(start_position));
+                }
+                replay.seek_to(start as usize).await?;
+                start_position
+            } else {
+                0
+            };
+            blob_info.push((section, replay, initial_position));
         }
 
         // Stream items as they are read to avoid occupying too much memory.
         // Each blob is processed sequentially, yielding batches of items that are then
         // flattened into individual stream elements.
-        Ok(stream::iter(blob_info).flat_map(move |(section, replay)| {
-            stream::unfold(
-                ReplayState {
-                    section,
-                    replay,
-                    position: 0,
-                    done: false,
-                },
-                move |mut state| async move {
-                    if state.done {
-                        return None;
-                    }
-
-                    let mut batch: Vec<Result<(u64, u64, A), Error>> = Vec::new();
-                    loop {
-                        // Ensure we have enough data for one item
-                        match state.replay.ensure(Self::CHUNK_SIZE).await {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                // Reader exhausted - we're done with this blob
-                                state.done = true;
-                                return if batch.is_empty() {
-                                    None
-                                } else {
-                                    Some((batch, state))
-                                };
-                            }
-                            Err(err) => {
-                                batch.push(Err(Error::Runtime(err)));
-                                state.done = true;
-                                return Some((batch, state));
-                            }
+        Ok(
+            stream::iter(blob_info).flat_map(move |(section, replay, initial_position)| {
+                stream::unfold(
+                    ReplayState {
+                        section,
+                        replay,
+                        position: initial_position,
+                        done: false,
+                    },
+                    move |mut state| async move {
+                        if state.done {
+                            return None;
                         }
 
-                        // Decode items from buffer
-                        while state.replay.remaining() >= Self::CHUNK_SIZE {
-                            match A::read(&mut state.replay) {
-                                Ok(item) => {
-                                    batch.push(Ok((state.section, state.position, item)));
-                                    state.position += 1;
+                        let mut batch: Vec<Result<(u64, u64, A), Error>> = Vec::new();
+                        loop {
+                            // Ensure we have enough data for one item
+                            match state.replay.ensure(Self::CHUNK_SIZE).await {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    // Reader exhausted - we're done with this blob
+                                    state.done = true;
+                                    return if batch.is_empty() {
+                                        None
+                                    } else {
+                                        Some((batch, state))
+                                    };
                                 }
                                 Err(err) => {
-                                    batch.push(Err(Error::Codec(err)));
+                                    batch.push(Err(Error::Runtime(err)));
                                     state.done = true;
                                     return Some((batch, state));
                                 }
                             }
-                        }
 
-                        // Return batch if we have items
-                        if !batch.is_empty() {
-                            return Some((batch, state));
+                            // Decode items from buffer
+                            while state.replay.remaining() >= Self::CHUNK_SIZE {
+                                match A::read(&mut state.replay) {
+                                    Ok(item) => {
+                                        batch.push(Ok((state.section, state.position, item)));
+                                        state.position += 1;
+                                    }
+                                    Err(err) => {
+                                        batch.push(Err(Error::Codec(err)));
+                                        state.done = true;
+                                        return Some((batch, state));
+                                    }
+                                }
+                            }
+
+                            // Return batch if we have items
+                            if !batch.is_empty() {
+                                return Some((batch, state));
+                            }
                         }
-                    }
-                },
-            )
-            .flat_map(stream::iter)
-        }))
+                    },
+                )
+                .flat_map(stream::iter)
+            }),
+        )
     }
 
     /// Sync the given section to storage.
@@ -318,6 +333,40 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Remove all underlying blobs.
     pub async fn destroy(self) -> Result<(), Error> {
         self.manager.destroy().await
+    }
+
+    /// Initialize a section with a specific number of zero-filled items.
+    ///
+    /// This creates the section's blob and fills it with `item_count` items worth of zeros.
+    /// The data is written through the Append wrapper which handles checksums properly.
+    ///
+    /// # Arguments
+    /// * `section` - The section number to initialize
+    /// * `item_count` - Number of zero-filled items to write
+    pub async fn init_section_at_size(
+        &mut self,
+        section: u64,
+        item_count: u64,
+    ) -> Result<(), Error> {
+        // Get or create the blob for this section
+        let blob = self.manager.get_or_create(section).await?;
+
+        // Calculate the target byte size
+        let target_size = item_count * Self::CHUNK_SIZE_U64;
+
+        // Resize grows the blob by appending zeros, which handles checksums properly
+        blob.resize(target_size).await?;
+
+        Ok(())
+    }
+
+    /// Ensure a section exists, creating an empty blob if needed.
+    ///
+    /// This is used to maintain the invariant that at least one blob always exists
+    /// (the "tail" blob), which allows reconstructing journal size on reopen.
+    pub async fn ensure_section_exists(&mut self, section: u64) -> Result<(), Error> {
+        self.manager.get_or_create(section).await?;
+        Ok(())
     }
 }
 
@@ -423,7 +472,7 @@ mod tests {
 
             let items = {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -569,7 +618,7 @@ mod tests {
             // Verify data integrity via replay
             {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -671,7 +720,7 @@ mod tests {
 
             let count = {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -799,7 +848,7 @@ mod tests {
             // Replay and verify all items in order
             {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -819,7 +868,7 @@ mod tests {
             // Test replay starting from middle section (5)
             {
                 let stream = journal
-                    .replay(5, NZUsize!(1024))
+                    .replay(5, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay from section 5");
                 pin_mut!(stream);
@@ -889,7 +938,7 @@ mod tests {
             // Replay all - should get items from sections 1 and 3, skipping empty section 2
             {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -912,7 +961,7 @@ mod tests {
             // Replay starting from empty section 2 - should get only section 3
             {
                 let stream = journal
-                    .replay(2, NZUsize!(1024))
+                    .replay(2, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay from section 2");
                 pin_mut!(stream);
