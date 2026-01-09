@@ -1,5 +1,5 @@
 use super::types::Ack;
-use crate::types::{Epoch, Height};
+use crate::types::{Epoch, Height, Participant};
 use commonware_cryptography::{
     certificate::{Attestation, Scheme},
     Digest, PublicKey,
@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 #[derive(Default)]
 struct Partials<S: Scheme, D: Digest> {
     // The set of signer indices that have voted for the payload.
-    pub signers: HashSet<u32>,
+    pub signers: HashSet<Participant>,
 
     // A map from payload digest to attestations.
     // Each signer should only vote once for each sequencer/height/epoch.

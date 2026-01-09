@@ -41,3 +41,7 @@ hash = "73102c8e2c269bbe2afd67158252c90a683a347e7ba623e8a1b383197c0d848a"
 ["commonware_utils::sequence::unit::test::conformance::CodecConformance<Unit>"]
 n_cases = 65536
 hash = "07854d2fef297a06ba81685e660c332de36d5d18d546927d30daad6d7fda1541"
+
+["commonware_utils::tests::conformance::CodecConformance<Participant>"]
+n_cases = 65536
+hash = "f0b66ee345e9e295c50b522d9cf3501d95cd70cecfe7bfd315c970ffa78ede40"

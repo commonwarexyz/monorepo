@@ -39,7 +39,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
-use commonware_utils::futures::Pool as FuturesPool;
+use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum};
 use futures::{
     channel::oneshot,
     future::{self, Either},
@@ -907,10 +907,10 @@ impl<
 
         // Validate sender is a participant and matches the vote signer
         let participants = scheme.participants();
-        let Some(index) = participants.iter().position(|p| p == sender) else {
+        let Some(index) = participants.index(sender) else {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
         };
-        if index as u32 != ack.attestation.signer {
+        if index != ack.attestation.signer {
             return Err(Error::PeerMismatch);
         }
 

@@ -50,6 +50,14 @@ hash = "c830d0e3842c1f2ef26f08ee762995942bfbbc722ca9c5e8e6a87c3dbe05c70d"
 n_cases = 65536
 hash = "6fc6f17d8734a14fb841a8acc1a39cda7519bdd025700663e260d3b000c9c5c6"
 
+["commonware_consensus::simplex::elector::tests::conformance::RandomSelectLeaderConformance"]
+n_cases = 512
+hash = "4df7290375d7ae3b005cfad96dc5fc091bdce4a246665f94b79acf34159a3945"
+
+["commonware_consensus::simplex::elector::tests::conformance::RoundRobinShuffleConformance"]
+n_cases = 512
+hash = "d6232310a3adc5cc8bf0767d095251f25211f165419372a5fe6b4ed7b06dd765"
+
 ["commonware_consensus::simplex::scheme::bls12381_threshold::tests::conformance::CodecConformance<Seed<MinSig>>"]
 n_cases = 65536
 hash = "d3cddac59b7f95fdf7d6dcda64b20bb685800ec87ea01a643c4fa5d3f8f71eed"

@@ -1125,9 +1125,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ordered_broadcast::{
-        mocks::Provider,
-        scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
+    use crate::{
+        ordered_broadcast::{
+            mocks::Provider,
+            scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
+        },
+        types::Participant,
     };
     use commonware_codec::{DecodeExt as _, Encode, Read};
     use commonware_cryptography::{
@@ -1958,7 +1961,7 @@ mod tests {
             .expect("Should sign vote");
         // Change the signer index to mismatch with the actual signature
         // The vote was signed by validator 1, but we claim it's from validator 0
-        tampered_vote.signer = 0;
+        tampered_vote.signer = Participant::new(0);
         let invalid_ack = Ack::<PublicKey, S, Sha256Digest>::new(chunk, epoch, tampered_vote);
 
         // Verification should fail because the signer index doesn't match the signature

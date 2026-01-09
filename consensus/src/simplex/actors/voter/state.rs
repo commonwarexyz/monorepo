@@ -9,7 +9,7 @@ use crate::{
             Nullification, Nullify, Proposal,
         },
     },
-    types::{Epoch, Round as Rnd, View, ViewDelta},
+    types::{Epoch, Participant, Round as Rnd, View, ViewDelta},
     Viewable,
 };
 use commonware_cryptography::{certificate, Digest};
@@ -139,7 +139,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Returns true when the local signer is the participant with index `idx`.
-    pub fn is_me(&self, idx: u32) -> bool {
+    pub fn is_me(&self, idx: Participant) -> bool {
         self.scheme.me().is_some_and(|me| me == idx)
     }
 
@@ -349,7 +349,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Returns the leader index for `view` if we already entered it.
-    pub fn leader_index(&self, view: View) -> Option<u32> {
+    pub fn leader_index(&self, view: View) -> Option<Participant> {
         self.views
             .get(&view)
             .and_then(|round| round.leader().map(|leader| leader.idx))

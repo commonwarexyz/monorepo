@@ -7,12 +7,13 @@ use crate::{
         scheme::Scheme,
         types::{Certificate, Notarize, Proposal, Vote},
     },
-    types::{Epoch, Round, View},
+    types::{Epoch, Participant, Round, View},
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{certificate, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
+use commonware_utils::ordered::Quorum;
 use rand::{seq::IteratorRandom, Rng};
 use std::{collections::HashSet, sync::Arc};
 
@@ -121,7 +122,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
                 .participants()
                 .iter()
                 .enumerate()
-                .filter(|(index, _)| *index as u32 != self.scheme.me().unwrap())
+                .filter(|(index, _)| Participant::from_usize(*index) != self.scheme.me().unwrap())
                 .choose(&mut self.context)
                 .unwrap();
 
@@ -139,7 +140,11 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
             let proposal_b = Proposal::new(next_round, view, digest_b);
 
             // Broadcast payloads via relay so nodes can verify
-            let me = &self.scheme.participants()[self.scheme.me().unwrap() as usize];
+            let me = self
+                .scheme
+                .participants()
+                .key(self.scheme.me().unwrap())
+                .unwrap();
             self.relay.broadcast(me, (digest_a, payload_a)).await;
             self.relay.broadcast(me, (digest_b, payload_b)).await;
 
@@ -161,7 +166,9 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
                 .participants()
                 .iter()
                 .enumerate()
-                .filter(|(index, key)| *index as u32 != self.scheme.me().unwrap() && *key != victim)
+                .filter(|(index, key)| {
+                    Participant::from_usize(*index) != self.scheme.me().unwrap() && *key != victim
+                })
                 .map(|(_, key)| key.clone())
                 .collect();
             vote_sender

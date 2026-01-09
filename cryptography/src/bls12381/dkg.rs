@@ -344,7 +344,9 @@ pub struct Output<V: Variant, P> {
 
 impl<V: Variant, P: Ord> Output<V, P> {
     fn share_commitment(&self, player: &P) -> Option<V::Public> {
-        self.public.partial_public(self.players.index(player)?).ok()
+        self.public
+            .partial_public(self.players.index(player)?.get())
+            .ok()
     }
 
     /// Return the quorum, i.e. the number of players needed to reconstruct the key.
@@ -523,12 +525,16 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     }
 
     fn player_index(&self, player: &P) -> Result<u32, Error> {
-        self.players.index(player).ok_or(Error::UnknownPlayer)
+        self.players
+            .index(player)
+            .map(|p| p.get())
+            .ok_or(Error::UnknownPlayer)
     }
 
     fn dealer_index(&self, dealer: &P) -> Result<u32, Error> {
         self.dealers
             .index(dealer)
+            .map(|p| p.get())
             .ok_or(Error::UnknownDealer(format!("{dealer:?}")))
     }
 
@@ -1592,10 +1598,10 @@ mod test_plan {
         },
         ed25519, PublicKey,
     };
-    use ::core::num::NonZeroI32;
     use anyhow::anyhow;
     use bytes::BytesMut;
     use commonware_utils::{max_faults, quorum, TryCollect};
+    use core::num::NonZeroI32;
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;
 
@@ -2009,7 +2015,7 @@ mod test_plan {
                             .index(&player_pk)
                             .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))?;
                         let player_key_idx = pk_to_key_idx[&player_pk];
-                        let player = &mut players.values_mut()[i_player as usize];
+                        let player = &mut players.values_mut()[i_player.get() as usize];
 
                         let ack = player.dealer_message(pk.clone(), pub_msg.clone(), priv_msg);
                         assert_eq!(ack, ReadExt::read(&mut ack.encode())?);

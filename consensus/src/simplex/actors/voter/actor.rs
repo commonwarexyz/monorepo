@@ -1037,7 +1037,7 @@ impl<
                     .update(current_view, leader, self.state.last_finalized())
                     .await;
                 if !is_active && !self.state.is_me(leader) {
-                    debug!(%view, ?leader, "skipping leader timeout due to inactivity");
+                    debug!(%view, %leader, "skipping leader timeout due to inactivity");
                     self.state.expire_round(current_view);
                 }
             }

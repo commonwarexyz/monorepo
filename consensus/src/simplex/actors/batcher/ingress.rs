@@ -1,4 +1,7 @@
-use crate::{simplex::types::Vote, types::View};
+use crate::{
+    simplex::types::Vote,
+    types::{Participant, View},
+};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_utils::channels::fallible::AsyncFallibleExt;
 use futures::channel::{mpsc, oneshot};
@@ -8,7 +11,7 @@ pub enum Message<S: Scheme, D: Digest> {
     /// View update with leader info.
     Update {
         current: View,
-        leader: u32,
+        leader: Participant,
         finalized: View,
 
         active: oneshot::Sender<bool>,
@@ -29,7 +32,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send an update message.
-    pub async fn update(&mut self, current: View, leader: u32, finalized: View) -> bool {
+    pub async fn update(&mut self, current: View, leader: Participant, finalized: View) -> bool {
         self.sender
             .request_or(
                 |active| Message::Update {

@@ -7,6 +7,7 @@ use crate::{
             Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
         },
     },
+    types::Participant,
     Reporter,
 };
 use commonware_cryptography::Digest;
@@ -281,7 +282,7 @@ impl<
     /// Sets the leader for this view. If the leader's vote has already been
     /// received, this will also set the leader's proposal (filtering out votes
     /// for other proposals).
-    pub fn set_leader(&mut self, leader: u32) {
+    pub fn set_leader(&mut self, leader: Participant) {
         self.verifier.set_leader(leader);
     }
 
@@ -289,7 +290,7 @@ impl<
     /// 1. We haven't already processed this (called at most once per round).
     /// 2. The leader's proposal is known.
     /// 3. We are not the leader (leaders don't need to forward their own proposal).
-    pub fn forward_proposal(&mut self, me: u32) -> Option<Proposal<D>> {
+    pub fn forward_proposal(&mut self, me: Participant) -> Option<Proposal<D>> {
         if self.proposal_sent {
             return None;
         }
@@ -312,7 +313,7 @@ impl<
     pub fn verify_notarizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
+    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
         self.verifier.verify_notarizes(rng)
     }
 
@@ -327,7 +328,7 @@ impl<
     pub fn verify_nullifies<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
+    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
         self.verifier.verify_nullifies(rng)
     }
 
@@ -342,7 +343,7 @@ impl<
     pub fn verify_finalizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
+    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
         self.verifier.verify_finalizes(rng)
     }
 
@@ -355,7 +356,7 @@ impl<
     /// vote (this is fine and preferred to verifying all votes from all peers in each round). Recall,
     /// the purpose of this mechanism is to minimize the timeout for crashed peers (not some tool to detect
     /// and skip Byzantine leaders, which is only possible once we detect incorrect behavior and block them for).
-    pub fn is_active(&self, leader: u32) -> bool {
+    pub fn is_active(&self, leader: Participant) -> bool {
         self.pending_votes.has_notarize(leader)
             || self.pending_votes.has_nullify(leader)
             || self.pending_votes.has_finalize(leader)
