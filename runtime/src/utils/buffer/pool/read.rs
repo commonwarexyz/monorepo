@@ -1,10 +1,45 @@
 use super::Checksum;
 use crate::{Blob, Error};
-use bytes::{Bytes, BytesMut};
+use bytes::{buf::Chain, Buf, Bytes, BytesMut};
 use commonware_codec::{CodecFixed, DecodeExt as _, Error as CodecError, FixedSize};
 use commonware_utils::StableBuf;
 use std::num::NonZeroUsize;
 use tracing::{debug, error};
+
+/// A buffer that can hold either a single contiguous [`Bytes`] or two chained [`Bytes`].
+///
+/// This allows zero-copy reads that span buffer boundaries by chaining the tail
+/// of one buffer with the head of the next, rather than copying into a new allocation.
+#[derive(Debug)]
+pub enum BytesList {
+    /// A single contiguous buffer (common case: data fits in current buffer).
+    Single(Bytes),
+    /// Two buffers chained together (data spans buffer boundary).
+    Two(Chain<Bytes, Bytes>),
+}
+
+impl Buf for BytesList {
+    fn remaining(&self) -> usize {
+        match self {
+            Self::Single(b) => b.remaining(),
+            Self::Two(c) => c.remaining(),
+        }
+    }
+
+    fn chunk(&self) -> &[u8] {
+        match self {
+            Self::Single(b) => b.chunk(),
+            Self::Two(c) => c.chunk(),
+        }
+    }
+
+    fn advance(&mut self, cnt: usize) {
+        match self {
+            Self::Single(b) => b.advance(cnt),
+            Self::Two(c) => c.advance(cnt),
+        }
+    }
+}
 
 /// A reader that buffers content from a [Blob] with page-level CRCs to optimize the performance of
 /// a full scan of contents.
@@ -139,21 +174,11 @@ impl<B: Blob> Read<B> {
         Ok(())
     }
 
-    /// Reads and decodes a fixed-size codec item from the blob.
-    ///
-    /// Returns the decoded item, or an error if reading or decoding fails.
-    /// Returns [Error::BlobInsufficientLength] if there aren't enough bytes remaining.
-    pub async fn read_fixed<T: CodecFixed<Cfg = ()>>(&mut self) -> Result<T, Error> {
-        let bytes = self.read_bytes(T::SIZE).await?;
-        T::decode(bytes.as_ref()).map_err(|e| Error::Codec(e.to_string()))
-    }
-
     /// Decodes a batch of fixed-size items from the buffer, calling a transform function for each.
     ///
     /// This method is optimized for high-throughput replay of fixed-size journal items. It fills
     /// the buffer once, then decodes as many complete items as fit in a tight loop without any
-    /// async overhead between items. This is significantly faster than calling `read_fixed`
-    /// repeatedly.
+    /// async overhead between items.
     ///
     /// # Arguments
     ///
@@ -191,9 +216,11 @@ impl<B: Blob> Read<B> {
         let available = self.available().len();
         if available < T::SIZE {
             // Buffer has less than one item. This happens when an item spans a page boundary.
-            // Use read_fixed which handles cross-page reads via read_bytes.
-            match self.read_fixed::<T>().await {
-                Ok(item) => {
+            // Use read_bytes which handles cross-page reads via chaining.
+            match self.read_bytes(T::SIZE).await {
+                Ok(bytes) => {
+                    let item = T::decode(bytes).map_err(|e| Error::Codec(e.to_string()))?;
+
                     batch.push(f(0, Ok(item)));
                     // After cross-page read, check remaining bytes. If less than one item,
                     // report as trailing (caller will check if at end of blob).
@@ -224,9 +251,6 @@ impl<B: Blob> Read<B> {
 
     /// Fills the buffer from the blob starting at the current physical position and verifies the
     /// CRC of each page (including any trailing partial page).
-    ///
-    /// Uses BytesMut for mutable operations, then freezes to Bytes. This allows previous
-    /// Bytes slices to remain valid even after refilling (they reference the old Arc).
     async fn fill_buffer(&mut self) -> Result<(), Error> {
         let logical_page_size = self.page_size - Checksum::SIZE;
 
@@ -398,8 +422,7 @@ impl<B: Blob> Read<B> {
 
         self.blob_page = position / logical_page_size;
         self.buffer_position = (position % logical_page_size) as usize;
-        // Invalidate buffer, will be refilled on next read
-        self.buffer = Bytes::new();
+        self.buffer = Bytes::new(); // Invalidate buffer, will be refilled on next read
 
         Ok(())
     }
@@ -412,56 +435,48 @@ impl<B: Blob> Read<B> {
         self.buffer.slice(self.buffer_position..)
     }
 
-    /// Reads exactly `size` bytes, returning owned Bytes.
+    /// Reads exactly `size` bytes, returning a [BytesList].
     ///
-    /// This is more efficient than `read_exact` when the caller needs owned data
-    /// for use across buffer refills (e.g., for zero-copy chaining).
-    pub async fn read_bytes(&mut self, size: usize) -> Result<Bytes, Error> {
+    /// Returns [BytesList] to avoid copying when data spans buffer boundaries.
+    /// Uses `chain()` to combine pieces without allocation.
+    pub async fn read_bytes(&mut self, size: usize) -> Result<BytesList, Error> {
         // Fast path: fits entirely in current buffer
         if self.buffer_position + size <= self.buffer.len() {
             let result = self
                 .buffer
                 .slice(self.buffer_position..self.buffer_position + size);
             self.buffer_position += size;
-            return Ok(result);
+            return Ok(BytesList::Single(result));
         }
 
-        // Slow path: spans buffer boundaries - collect pieces
-        let mut pieces = Vec::new();
-        let mut remaining = size;
+        // Slow path: spans buffer boundaries - chain pieces
+        let first = self.buffer.slice(self.buffer_position..);
+        let first_len = first.len();
+        self.buffer_position = self.buffer.len();
 
-        while remaining > 0 {
-            // Refill if needed
-            if self.buffer_position >= self.buffer.len() {
-                self.fill_buffer().await?;
-            }
-
-            let available = self.buffer.len() - self.buffer_position;
-            if available == 0 {
-                return Err(Error::BlobInsufficientLength);
-            }
-
-            let take = remaining.min(available);
-            pieces.push(
-                self.buffer
-                    .slice(self.buffer_position..self.buffer_position + take),
-            );
-            self.buffer_position += take;
-            remaining -= take;
+        self.fill_buffer().await?;
+        if self.buffer.is_empty() {
+            return Err(Error::BlobInsufficientLength);
         }
 
-        // Single piece - return directly
-        if pieces.len() == 1 {
-            return Ok(pieces.pop().unwrap());
+        let second_len = size - first_len;
+        if second_len > self.buffer.len() {
+            // Rare case: spans 3+ buffers, fall back to read_exact
+            let mut buf = BytesMut::with_capacity(size);
+            buf.extend_from_slice(&first);
+            buf.extend_from_slice(&self.buffer[..self.buffer.len()]);
+            self.buffer_position = self.buffer.len();
+
+            let remaining = second_len - self.buffer.len();
+            let mut rest = vec![0u8; remaining];
+            self.read_exact(&mut rest, remaining).await?;
+            buf.extend_from_slice(&rest);
+            return Ok(BytesList::Single(buf.freeze()));
         }
 
-        // Multiple pieces - must concatenate
-        let total: usize = pieces.iter().map(|b| b.len()).sum();
-        let mut result = BytesMut::with_capacity(total);
-        for piece in pieces {
-            result.extend_from_slice(&piece);
-        }
-        Ok(result.freeze())
+        let second = self.buffer.slice(..second_len);
+        self.buffer_position = second_len;
+        Ok(BytesList::Two(first.chain(second)))
     }
 }
 
