@@ -7,7 +7,7 @@
 //! # Format
 //!
 //! Data stored in `Journal` is persisted in one of many Blobs within a caller-provided `partition`.
-//! The particular `Blob` in which data is stored is identified by a `section` number (`u64`).
+//! The particular [Blob] in which data is stored is identified by a `section` number (`u64`).
 //! Within a `section`, data is appended as an `item` with the following format:
 //!
 //! ```text
