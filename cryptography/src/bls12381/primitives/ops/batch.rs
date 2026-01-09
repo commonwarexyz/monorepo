@@ -15,7 +15,7 @@
 //! must be generated securely).
 
 use super::{
-    super::{group::Scalar, variant::Variant, Error},
+    super::{group::SmallScalar, variant::Variant, Error},
     hash_with_namespace,
 };
 #[cfg(not(feature = "std"))]
@@ -58,8 +58,8 @@ where
     let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
     // Generate random scalars once for all entries
-    let scalars: Vec<Scalar> = (0..entries.len())
-        .map(|_| Scalar::random(&mut *rng))
+    let scalars: Vec<SmallScalar> = (0..entries.len())
+        .map(|_| SmallScalar::random(&mut *rng))
         .collect();
 
     // Pre-compute weighted values once: weighted_pk[i] = scalar[i] * pk[i]
@@ -134,8 +134,8 @@ where
     }
 
     // Generate random scalars for each message/signature pair
-    let scalars: Vec<Scalar> = (0..entries.len())
-        .map(|_| Scalar::random(&mut *rng))
+    let scalars: Vec<SmallScalar> = (0..entries.len())
+        .map(|_| SmallScalar::random(&mut *rng))
         .collect();
 
     // Hash all messages and collect signatures
@@ -159,7 +159,10 @@ mod tests {
         super::{aggregate, hash_with_namespace, keypair, sign_message, verify_message},
         *,
     };
-    use crate::bls12381::primitives::variant::{MinPk, MinSig};
+    use crate::bls12381::primitives::{
+        group::Scalar,
+        variant::{MinPk, MinSig},
+    };
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::{test_rng, NZUsize};

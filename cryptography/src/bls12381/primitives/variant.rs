@@ -2,7 +2,7 @@
 
 use super::{
     group::{
-        Scalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
+        Scalar, SmallScalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
         G2_PROOF_OF_POSSESSION, GT,
     },
     Error,
@@ -29,6 +29,7 @@ use rand_core::CryptoRngCore;
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     /// The public key type.
     type Public: HashToGroup<Scalar = Scalar>
+        + Space<SmallScalar>
         + FixedSize
         + Write
         + Read<Cfg = ()>
@@ -38,6 +39,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
 
     /// The signature type.
     type Signature: HashToGroup<Scalar = Scalar>
+        + Space<SmallScalar>
         + FixedSize
         + Write
         + Read<Cfg = ()>
@@ -161,8 +163,8 @@ impl Variant for MinPk {
         }
 
         // Generate random scalars.
-        let scalars: Vec<Scalar> = (0..publics.len())
-            .map(|_| Scalar::random(&mut *rng))
+        let scalars: Vec<SmallScalar> = (0..publics.len())
+            .map(|_| SmallScalar::random(&mut *rng))
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
@@ -308,8 +310,8 @@ impl Variant for MinSig {
         }
 
         // Generate random scalars.
-        let scalars: Vec<Scalar> = (0..publics.len())
-            .map(|_| Scalar::random(&mut *rng))
+        let scalars: Vec<SmallScalar> = (0..publics.len())
+            .map(|_| SmallScalar::random(&mut *rng))
             .collect();
 
         // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
