@@ -18,10 +18,16 @@ use super::{
     hash_with_namespace,
 };
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    vec,
+    vec::Vec,
+};
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
+#[cfg(feature = "std")]
+use std::collections::{BTreeMap, BTreeSet};
 
 struct SumTree<V: Variant> {
     len: usize,
