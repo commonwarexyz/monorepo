@@ -138,9 +138,10 @@ impl Variant for MinPk {
             .map(|_| SmallScalar::random(&mut *rng))
             .collect();
 
-        // Compute S_agg = sum(r_i * sig_i) using MSM with 128-bit scalars.
-        let s_agg = G2::msm(signatures, &scalars, par);
-        let scaled_pks = par.map_collect_vec(publics.iter().zip(scalars.iter()), |(&pk, s)| pk * s);
+        let (s_agg, scaled_pks) = par.join(
+            || G2::msm(signatures, &scalars, par),
+            || par.map_collect_vec(publics.iter().zip(scalars.iter()), |(&pk, s)| pk * s),
+        );
         if !G2::multi_pairing_check(hms, &scaled_pks, &s_agg, &-G1::generator()) {
             return Err(Error::InvalidSignature);
         }
@@ -239,9 +240,10 @@ impl Variant for MinSig {
             .map(|_| SmallScalar::random(&mut *rng))
             .collect();
 
-        // Compute S_agg = sum(r_i * sig_i) using MSM with 128-bit scalars.
-        let s_agg = G1::msm(signatures, &scalars, par);
-        let scaled_pks = par.map_collect_vec(publics.iter().zip(scalars.iter()), |(&pk, s)| pk * s);
+        let (s_agg, scaled_pks) = par.join(
+            || G1::msm(signatures, &scalars, par),
+            || par.map_collect_vec(publics.iter().zip(scalars.iter()), |(&pk, s)| pk * s),
+        );
         if !G1::multi_pairing_check(hms, &scaled_pks, &s_agg, &-G2::generator()) {
             return Err(Error::InvalidSignature);
         }
