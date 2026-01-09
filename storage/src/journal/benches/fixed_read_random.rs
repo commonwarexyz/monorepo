@@ -1,4 +1,4 @@
-use super::{append_fixed_random_data, get_fixed_journal};
+use crate::{append_fixed_random_data, get_fixed_journal};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
@@ -61,7 +61,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
     runner.start(|ctx| async move {
         // Create a large temp journal with random data.
         let mut j = get_fixed_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
-        append_fixed_random_data::<ITEM_SIZE>(&mut j, ITEMS_TO_WRITE).await;
+        append_fixed_random_data::<_, ITEM_SIZE>(&mut j, ITEMS_TO_WRITE).await;
         j.sync().await.unwrap();
     });
 

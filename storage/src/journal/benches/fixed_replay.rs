@@ -1,27 +1,20 @@
-use super::{append_fixed_random_data, get_fixed_journal};
+use crate::{append_fixed_random_data, get_fixed_journal, ITEMS_PER_BLOB, ITEM_SIZE};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
     Runner as _,
 };
 use commonware_storage::journal::contiguous::fixed::Journal;
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize};
 use criterion::{criterion_group, Criterion};
 use futures::{pin_mut, StreamExt};
 use std::{
     hint::black_box,
-    num::NonZeroU64,
     time::{Duration, Instant},
 };
 
 /// Partition name to use in the journal config.
 const PARTITION: &str = "test_partition";
-
-/// Value of items_per_blob to use in the journal config.
-const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(100_000);
-
-/// Size of each journal item in bytes.
-const ITEM_SIZE: usize = 32;
 
 /// Replay all items in the given `journal`.
 async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {
@@ -52,7 +45,7 @@ fn bench_fixed_replay(c: &mut Criterion) {
         let runner = Runner::new(cfg.clone());
         runner.start(|ctx| async move {
             let mut j = get_fixed_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
-            append_fixed_random_data::<ITEM_SIZE>(&mut j, items).await;
+            append_fixed_random_data::<_, ITEM_SIZE>(&mut j, items).await;
             j.sync().await.unwrap();
         });
 
