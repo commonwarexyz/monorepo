@@ -83,16 +83,9 @@ where
 
     // Slow path: bisection to find invalid signatures
     // Pre-compute individual weighted values for bisection
-    let weighted_pks: Vec<V::Public> = pks
-        .iter()
-        .zip(&scalars)
-        .map(|(pk, s)| *pk * s)
-        .collect();
-    let weighted_sigs: Vec<V::Signature> = sigs
-        .iter()
-        .zip(&scalars)
-        .map(|(sig, s)| *sig * s)
-        .collect();
+    let weighted_pks: Vec<V::Public> = pks.iter().zip(&scalars).map(|(pk, s)| *pk * s).collect();
+    let weighted_sigs: Vec<V::Signature> =
+        sigs.iter().zip(&scalars).map(|(sig, s)| *sig * s).collect();
 
     let mut invalid = Vec::new();
     let mut stack = vec![(0, entries.len())];

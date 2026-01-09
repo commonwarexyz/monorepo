@@ -128,9 +128,9 @@ impl SmallScalar {
     /// Generates a random 128-bit scalar.
     pub fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut bytes = [0u8; 32]; // blst_scalar is 32 bytes
-        // Fill the last 16 bytes (128 bits) with entropy.
-        // In big-endian, bytes[16..32] are the least significant.
-        // Leaving bytes[0..16] as zero ensures the scalar is < 2^128.
+                                   // Fill the last 16 bytes (128 bits) with entropy.
+                                   // In big-endian, bytes[16..32] are the least significant.
+                                   // Leaving bytes[0..16] as zero ensures the scalar is < 2^128.
         rng.fill_bytes(&mut bytes[SMALL_SCALAR_LENGTH..]);
 
         let mut scalar = blst_scalar::default();
@@ -1040,8 +1040,10 @@ impl Space<SmallScalar> for G1 {
         // Batch convert to affine (1 field inversion via Montgomery's trick)
         let affine_points = Self::batch_to_affine(&points_filtered);
 
-        let points_ptr: Vec<*const blst_p1_affine> =
-            affine_points.iter().map(|p| p.inner() as *const _).collect();
+        let points_ptr: Vec<*const blst_p1_affine> = affine_points
+            .iter()
+            .map(|p| p.inner() as *const _)
+            .collect();
         let scalars_ptr: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
 
         // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
@@ -1473,8 +1475,10 @@ impl Space<SmallScalar> for G2 {
         // Batch convert to affine (1 field inversion via Montgomery's trick)
         let affine_points = Self::batch_to_affine(&points_filtered);
 
-        let points_ptr: Vec<*const blst_p2_affine> =
-            affine_points.iter().map(|p| p.inner() as *const _).collect();
+        let points_ptr: Vec<*const blst_p2_affine> = affine_points
+            .iter()
+            .map(|p| p.inner() as *const _)
+            .collect();
         let scalars_ptr: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
 
         // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
