@@ -93,7 +93,7 @@ impl Mode {
             return Some(Interpolator::new(iter::empty()));
         };
         self.interpolator(total, subset, |i| {
-            set.position(i).map(|x| Participant::new(x as u32))
+            set.position(i).map(Participant::from_usize)
         })
     }
 }

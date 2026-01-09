@@ -808,7 +808,7 @@ mod tests {
                 );
                 assert_eq!(
                     invalid_sigs[0].index,
-                    Participant::new(corrupted_index as u32),
+                    Participant::from_usize(corrupted_index),
                     "The invalid signature should match the corrupted share's index"
                 );
             }
@@ -850,7 +850,7 @@ mod tests {
                     invalid_sigs.iter().map(|sig| sig.index).collect();
                 let expected_indices: Vec<Participant> = corrupted_indices
                     .iter()
-                    .map(|&i| Participant::new(i as u32))
+                    .map(|&i| Participant::from_usize(i))
                     .collect();
                 assert_eq!(
                     invalid_indices, expected_indices,
