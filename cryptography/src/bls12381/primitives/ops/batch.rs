@@ -19,9 +19,77 @@ use super::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
-use commonware_math::algebra::{Additive, Space};
+use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
+
+struct SumTree<V: Variant> {
+    len: usize,
+    /// This could be optimized to use a more compact data structure, but correctness
+    /// matters more
+    values: BTreeMap<(usize, usize), (V::Public, V::Signature)>,
+}
+
+impl<V: Variant> SumTree<V> {
+    pub fn build(leaves: &[(V::Public, V::Signature)]) -> Self {
+        let mut values = BTreeMap::new();
+        let len = leaves.len();
+        if len == 0 {
+            return Self { len, values };
+        }
+
+        // Use an explicit stack to build bottom-up with halving intervals.
+        // Phase 0 = first visit (push children), Phase 1 = second visit (compute value)
+        let mut stack: Vec<(usize, usize, u8)> = vec![(0, len, 0)];
+
+        while let Some((start, end, phase)) = stack.pop() {
+            if end - start == 1 {
+                values.insert((start, end), leaves[start]);
+            } else if phase == 0 {
+                let mid = start + (end - start) / 2;
+                stack.push((start, end, 1)); // Come back to compute this node
+                stack.push((mid, end, 0)); // Right child
+                stack.push((start, mid, 0)); // Left child
+            } else {
+                let mid = start + (end - start) / 2;
+                let left = values.get(&(start, mid)).expect("left child should exist");
+                let right = values.get(&(mid, end)).expect("right child should exist");
+                values.insert((start, end), (left.0 + &right.0, left.1 + &right.1));
+            }
+        }
+
+        Self { len, values }
+    }
+
+    pub fn verify(&self, hm: &V::Signature) -> Vec<usize> {
+        let mut good = (0..self.len).collect::<BTreeSet<_>>();
+        let mut work = vec![(0, self.len)];
+        while let Some((start, end)) = work.pop() {
+            if start == end {
+                continue;
+            }
+            let (pk, sig) = self
+                .values
+                .get(&(start, end))
+                .expect("SumTree should be correctly constructed");
+            if V::verify(pk, hm, sig).is_ok() {
+                continue;
+            }
+            if end == start + 1 {
+                good.remove(&start);
+                continue;
+            }
+            let mid = start + (end - start) / 2;
+            work.push((start, mid));
+            work.push((mid, end));
+        }
+        (0..self.len).filter(|x| !good.contains(x)).collect()
+    }
+}
+
+fn bisect<V: Variant>(entries: &[(V::Public, V::Signature)], hm: &V::Signature) -> Vec<usize> {
+    SumTree::<V>::build(entries).verify(hm)
+}
 
 /// Verifies multiple signatures over the same message from different public keys,
 /// ensuring each individual signature is valid.
@@ -79,49 +147,11 @@ where
 
     // Slow path: bisection to find invalid signatures
     // Pre-compute individual weighted values for bisection
-    let (weighted_pks, weighted_sigs) = par.fold(
+    let weighted_entries = par.map_collect_vec(
         scalars.iter().zip(pks.iter().zip(sigs.iter())),
-        || (Vec::new(), Vec::new()),
-        |mut acc, (s, (&pk, &sig))| {
-            acc.0.push(pk * s);
-            acc.1.push(sig * s);
-            acc
-        },
-        |mut a, b| {
-            a.0.extend(b.0);
-            a.1.extend(b.1);
-            a
-        },
+        |(s, (&pk, &sig))| (pk * s, sig * s),
     );
-
-    let mut invalid = Vec::new();
-    let mut stack = vec![(0, entries.len())];
-    while let Some((start, end)) = stack.pop() {
-        if start >= end {
-            continue;
-        }
-
-        // Sum pre-computed weighted values for this slice
-        let mut sum_pk = V::Public::zero();
-        let mut sum_sig = V::Signature::zero();
-        for i in start..end {
-            sum_pk += &weighted_pks[i];
-            sum_sig += &weighted_sigs[i];
-        }
-
-        // Verify: e(sum_pk, H(m)) == e(sum_sig, G)
-        if V::verify(&sum_pk, &hm, &sum_sig).is_err() {
-            if end - start == 1 {
-                invalid.push(start);
-            } else {
-                let mid = start + (end - start) / 2;
-                stack.push((mid, end));
-                stack.push((start, mid));
-            }
-        }
-    }
-
-    invalid
+    bisect::<V>(&weighted_entries, &hm)
 }
 
 /// Verifies multiple signatures over multiple messages from a single public key,
