@@ -64,8 +64,7 @@ where
     let scalars: Vec<SmallScalar> = (0..len).map(|_| SmallScalar::random(&mut *rng)).collect();
 
     // Extract pks and sigs for MSM
-    let pks: Vec<V::Public> = entries.iter().map(|(pk, _)| *pk).collect();
-    let sigs: Vec<V::Signature> = entries.iter().map(|(_, sig)| *sig).collect();
+    let (pks, sigs) = entries.iter().cloned().collect::<(Vec<_>, Vec<_>)>();
 
     // Compute MSMs for pk and sig in parallel using 128-bit scalars.
     let (sum_pk, sum_sig) = par.join(
@@ -158,10 +157,9 @@ where
         .collect();
 
     // Hash all messages and collect signatures
-    let hms: Vec<V::Signature> = entries
-        .iter()
-        .map(|(namespace, msg, _)| hash_with_namespace::<V>(V::MESSAGE, namespace, msg))
-        .collect();
+    let hms: Vec<V::Signature> = strategy.map_collect_vec(entries.iter(), |(namespace, msg, _)| {
+        hash_with_namespace::<V>(V::MESSAGE, namespace, msg)
+    });
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
 
     // Compute weighted sums in parallel using MSM with 128-bit scalars.
