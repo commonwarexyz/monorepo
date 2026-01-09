@@ -117,21 +117,15 @@ pub(crate) mod test {
     type MutableAnyTest =
         Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
-    /// Deterministic byte vector generator for variable-value tests.
-    fn to_bytes(i: u64) -> Vec<u8> {
-        let len = ((i % 13) + 7) as usize;
-        vec![(i % 255) as u8; len]
-    }
-
     pub(crate) fn create_test_config(seed: u64) -> VarConfig {
         VariableConfig {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
+            mmr_items_per_blob: NZU64!(12),
+            mmr_write_buffer: NZUsize!(64),
             log_partition: format!("log_journal_{seed}"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
+            log_items_per_blob: NZU64!(14),
+            log_write_buffer: NZUsize!(64),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
@@ -145,6 +139,12 @@ pub(crate) mod test {
         let seed = context.next_u64();
         let config = create_test_config(seed);
         AnyTest::init(context, config).await.unwrap()
+    }
+
+    /// Deterministic byte vector generator for variable-value tests.
+    fn to_bytes(i: u64) -> Vec<u8> {
+        let len = ((i % 13) + 7) as usize;
+        vec![(i % 255) as u8; len]
     }
 
     /// Create n random operations. Some portion of the updates are deletes.
@@ -190,7 +190,7 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        create_test_db(context).await
+        AnyTest::init(context, create_test_config(0)).await.unwrap()
     }
 
     #[test_traced("WARN")]
