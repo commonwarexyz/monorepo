@@ -60,12 +60,12 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     ) -> Result<(), Error>;
 
     /// Verify a batch of signatures from the provided public keys and pre-hashed messages.
-    fn batch_verify<R: CryptoRngCore, S: Strategy>(
+    fn batch_verify<R: CryptoRngCore>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
-        strategy: &S,
+        strategy: &impl Strategy,
     ) -> Result<(), Error>;
 
     /// Compute the pairing `e(G1, G2) -> GT`.
@@ -147,12 +147,12 @@ impl Variant for MinPk {
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify<R: CryptoRngCore, S: Strategy>(
+    fn batch_verify<R: CryptoRngCore>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
-        strategy: &S,
+        strategy: &impl Strategy,
     ) -> Result<(), Error> {
         // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());
@@ -303,12 +303,12 @@ impl Variant for MinSig {
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify<R: CryptoRngCore, S: Strategy>(
+    fn batch_verify<R: CryptoRngCore>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
-        strategy: &S,
+        strategy: &impl Strategy,
     ) -> Result<(), Error> {
         // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());

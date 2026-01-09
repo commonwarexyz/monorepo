@@ -176,7 +176,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         // Verify attestations and return any invalid ones.
         let namespace = subject.namespace(&self.namespace);
         let message = subject.message();
-        let invalid_indices = batch::verify_same_message::<_, V, _>(
+        let invalid_indices = batch::verify_same_message::<_, V>(
             rng,
             namespace,
             message.as_ref(),

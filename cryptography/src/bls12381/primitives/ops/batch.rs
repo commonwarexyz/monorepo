@@ -42,17 +42,16 @@ use rand_core::CryptoRngCore;
 /// This function assumes a group check was already performed on each public key
 /// and signature. Duplicate public keys are safe because random scalar weights
 /// ensure each (public key, signature) pair is verified independently.
-pub fn verify_same_message<R, V, S>(
+pub fn verify_same_message<R, V>(
     rng: &mut R,
     namespace: &[u8],
     message: &[u8],
     entries: &[(V::Public, V::Signature)],
-    strategy: &S,
+    strategy: &impl Strategy,
 ) -> Vec<usize>
 where
     R: CryptoRngCore,
     V: Variant,
-    S: Strategy,
 {
     if entries.is_empty() {
         return Vec::new();
@@ -126,17 +125,16 @@ where
 /// This function assumes a group check was already performed on `public` and each `signature`.
 /// Duplicate messages are safe because random scalar weights ensure each (message, signature)
 /// pair is verified independently.
-pub fn verify_same_signer<'a, R, V, I, S>(
+pub fn verify_same_signer<'a, R, V, I>(
     rng: &mut R,
     public: &V::Public,
     entries: I,
-    strategy: &S,
+    strategy: &impl Strategy,
 ) -> Result<(), Error>
 where
     R: CryptoRngCore,
     V: Variant,
     I: IntoIterator<Item = &'a (&'a [u8], &'a [u8], V::Signature)>,
-    S: Strategy,
 {
     let entries: Vec<_> = entries.into_iter().collect();
 
@@ -194,11 +192,11 @@ mod tests {
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(&private, ns, msg)))
             .collect();
 
-        verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &Sequential)
+        verify_same_signer::<_, V, _>(&mut rng, &public, &entries, &Sequential)
             .expect("valid signatures should be accepted");
 
         let strategy = Rayon::new(NZUsize!(4)).unwrap();
-        verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &strategy)
+        verify_same_signer::<_, V, _>(&mut rng, &public, &entries, &strategy)
             .expect("valid signatures should be accepted with parallel strategy");
     }
 
@@ -225,7 +223,7 @@ mod tests {
         let random_scalar = Scalar::random(&mut rng);
         entries[1].2 += &(V::Signature::generator() * &random_scalar);
 
-        let result = verify_same_signer::<_, V, _, _>(&mut rng, &public, &entries, &Sequential);
+        let result = verify_same_signer::<_, V, _>(&mut rng, &public, &entries, &Sequential);
         assert!(result.is_err(), "corrupted signature should be rejected");
     }
 
@@ -281,8 +279,7 @@ mod tests {
             (namespace, msg1, forged_sig1),
             (namespace, msg2, forged_sig2),
         ];
-        let result =
-            verify_same_signer::<_, V, _, _>(&mut rng, &public, &forged_entries, &Sequential);
+        let result = verify_same_signer::<_, V, _>(&mut rng, &public, &forged_entries, &Sequential);
         assert!(
             result.is_err(),
             "batch verification should reject forged signatures"
@@ -291,7 +288,7 @@ mod tests {
         // Batch verification accepts valid signatures
         let valid_entries: Vec<(&[u8], &[u8], _)> =
             vec![(namespace, msg1, sig1), (namespace, msg2, sig2)];
-        verify_same_signer::<_, V, _, _>(&mut rng, &public, &valid_entries, &Sequential)
+        verify_same_signer::<_, V, _>(&mut rng, &public, &valid_entries, &Sequential)
             .expect("batch verification should accept valid signatures");
     }
 

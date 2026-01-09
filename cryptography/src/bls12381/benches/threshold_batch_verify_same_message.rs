@@ -38,9 +38,12 @@ fn benchmark_threshold_batch_verify_same_message(c: &mut Criterion) {
                                     .map(|i| PrivateKey::from_seed(i as u64).public_key())
                                     .try_collect()
                                     .unwrap();
-                                let (output, shares) =
-                                    deal::<MinSig, _, Bft3f1>(&mut rng, Default::default(), players)
-                                        .expect("deal should succeed");
+                                let (output, shares) = deal::<MinSig, _, Bft3f1>(
+                                    &mut rng,
+                                    Default::default(),
+                                    players,
+                                )
+                                .expect("deal should succeed");
                                 let signatures = shares
                                     .values()
                                     .iter()
@@ -70,7 +73,6 @@ fn benchmark_threshold_batch_verify_same_message(c: &mut Criterion) {
                                             _,
                                             MinSig,
                                             _,
-                                            _,
                                         >(
                                             &mut rng,
                                             &polynomial,
@@ -85,7 +87,6 @@ fn benchmark_threshold_batch_verify_same_message(c: &mut Criterion) {
                                         primitives::ops::threshold::batch_verify_same_message::<
                                             _,
                                             MinSig,
-                                            _,
                                             _,
                                         >(
                                             &mut rng,

@@ -271,7 +271,7 @@
 //! }
 //!
 //! // Step 5: Observer can also compute the public output
-//! let observer_output = observe::<MinSig, ed25519::PublicKey, _, Bft3f1>(
+//! let observer_output = observe::<MinSig, ed25519::PublicKey, Bft3f1>(
 //!     info,
 //!     dealer_logs,
 //!     &commonware_parallel::Sequential,
@@ -1316,10 +1316,10 @@ struct ObserveInner<V: Variant, P: PublicKey> {
 }
 
 impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
-    fn reckon<S: ParStrategy, M: Faults>(
+    fn reckon<M: Faults>(
         info: Info<V, P>,
         selected: Map<P, DealerLog<V, P>>,
-        strategy: &S,
+        strategy: &impl ParStrategy,
     ) -> Result<Self, Error> {
         // Track players with too many reveals
         let max_faults = info.players.max_faults::<M>();
@@ -1399,13 +1399,13 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 /// From this log, we can (potentially, as the DKG can fail) compute the public output.
 ///
 /// This will only ever return [`Error::DkgFailed`].
-pub fn observe<V: Variant, P: PublicKey, S: ParStrategy, M: Faults>(
+pub fn observe<V: Variant, P: PublicKey, M: Faults>(
     info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
-    strategy: &S,
+    strategy: &impl ParStrategy,
 ) -> Result<Output<V, P>, Error> {
     let selected = select::<V, P, M>(&info, logs)?;
-    ObserveInner::<V, P>::reckon::<S, M>(info, selected, strategy).map(|x| x.output)
+    ObserveInner::<V, P>::reckon::<M>(info, selected, strategy).map(|x| x.output)
 }
 
 /// Represents a player in the DKG / reshare process.
@@ -1509,7 +1509,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
             .try_collect::<Map<_, _>>()
             .expect("select produces at most one entry per dealer");
         let ObserveInner { output, weights } =
-            ObserveInner::<V, S::PublicKey>::reckon::<Y, M>(self.info, selected, strategy)?;
+            ObserveInner::<V, S::PublicKey>::reckon::<M>(self.info, selected, strategy)?;
         let private = weights.map_or_else(
             || {
                 let mut out = <Scalar as Additive>::zero();
@@ -2103,7 +2103,7 @@ mod test_plan {
                 }
                 // Run observer
                 let observe_result =
-                    observe::<_, _, _, Bft3f1>(info.clone(), dealer_logs.clone(), &Sequential);
+                    observe::<_, _, Bft3f1>(info.clone(), dealer_logs.clone(), &Sequential);
                 if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
@@ -2245,7 +2245,7 @@ mod test_plan {
                 }
 
                 let threshold = observer_output.quorum::<Bft3f1>();
-                let threshold_sig = threshold::recover::<V, _, _, Bft3f1>(
+                let threshold_sig = threshold::recover::<V, _, Bft3f1>(
                     &observer_output.public,
                     &partial_sigs[0..threshold as usize],
                     &Sequential,

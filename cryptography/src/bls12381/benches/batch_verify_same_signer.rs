@@ -32,7 +32,7 @@ fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
                         },
                         |(public, entries)| {
                             if concurrency > 1 {
-                                ops::batch::verify_same_signer::<_, MinSig, _, _>(
+                                ops::batch::verify_same_signer::<_, MinSig, _>(
                                     &mut thread_rng(),
                                     &public,
                                     &entries,
@@ -40,7 +40,7 @@ fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
                                 )
                                 .unwrap();
                             } else {
-                                ops::batch::verify_same_signer::<_, MinSig, _, _>(
+                                ops::batch::verify_same_signer::<_, MinSig, _>(
                                     &mut thread_rng(),
                                     &public,
                                     &entries,

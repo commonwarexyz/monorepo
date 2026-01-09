@@ -475,7 +475,7 @@ where
                                         ),
                                     }
                                 } else {
-                                    match observe::<_, _, _, Bft3f1>(round.clone(), logs, &Sequential) {
+                                    match observe::<_, _, Bft3f1>(round.clone(), logs, &Sequential) {
                                         Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                         Err(_) => (
                                             false,

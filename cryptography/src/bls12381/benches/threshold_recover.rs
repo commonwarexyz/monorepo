@@ -43,7 +43,7 @@ fn benchmark_threshold_recover(c: &mut Criterion) {
                 },
                 |(public, partials)| {
                     black_box(
-                        primitives::ops::threshold::recover::<MinSig, _, _, Bft3f1>(
+                        primitives::ops::threshold::recover::<MinSig, _, Bft3f1>(
                             public.public(),
                             &partials,
                             &Sequential,
