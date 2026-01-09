@@ -113,7 +113,7 @@ pub(crate) mod test {
         VariableConfig {
             mmr_journal_partition: format!("journal_{seed}"),
             mmr_metadata_partition: format!("metadata_{seed}"),
-            mmr_items_per_blob: NZU64!(11),
+            mmr_items_per_blob: NZU64!(13),
             mmr_write_buffer: NZUsize!(1024),
             log_partition: format!("log_journal_{seed}"),
             log_items_per_blob: NZU64!(7),
