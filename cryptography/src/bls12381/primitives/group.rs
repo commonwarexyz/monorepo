@@ -720,7 +720,10 @@ impl G1 {
             blst_p1s_to_affine(out.as_mut_ptr(), points_ptr.as_ptr(), n);
         }
 
-        out.into_iter().map(G1Affine::from_blst).collect()
+        // SAFETY: G1Affine is #[repr(transparent)] over blst_p1_affine,
+        // so Vec<blst_p1_affine> and Vec<G1Affine> have identical memory layouts.
+        // This avoids the overhead of iterating and wrapping each element.
+        unsafe { core::mem::transmute::<Vec<blst_p1_affine>, Vec<G1Affine>>(out) }
     }
 
     /// Computes MSM on pre-converted affine points with 128-bit scalars.
@@ -1158,7 +1161,10 @@ impl G2 {
             blst_p2s_to_affine(out.as_mut_ptr(), points_ptr.as_ptr(), n);
         }
 
-        out.into_iter().map(G2Affine::from_blst).collect()
+        // SAFETY: G2Affine is #[repr(transparent)] over blst_p2_affine,
+        // so Vec<blst_p2_affine> and Vec<G2Affine> have identical memory layouts.
+        // This avoids the overhead of iterating and wrapping each element.
+        unsafe { core::mem::transmute::<Vec<blst_p2_affine>, Vec<G2Affine>>(out) }
     }
 
     /// Computes MSM on pre-converted affine points with 128-bit scalars.
