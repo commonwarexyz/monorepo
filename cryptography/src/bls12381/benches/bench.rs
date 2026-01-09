@@ -8,6 +8,7 @@ mod combine_public_keys;
 mod combine_signatures;
 mod dkg;
 mod evaluate_point;
+mod hash_to_curve;
 mod msm;
 mod msm_affine;
 mod pairing_verify;
@@ -24,6 +25,7 @@ mod tle_encrypt;
 criterion_main!(
     batch_to_affine::benches,
     dkg::benches,
+    hash_to_curve::benches,
     threshold_recover::benches,
     combine_public_keys::benches,
     combine_signatures::benches,
