@@ -567,7 +567,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         rng.fill_bytes(&mut vote_rng_seed);
         rng.fill_bytes(&mut seed_rng_seed);
 
-        // Verify vote and seed signatures concurrently
+        // Verify vote and seed signatures concurrently.
         let (vote_invalid, seed_invalid) = strategy.join(
             || {
                 let mut vote_rng = StdRng::from_seed(vote_rng_seed);
