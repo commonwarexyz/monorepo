@@ -2014,7 +2014,7 @@ mod test_plan {
                             .index(&player_pk)
                             .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))?;
                         let player_key_idx = pk_to_key_idx[&player_pk];
-                        let player = &mut players.values_mut()[i_player.get() as usize];
+                        let player = &mut players.values_mut()[usize::from(i_player)];
 
                         let ack = player.dealer_message(pk.clone(), pub_msg.clone(), priv_msg);
                         assert_eq!(ack, ReadExt::read(&mut ack.encode())?);

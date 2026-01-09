@@ -981,15 +981,15 @@ mod tests {
             let mut num = Scalar::one();
             let mut den = Scalar::one();
 
-            let eval_x = scalars[eval_x.get() as usize].clone();
-            let xi = scalars[i_x.get() as usize].clone();
+            let eval_x = scalars[usize::from(eval_x)].clone();
+            let xi = scalars[usize::from(i_x)].clone();
 
             for &j_x in x_coords {
                 if i_x == j_x {
                     continue;
                 }
 
-                let xj = scalars[j_x.get() as usize].clone();
+                let xj = scalars[usize::from(j_x)].clone();
 
                 let mut term = eval_x.clone();
                 term -= &xj;

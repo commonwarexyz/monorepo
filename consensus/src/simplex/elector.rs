@@ -293,8 +293,8 @@ mod tests {
         // Each participant should be selected exactly once
         let mut seen = vec![false; n];
         for leader in &leaders {
-            assert!(!seen[leader.get() as usize]);
-            seen[leader.get() as usize] = true;
+            assert!(!seen[usize::from(*leader)]);
+            seen[usize::from(*leader)] = true;
         }
         assert!(seen.iter().all(|x| *x));
     }
@@ -404,8 +404,8 @@ mod tests {
         // Each participant should be selected exactly once (same as RoundRobin)
         let mut seen = vec![false; n];
         for leader in &leaders {
-            assert!(!seen[leader.get() as usize]);
-            seen[leader.get() as usize] = true;
+            assert!(!seen[usize::from(*leader)]);
+            seen[usize::from(*leader)] = true;
         }
         assert!(seen.iter().all(|x| *x));
     }

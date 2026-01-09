@@ -1386,10 +1386,10 @@ mod tests {
             let temp_elector: RoundRobinElector<S> =
                 elector_config.clone().build(schemes[0].participants());
             let leader_idx = temp_elector.elect(view2_round, None);
-            let leader = participants[leader_idx.get() as usize].clone();
+            let leader = participants[usize::from(leader_idx)].clone();
 
             // Create a voter with the leader's identity
-            let leader_scheme = schemes[leader_idx.get() as usize].clone();
+            let leader_scheme = schemes[usize::from(leader_idx)].clone();
 
             // Setup application mock with some latency so we can inject peer
             // message before automaton completes
@@ -2167,7 +2167,7 @@ mod tests {
 
                 // Check if we're NOT the leader for this view
                 if leader != Participant::new(0) {
-                    break (current_view, participants[leader.get() as usize].clone());
+                    break (current_view, participants[usize::from(leader)].clone());
                 }
 
                 // We're the leader, advance to next view

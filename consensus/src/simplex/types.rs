@@ -81,7 +81,7 @@ impl<T: Attributable> AttributableMap<T> {
     /// Returns `true` if the item was inserted, `false` if an item from this
     /// signer already exists or if the signer index is out of bounds.
     pub fn insert(&mut self, item: T) -> bool {
-        let index = item.signer().get() as usize;
+        let index: usize = item.signer().into();
         if index >= self.data.len() {
             return false;
         }
@@ -105,7 +105,7 @@ impl<T: Attributable> AttributableMap<T> {
 
     /// Returns a reference to the item associated with the given signer, if present.
     pub fn get(&self, signer: Participant) -> Option<&T> {
-        self.data.get(signer.get() as usize)?.as_ref()
+        self.data.get(<usize>::from(signer))?.as_ref()
     }
 
     /// Returns an iterator over items in the map, ordered by signer index

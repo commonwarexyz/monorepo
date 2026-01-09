@@ -284,7 +284,7 @@ impl<T: Ord> Quorum for Set<T> {
     }
 
     fn key(&self, index: Participant) -> Option<&Self::Item> {
-        self.get(index.get() as usize)
+        self.get(index.into())
     }
 
     fn index(&self, key: &Self::Item) -> Option<Participant> {

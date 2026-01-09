@@ -214,7 +214,7 @@ impl<V: Variant> Sharing<V> {
         cfg_if! {
             if #[cfg(feature = "std")] {
                 self.evals
-                    .get(i.get() as usize)
+                    .get(usize::from(i))
                     .map(|e| {
                         *e.get_or_init(|| self.poly.eval_msm(&self.scalar(i).expect("i < total"), &Sequential))
                     })

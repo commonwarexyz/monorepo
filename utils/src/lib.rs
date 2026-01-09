@@ -65,6 +65,12 @@ impl Participant {
     }
 }
 
+impl From<Participant> for usize {
+    fn from(p: Participant) -> Self {
+        p.0 as Self
+    }
+}
+
 impl core::fmt::Display for Participant {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.0)
