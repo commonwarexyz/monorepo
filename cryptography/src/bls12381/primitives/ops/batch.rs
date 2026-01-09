@@ -98,33 +98,44 @@ where
         },
     );
 
+    // Parallel bisection to find invalid signatures.
+    // Process all pending ranges at each level in parallel for maximum throughput.
     let mut invalid = Vec::new();
-    let mut stack = vec![(0, entries.len())];
-    while let Some((start, end)) = stack.pop() {
-        if start >= end {
-            continue;
-        }
+    let mut pending = vec![(0, entries.len())];
 
-        // Sum pre-computed weighted values for this slice
-        let mut sum_pk = V::Public::zero();
-        let mut sum_sig = V::Signature::zero();
-        for i in start..end {
-            sum_pk += &weighted_pks[i];
-            sum_sig += &weighted_sigs[i];
-        }
+    while !pending.is_empty() {
+        // Verify all pending ranges in parallel
+        let results: Vec<_> = strategy.map_collect_vec(&pending, |&(start, end)| {
+            // Sum pre-computed weighted values for this slice
+            let mut sum_pk = V::Public::zero();
+            let mut sum_sig = V::Signature::zero();
+            for i in start..end {
+                sum_pk += &weighted_pks[i];
+                sum_sig += &weighted_sigs[i];
+            }
+            // Return whether verification failed
+            V::verify(&sum_pk, &hm, &sum_sig).is_err()
+        });
 
-        // Verify: e(sum_pk, H(m)) == e(sum_sig, G)
-        if V::verify(&sum_pk, &hm, &sum_sig).is_err() {
-            if end - start == 1 {
-                invalid.push(start);
-            } else {
-                let mid = start + (end - start) / 2;
-                stack.push((mid, end));
-                stack.push((start, mid));
+        // Collect next level of ranges to verify
+        let mut next_pending = Vec::new();
+        for (&(start, end), &is_invalid) in pending.iter().zip(&results) {
+            if is_invalid {
+                if end - start == 1 {
+                    invalid.push(start);
+                } else {
+                    let mid = start + (end - start) / 2;
+                    next_pending.push((start, mid));
+                    next_pending.push((mid, end));
+                }
             }
         }
+        pending = next_pending;
     }
 
+    // Sort for deterministic output regardless of parallelization.
+    // Using sort_unstable is fine because indices are unique (no duplicates).
+    invalid.sort_unstable();
     invalid
 }
 
