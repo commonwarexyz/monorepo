@@ -82,7 +82,7 @@ use crate::journal::Error;
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
-    buffer::pool::{Append, PoolRef},
+    buffer::pool::{Append, PoolRef, Read},
     Blob, Error as RError, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
@@ -238,6 +238,56 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok((next_offset, size, decoded))
     }
 
+    /// Helper function to read an item from a [Read].
+    ///
+    /// The `varint_buf` parameter is a reusable buffer for reading the varint header to avoid
+    /// allocating a new buffer for every item.
+    async fn read_buffered(
+        reader: &mut Read<E::Blob>,
+        offset: u64,
+        cfg: &V::Cfg,
+        compressed: bool,
+        varint_buf: &mut Vec<u8>,
+    ) -> Result<(u64, u64, u32, V), Error> {
+        // If we're not at the right position, seek to it
+        if reader.position() != offset {
+            reader.seek_to(offset).map_err(Error::Runtime)?;
+        }
+
+        // Read varint header (max 5 bytes for u32). Reuse the provided buffer.
+        varint_buf.clear();
+        varint_buf.resize(MAX_VARINT_SIZE, 0);
+        let buf = std::mem::take(varint_buf);
+        let (buf, available) = reader.read_up_to(buf).await?;
+        let (next_offset, size, item) = find_item(buf.as_ref(), available, offset)?;
+
+        // Get item bytes - either from buffer directly or by reading more
+        let item_data: Cow<'_, [u8]> = match item {
+            Item::Complete(data) => {
+                // We already have all the data we need, but reader position may be ahead.
+                // Seek to the correct next position.
+                reader.seek_to(next_offset).map_err(Error::Runtime)?;
+                Cow::Borrowed(data)
+            }
+            Item::Incomplete {
+                mut buffer, filled, ..
+            } => {
+                reader
+                    .read_exact(&mut buffer[filled..], size as usize - filled)
+                    .await
+                    .map_err(Error::Runtime)?;
+                Cow::Owned(buffer)
+            }
+        };
+
+        // Decode item (with optional decompression)
+        let decoded = decode_item::<V>(item_data.as_ref(), cfg, compressed)?;
+
+        // Restore the buffer for reuse in the next iteration
+        *varint_buf = buf.into();
+        Ok((next_offset, next_offset, size, decoded))
+    }
+
     /// Returns an ordered stream of all items in the journal starting with the item at the given
     /// `start_section` and `offset` into that section. Each item is returned as a tuple of
     /// (section, offset, size, item).
@@ -272,22 +322,21 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             ));
         }
 
-        // Replay all blobs in order and stream items as they are read (to avoid occupying too
-        // much memory with buffered data)
+        // Replay all blobs in order and stream items as they are read (to avoid occupying too much
+        // memory with buffered data)
         Ok(stream::iter(blobs).flat_map(
             move |(section, blob, mut reader, blob_size, codec_config, compressed)| {
                 if section == start_section && offset != 0 {
                     if let Err(err) = reader.seek_to(offset) {
                         warn!(section, offset, ?err, "failed to seek to offset");
-                        return stream::once(async move { stream::iter(vec![Err(err.into())]) })
-                            .flatten()
-                            .left_stream();
+                        // Return early with the error to terminate the entire stream
+                        return stream::once(async move { Err(err.into()) }).left_stream();
                     }
                 } else {
                     offset = 0;
                 }
 
-                let batch_buffer = Vec::with_capacity(buffer.get());
+                // Read over the blob. Include a reusable buffer for varint parsing.
                 stream::unfold(
                     (
                         section,
@@ -298,221 +347,86 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                         blob_size,
                         codec_config,
                         compressed,
-                        batch_buffer,
+                        Vec::with_capacity(MAX_VARINT_SIZE),
                     ),
                     move |(
                         section,
                         blob,
                         mut reader,
-                        mut current_offset,
-                        mut valid_size,
+                        offset,
+                        valid_size,
                         blob_size,
                         codec_config,
                         compressed,
-                        mut batch_buffer,
+                        mut varint_buf,
                     )| async move {
-                        if current_offset >= blob_size {
+                        // Check if we are at the end of the blob
+                        if offset >= blob_size {
                             return None;
                         }
 
-                        // Read a chunk of data
-                        batch_buffer.clear();
-                        batch_buffer
-                            .resize(buffer.get().min((blob_size - current_offset) as usize), 0);
-                        let buf = std::mem::take(&mut batch_buffer);
-                        let (buf, available) = match reader.read_up_to(buf).await {
-                            Ok(result) => result,
-                            Err(err) => {
-                                warn!(section, current_offset, ?err, "error reading batch");
-                                return Some((
-                                    vec![Err(err.into())],
+                        // Read an item from the buffer
+                        match Self::read_buffered(
+                            &mut reader,
+                            offset,
+                            &codec_config,
+                            compressed,
+                            &mut varint_buf,
+                        )
+                        .await
+                        {
+                            Ok((next_offset, next_valid_size, size, item)) => {
+                                trace!(blob = section, cursor = offset, "replayed item");
+                                Some((
+                                    Ok((section, offset, size, item)),
                                     (
                                         section,
                                         blob,
                                         reader,
-                                        blob_size,
-                                        valid_size,
+                                        next_offset,
+                                        next_valid_size,
                                         blob_size,
                                         codec_config,
                                         compressed,
-                                        Vec::new(),
+                                        varint_buf,
                                     ),
-                                ));
+                                ))
                             }
-                        };
-
-                        if available == 0 {
-                            return None;
-                        }
-
-                        // Parse as many complete items as possible from the buffer
-                        let mut batch: Vec<Result<(u64, u64, u32, V), Error>> = Vec::new();
-                        let mut buf_offset = 0;
-                        let buf_slice = buf.as_ref();
-
-                        while buf_offset < available {
-                            let remaining = &buf_slice[buf_offset..available];
-                            match find_item(remaining, remaining.len(), current_offset) {
-                                Ok((next_offset, size, item)) => {
-                                    let item_data: Cow<'_, [u8]> = match item {
-                                        Item::Complete(data) => Cow::Borrowed(data),
-                                        Item::Incomplete { .. } => {
-                                            // Item spans buffer boundary - stop here
-                                            break;
-                                        }
-                                    };
-
-                                    match decode_item::<V>(
-                                        item_data.as_ref(),
-                                        &codec_config,
-                                        compressed,
-                                    ) {
-                                        Ok(decoded) => {
-                                            batch.push(Ok((
-                                                section,
-                                                current_offset,
-                                                size,
-                                                decoded,
-                                            )));
-                                            valid_size = next_offset;
-                                            let bytes_consumed =
-                                                (next_offset - current_offset) as usize;
-                                            buf_offset += bytes_consumed;
-                                            current_offset = next_offset;
-                                        }
-                                        Err(err) => {
-                                            warn!(
-                                                section,
-                                                current_offset,
-                                                ?err,
-                                                "decode error in batch"
-                                            );
-                                            batch_buffer = buf.into();
-                                            batch.push(Err(err));
-                                            return Some((
-                                                batch,
-                                                (
-                                                    section,
-                                                    blob,
-                                                    reader,
-                                                    blob_size,
-                                                    valid_size,
-                                                    blob_size,
-                                                    codec_config,
-                                                    compressed,
-                                                    batch_buffer,
-                                                ),
-                                            ));
-                                        }
-                                    }
-                                }
-                                Err(Error::Runtime(RError::BlobInsufficientLength)) => {
-                                    // Incomplete item at end of buffer - stop and let next
-                                    // iteration handle it
-                                    break;
-                                }
-                                Err(err) => {
-                                    if batch.is_empty() {
-                                        batch_buffer = buf.into();
-                                        return Some((
-                                            vec![Err(err)],
-                                            (
-                                                section,
-                                                blob,
-                                                reader,
-                                                blob_size,
-                                                valid_size,
-                                                blob_size,
-                                                codec_config,
-                                                compressed,
-                                                batch_buffer,
-                                            ),
-                                        ));
-                                    }
-                                    // Return what we have so far
-                                    break;
-                                }
-                            }
-                        }
-
-                        let bytes_remaining = available - buf_offset;
-
-                        batch_buffer = buf.into();
-
-                        // Seek reader to current position for next iteration
-                        if let Err(err) = reader.seek_to(current_offset) {
-                            warn!(section, current_offset, ?err, "failed to seek after batch");
-                            batch.push(Err(err.into()));
-                            return Some((
-                                batch,
-                                (
-                                    section,
-                                    blob,
-                                    reader,
-                                    blob_size,
-                                    valid_size,
-                                    blob_size,
-                                    codec_config,
-                                    compressed,
-                                    batch_buffer,
-                                ),
-                            ));
-                        }
-
-                        if batch.is_empty() {
-                            // If we encounter trailing bytes, we prune to the last valid item.
-                            // This can happen during an unclean file close (where pending data
-                            // is not fully synced to disk).
-                            let at_physical_end =
-                                current_offset + bytes_remaining as u64 >= blob_size;
-                            if at_physical_end && bytes_remaining > 0 {
+                            Err(Error::Runtime(RError::BlobInsufficientLength)) => {
+                                // If we encounter trailing bytes, we prune to the last
+                                // valid item. This can happen during an unclean file close (where
+                                // pending data is not fully synced to disk).
                                 warn!(
                                     blob = section,
-                                    bad_offset = current_offset,
+                                    bad_offset = offset,
                                     new_size = valid_size,
                                     "trailing bytes detected: truncating"
                                 );
                                 blob.resize(valid_size).await.ok()?;
-                                return None;
+                                None
                             }
-                            // If we consumed nothing and there's more data, the next read
-                            // will get a fresh buffer starting at current_offset.
-                            if buf_offset == 0 && !at_physical_end {
-                                return Some((
-                                    batch,
+                            Err(err) => {
+                                // If we encounter an unexpected error, return it without attempting
+                                // to fix anything.
+                                warn!(blob = section, cursor = offset, ?err, "unexpected error");
+                                Some((
+                                    Err(err),
                                     (
                                         section,
                                         blob,
                                         reader,
-                                        current_offset,
+                                        offset,
                                         valid_size,
                                         blob_size,
                                         codec_config,
                                         compressed,
-                                        batch_buffer,
+                                        varint_buf,
                                     ),
-                                ));
+                                ))
                             }
-                            return None;
                         }
-
-                        Some((
-                            batch,
-                            (
-                                section,
-                                blob,
-                                reader,
-                                current_offset,
-                                valid_size,
-                                blob_size,
-                                codec_config,
-                                compressed,
-                                batch_buffer,
-                            ),
-                        ))
                     },
                 )
-                .flat_map(stream::iter)
                 .right_stream()
             },
         ))
