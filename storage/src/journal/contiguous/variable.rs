@@ -90,10 +90,20 @@ impl<C> Config<C> {
     }
 }
 
-/// A position-based journal for variable-length items.
+/// A contiguous journal with variable-size entries.
 ///
 /// This journal manages section assignment automatically, allowing callers to append items
 /// sequentially without manually tracking section numbers.
+///
+/// # Repair
+///
+/// Like
+/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+/// and
+/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+/// the first invalid data read will be considered the new end of the journal (and the
+/// underlying [Blob](commonware_runtime::Blob) will be truncated to the last valid item). Repair occurs during
+/// init via the underlying segmented journals.
 ///
 /// # Invariants
 ///

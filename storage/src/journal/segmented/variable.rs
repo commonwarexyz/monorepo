@@ -84,8 +84,8 @@ use commonware_codec::{
     varint::UInt, Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
 use commonware_runtime::{
-    buffer::pool::{Append, PoolRef, Read},
-    Blob, Error as RError, Metrics, Storage,
+    buffer::pool::{Append, PoolRef},
+    Blob, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::{borrow::Cow, io::Cursor, num::NonZeroUsize};
@@ -176,7 +176,19 @@ fn decode_item<V: Codec>(item_data: &[u8], cfg: &V::Cfg, compressed: bool) -> Re
     }
 }
 
-/// Implementation of `Journal` storage.
+/// A segmented journal with variable-size entries.
+///
+/// Each section is stored in a separate blob. Items are length-prefixed with a varint.
+///
+/// # Repair
+///
+/// Like
+/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+/// and
+/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+/// the first invalid data read will be considered the new end of the journal (and the
+/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
+/// replay (not init) because any blob could have trailing bytes.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     manager: Manager<E, AppendFactory>,
 
@@ -240,68 +252,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok((next_offset, size, decoded))
     }
 
-    /// Helper function to read an item from a [Read].
-    ///
-    /// The `varint_buf` parameter is a reusable buffer for reading the varint header to avoid
-    /// allocating a new buffer for every item.
-    async fn read_buffered(
-        reader: &mut Read<E::Blob>,
-        offset: u64,
-        cfg: &V::Cfg,
-        compressed: bool,
-        varint_buf: &mut Vec<u8>,
-    ) -> Result<(u64, u64, u32, V), Error> {
-        // If we're not at the right position, seek to it
-        if reader.position() != offset {
-            reader.seek_to(offset).map_err(Error::Runtime)?;
-        }
-
-        // Read varint header (max 5 bytes for u32). Reuse the provided buffer.
-        varint_buf.clear();
-        varint_buf.resize(MAX_VARINT_SIZE, 0);
-        let buf = std::mem::take(varint_buf);
-        let (buf, available) = reader.read_up_to(buf).await?;
-        let (next_offset, size, item) = find_item(buf.as_ref(), available, offset)?;
-
-        // Get item bytes - either from buffer directly or by reading more
-        let item_data: Cow<'_, [u8]> = match item {
-            Item::Complete(data) => {
-                // We already have all the data we need, but reader position may be ahead.
-                // Seek to the correct next position.
-                reader.seek_to(next_offset).map_err(Error::Runtime)?;
-                Cow::Borrowed(data)
-            }
-            Item::Incomplete {
-                mut buffer, filled, ..
-            } => {
-                reader
-                    .read_exact(&mut buffer[filled..], size as usize - filled)
-                    .await
-                    .map_err(Error::Runtime)?;
-                Cow::Owned(buffer)
-            }
-        };
-
-        // Decode item (with optional decompression)
-        let decoded = decode_item::<V>(item_data.as_ref(), cfg, compressed)?;
-
-        // Restore the buffer for reuse in the next iteration
-        *varint_buf = buf.into();
-        Ok((next_offset, next_offset, size, decoded))
-    }
-
     /// Returns an ordered stream of all items in the journal starting with the item at the given
     /// `start_section` and `offset` into that section. Each item is returned as a tuple of
     /// (section, offset, size, item).
-    ///
-    /// # Repair
-    ///
-    /// Like
-    /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
-    /// and
-    /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-    /// the first invalid data read will be considered the new end of the journal (and the
-    /// underlying [Blob] will be truncated to the last valid item).
     pub async fn replay(
         &self,
         start_section: u64,
@@ -313,32 +266,27 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         let compressed = self.compression.is_some();
         let mut blobs = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
-            let blob_size = blob.size().await;
             blobs.push((
                 section,
                 blob.clone(),
                 blob.as_blob_reader(buffer).await?,
-                blob_size,
                 codec_config.clone(),
                 compressed,
             ));
         }
 
-        // Replay all blobs in order and stream items as they are read (to avoid occupying too much
-        // memory with buffered data)
+        // Stream items as they are read to avoid occupying too much memory
         Ok(stream::iter(blobs).flat_map(
-            move |(section, blob, mut reader, blob_size, codec_config, compressed)| {
+            move |(section, blob, mut reader, codec_config, compressed)| {
                 if section == start_section && offset != 0 {
                     if let Err(err) = reader.seek_to(offset) {
                         warn!(section, offset, ?err, "failed to seek to offset");
-                        // Return early with the error to terminate the entire stream
                         return stream::once(async move { Err(err.into()) }).left_stream();
                     }
                 } else {
                     offset = 0;
                 }
 
-                // Read over the blob. Include a reusable buffer for varint parsing.
                 stream::unfold(
                     (
                         section,
@@ -346,89 +294,139 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                         reader,
                         offset,
                         0u64,
-                        blob_size,
                         codec_config,
                         compressed,
-                        Vec::with_capacity(MAX_VARINT_SIZE),
                     ),
                     move |(
                         section,
                         blob,
                         mut reader,
-                        offset,
-                        valid_size,
-                        blob_size,
+                        mut offset,
+                        mut valid_offset,
                         codec_config,
                         compressed,
-                        mut varint_buf,
                     )| async move {
-                        // Check if we are at the end of the blob
-                        if offset >= blob_size {
+                        let blob_size = reader.blob_size();
+
+                        // Fill buffer once per unfold iteration
+                        match reader.fill().await {
+                            Ok(0) => return None,
+                            Err(err) => {
+                                return Some((
+                                    vec![Err(err.into())],
+                                    (
+                                        section,
+                                        blob,
+                                        reader,
+                                        blob_size,
+                                        valid_offset,
+                                        codec_config,
+                                        compressed,
+                                    ),
+                                ));
+                            }
+                            Ok(_) => {}
+                        }
+
+                        // Parse as many complete items as possible from buffer
+                        let mut batch: Vec<Result<(u64, u64, u32, V), Error>> = Vec::new();
+
+                        loop {
+                            let buf = reader.available();
+                            if buf.is_empty() {
+                                break;
+                            }
+
+                            match find_item(buf, buf.len(), offset) {
+                                Ok((next_offset, size, Item::Complete(data))) => {
+                                    match decode_item::<V>(data, &codec_config, compressed) {
+                                        Ok(decoded) => {
+                                            let consumed = (next_offset - offset) as usize;
+                                            reader.advance(consumed);
+                                            batch.push(Ok((section, offset, size, decoded)));
+                                            valid_offset = next_offset;
+                                            offset = next_offset;
+                                        }
+                                        Err(err) => {
+                                            batch.push(Err(err));
+                                            break;
+                                        }
+                                    }
+                                }
+                                Ok((
+                                    next_offset,
+                                    size,
+                                    Item::Incomplete {
+                                        mut buffer, filled, ..
+                                    },
+                                )) => {
+                                    // Item::Incomplete means the item spans buffer boundary: we have
+                                    // the varint + partial data, but not the complete item. By
+                                    // definition, this consumed the entire buffer (varint_len +
+                                    // filled = buf.len()), so advance past all of it.
+                                    reader.advance(buf.len());
+
+                                    // Now read remaining bytes from new pages
+                                    if let Err(err) = reader
+                                        .read_exact(&mut buffer[filled..], size as usize - filled)
+                                        .await
+                                    {
+                                        batch.push(Err(err.into()));
+                                        break;
+                                    }
+                                    match decode_item::<V>(&buffer, &codec_config, compressed) {
+                                        Ok(decoded) => {
+                                            batch.push(Ok((section, offset, size, decoded)));
+                                            valid_offset = next_offset;
+                                            offset = next_offset;
+                                        }
+                                        Err(err) => {
+                                            batch.push(Err(err));
+                                        }
+                                    }
+                                    break;
+                                }
+                                Err(err) => {
+                                    // Could be codec error from incomplete varint - treat as
+                                    // end if at physical end
+                                    let at_physical_end = offset + buf.len() as u64 >= blob_size;
+                                    if at_physical_end {
+                                        if valid_offset < blob_size {
+                                            warn!(
+                                                blob = section,
+                                                bad_offset = offset,
+                                                new_size = valid_offset,
+                                                "trailing bytes detected: truncating"
+                                            );
+                                            blob.resize(valid_offset).await.ok()?;
+                                        }
+                                        break;
+                                    }
+                                    batch.push(Err(err));
+                                    break;
+                                }
+                            }
+                        }
+
+                        if batch.is_empty() {
                             return None;
                         }
 
-                        // Read an item from the buffer
-                        match Self::read_buffered(
-                            &mut reader,
-                            offset,
-                            &codec_config,
-                            compressed,
-                            &mut varint_buf,
-                        )
-                        .await
-                        {
-                            Ok((next_offset, next_valid_size, size, item)) => {
-                                trace!(blob = section, cursor = offset, "replayed item");
-                                Some((
-                                    Ok((section, offset, size, item)),
-                                    (
-                                        section,
-                                        blob,
-                                        reader,
-                                        next_offset,
-                                        next_valid_size,
-                                        blob_size,
-                                        codec_config,
-                                        compressed,
-                                        varint_buf,
-                                    ),
-                                ))
-                            }
-                            Err(Error::Runtime(RError::BlobInsufficientLength)) => {
-                                // If we encounter trailing bytes, we prune to the last
-                                // valid item. This can happen during an unclean file close (where
-                                // pending data is not fully synced to disk).
-                                warn!(
-                                    blob = section,
-                                    bad_offset = offset,
-                                    new_size = valid_size,
-                                    "trailing bytes detected: truncating"
-                                );
-                                blob.resize(valid_size).await.ok()?;
-                                None
-                            }
-                            Err(err) => {
-                                // If we encounter an unexpected error, return it without attempting
-                                // to fix anything.
-                                warn!(blob = section, cursor = offset, ?err, "unexpected error");
-                                Some((
-                                    Err(err),
-                                    (
-                                        section,
-                                        blob,
-                                        reader,
-                                        offset,
-                                        valid_size,
-                                        blob_size,
-                                        codec_config,
-                                        compressed,
-                                        varint_buf,
-                                    ),
-                                ))
-                            }
-                        }
+                        Some((
+                            batch,
+                            (
+                                section,
+                                blob,
+                                reader,
+                                offset,
+                                valid_offset,
+                                codec_config,
+                                compressed,
+                            ),
+                        ))
                     },
                 )
+                .flat_map(stream::iter)
                 .right_stream()
             },
         ))
