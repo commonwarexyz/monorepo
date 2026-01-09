@@ -60,7 +60,7 @@ impl<B: Blob> Read<B> {
             blob,
             physical_blob_size,
             logical_blob_size,
-            buffer: BytesMut::with_capacity(capacity).freeze(),
+            buffer: Bytes::new(),
             blob_page: 0,
             buffer_position: 0,
             buffer_capacity: capacity,
@@ -398,8 +398,8 @@ impl<B: Blob> Read<B> {
 
         self.blob_page = position / logical_page_size;
         self.buffer_position = (position % logical_page_size) as usize;
-        // Invalidate buffer with pre-allocated capacity, will be refilled on next read
-        self.buffer = BytesMut::with_capacity(self.buffer_capacity).freeze();
+        // Invalidate buffer, will be refilled on next read
+        self.buffer = Bytes::new();
 
         Ok(())
     }
