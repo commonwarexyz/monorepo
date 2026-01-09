@@ -21,7 +21,8 @@ const LN2_Q16: u64 = 45_426;
 const FP_RATE_SCALE: u64 = 10_000;
 
 /// Bits-per-element constants in Q16.16 fixed-point format.
-/// Pre-computed as `bpe = -ln(p) / (ln(2))^2` for common false positive rates.
+/// Pre-computed as `bpe = round(-ln(p) / (ln(2))^2 * 65536)` for common false positive
+/// rates. See `test_q16_constants` for verification.
 mod bpe {
     pub const FP_1E1: u64 = 314_083; // ~10% FP rate (4.79 bits/element)
     pub const FP_1E2: u64 = 628_166; // ~1% FP rate (9.59 bits/element)
@@ -205,6 +206,13 @@ impl<H: Hasher> BloomFilter<H> {
     ///
     /// This approximates the false positive rate as `f^k` where `f` is the fill ratio
     /// (proportion of bits set to 1) and `k` is the number of hash functions.
+    ///
+    /// # Determinism
+    ///
+    /// This method is deterministic across platforms because:
+    /// - Integer to f64 conversion is exact for values < 2^53 (our bit counts qualify)
+    /// - Division is an IEEE 754 basic operation (correctly rounded, deterministic)
+    /// - `powi` is repeated multiplication of IEEE 754 basic operations
     #[cfg(feature = "std")]
     pub fn estimated_false_positive_rate(&self) -> f64 {
         let fill_ratio = self.bits.count_ones() as f64 / self.bits.len() as f64;
@@ -215,6 +223,11 @@ impl<H: Hasher> BloomFilter<H> {
     ///
     /// Uses the formula `n = -(m/k) * ln(1 - x/m)` where `m` is the number of bits,
     /// `k` is the number of hash functions, and `x` is the number of bits set to 1.
+    ///
+    /// # Warning
+    ///
+    /// This method uses `ln()` which is NOT an IEEE 754 basic operation. Results may differ
+    /// across platforms/architectures. Do not use in consensus-critical code paths.
     #[cfg(feature = "std")]
     pub fn estimated_count(&self) -> f64 {
         let m = self.bits.len() as f64;
