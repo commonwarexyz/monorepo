@@ -374,11 +374,11 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::RecoverMinPk { sharing, partials } => {
-            let _ = threshold::recover::<MinPk, _>(&sharing, &partials);
+            let _ = threshold::recover::<MinPk, _, _>(&sharing, &partials, &Sequential);
         }
 
         FuzzOperation::RecoverMinSig { sharing, partials } => {
-            let _ = threshold::recover::<MinSig, _>(&sharing, &partials);
+            let _ = threshold::recover::<MinSig, _, _>(&sharing, &partials, &Sequential);
         }
 
         FuzzOperation::RecoverMultipleMinPk {

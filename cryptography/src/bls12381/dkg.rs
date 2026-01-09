@@ -2242,9 +2242,10 @@ mod test_plan {
                 }
 
                 let threshold = observer_output.quorum();
-                let threshold_sig = threshold::recover::<V, _>(
+                let threshold_sig = threshold::recover::<V, _, _>(
                     &observer_output.public,
                     &partial_sigs[0..threshold as usize],
+                    &Sequential,
                 )
                 .expect("Should recover threshold signature");
 
