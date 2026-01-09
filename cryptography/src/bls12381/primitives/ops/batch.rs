@@ -81,10 +81,22 @@ where
     }
 
     // Slow path: bisection to find invalid signatures
-    // Pre-compute individual weighted values for bisection
-    let weighted_pks: Vec<V::Public> = pks.iter().zip(&scalars).map(|(pk, s)| *pk * s).collect();
-    let weighted_sigs: Vec<V::Signature> =
-        sigs.iter().zip(&scalars).map(|(sig, s)| *sig * s).collect();
+    // Pre-compute individual weighted values in parallel for bisection.
+    // Each branch computes n scalar multiplications, so parallelization helps.
+    let (weighted_pks, weighted_sigs) = strategy.join(
+        || {
+            pks.iter()
+                .zip(&scalars)
+                .map(|(pk, s)| *pk * s)
+                .collect::<Vec<_>>()
+        },
+        || {
+            sigs.iter()
+                .zip(&scalars)
+                .map(|(sig, s)| *sig * s)
+                .collect::<Vec<_>>()
+        },
+    );
 
     let mut invalid = Vec::new();
     let mut stack = vec![(0, entries.len())];
@@ -149,11 +161,10 @@ where
         .map(|_| SmallScalar::random(&mut *rng))
         .collect();
 
-    // Hash all messages and collect signatures
-    let hms: Vec<V::Signature> = entries
-        .iter()
-        .map(|(namespace, msg, _)| hash_with_namespace::<V>(V::MESSAGE, namespace, msg))
-        .collect();
+    // Hash all messages in parallel (hash-to-curve is expensive) and collect signatures
+    let hms: Vec<V::Signature> = strategy.map_collect_vec(&entries, |(namespace, msg, _)| {
+        hash_with_namespace::<V>(V::MESSAGE, namespace, msg)
+    });
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
 
     // Compute weighted sums in parallel using MSM with 128-bit scalars.
