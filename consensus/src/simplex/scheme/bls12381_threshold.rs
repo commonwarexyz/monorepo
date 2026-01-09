@@ -480,7 +480,7 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
 
     fn me(&self) -> Option<Participant> {
         match &self.role {
-            Role::Signer { share, .. } => Some(Participant::new(share.index)),
+            Role::Signer { share, .. } => Some(share.index),
             _ => None,
         }
     }
@@ -508,7 +508,7 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
         };
 
         Some(Attestation {
-            signer: Participant::new(share.index),
+            signer: share.index,
             signature,
         })
     }
@@ -523,7 +523,7 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
         R: CryptoRngCore,
         D: Digest,
     {
-        let Ok(evaluated) = self.polynomial().partial_public(attestation.signer.get()) else {
+        let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
             return false;
         };
 
@@ -565,11 +565,11 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
             .map(|attestation| {
                 (
                     PartialSignature::<V> {
-                        index: attestation.signer.get(),
+                        index: attestation.signer,
                         value: attestation.signature.vote_signature,
                     },
                     PartialSignature::<V> {
-                        index: attestation.signer.get(),
+                        index: attestation.signer,
                         value: attestation.signature.seed_signature,
                     },
                 )
@@ -610,19 +610,16 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
             .into_iter()
             .zip(seed_partials)
             .map(|(vote, seed)| Attestation {
-                signer: Participant::new(vote.index),
+                signer: vote.index,
                 signature: Signature {
                     vote_signature: vote.value,
                     seed_signature: seed.value,
                 },
             })
-            .filter(|attestation| !invalid.contains(&attestation.signer.get()))
+            .filter(|attestation| !invalid.contains(&attestation.signer))
             .collect();
 
-        Verification::new(
-            verified,
-            invalid.into_iter().map(Participant::new).collect(),
-        )
+        Verification::new(verified, invalid.into_iter().collect())
     }
 
     fn assemble<I>(&self, attestations: I) -> Option<Self::Certificate>
@@ -634,11 +631,11 @@ impl<P: PublicKey, V: Variant, S: Strategy> certificate::Scheme for Scheme<P, V,
             .map(|attestation| {
                 (
                     PartialSignature::<V> {
-                        index: attestation.signer.get(),
+                        index: attestation.signer,
                         value: attestation.signature.vote_signature,
                     },
                     PartialSignature::<V> {
-                        index: attestation.signer.get(),
+                        index: attestation.signer,
                         value: attestation.signature.seed_signature,
                     },
                 )
@@ -805,7 +802,7 @@ mod tests {
         let participants = ed25519_participants(&mut rng, 4);
         let (polynomial, mut shares) =
             dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
-        shares[0].index = 999;
+        shares[0].index = Participant::new(999);
         Scheme::<V>::signer(
             NAMESPACE,
             participants.keys().clone(),
@@ -1456,7 +1453,7 @@ mod tests {
             threshold::sign_message::<V>(share, seed_namespace.as_ref(), seed_message.as_ref())
                 .value;
 
-        assert_eq!(vote.signer, Participant::new(share.index));
+        assert_eq!(vote.signer, share.index);
         assert_eq!(vote.signature.vote_signature, expected_message);
         assert_eq!(vote.signature.seed_signature, expected_seed);
     }

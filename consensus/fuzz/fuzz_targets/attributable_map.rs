@@ -65,7 +65,7 @@ fn fuzz(input: FuzzInput) {
                 let nullify = make_vote(&data, dummy_sig.clone());
                 let result = map.insert(nullify);
 
-                let in_bounds = (signer_idx.get() as usize) < (input.participants as usize);
+                let in_bounds = signer_idx.get() < u32::from(input.participants);
                 let already_inserted = inserted_signers.contains(&signer_idx);
 
                 if in_bounds && !already_inserted {

@@ -117,7 +117,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         D: Digest,
     {
-        let Some(public_key) = self.participants.value(attestation.signer.get() as usize) else {
+        let Some(public_key) = self.participants.value(attestation.signer.into()) else {
             return false;
         };
 
@@ -149,8 +149,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         let mut verified = Vec::new();
 
         for attestation in attestations.into_iter() {
-            let Some(public_key) = self.participants.value(attestation.signer.get() as usize)
-            else {
+            let Some(public_key) = self.participants.value(attestation.signer.into()) else {
                 invalid.insert(attestation.signer);
                 continue;
             };
@@ -174,7 +173,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
         for Attestation { signer, signature } in attestations {
-            if signer.get() as usize >= self.participants.len() {
+            if usize::from(signer) >= self.participants.len() {
                 return None;
             }
 
@@ -226,7 +225,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         let namespace = subject.namespace(&self.namespace);
         let message = subject.message();
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            let Some(public_key) = self.participants.value(signer.get() as usize) else {
+            let Some(public_key) = self.participants.value(signer.into()) else {
                 return false;
             };
             if !public_key.verify(namespace, &message, signature) {

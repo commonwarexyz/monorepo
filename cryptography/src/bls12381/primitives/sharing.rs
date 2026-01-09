@@ -5,7 +5,7 @@ use cfg_if::cfg_if;
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
-use commonware_utils::{ordered::Set, quorum, NZU32};
+use commonware_utils::{ordered::Set, quorum, Participant, NZU32};
 use core::{iter, num::NonZeroU32};
 #[cfg(feature = "std")]
 use std::sync::{Arc, OnceLock};
@@ -26,21 +26,21 @@ impl Mode {
     /// Compute the scalar for one participant.
     ///
     /// This will return `None` only if `i >= total`.
-    pub(crate) fn scalar(self, total: NonZeroU32, i: u32) -> Option<Scalar> {
-        if i >= total.get() {
+    pub(crate) fn scalar(self, total: NonZeroU32, i: Participant) -> Option<Scalar> {
+        if i.get() >= total.get() {
             return None;
         }
         match self {
             Self::NonZeroCounter => {
                 // Adding 1 is critical, because f(0) will contain the secret.
-                Some(Scalar::from_u64(i as u64 + 1))
+                Some(Scalar::from_u64(i.get() as u64 + 1))
             }
         }
     }
 
     /// Compute the scalars for all participants.
     pub(crate) fn all_scalars(self, total: NonZeroU32) -> impl Iterator<Item = Scalar> {
-        (0..total.get()).map(move |i| self.scalar(total, i).expect("i < total"))
+        (0..total.get()).map(move |i| self.scalar(total, Participant::new(i)).expect("i < total"))
     }
 
     /// Create an interpolator for this mode, given a set of indices.
@@ -52,12 +52,12 @@ impl Mode {
     /// To be generic over different use cases, we need:
     /// - the total number of participants,
     /// - a set of indices (of any type),
-    /// - a means to convert indices to u32 values.
+    /// - a means to convert indices to Participant values.
     fn interpolator<I: Clone + Ord>(
         self,
         total: NonZeroU32,
         indices: &Set<I>,
-        to_index: impl Fn(&I) -> Option<u32>,
+        to_index: impl Fn(&I) -> Option<Participant>,
     ) -> Option<Interpolator<I, Scalar>> {
         let mut count = 0;
         let iter = indices
@@ -92,7 +92,9 @@ impl Mode {
         let Ok(total) = NonZeroU32::try_from(set.len() as u32) else {
             return Some(Interpolator::new(iter::empty()));
         };
-        self.interpolator(total, subset, |i| set.position(i).map(|x| x as u32))
+        self.interpolator(total, subset, |i| {
+            set.position(i).map(Participant::from_usize)
+        })
     }
 }
 
@@ -157,7 +159,7 @@ impl<V: Variant> Sharing<V> {
         self.mode
     }
 
-    pub(crate) fn scalar(&self, i: u32) -> Option<Scalar> {
+    pub(crate) fn scalar(&self, i: Participant) -> Option<Scalar> {
         self.mode.scalar(self.total, i)
     }
 
@@ -180,8 +182,8 @@ impl<V: Variant> Sharing<V> {
     /// This will return an error if any of the indices are >= [`Self::total`].
     pub(crate) fn interpolator(
         &self,
-        indices: &Set<u32>,
-    ) -> Result<Interpolator<u32, Scalar>, Error> {
+        indices: &Set<Participant>,
+    ) -> Result<Interpolator<Participant, Scalar>, Error> {
         self.mode
             .interpolator(self.total, indices, |&x| Some(x))
             .ok_or(Error::InvalidIndex)
@@ -208,11 +210,11 @@ impl<V: Variant> Sharing<V> {
     /// Get the partial public key associated with a given participant.
     ///
     /// This will return `None` if the index is greater >= [`Self::total`].
-    pub fn partial_public(&self, i: u32) -> Result<V::Public, Error> {
+    pub fn partial_public(&self, i: Participant) -> Result<V::Public, Error> {
         cfg_if! {
             if #[cfg(feature = "std")] {
                 self.evals
-                    .get(i as usize)
+                    .get(usize::from(i))
                     .map(|e| {
                         *e.get_or_init(|| self.poly.eval_msm(&self.scalar(i).expect("i < total"), &Sequential))
                     })
