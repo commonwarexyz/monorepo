@@ -169,15 +169,17 @@ where
 /// more verifications than checking each signature individually. If an invalid signer is detected,
 /// consider blocking them from participating in future batches to better amortize the cost of this
 /// search.
-fn batch_verify_same_message_bisect<'a, R, V>(
+fn batch_verify_same_message_bisect<'a, R, V, S>(
     rng: &mut R,
     pending: &[(V::Public, &'a PartialSignature<V>)],
     namespace: &[u8],
     message: &[u8],
+    strategy: &S,
 ) -> Vec<&'a PartialSignature<V>>
 where
     R: CryptoRngCore,
     V: Variant,
+    S: Strategy,
 {
     // Convert to the format expected by verify_same_message
     let entries: Vec<(V::Public, V::Signature)> = pending
@@ -186,7 +188,8 @@ where
         .collect();
 
     // Use the generic verification function
-    let invalid_indices = batch::verify_same_message::<_, V>(rng, namespace, message, &entries);
+    let invalid_indices =
+        batch::verify_same_message::<_, V, _>(rng, namespace, message, &entries, strategy);
 
     // Map indices back to PartialSignature references
     invalid_indices
@@ -206,17 +209,19 @@ where
 /// This function assumes a group check was already performed on each `signature`.
 /// Duplicate signers are safe because random scalar weights ensure each
 /// (public key, signature) pair is verified independently.
-pub fn batch_verify_same_message<'a, R, V, I>(
+pub fn batch_verify_same_message<'a, R, V, I, S>(
     rng: &mut R,
     sharing: &Sharing<V>,
     namespace: &[u8],
     message: &[u8],
     partials: I,
+    strategy: &S,
 ) -> Result<(), Vec<&'a PartialSignature<V>>>
 where
     R: CryptoRngCore,
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
+    S: Strategy,
 {
     let partials = partials.into_iter();
     let mut pending = Vec::with_capacity(partials.size_hint().0);
@@ -229,7 +234,13 @@ where
     }
 
     // Find any invalid partial signatures
-    let bad = batch_verify_same_message_bisect::<_, V>(rng, pending.as_slice(), namespace, message);
+    let bad = batch_verify_same_message_bisect::<_, V, _>(
+        rng,
+        pending.as_slice(),
+        namespace,
+        message,
+        strategy,
+    );
     invalid.extend(bad);
 
     if invalid.is_empty() {
@@ -790,7 +801,7 @@ mod tests {
             .collect();
         sharing.precompute_partial_publics();
 
-        batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials)
+        batch_verify_same_message::<_, MinSig, _, _>(&mut rng, &sharing, namespace, msg, &partials, &Sequential)
             .expect("all signatures should be valid");
     }
 
@@ -812,8 +823,8 @@ mod tests {
             .collect();
 
         sharing.precompute_partial_publics();
-        let result = batch_verify_same_message::<_, MinSig, _>(
-            &mut rng, &sharing, namespace, msg, &partials,
+        let result = batch_verify_same_message::<_, MinSig, _, _>(
+            &mut rng, &sharing, namespace, msg, &partials, &Sequential,
         );
         match result {
             Err(invalid_sigs) => {
@@ -852,8 +863,8 @@ mod tests {
             .collect();
         sharing.precompute_partial_publics();
 
-        let result = batch_verify_same_message::<_, MinSig, _>(
-            &mut rng, &sharing, namespace, msg, &partials,
+        let result = batch_verify_same_message::<_, MinSig, _, _>(
+            &mut rng, &sharing, namespace, msg, &partials, &Sequential,
         );
         match result {
             Err(invalid_sigs) => {
@@ -894,8 +905,8 @@ mod tests {
         partials[0].index = Participant::new(100);
 
         sharing.precompute_partial_publics();
-        let result = batch_verify_same_message::<_, MinSig, _>(
-            &mut rng, &sharing, namespace, msg, &partials,
+        let result = batch_verify_same_message::<_, MinSig, _, _>(
+            &mut rng, &sharing, namespace, msg, &partials, &Sequential,
         );
         match result {
             Err(invalid_sigs) => {
@@ -927,7 +938,7 @@ mod tests {
             .map(|s| sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        batch_verify_same_message::<_, MinSig, _>(&mut rng, &sharing, namespace, msg, &partials)
+        batch_verify_same_message::<_, MinSig, _, _>(&mut rng, &sharing, namespace, msg, &partials, &Sequential)
             .expect("signature should be valid");
     }
 
@@ -946,8 +957,8 @@ mod tests {
             .map(|s| sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        let result = batch_verify_same_message::<_, MinSig, _>(
-            &mut rng, &sharing, namespace, msg, &partials,
+        let result = batch_verify_same_message::<_, MinSig, _, _>(
+            &mut rng, &sharing, namespace, msg, &partials, &Sequential,
         );
         match result {
             Err(invalid_sigs) => {
@@ -975,8 +986,8 @@ mod tests {
             .map(|s| sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        let result = batch_verify_same_message::<_, MinSig, _>(
-            &mut rng, &sharing, namespace, msg, &partials,
+        let result = batch_verify_same_message::<_, MinSig, _, _>(
+            &mut rng, &sharing, namespace, msg, &partials, &Sequential,
         );
         match result {
             Err(invalid_sigs) => {
@@ -1117,12 +1128,13 @@ mod tests {
             .expect("vulnerable naive verification accepts forged aggregate");
 
         let forged_partials = [forged_partial1, forged_partial2];
-        let result = batch_verify_same_message::<_, V, _>(
+        let result = batch_verify_same_message::<_, V, _, _>(
             &mut rng,
             &sharing,
             namespace,
             msg,
             &forged_partials,
+            &Sequential,
         );
         assert!(
             result.is_err(),
@@ -1130,7 +1142,7 @@ mod tests {
         );
 
         let valid_partials = [partial1, partial2];
-        batch_verify_same_message::<_, V, _>(&mut rng, &sharing, namespace, msg, &valid_partials)
+        batch_verify_same_message::<_, V, _, _>(&mut rng, &sharing, namespace, msg, &valid_partials, &Sequential)
             .expect("secure function should accept valid partial signatures");
     }
 

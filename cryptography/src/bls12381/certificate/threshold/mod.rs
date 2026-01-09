@@ -246,11 +246,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Batch-verifies attestations and returns verified attestations and invalid signers.
-    pub fn verify_attestations<'a, S, R, D, I>(
+    pub fn verify_attestations<'a, S, R, D, I, T>(
         &self,
         rng: &mut R,
         subject: S::Subject<'a, D>,
         attestations: I,
+        strategy: &T,
     ) -> Verification<S>
     where
         S: Scheme<Signature = V::Signature>,
@@ -258,6 +259,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
+        T: Strategy,
     {
         let mut invalid = BTreeSet::new();
         let partials: Vec<_> = attestations
@@ -269,12 +271,13 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .collect();
 
         let polynomial = self.polynomial();
-        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
+        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _, _>(
             rng,
             polynomial,
             subject.namespace(self.namespace()),
             &subject.message(),
             partials.iter(),
+            strategy,
         ) {
             for partial in errs {
                 invalid.insert(partial.index);
@@ -553,7 +556,7 @@ mod macros {
                     rng: &mut R,
                     subject: Self::Subject<'_, D>,
                     attestations: I,
-                    _strategy: &impl commonware_parallel::Strategy,
+                    strategy: &impl commonware_parallel::Strategy,
                 ) -> $crate::certificate::Verification<Self>
                 where
                     R: rand_core::CryptoRngCore,
@@ -561,7 +564,7 @@ mod macros {
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
                     self.generic
-                        .verify_attestations::<_, _, D, _>(rng, subject, attestations)
+                        .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
                 }
 
                 fn assemble<I, M>(

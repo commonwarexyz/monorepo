@@ -19,6 +19,7 @@ use crate::{
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_parallel::Strategy;
 use commonware_utils::{
     ordered::{BiMap, Quorum, Set},
     Faults, Participant,
@@ -139,11 +140,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Batch-verifies attestations and returns verified attestations and invalid signers.
-    pub fn verify_attestations<'a, S, R, D, I>(
+    pub fn verify_attestations<'a, S, R, D, I, T>(
         &self,
         rng: &mut R,
         subject: S::Subject<'a, D>,
         attestations: I,
+        strategy: &T,
     ) -> Verification<S>
     where
         S: Scheme<Signature = V::Signature>,
@@ -151,6 +153,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
+        T: Strategy,
     {
         let mut invalid = BTreeSet::new();
         let mut candidates = Vec::new();
@@ -174,7 +177,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let namespace = subject.namespace(&self.namespace);
         let message = subject.message();
         let invalid_indices =
-            batch::verify_same_message::<_, V>(rng, namespace, message.as_ref(), &entries);
+            batch::verify_same_message::<_, V, _>(rng, namespace, message.as_ref(), &entries, strategy);
 
         // Mark invalid attestations.
         for idx in invalid_indices {
@@ -490,7 +493,7 @@ mod macros {
                     rng: &mut R,
                     subject: Self::Subject<'_, D>,
                     attestations: I,
-                    _strategy: &impl commonware_parallel::Strategy,
+                    strategy: &impl commonware_parallel::Strategy,
                 ) -> $crate::certificate::Verification<Self>
                 where
                     R: rand_core::CryptoRngCore,
@@ -498,7 +501,7 @@ mod macros {
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 {
                     self.generic
-                        .verify_attestations::<_, _, D, _>(rng, subject, attestations)
+                        .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
                 }
 
                 fn assemble<I, M>(
