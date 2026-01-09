@@ -82,6 +82,15 @@ pub fn test_rng() -> rand::rngs::StdRng {
     rand::SeedableRng::seed_from_u64(0)
 }
 
+/// Returns a seeded RNG with a custom seed for deterministic testing.
+///
+/// Use this when you need multiple independent RNG streams in the same test,
+/// or when a helper function needs its own RNG that won't collide with the caller's.
+#[cfg(feature = "std")]
+pub fn test_rng_seeded(seed: u64) -> rand::rngs::StdRng {
+    rand::SeedableRng::seed_from_u64(seed)
+}
+
 /// Alias for boxed errors that are `Send` and `Sync`.
 pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;
 

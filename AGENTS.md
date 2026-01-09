@@ -221,8 +221,16 @@ Use `commonware_utils::test_rng()` for random number generation in tests:
 let mut rng = test_rng();
 let key = PrivateKey::random(&mut rng);
 ```
-Avoid `OsRng`, `StdRng::from_entropy()`, or hardcoded seeds like `StdRng::seed_from_u64(42)`.
-Exceptions: fuzz tests deriving seed from input, loops testing multiple seeds, or parameterized helpers taking a seed.
+
+When you need multiple independent RNG streams in the same test (e.g., to generate
+non-overlapping keys), use `test_rng_seeded(seed)`:
+```rust
+let mut rng1 = test_rng();           // Stream 1: seed 0
+let mut rng2 = test_rng_seeded(1);   // Stream 2: seed 1
+```
+
+Avoid `OsRng`, `StdRng::from_entropy()`, or raw `StdRng::seed_from_u64()`.
+Exceptions: fuzz tests deriving seed from input, or loops testing multiple seeds.
 
 ### Simulated Network Testing
 To simulate network operations, use the simulated network (`p2p/src/simulated`):
