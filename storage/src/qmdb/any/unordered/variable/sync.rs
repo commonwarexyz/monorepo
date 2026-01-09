@@ -3,16 +3,90 @@
 use super::{Db, Operation};
 use crate::{
     index::unordered::Index,
-    journal::{authenticated, contiguous::variable},
+    journal::{
+        authenticated,
+        contiguous::{fixed, variable},
+        segmented::variable as segmented_variable,
+    },
     mmr::{mem::Clean, Location, Position, StandardHasher},
     qmdb::{self, any::VariableValue, Durable, Merkleized},
     translator::Translator,
 };
-use commonware_codec::Read;
+use commonware_codec::{CodecShared, Read};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
+use tracing::debug;
+
+/// Initialize a variable [variable::Journal] at a specific size with no real data.
+///
+/// Creates a journal in a "fully pruned" state where:
+/// - `size()` returns `size`
+/// - `oldest_retained_pos()` returns `None`
+/// - Next append receives position `size`
+///
+/// Only creates the tail section with dummy entries - O(tail_items) not O(size).
+pub(crate) async fn init_journal_at_size<E: Storage + Metrics, V: CodecShared>(
+    context: E,
+    cfg: variable::Config<V::Cfg>,
+    size: u64,
+) -> Result<variable::Journal<E, V>, crate::journal::Error> {
+    let items_per_section = cfg.items_per_section.get();
+    let tail_section = size / items_per_section;
+    let tail_items = size % items_per_section;
+
+    debug!(
+        size,
+        tail_section, tail_items, "initializing variable journal at size"
+    );
+
+    // Initialize empty data journal
+    let mut data = segmented_variable::Journal::init(
+        context.clone(),
+        segmented_variable::Config {
+            partition: cfg.data_partition(),
+            compression: cfg.compression,
+            codec_config: cfg.codec_config.clone(),
+            buffer_pool: cfg.buffer_pool.clone(),
+            write_buffer: cfg.write_buffer,
+        },
+    )
+    .await?;
+
+    // Write exactly tail_items dummies to tail_section (NOT 0..size!)
+    if tail_items > 0 {
+        for _ in 0..tail_items {
+            data.append_dummy(tail_section).await?;
+        }
+        data.sync(tail_section).await?;
+    }
+
+    // Initialize offsets journal at size using the efficient fixed journal method
+    // (O(1) - just creates/resizes tail blob, fills with zeros)
+    let mut offsets = crate::qmdb::any::unordered::fixed::sync::init_journal_at_size(
+        context,
+        fixed::Config {
+            partition: cfg.offsets_partition(),
+            items_per_blob: cfg.items_per_section,
+            buffer_pool: cfg.buffer_pool,
+            write_buffer: cfg.write_buffer,
+        },
+        size,
+    )
+    .await?;
+
+    // Sync to ensure the resized blob is persisted
+    offsets.sync().await?;
+
+    Ok(variable::Journal::from_parts(
+        data,
+        offsets,
+        items_per_section,
+        size,
+        size, // oldest_retained_pos = size means "fully pruned"
+    ))
+}
 
 impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T, Merkleized<H>, Durable>
 where

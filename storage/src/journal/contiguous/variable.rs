@@ -80,12 +80,12 @@ pub struct Config<C> {
 
 impl<C> Config<C> {
     /// Returns the partition name for the data journal.
-    fn data_partition(&self) -> String {
+    pub(crate) fn data_partition(&self) -> String {
         format!("{}{}", self.partition, DATA_SUFFIX)
     }
 
     /// Returns the partition name for the offsets journal.
-    fn offsets_partition(&self) -> String {
+    pub(crate) fn offsets_partition(&self) -> String {
         format!("{}{}", self.partition, OFFSETS_SUFFIX)
     }
 }
@@ -150,6 +150,26 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
+    /// Construct a Journal from its component parts.
+    ///
+    /// This is used by `init_journal_at_size` to efficiently create a journal
+    /// at a specific size without iterating over all positions.
+    pub(crate) const fn from_parts(
+        data: variable::Journal<E, V>,
+        offsets: fixed::Journal<E, u64>,
+        items_per_section: u64,
+        size: u64,
+        oldest_retained_pos: u64,
+    ) -> Self {
+        Self {
+            data,
+            offsets,
+            items_per_section,
+            size,
+            oldest_retained_pos,
+        }
+    }
+
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
@@ -220,100 +240,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// * `oldest_retained_pos()` returns `None` (fully pruned)
     /// * Next append receives position `size`
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
-        let items_per_section = cfg.items_per_section.get();
-
-        // Calculate tail section state
-        let tail_section = size / items_per_section;
-        let tail_items = size % items_per_section;
-
-        // Initialize data journal (empty initially)
-        let mut data = variable::Journal::init(
-            context.clone(),
-            variable::Config {
-                partition: cfg.data_partition(),
-                compression: cfg.compression,
-                codec_config: cfg.codec_config.clone(),
-                buffer_pool: cfg.buffer_pool.clone(),
-                write_buffer: cfg.write_buffer,
-            },
-        )
-        .await?;
-
-        if tail_items > 0 {
-            // Size is NOT at section boundary - need to write dummies for crash recovery.
-            // Only write dummies to the tail section (not full sections that would be pruned).
-            // This ensures align_journals can count items correctly on recovery.
-
-            let mut offsets = fixed::Journal::init(
-                context,
-                fixed::Config {
-                    partition: cfg.offsets_partition(),
-                    items_per_blob: cfg.items_per_section,
-                    buffer_pool: cfg.buffer_pool,
-                    write_buffer: cfg.write_buffer,
-                },
-            )
-            .await?;
-
-            // Write dummy items for all positions 0..size
-            for pos in 0..size {
-                let section = pos / items_per_section;
-
-                // Append size-0 dummy to data journal, get byte offset
-                let offset = data.append_dummy(section).await?;
-                // Append offset to offsets journal
-                offsets.append(offset).await?;
-
-                // Sync at section boundaries
-                if (pos + 1) % items_per_section == 0 {
-                    data.sync(section).await?;
-                    offsets.sync().await?;
-                }
-            }
-
-            // Final sync for partial tail section
-            data.sync(tail_section).await?;
-            offsets.sync().await?;
-
-            // Prune complete sections to minimize storage
-            if tail_section > 0 {
-                data.prune(tail_section).await?;
-                offsets.prune(tail_section * items_per_section).await?;
-            }
-
-            // Set oldest_retained_pos = size so that oldest_retained_pos() returns None,
-            // indicating no "real" data is retained (only dummies for alignment).
-            // After crash recovery via init(), this will be updated to the section boundary.
-            Ok(Self {
-                data,
-                offsets,
-                items_per_section,
-                size,
-                oldest_retained_pos: size,
-            })
-        } else {
-            // Size is exactly at section boundary - use init_journal_at_size for offsets.
-            // No dummies needed because align_journals handles the "both empty" case correctly.
-            let offsets = crate::qmdb::any::unordered::fixed::sync::init_journal_at_size(
-                context,
-                fixed::Config {
-                    partition: cfg.offsets_partition(),
-                    items_per_blob: cfg.items_per_section,
-                    buffer_pool: cfg.buffer_pool,
-                    write_buffer: cfg.write_buffer,
-                },
-                size,
-            )
-            .await?;
-
-            Ok(Self {
-                data,
-                offsets,
-                items_per_section,
-                size,
-                oldest_retained_pos: size,
-            })
-        }
+        crate::qmdb::any::unordered::variable::sync::init_journal_at_size(context, cfg, size).await
     }
 
     /// Initialize a [Journal] for use in state sync.
