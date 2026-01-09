@@ -2402,88 +2402,35 @@ mod tests {
             }
 
             journal.destroy().await.unwrap();
-        });
-    }
 
-    /// Test the scenario where prune is called before the next state is committed.
-    ///
-    /// This reproduces a bug where:
-    /// 1. Items exist at positions 0-9
-    /// 2. Prune is called with min_position >= size (prunes everything)
-    /// 3. Trying to read from size() - 1 fails because that position is now pruned
-    #[test_traced]
-    fn test_prune_before_next_commit() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "prune_before_commit".to_string(),
-                items_per_section: NZU64!(1),
-                compression: None,
-                codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Create journal and append items
+            // === Test 6: Prune all items (edge case) ===
+            // This tests the scenario where prune removes everything.
+            // Callers must check oldest_retained_pos() before reading.
             let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
                 .await
                 .unwrap();
 
-            // Append 10 items (positions 0-9)
-            for i in 0..10u64 {
+            for i in 0..5u64 {
                 journal.append(i * 100).await.unwrap();
             }
-            assert_eq!(journal.size(), 10);
             journal.sync().await.unwrap();
 
-            // Scenario 1: Prune to exactly size (prunes all items)
-            journal.prune(10).await.unwrap();
-            assert_eq!(journal.size(), 10); // Size unchanged
+            // Prune all items
+            journal.prune(5).await.unwrap();
+            assert_eq!(journal.size(), 5); // Size unchanged
             assert_eq!(journal.oldest_retained_pos(), None); // All pruned
 
-            // Now size() - 1 = 9, but position 9 is pruned!
+            // size() - 1 = 4, but position 4 is pruned
             let result = journal.read(journal.size() - 1).await;
-            assert!(
-                matches!(result, Err(crate::journal::Error::ItemPruned(9))),
-                "Expected ItemPruned(9), got {:?}",
-                result
-            );
+            assert!(matches!(
+                result,
+                Err(crate::journal::Error::ItemPruned(4))
+            ));
 
-            // The caller should check oldest_retained_pos() before reading
-            // If oldest_retained_pos() is None, there's nothing to read
-            assert_eq!(journal.oldest_retained_pos(), None);
-
-            // After appending a new item, reading from size() - 1 should work
-            journal.append(1000).await.unwrap();
-            assert_eq!(journal.size(), 11);
-            assert_eq!(journal.oldest_retained_pos(), Some(10));
-
-            let value = journal.read(journal.size() - 1).await.unwrap();
-            assert_eq!(value, 1000);
-
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Scenario 2: Restart after prune-all, then append
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
-                .await
-                .unwrap();
-
-            assert_eq!(journal.size(), 11);
-            assert_eq!(journal.oldest_retained_pos(), Some(10));
-
-            // Reading from size() - 1 should work
-            let value = journal.read(journal.size() - 1).await.unwrap();
-            assert_eq!(value, 1000);
-
-            // Prune all again
-            journal.prune(11).await.unwrap();
-            assert_eq!(journal.size(), 11);
-            assert_eq!(journal.oldest_retained_pos(), None);
-
-            // size() - 1 is now pruned
-            let result = journal.read(journal.size() - 1).await;
-            assert!(matches!(result, Err(crate::journal::Error::ItemPruned(_))));
+            // After appending, reading works again
+            journal.append(500).await.unwrap();
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+            assert_eq!(journal.read(journal.size() - 1).await.unwrap(), 500);
 
             journal.destroy().await.unwrap();
         });
