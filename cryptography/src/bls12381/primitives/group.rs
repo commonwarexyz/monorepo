@@ -20,12 +20,12 @@ use blst::{
     blst_fr_mul, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
     blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_from_affine,
     blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress,
-    blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p2,
+    blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p1s_to_affine, blst_p2,
     blst_p2_add_or_double, blst_p2_affine, blst_p2_cneg, blst_p2_compress, blst_p2_from_affine,
     blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress,
-    blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar,
-    blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
-    BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_to_affine,
+    blst_scalar, blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
+    blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -41,13 +41,20 @@ use commonware_utils::{hex, Participant};
 use core::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
+    iter,
     mem::MaybeUninit,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
     ptr,
 };
-use ctutils::CtEq;
+use ctutils::{Choice, CtEq};
 use rand_core::CryptoRngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+fn all_zero(bytes: &[u8]) -> Choice {
+    bytes
+        .iter()
+        .fold(Choice::TRUE, |acc, b| acc & b.ct_eq(&0u8))
+}
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
 ///
@@ -98,11 +105,60 @@ impl arbitrary::Arbitrary<'_> for Scalar {
 /// the range `0x00‥=0x7f`, leaving the top bit clear.
 pub const SCALAR_LENGTH: usize = 32;
 
-/// Effective bit‑length of the field modulus `r` (`⌈log_2 r⌉ = 255`).
+/// Effective bit-length of the field modulus `r` (`ceil(log_2 r) = 255`).
 ///
-/// Useful for constant‑time exponentiation loops and for validating that a
-/// decoded integer lies in the range `0 ≤ x < r`.
+/// Useful for constant-time exponentiation loops and for validating that a
+/// decoded integer lies in the range `0 <= x < r`.
 const SCALAR_BITS: usize = 255;
+
+/// Number of scalar bits for SmallScalar (128 bits).
+///
+/// 128 bits provides sufficient security (2^-128 collision probability)
+/// while roughly halving MSM computation time compared to full 255-bit scalars.
+const SMALL_SCALAR_BITS: usize = 128;
+
+/// Number of bytes for SmallScalar (16 bytes = 128 bits).
+const SMALL_SCALAR_LENGTH: usize = 16;
+
+/// A 128-bit scalar for use in batch verification random challenges.
+///
+/// This provides 128-bit security which is sufficient for preventing
+/// forgery attacks in batch verification while reducing computational cost
+/// compared to full 255-bit scalars.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SmallScalar {
+    /// Stored as blst_scalar with only lower 128 bits populated.
+    inner: blst_scalar,
+}
+
+impl SmallScalar {
+    /// Generates a random 128-bit scalar.
+    pub fn random(mut rng: impl CryptoRngCore) -> Self {
+        let mut bytes = [0u8; 32]; // blst_scalar is 32 bytes
+                                   // Fill the last 16 bytes (128 bits) with entropy.
+                                   // In big-endian, bytes[16..32] are the least significant.
+                                   // Leaving bytes[0..16] as zero ensures the scalar is < 2^128.
+        rng.fill_bytes(&mut bytes[SMALL_SCALAR_LENGTH..]);
+
+        let mut scalar = blst_scalar::default();
+        // SAFETY: bytes is a valid 32-byte array.
+        unsafe {
+            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
+        }
+        Self { inner: scalar }
+    }
+
+    pub const fn as_bytes(&self) -> &[u8] {
+        self.inner.b.as_slice()
+    }
+
+    /// Returns the zero scalar.
+    pub fn zero() -> Self {
+        Self {
+            inner: blst_scalar::default(),
+        }
+    }
+}
 
 /// This constant serves as the multiplicative identity (i.e., "one") in the
 /// BLS12-381 finite field, ensuring that arithmetic is carried out within the
@@ -604,6 +660,96 @@ impl G1 {
     pub(crate) const fn from_blst_p1(p: blst_p1) -> Self {
         Self(p)
     }
+
+    /// Batch converts projective G1 points to affine.
+    ///
+    /// This uses Montgomery's trick to reduce n field inversions to 1,
+    /// providing significant speedup over converting points individually.
+    pub fn batch_to_affine(points: &[Self]) -> Vec<blst_p1_affine> {
+        if points.is_empty() {
+            return Vec::new();
+        }
+
+        let n = points.len();
+        let mut out = vec![blst_p1_affine::default(); n];
+
+        // SAFETY: blst_p1s_to_affine batch converts projective points to affine.
+        // The function uses Montgomery's trick internally for efficiency.
+        // All pointers are valid and point to properly sized arrays.
+        unsafe {
+            let points_ptr: Vec<*const blst_p1> = points.iter().map(|p| &p.0 as *const _).collect();
+            blst_p1s_to_affine(out.as_mut_ptr(), points_ptr.as_ptr(), n);
+        }
+
+        out
+    }
+
+    /// Checks that `sum_i (p1[i] ⊙ p2[i]) + t1 ⊙ t2 == 0`.
+    ///
+    /// `p1` and `p2` MUST have the same length.
+    #[must_use]
+    pub(crate) fn multi_pairing_check(p1: &[Self], p2: &[G2], t1: &Self, t2: &G2) -> bool {
+        assert_eq!(p1.len(), p2.len());
+
+        let mut pairing = Pairing::new(false, &[]);
+        let p1_affine = Self::batch_to_affine(p1);
+        let p2_affine = G2::batch_to_affine(p2);
+        for (p1, p2) in iter::once((&t1.as_blst_p1_affine(), &t2.as_blst_p2_affine()))
+            .chain(p1_affine.iter().zip(p2_affine.iter()))
+        {
+            pairing.raw_aggregate(p2, p1);
+        }
+        // These final two steps check that the sum of the pairings is equal to 0.
+        pairing.commit();
+        // Passing `None` here indicates that our target is 0.
+        pairing.finalverify(None)
+    }
+
+    fn msm_inner<'a>(iter: impl Iterator<Item = (&'a Self, &'a [u8])>, nbits: usize) -> Self {
+        // Filter out zero points/scalars and convert to blst types.
+        // `blst` does not filter out infinity, so we must ensure it is impossible.
+        //
+        // Sources:
+        // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
+        // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
+        let (points_filtered, scalars_filtered): (Vec<_>, Vec<_>) = iter
+            .filter_map(|(point, scalar)| {
+                if *point == Self::zero() || all_zero(scalar).into() {
+                    return None;
+                }
+                Some((point, scalar))
+            })
+            .unzip();
+
+        if points_filtered.is_empty() {
+            return Self::zero();
+        }
+
+        let affine_points = Self::batch_to_affine(&points_filtered);
+        let points: Vec<*const blst_p1_affine> =
+            affine_points.iter().map(|p| p as *const _).collect();
+        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.as_ptr()).collect();
+
+        // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
+        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
+        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+
+        let mut msm_result = blst_p1::default();
+        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
+        unsafe {
+            blst_p1s_mult_pippenger(
+                &mut msm_result,
+                points.as_ptr(),
+                points.len(),
+                scalars.as_ptr(),
+                nbits,
+                scratch.as_mut_ptr() as *mut _,
+            );
+        }
+
+        Self::from_blst_p1(msm_result)
+    }
 }
 
 impl Write for G1 {
@@ -759,68 +905,46 @@ impl<'a> Mul<&'a Scalar> for G1 {
     }
 }
 
-impl Space<Scalar> for G1 {
-    /// Performs multi-scalar multiplication (MSM) on G1 points using Pippenger's algorithm.
-    /// Computes `sum(scalars[i] * points[i])`.
-    ///
-    /// Filters out pairs where the point is the identity element (infinity).
-    /// Returns an error if the lengths of the input slices mismatch.
-    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
-        // Assert input validity
-        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-
-        // Prepare points (affine) and scalars (raw blst_scalar)
-        let mut points_filtered = Vec::with_capacity(points.len());
-        let mut scalars_filtered = Vec::with_capacity(scalars.len());
-        for (point, scalar) in points.iter().zip(scalars.iter()) {
-            // `blst` does not filter out infinity, so we must ensure it is impossible.
-            //
-            // Sources:
-            // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
-            // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
-            if *point == Self::zero() || *scalar == Scalar::zero() {
-                continue;
-            }
-
-            // Add to filtered vectors
-            points_filtered.push(point.as_blst_p1_affine());
-            scalars_filtered.push(scalar.as_blst_scalar());
-        }
-
-        // If all points were filtered, return zero.
-        if points_filtered.is_empty() {
-            return Self::zero();
-        }
-
-        // Create vectors of pointers for the blst API.
-        // These vectors hold pointers *to* the elements in the filtered vectors above.
-        let points: Vec<*const blst_p1_affine> =
-            points_filtered.iter().map(|p| p as *const _).collect();
-        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
-
-        // Allocate scratch space for Pippenger's algorithm.
-        // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
-        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
-        // Ensure scratch_size is a multiple of 8 to avoid truncation in division.
-        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
-        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
-
-        // Perform multi-scalar multiplication
-        let mut msm_result = blst_p1::default();
-        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
-        // points_filtered and scalars_filtered remain alive until after this block.
+impl<'a> MulAssign<&'a SmallScalar> for G1 {
+    fn mul_assign(&mut self, rhs: &'a SmallScalar) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_p1_mult supports in-place (ret==a). Using SMALL_SCALAR_BITS (128)
+        // processes only the lower 128 bits of the scalar, halving computation time.
         unsafe {
-            blst_p1s_mult_pippenger(
-                &mut msm_result,
-                points.as_ptr(),
-                points.len(),
-                scalars.as_ptr(),
-                SCALAR_BITS, // Using SCALAR_BITS (255) ensures full scalar range
-                scratch.as_mut_ptr() as *mut _,
-            );
+            blst_p1_mult(ptr, ptr, rhs.inner.b.as_ptr(), SMALL_SCALAR_BITS);
         }
+    }
+}
 
-        Self::from_blst_p1(msm_result)
+impl<'a> Mul<&'a SmallScalar> for G1 {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a SmallScalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl Space<Scalar> for G1 {
+    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        Self::msm_inner(
+            points
+                .iter()
+                .zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
+            SCALAR_BITS,
+        )
+    }
+}
+
+impl Space<SmallScalar> for G1 {
+    fn msm(points: &[Self], scalars: &[SmallScalar], _strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        Self::msm_inner(
+            points.iter().zip(scalars.iter().map(|s| s.as_bytes())),
+            SMALL_SCALAR_BITS,
+        )
     }
 }
 
@@ -887,6 +1011,83 @@ impl G2 {
     /// Creates a G2 point from a raw `blst_p2`.
     pub(crate) const fn from_blst_p2(p: blst_p2) -> Self {
         Self(p)
+    }
+
+    /// Batch converts projective G2 points to affine.
+    ///
+    /// This uses Montgomery's trick to reduce n field inversions to 1,
+    /// providing significant speedup over converting points individually.
+    pub fn batch_to_affine(points: &[Self]) -> Vec<blst_p2_affine> {
+        if points.is_empty() {
+            return Vec::new();
+        }
+
+        let n = points.len();
+        let mut out = vec![blst_p2_affine::default(); n];
+
+        // SAFETY: blst_p2s_to_affine batch converts projective points to affine.
+        // The function uses Montgomery's trick internally for efficiency.
+        // All pointers are valid and point to properly sized arrays.
+        unsafe {
+            let points_ptr: Vec<*const blst_p2> = points.iter().map(|p| &p.0 as *const _).collect();
+            blst_p2s_to_affine(out.as_mut_ptr(), points_ptr.as_ptr(), n);
+        }
+
+        out
+    }
+
+    /// Checks that `sum_i (p1[i] ⊙ p2[i]) + t1 ⊙ t2 == 0`.
+    ///
+    /// `p1` and `p2` MUST have the same length.
+    #[must_use]
+    pub(crate) fn multi_pairing_check(p1: &[Self], p2: &[G1], t1: &Self, t2: &G1) -> bool {
+        G1::multi_pairing_check(p2, p1, t2, t1)
+    }
+
+    fn msm_inner<'a>(iter: impl Iterator<Item = (&'a Self, &'a [u8])>, nbits: usize) -> Self {
+        // Filter out zero points/scalars and convert to blst types.
+        // `blst` does not filter out infinity, so we must ensure it is impossible.
+        //
+        // Sources:
+        // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
+        // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
+        let (points_filtered, scalars_filtered): (Vec<_>, Vec<_>) = iter
+            .filter_map(|(point, scalar)| {
+                if *point == Self::zero() || all_zero(scalar).into() {
+                    return None;
+                }
+                Some((point, scalar))
+            })
+            .unzip();
+
+        if points_filtered.is_empty() {
+            return Self::zero();
+        }
+
+        let affine_points = Self::batch_to_affine(&points_filtered);
+        let points: Vec<*const blst_p2_affine> =
+            affine_points.iter().map(|p| p as *const _).collect();
+        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.as_ptr()).collect();
+
+        // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
+        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
+        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+
+        let mut msm_result = blst_p2::default();
+        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
+        unsafe {
+            blst_p2s_mult_pippenger(
+                &mut msm_result,
+                points.as_ptr(),
+                points.len(),
+                scalars.as_ptr(),
+                nbits,
+                scratch.as_mut_ptr() as *mut _,
+            );
+        }
+
+        Self::from_blst_p2(msm_result)
     }
 }
 
@@ -1043,65 +1244,46 @@ impl<'a> Mul<&'a Scalar> for G2 {
     }
 }
 
-impl Space<Scalar> for G2 {
-    /// Performs multi-scalar multiplication (MSM) on G2 points using Pippenger's algorithm.
-    /// Computes `sum(scalars[i] * points[i])`.
-    ///
-    /// Filters out pairs where the point is the identity element (infinity).
-    /// Returns an error if the lengths of the input slices mismatch.
-    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
-        // Assert input validity
-        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-
-        // Prepare points (affine) and scalars (raw blst_scalar), filtering identity points
-        let mut points_filtered = Vec::with_capacity(points.len());
-        let mut scalars_filtered = Vec::with_capacity(scalars.len());
-        for (point, scalar) in points.iter().zip(scalars.iter()) {
-            // `blst` does not filter out infinity, so we must ensure it is impossible.
-            //
-            // Sources:
-            // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
-            // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
-            if *point == Self::zero() || *scalar == Scalar::zero() {
-                continue;
-            }
-            points_filtered.push(point.as_blst_p2_affine());
-            scalars_filtered.push(scalar.as_blst_scalar());
-        }
-
-        // If all points were filtered, return zero.
-        if points_filtered.is_empty() {
-            return Self::zero();
-        }
-
-        // Create vectors of pointers for the blst API
-        let points: Vec<*const blst_p2_affine> =
-            points_filtered.iter().map(|p| p as *const _).collect();
-        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
-
-        // Allocate scratch space for Pippenger algorithm
-        // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
-        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
-        // Ensure scratch_size is a multiple of 8 to avoid truncation in division.
-        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
-        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
-
-        // Perform multi-scalar multiplication
-        let mut msm_result = blst_p2::default();
-        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
-        // points_filtered and scalars_filtered remain alive until after this block.
+impl<'a> MulAssign<&'a SmallScalar> for G2 {
+    fn mul_assign(&mut self, rhs: &'a SmallScalar) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_p2_mult supports in-place (ret==a). Using SMALL_SCALAR_BITS (128)
+        // processes only the lower 128 bits of the scalar, halving computation time.
         unsafe {
-            blst_p2s_mult_pippenger(
-                &mut msm_result,
-                points.as_ptr(),
-                points.len(),
-                scalars.as_ptr(),
-                SCALAR_BITS, // Using SCALAR_BITS (255) ensures full scalar range
-                scratch.as_mut_ptr() as *mut _,
-            );
+            blst_p2_mult(ptr, ptr, rhs.inner.b.as_ptr(), SMALL_SCALAR_BITS);
         }
+    }
+}
 
-        Self::from_blst_p2(msm_result)
+impl<'a> Mul<&'a SmallScalar> for G2 {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a SmallScalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl Space<Scalar> for G2 {
+    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        Self::msm_inner(
+            points
+                .iter()
+                .zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
+            SCALAR_BITS,
+        )
+    }
+}
+
+impl Space<SmallScalar> for G2 {
+    fn msm(points: &[Self], scalars: &[SmallScalar], _strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        Self::msm_inner(
+            points.iter().zip(scalars.iter().map(|s| s.as_bytes())),
+            SMALL_SCALAR_BITS,
+        )
     }
 }
 

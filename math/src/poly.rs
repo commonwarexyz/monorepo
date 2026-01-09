@@ -126,7 +126,7 @@ impl<K> Poly<K> {
     /// This method uses more scratch space, and requires cloning values of
     /// type `R` more, but should be better if [`Space::msm`] has a better algorithm
     /// for `K`.
-    pub fn eval_msm<R: Ring, S: ParStrategy>(&self, r: &R, strategy: &S) -> K
+    pub fn eval_msm<R: Ring>(&self, r: &R, strategy: &impl ParStrategy) -> K
     where
         K: Space<R>,
     {
@@ -394,10 +394,10 @@ impl<I: PartialEq, F: Ring> Interpolator<I, F> {
     ///
     /// The indices provided here MUST match those provided to [`Self::new`] exactly,
     /// otherwise `None` will be returned.
-    pub fn interpolate<K: Space<F>, S: ParStrategy>(
+    pub fn interpolate<K: Space<F>>(
         &self,
         evals: &Map<I, K>,
-        strategy: &S,
+        strategy: &impl ParStrategy,
     ) -> Option<K> {
         if evals.keys() != self.weights.keys() {
             return None;
