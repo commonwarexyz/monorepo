@@ -34,10 +34,12 @@ use commonware_utils::{NZUsize, NZU16};
 use futures::StreamExt;
 use std::{
     collections::BTreeMap,
-    num::{NonZeroU32, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
 };
 use tracing::debug;
 
+const PAGE_SIZE: NonZeroU16 = NZU16!(1 << 12);
+const POOL_CAPACITY: NonZeroUsize = NZUsize!(1 << 20);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1 << 12);
 const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20);
 
@@ -184,7 +186,7 @@ impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V
     /// Initialize storage, creating partitions if needed.
     /// Replays metadata and journals to populate in-memory caches.
     pub async fn init(context: E, partition_prefix: &str, max_read_size: NonZeroU32) -> Self {
-        let buffer_pool = PoolRef::new(NZU16!(1 << 12), NZUsize!(1 << 20));
+        let buffer_pool = PoolRef::new(PAGE_SIZE, POOL_CAPACITY);
 
         let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(
             context.with_label("states"),
