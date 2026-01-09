@@ -57,7 +57,7 @@ pub struct Config {
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
 /// the first invalid data read will be considered the new end of the journal (and the
 /// underlying [Blob] will be truncated to the last valid item). Repair occurs during
-/// replay (not init) because any blob could have trailing bytes.
+/// init by checking each blob's size.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     manager: Manager<E, AppendFactory>,
     _array: PhantomData<A>,
@@ -80,7 +80,24 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 pool_ref: cfg.buffer_pool,
             },
         };
-        let manager = Manager::init(context, manager_cfg).await?;
+        let mut manager = Manager::init(context, manager_cfg).await?;
+
+        // Repair any blobs with trailing bytes (incomplete items from crash)
+        let sections: Vec<_> = manager.sections().collect();
+        for section in sections {
+            let size = manager.size(section).await?;
+            if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
+                let valid_size = size - (size % Self::CHUNK_SIZE_U64);
+                warn!(
+                    section,
+                    invalid_size = size,
+                    new_size = valid_size,
+                    "trailing bytes detected: truncating"
+                );
+                manager.rewind_section(section, valid_size).await?;
+            }
+        }
+
         Ok(Self {
             manager,
             _array: PhantomData,
@@ -164,23 +181,23 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
             let reader = blob.as_blob_reader(buffer).await?;
-            blob_info.push((section, blob.clone(), reader));
+            blob_info.push((section, reader));
         }
 
         // Stream items as they are read to avoid occupying too much memory.
         // Each blob is processed sequentially, yielding batches of items that are then
         // flattened into individual stream elements.
         Ok(stream::iter(blob_info)
-            .flat_map(move |(section, blob, reader)| {
+            .flat_map(move |(section, reader)| {
                 stream::unfold(
-                    (section, blob, reader, 0u64),
-                    move |(section, blob, mut reader, mut offset)| async move {
+                    (section, reader, 0u64),
+                    move |(section, mut reader, mut offset)| async move {
                         let blob_size = reader.blob_size();
                         let mut batch = Vec::new();
 
                         // Decode a batch of items from the buffer. The callback transforms each
                         // decoded item into (section, position, item) tuple or an error.
-                        let (count, trailing) = match reader
+                        let count = match reader
                             .decode_batch_fixed::<A, _, _>(&mut batch, |i, result| {
                                 let position = offset / Self::CHUNK_SIZE_U64 + i as u64;
                                 result
@@ -190,32 +207,18 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                             .await
                         {
                             Ok((0, _)) => return None, // End of blob
-                            Ok((count, trailing)) => (count, trailing),
+                            Ok((count, _)) => count,
                             Err(err) => {
                                 return Some((
                                     vec![Err(Error::Runtime(err))],
-                                    (section, blob, reader, blob_size),
+                                    (section, reader, blob_size),
                                 ))
                             }
                         };
 
                         offset += (count * Self::CHUNK_SIZE) as u64;
 
-                        // Handle trailing bytes at end of blob. If there are leftover bytes that
-                        // don't form a complete item and we've reached the end of the blob, this
-                        // indicates corrupted or partially-written data. Truncate to the last
-                        // valid item to repair the journal.
-                        if trailing > 0 && offset + trailing as u64 >= blob_size {
-                            warn!(
-                                section,
-                                position = offset / Self::CHUNK_SIZE_U64,
-                                new_size = offset,
-                                "trailing bytes detected: truncating"
-                            );
-                            blob.resize(offset).await.ok()?;
-                        }
-
-                        Some((batch, (section, blob, reader, offset)))
+                        Some((batch, (section, reader, offset)))
                     },
                 )
                 .flat_map(stream::iter)
