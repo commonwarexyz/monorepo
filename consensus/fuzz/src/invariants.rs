@@ -1,16 +1,13 @@
 use crate::{
-    simplex::{
-        Simplex, SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
-    },
+    simplex::Simplex,
     types::{Finalization, Notarization, Nullification, ReplicaState},
-    SimplexSecp256r1,
 };
 use commonware_consensus::simplex::{
     elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
-    certificate::secp256r1,
+    certificate::{secp256r1, Scheme as CertificateScheme},
     sha256::Digest as Sha256Digest,
 };
 use commonware_utils::quorum;
@@ -20,7 +17,10 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
+pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>)
+where
+    P::Scheme: scheme::Scheme<Sha256Digest>,
+{
     let threshold = quorum(n) as usize;
 
     // Invariant: agreement
@@ -132,7 +132,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         // Invariant: certificates_are_valid
         // Certificates have the correct number of signatures.
         for (view, data) in nullifications.iter() {
-            if is_attributable_scheme::<P>() {
+            if <P::Scheme as CertificateScheme>::is_attributable() {
                 let count = data
                     .signature_count
                     .expect("Attributable scheme must have signature count");
@@ -149,7 +149,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         }
 
         for (view, data) in notarizations.iter() {
-            if is_attributable_scheme::<P>() {
+            if <P::Scheme as CertificateScheme>::is_attributable() {
                 let count = data
                     .signature_count
                     .expect("Attributable scheme must have signature count");
@@ -166,7 +166,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         }
 
         for (view, data) in finalizations.iter() {
-            if is_attributable_scheme::<P>() {
+            if <P::Scheme as CertificateScheme>::is_attributable() {
                 let count = data
                     .signature_count
                     .expect("Attributable scheme must have signature count");
@@ -190,14 +190,6 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
             );
         }
     }
-}
-
-fn is_attributable_scheme<P: Simplex>() -> bool {
-    let type_id = TypeId::of::<P>();
-    type_id == TypeId::of::<SimplexEd25519>()
-        || type_id == TypeId::of::<SimplexSecp256r1>()
-        || type_id == TypeId::of::<SimplexBls12381MultisigMinPk>()
-        || type_id == TypeId::of::<SimplexBls12381MultisigMinSig>()
 }
 
 fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
