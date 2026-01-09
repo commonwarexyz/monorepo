@@ -20,12 +20,12 @@ use blst::{
     blst_fr_mul, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
     blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_from_affine,
     blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress,
-    blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p2,
+    blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p1s_to_affine, blst_p2,
     blst_p2_add_or_double, blst_p2_affine, blst_p2_cneg, blst_p2_compress, blst_p2_from_affine,
     blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress,
-    blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar,
-    blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
-    BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_to_affine,
+    blst_scalar, blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
+    blst_sk_check, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -68,26 +68,28 @@ pub type DST = &'static [u8];
 #[repr(transparent)]
 pub struct Scalar(blst_fr);
 
+impl Scalar {
+    /// Creates a non-zero Scalar from 64 bytes of input key material.
+    ///
+    /// Uses `blst_keygen` which follows IETF BLS KeyGen and guarantees
+    /// the result is non-zero by looping internally if needed.
+    fn from_ikm(ikm: &[u8; 64]) -> Self {
+        let mut sc = blst_scalar::default();
+        let mut ret = blst_fr::default();
+        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
+        unsafe {
+            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
+            blst_fr_from_scalar(&mut ret, &sc);
+        }
+        Self(ret)
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Scalar {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        // Generate 32 bytes and convert to scalar with automatic modular reduction
-        let bytes = u.arbitrary::<[u8; SCALAR_LENGTH]>()?;
-        let mut fr = blst_fr::default();
-        // SAFETY: bytes is a valid 32-byte array; blst_scalar_from_bendian handles reduction.
-        unsafe {
-            let mut scalar = blst_scalar::default();
-            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            blst_fr_from_scalar(&mut fr, &scalar);
-        }
-        let result = Self(fr);
-        // We avoid generating zero scalars, since this module assumes that scalars
-        // can't be zero, since they're punned to private keys.
-        if result == <Self as Additive>::zero() {
-            Ok(BLST_FR_ONE)
-        } else {
-            Ok(result)
-        }
+        let ikm = u.arbitrary::<[u8; 64]>()?;
+        Ok(Self::from_ikm(&ikm))
     }
 }
 
@@ -98,11 +100,100 @@ impl arbitrary::Arbitrary<'_> for Scalar {
 /// the range `0x00‥=0x7f`, leaving the top bit clear.
 pub const SCALAR_LENGTH: usize = 32;
 
-/// Effective bit‑length of the field modulus `r` (`⌈log_2 r⌉ = 255`).
+/// Effective bit-length of the field modulus `r` (`ceil(log_2 r) = 255`).
 ///
-/// Useful for constant‑time exponentiation loops and for validating that a
-/// decoded integer lies in the range `0 ≤ x < r`.
+/// Useful for constant-time exponentiation loops and for validating that a
+/// decoded integer lies in the range `0 <= x < r`.
 const SCALAR_BITS: usize = 255;
+
+/// Number of scalar bits for SmallScalar (128 bits).
+///
+/// 128 bits provides sufficient security (2^-128 collision probability)
+/// while roughly halving MSM computation time compared to full 255-bit scalars.
+const SMALL_SCALAR_BITS: usize = 128;
+
+/// Number of bytes for SmallScalar (16 bytes = 128 bits).
+const SMALL_SCALAR_LENGTH: usize = 16;
+
+/// A 128-bit scalar for use in batch verification random challenges.
+///
+/// This provides 128-bit security which is sufficient for preventing
+/// forgery attacks in batch verification while reducing computational cost
+/// compared to full 255-bit scalars.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SmallScalar {
+    /// Stored as blst_scalar with only lower 128 bits populated.
+    inner: blst_scalar,
+}
+
+impl SmallScalar {
+    /// Creates a SmallScalar from 16 bytes (128 bits) in big-endian format.
+    fn from_bytes(small_bytes: [u8; SMALL_SCALAR_LENGTH]) -> Self {
+        let mut bytes = [0u8; 32];
+        // Copy to the last 16 bytes (big-endian: lower bits)
+        bytes[SMALL_SCALAR_LENGTH..].copy_from_slice(&small_bytes);
+
+        let mut scalar = blst_scalar::default();
+        // SAFETY: bytes is a valid 32-byte array.
+        unsafe {
+            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
+        }
+        Self { inner: scalar }
+    }
+
+    /// Generates a random 128-bit scalar.
+    pub fn random(mut rng: impl CryptoRngCore) -> Self {
+        let mut small_bytes = [0u8; SMALL_SCALAR_LENGTH];
+        rng.fill_bytes(&mut small_bytes);
+        Self::from_bytes(small_bytes)
+    }
+
+    /// Returns the underlying blst_scalar.
+    pub const fn inner(&self) -> &blst_scalar {
+        &self.inner
+    }
+
+    /// Returns the zero scalar.
+    pub fn zero() -> Self {
+        Self {
+            inner: blst_scalar::default(),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for SmallScalar {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let bytes = u.arbitrary::<[u8; SMALL_SCALAR_LENGTH]>()?;
+        Ok(Self::from_bytes(bytes))
+    }
+}
+
+impl Write for SmallScalar {
+    fn write(&self, buf: &mut impl BufMut) {
+        // Extract and write only the lower 128 bits (16 bytes) in big-endian
+        let mut bytes = [0u8; 32];
+        // SAFETY: bytes is a valid 32-byte array.
+        unsafe {
+            blst_bendian_from_scalar(bytes.as_mut_ptr(), &self.inner);
+        }
+        // Write only the last 16 bytes (the lower 128 bits in big-endian)
+        buf.put_slice(&bytes[SMALL_SCALAR_LENGTH..]);
+    }
+}
+
+impl Read for SmallScalar {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let bytes = <[u8; SMALL_SCALAR_LENGTH]>::read(buf)?;
+        Ok(Self::from_bytes(bytes))
+    }
+}
+
+impl FixedSize for SmallScalar {
+    const SIZE: usize = SMALL_SCALAR_LENGTH;
+}
 
 /// This constant serves as the multiplicative identity (i.e., "one") in the
 /// BLS12-381 finite field, ensuring that arithmetic is carried out within the
@@ -151,6 +242,26 @@ impl arbitrary::Arbitrary<'_> for G1 {
     }
 }
 
+/// Affine representation of a G1 point.
+///
+/// Affine coordinates can be batch-converted from projective coordinates efficiently
+/// using Montgomery's trick (n field inversions -> 1 inversion).
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct G1Affine(blst_p1_affine);
+
+impl G1Affine {
+    /// Returns a reference to the inner `blst_p1_affine`.
+    pub(crate) const fn inner(&self) -> &blst_p1_affine {
+        &self.0
+    }
+
+    /// Creates a G1Affine from a raw `blst_p1_affine`.
+    pub(crate) const fn from_blst(affine: blst_p1_affine) -> Self {
+        Self(affine)
+    }
+}
+
 /// A point on the BLS12-381 G2 curve.
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
@@ -174,6 +285,26 @@ pub const G2_MESSAGE: DST = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 impl arbitrary::Arbitrary<'_> for G2 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self::generator() * &u.arbitrary::<Scalar>()?)
+    }
+}
+
+/// Affine representation of a G2 point.
+///
+/// Affine coordinates can be batch-converted from projective coordinates efficiently
+/// using Montgomery's trick (n field inversions -> 1 inversion).
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct G2Affine(blst_p2_affine);
+
+impl G2Affine {
+    /// Returns a reference to the inner `blst_p2_affine`.
+    pub(crate) const fn inner(&self) -> &blst_p2_affine {
+        &self.0
+    }
+
+    /// Creates a G2Affine from a raw `blst_p2_affine`.
+    pub(crate) const fn from_blst(affine: blst_p2_affine) -> Self {
+        Self(affine)
     }
 }
 
@@ -478,20 +609,9 @@ impl Random for Scalar {
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut ikm = [0u8; 64];
         rng.fill_bytes(&mut ikm);
-
-        let mut sc = blst_scalar::default();
-        let mut ret = blst_fr::default();
-        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
-        unsafe {
-            // blst_keygen loops until a non-zero value is produced (in accordance with IETF BLS KeyGen 4+).
-            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
-            blst_fr_from_scalar(&mut ret, &sc);
-        }
-
-        // Zeroize the ikm buffer
+        let result = Self::from_ikm(&ikm);
         ikm.zeroize();
-
-        Self(ret)
+        result
     }
 }
 
@@ -603,6 +723,29 @@ impl G1 {
     /// Creates a G1 point from a raw `blst_p1`.
     pub(crate) const fn from_blst_p1(p: blst_p1) -> Self {
         Self(p)
+    }
+
+    /// Batch converts projective G1 points to affine.
+    ///
+    /// This uses Montgomery's trick to reduce n field inversions to 1,
+    /// providing significant speedup over converting points individually.
+    pub fn batch_to_affine(points: &[Self]) -> Vec<G1Affine> {
+        if points.is_empty() {
+            return Vec::new();
+        }
+
+        let n = points.len();
+        let mut out = vec![blst_p1_affine::default(); n];
+
+        // SAFETY: blst_p1s_to_affine batch converts projective points to affine.
+        // The function uses Montgomery's trick internally for efficiency.
+        // All pointers are valid and point to properly sized arrays.
+        unsafe {
+            let points_ptr: Vec<*const blst_p1> = points.iter().map(|p| &p.0 as *const _).collect();
+            blst_p1s_to_affine(out.as_mut_ptr(), points_ptr.as_ptr(), n);
+        }
+
+        out.into_iter().map(G1Affine::from_blst).collect()
     }
 }
 
@@ -759,6 +902,26 @@ impl<'a> Mul<&'a Scalar> for G1 {
     }
 }
 
+impl<'a> MulAssign<&'a SmallScalar> for G1 {
+    fn mul_assign(&mut self, rhs: &'a SmallScalar) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_p1_mult supports in-place (ret==a). Using SMALL_SCALAR_BITS (128)
+        // processes only the lower 128 bits of the scalar, halving computation time.
+        unsafe {
+            blst_p1_mult(ptr, ptr, rhs.inner.b.as_ptr(), SMALL_SCALAR_BITS);
+        }
+    }
+}
+
+impl<'a> Mul<&'a SmallScalar> for G1 {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a SmallScalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
 impl Space<Scalar> for G1 {
     /// Performs multi-scalar multiplication (MSM) on G1 points using Pippenger's algorithm.
     /// Computes `sum(scalars[i] * points[i])`.
@@ -821,6 +984,58 @@ impl Space<Scalar> for G1 {
         }
 
         Self::from_blst_p1(msm_result)
+    }
+}
+
+impl Space<SmallScalar> for G1 {
+    /// Performs MSM on G1 points using Pippenger's algorithm with 128-bit scalars.
+    ///
+    /// Uses batch affine conversion (1 field inversion via Montgomery's trick)
+    /// and `SMALL_SCALAR_BITS` (128) for faster computation.
+    fn msm(points: &[Self], scalars: &[SmallScalar], _strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+
+        // Filter out identity points and zero scalars (BLST doesn't handle them)
+        let mut points_filtered = Vec::with_capacity(points.len());
+        let mut scalars_filtered = Vec::with_capacity(scalars.len());
+        for (point, scalar) in points.iter().zip(scalars.iter()) {
+            if *point == Self::zero() || *scalar == SmallScalar::zero() {
+                continue;
+            }
+            points_filtered.push(*point);
+            scalars_filtered.push(scalar.inner().clone());
+        }
+        if points_filtered.is_empty() {
+            return Self::zero();
+        }
+
+        // Batch convert to affine (1 field inversion via Montgomery's trick)
+        let affine_points = Self::batch_to_affine(&points_filtered);
+        let points_ptr: Vec<*const blst_p1_affine> = affine_points
+            .iter()
+            .map(|p| p.inner() as *const _)
+            .collect();
+        let scalars_ptr: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
+
+        // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
+        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points_ptr.len()) };
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
+        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+
+        let mut result = blst_p1::default();
+        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
+        unsafe {
+            blst_p1s_mult_pippenger(
+                &mut result,
+                points_ptr.as_ptr(),
+                points_ptr.len(),
+                scalars_ptr.as_ptr(),
+                SMALL_SCALAR_BITS, // 128 bits for batch verification
+                scratch.as_mut_ptr() as *mut _,
+            );
+        }
+
+        Self::from_blst_p1(result)
     }
 }
 
@@ -887,6 +1102,29 @@ impl G2 {
     /// Creates a G2 point from a raw `blst_p2`.
     pub(crate) const fn from_blst_p2(p: blst_p2) -> Self {
         Self(p)
+    }
+
+    /// Batch converts projective G2 points to affine.
+    ///
+    /// This uses Montgomery's trick to reduce n field inversions to 1,
+    /// providing significant speedup over converting points individually.
+    pub fn batch_to_affine(points: &[Self]) -> Vec<G2Affine> {
+        if points.is_empty() {
+            return Vec::new();
+        }
+
+        let n = points.len();
+        let mut out = vec![blst_p2_affine::default(); n];
+
+        // SAFETY: blst_p2s_to_affine batch converts projective points to affine.
+        // The function uses Montgomery's trick internally for efficiency.
+        // All pointers are valid and point to properly sized arrays.
+        unsafe {
+            let points_ptr: Vec<*const blst_p2> = points.iter().map(|p| &p.0 as *const _).collect();
+            blst_p2s_to_affine(out.as_mut_ptr(), points_ptr.as_ptr(), n);
+        }
+
+        out.into_iter().map(G2Affine::from_blst).collect()
     }
 }
 
@@ -1043,6 +1281,26 @@ impl<'a> Mul<&'a Scalar> for G2 {
     }
 }
 
+impl<'a> MulAssign<&'a SmallScalar> for G2 {
+    fn mul_assign(&mut self, rhs: &'a SmallScalar) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_p2_mult supports in-place (ret==a). Using SMALL_SCALAR_BITS (128)
+        // processes only the lower 128 bits of the scalar, halving computation time.
+        unsafe {
+            blst_p2_mult(ptr, ptr, rhs.inner.b.as_ptr(), SMALL_SCALAR_BITS);
+        }
+    }
+}
+
+impl<'a> Mul<&'a SmallScalar> for G2 {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a SmallScalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
 impl Space<Scalar> for G2 {
     /// Performs multi-scalar multiplication (MSM) on G2 points using Pippenger's algorithm.
     /// Computes `sum(scalars[i] * points[i])`.
@@ -1102,6 +1360,58 @@ impl Space<Scalar> for G2 {
         }
 
         Self::from_blst_p2(msm_result)
+    }
+}
+
+impl Space<SmallScalar> for G2 {
+    /// Performs MSM on G2 points using Pippenger's algorithm with 128-bit scalars.
+    ///
+    /// Uses batch affine conversion (1 field inversion via Montgomery's trick)
+    /// and `SMALL_SCALAR_BITS` (128) for faster computation.
+    fn msm(points: &[Self], scalars: &[SmallScalar], _strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+
+        // Filter out identity points and zero scalars (BLST doesn't handle them)
+        let mut points_filtered = Vec::with_capacity(points.len());
+        let mut scalars_filtered = Vec::with_capacity(scalars.len());
+        for (point, scalar) in points.iter().zip(scalars.iter()) {
+            if *point == Self::zero() || *scalar == SmallScalar::zero() {
+                continue;
+            }
+            points_filtered.push(*point);
+            scalars_filtered.push(scalar.inner().clone());
+        }
+        if points_filtered.is_empty() {
+            return Self::zero();
+        }
+
+        // Batch convert to affine (1 field inversion via Montgomery's trick)
+        let affine_points = Self::batch_to_affine(&points_filtered);
+        let points_ptr: Vec<*const blst_p2_affine> = affine_points
+            .iter()
+            .map(|p| p.inner() as *const _)
+            .collect();
+        let scalars_ptr: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
+
+        // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
+        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points_ptr.len()) };
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
+        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+
+        let mut result = blst_p2::default();
+        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
+        unsafe {
+            blst_p2s_mult_pippenger(
+                &mut result,
+                points_ptr.as_ptr(),
+                points_ptr.len(),
+                scalars_ptr.as_ptr(),
+                SMALL_SCALAR_BITS, // 128 bits for batch verification
+                scratch.as_mut_ptr() as *mut _,
+            );
+        }
+
+        Self::from_blst_p2(result)
     }
 }
 
@@ -1235,6 +1545,15 @@ mod tests {
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), Scalar::SIZE);
         let decoded = Scalar::decode(&mut encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_small_scalar_codec() {
+        let original = SmallScalar::random(&mut test_rng());
+        let mut encoded = original.encode();
+        assert_eq!(encoded.len(), SmallScalar::SIZE);
+        let decoded = SmallScalar::decode(&mut encoded).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -1584,6 +1903,7 @@ mod tests {
             CodecConformance<G1>,
             CodecConformance<G2>,
             CodecConformance<Scalar>,
+            CodecConformance<SmallScalar>,
             CodecConformance<Share>
         }
     }

@@ -346,12 +346,13 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
-                let _ = threshold::batch_verify_same_message::<_, MinPk, _>(
+                let _ = threshold::batch_verify_same_message::<_, MinPk, _, _>(
                     &mut thread_rng(),
                     &public,
                     &namespace,
                     &message,
                     &partials_evals,
+                    &Sequential,
                 );
             }
         }
@@ -370,12 +371,13 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
-                let _ = threshold::batch_verify_same_message::<_, MinSig, _>(
+                let _ = threshold::batch_verify_same_message::<_, MinSig, _, _>(
                     &mut thread_rng(),
                     &public,
                     &namespace,
                     &message,
                     &partials_evals,
+                    &Sequential,
                 );
             }
         }

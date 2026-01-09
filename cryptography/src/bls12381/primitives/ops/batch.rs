@@ -15,12 +15,12 @@
 //! must be generated securely).
 
 use super::{
-    super::{group::Scalar, variant::Variant, Error},
+    super::{group::SmallScalar, variant::Variant, Error},
     hash_with_namespace,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
-use commonware_math::algebra::{Additive, Random, Space};
+use commonware_math::algebra::{Additive, Space};
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 
@@ -31,25 +31,28 @@ use rand_core::CryptoRngCore;
 ///
 /// # Performance
 ///
-/// Uses bisection to identify which signatures are invalid. In the worst case, this can require
-/// more verifications than checking each signature individually. If an invalid signer is detected,
-/// consider blocking them from participating in future batches to better amortize the cost of this
-/// search.
+/// Uses MSM (multi-scalar multiplication) for efficient batch verification. The pk and sig
+/// MSMs are computed in parallel when possible. Uses bisection to identify which signatures
+/// are invalid (only when the batch fails). In the worst case, bisection can require more
+/// verifications than checking each signature individually. If an invalid signer is detected,
+/// consider blocking them from participating in future batches to better amortize the cost.
 ///
 /// # Warning
 ///
 /// This function assumes a group check was already performed on each public key
 /// and signature. Duplicate public keys are safe because random scalar weights
 /// ensure each (public key, signature) pair is verified independently.
-pub fn verify_same_message<R, V>(
+pub fn verify_same_message<R, V, S>(
     rng: &mut R,
     namespace: &[u8],
     message: &[u8],
     entries: &[(V::Public, V::Signature)],
+    strategy: &S,
 ) -> Vec<usize>
 where
     R: CryptoRngCore,
     V: Variant,
+    S: Strategy,
 {
     if entries.is_empty() {
         return Vec::new();
@@ -57,51 +60,71 @@ where
 
     let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
-    // Generate random scalars once for all entries
-    let scalars: Vec<Scalar> = (0..entries.len())
-        .map(|_| Scalar::random(&mut *rng))
+    // Generate 128-bit random scalars (sufficient for batch verification security)
+    let scalars: Vec<SmallScalar> = (0..entries.len())
+        .map(|_| SmallScalar::random(&mut *rng))
         .collect();
 
-    // Pre-compute weighted values once: weighted_pk[i] = scalar[i] * pk[i]
-    let weighted_pks: Vec<V::Public> = entries
-        .iter()
-        .zip(&scalars)
-        .map(|((pk, _), s)| *pk * s)
-        .collect();
-    let weighted_sigs: Vec<V::Signature> = entries
-        .iter()
-        .zip(&scalars)
-        .map(|((_, sig), s)| *sig * s)
-        .collect();
+    // Extract pks and sigs for MSM
+    let pks: Vec<V::Public> = entries.iter().map(|(pk, _)| *pk).collect();
+    let sigs: Vec<V::Signature> = entries.iter().map(|(_, sig)| *sig).collect();
 
-    // Iteratively bisect to find invalid signatures
-    let mut invalid = Vec::new();
-    let mut stack = vec![(0, entries.len())];
-    while let Some((start, end)) = stack.pop() {
-        if start >= end {
-            continue;
-        }
+    // Compute MSMs for pk and sig in parallel using 128-bit scalars.
+    let (sum_pk, sum_sig) = strategy.join(
+        || V::Public::msm(&pks, &scalars, strategy),
+        || V::Signature::msm(&sigs, &scalars, strategy),
+    );
 
-        // Sum pre-computed weighted values for this slice
-        let mut sum_pk = V::Public::zero();
-        let mut sum_sig = V::Signature::zero();
-        for i in start..end {
-            sum_pk += &weighted_pks[i];
-            sum_sig += &weighted_sigs[i];
-        }
-
-        // Verify: e(sum_pk, H(m)) == e(sum_sig, G)
-        if V::verify(&sum_pk, &hm, &sum_sig).is_err() {
-            if end - start == 1 {
-                invalid.push(start);
-            } else {
-                let mid = start + (end - start) / 2;
-                stack.push((mid, end));
-                stack.push((start, mid));
-            }
-        }
+    // Fast path: if all signatures are valid, return empty
+    if V::verify(&sum_pk, &hm, &sum_sig).is_ok() {
+        return Vec::new();
     }
 
+    // Slow path: bisection to find invalid signatures
+    // Pre-compute individual weighted values in parallel for bisection.
+    let indices: Vec<_> = (0..entries.len()).collect();
+    let (weighted_pks, weighted_sigs): (Vec<_>, Vec<_>) = strategy
+        .map_collect_vec(&indices, |&i| (pks[i] * &scalars[i], sigs[i] * &scalars[i]))
+        .into_iter()
+        .unzip();
+
+    // Parallel bisection to find invalid signatures.
+    // Process all pending ranges at each level in parallel for maximum throughput.
+    let mut invalid = Vec::new();
+    let mut pending = vec![(0, entries.len())];
+    while !pending.is_empty() {
+        // Verify all pending ranges in parallel
+        let results: Vec<_> = strategy.map_collect_vec(&pending, |&(start, end)| {
+            // Sum pre-computed weighted values for this slice
+            let mut sum_pk = V::Public::zero();
+            let mut sum_sig = V::Signature::zero();
+            for i in start..end {
+                sum_pk += &weighted_pks[i];
+                sum_sig += &weighted_sigs[i];
+            }
+            // Return whether verification failed
+            V::verify(&sum_pk, &hm, &sum_sig).is_err()
+        });
+
+        // Collect next level of ranges to verify
+        let mut next_pending = Vec::new();
+        for (&(start, end), &is_invalid) in pending.iter().zip(&results) {
+            if is_invalid {
+                if end - start == 1 {
+                    invalid.push(start);
+                } else {
+                    let mid = start + (end - start) / 2;
+                    next_pending.push((start, mid));
+                    next_pending.push((mid, end));
+                }
+            }
+        }
+        pending = next_pending;
+    }
+
+    // Sort for deterministic output regardless of parallelization.
+    // Using sort_unstable is fine because indices are unique (no duplicates).
+    invalid.sort_unstable();
     invalid
 }
 
@@ -133,21 +156,22 @@ where
         return Ok(());
     }
 
-    // Generate random scalars for each message/signature pair
-    let scalars: Vec<Scalar> = (0..entries.len())
-        .map(|_| Scalar::random(&mut *rng))
+    // Generate 128-bit random scalars (sufficient for batch verification security)
+    let scalars: Vec<SmallScalar> = (0..entries.len())
+        .map(|_| SmallScalar::random(&mut *rng))
         .collect();
 
-    // Hash all messages and collect signatures
-    let hms: Vec<V::Signature> = entries
-        .iter()
-        .map(|(namespace, msg, _)| hash_with_namespace::<V>(V::MESSAGE, namespace, msg))
-        .collect();
+    // Hash all messages in parallel (hash-to-curve is expensive) and collect signatures
+    let hms: Vec<V::Signature> = strategy.map_collect_vec(&entries, |(namespace, msg, _)| {
+        hash_with_namespace::<V>(V::MESSAGE, namespace, msg)
+    });
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
 
-    // Compute weighted sums using MSM
-    let weighted_hm = V::Signature::msm(&hms, &scalars, strategy);
-    let weighted_sig = V::Signature::msm(&sigs, &scalars, strategy);
+    // Compute weighted sums in parallel using MSM with 128-bit scalars.
+    let (weighted_hm, weighted_sig) = strategy.join(
+        || V::Signature::msm(&hms, &scalars, strategy),
+        || V::Signature::msm(&sigs, &scalars, strategy),
+    );
 
     // Verify: e(pk, weighted_hm) == e(weighted_sig, G)
     V::verify(public, &weighted_hm, &weighted_sig)
@@ -156,7 +180,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        super::{aggregate, hash_with_namespace, keypair, sign_message, verify_message},
+        super::{
+            super::group::Scalar, aggregate, hash_with_namespace, keypair, sign_message,
+            verify_message,
+        },
         *,
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};

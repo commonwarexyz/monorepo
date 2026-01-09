@@ -2,7 +2,7 @@
 
 use super::{
     group::{
-        Scalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
+        Scalar, SmallScalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
         G2_PROOF_OF_POSSESSION, GT,
     },
     Error,
@@ -15,7 +15,7 @@ use blst::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
-use commonware_math::algebra::{HashToGroup, Random as _, Space};
+use commonware_math::algebra::{HashToGroup, Space};
 use commonware_parallel::Strategy;
 use commonware_utils::Participant;
 use core::{
@@ -28,6 +28,7 @@ use rand_core::CryptoRngCore;
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     /// The public key type.
     type Public: HashToGroup<Scalar = Scalar>
+        + Space<SmallScalar>
         + FixedSize
         + Write
         + Read<Cfg = ()>
@@ -37,6 +38,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
 
     /// The signature type.
     type Signature: HashToGroup<Scalar = Scalar>
+        + Space<SmallScalar>
         + FixedSize
         + Write
         + Read<Cfg = ()>
@@ -159,13 +161,30 @@ impl Variant for MinPk {
             return Ok(());
         }
 
-        // Generate random scalars.
-        let scalars: Vec<Scalar> = (0..publics.len())
-            .map(|_| Scalar::random(&mut *rng))
+        // Generate 128-bit random scalars (sufficient for batch verification security).
+        let scalars: Vec<SmallScalar> = (0..publics.len())
+            .map(|_| SmallScalar::random(&mut *rng))
             .collect();
 
-        // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
-        let s_agg = G2::msm(signatures, &scalars, strategy);
+        // Compute S_agg MSM and (scaled_pks + batch conversions) in parallel.
+        // The MSM uses Pippenger's algorithm internally, while the other branch
+        // computes n individual scalar multiplications and batch affine conversions.
+        let (s_agg, (scaled_pks_affine, hms_affine)) = strategy.join(
+            || G2::msm(signatures, &scalars, strategy),
+            || {
+                // Pre-compute r_i * pk_i using 128-bit scalar multiplication
+                let scaled_pks: Vec<G1> = publics
+                    .iter()
+                    .zip(&scalars)
+                    .map(|(pk, s)| *pk * s)
+                    .collect();
+                // Batch convert scaled_pks to affine (1 inversion instead of n)
+                let scaled_pks_affine = G1::batch_to_affine(&scaled_pks);
+                // Batch convert hms to affine
+                let hms_affine = G2::batch_to_affine(hms);
+                (scaled_pks_affine, hms_affine)
+            },
+        );
 
         // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);
@@ -177,13 +196,9 @@ impl Variant for MinPk {
             pairing.raw_aggregate(&s_agg_affine, &BLS12_381_NEG_G1);
         }
 
-        // Aggregate the `n` terms corresponding to public keys and messages: e(r_i * pk_i,hm_i)
-        for i in 0..publics.len() {
-            let mut scaled_pk = publics[i];
-            scaled_pk *= &scalars[i];
-            let pk_affine = scaled_pk.as_blst_p1_affine();
-            let hm_affine = hms[i].as_blst_p2_affine();
-            pairing.raw_aggregate(&hm_affine, &pk_affine);
+        // Aggregate the `n` terms corresponding to public keys and messages: e(r_i * pk_i, hm_i)
+        for (pk_affine, hm_affine) in scaled_pks_affine.iter().zip(hms_affine.iter()) {
+            pairing.raw_aggregate(hm_affine.inner(), pk_affine.inner());
         }
 
         // Perform the final verification on the product of (n+1) pairing terms.
@@ -306,13 +321,30 @@ impl Variant for MinSig {
             return Ok(());
         }
 
-        // Generate random scalars.
-        let scalars: Vec<Scalar> = (0..publics.len())
-            .map(|_| Scalar::random(&mut *rng))
+        // Generate 128-bit random scalars (sufficient for batch verification security).
+        let scalars: Vec<SmallScalar> = (0..publics.len())
+            .map(|_| SmallScalar::random(&mut *rng))
             .collect();
 
-        // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
-        let s_agg = G1::msm(signatures, &scalars, strategy);
+        // Compute S_agg MSM and (scaled_pks + batch conversions) in parallel.
+        // The MSM uses Pippenger's algorithm internally, while the other branch
+        // computes n individual scalar multiplications and batch affine conversions.
+        let (s_agg, (scaled_pks_affine, hms_affine)) = strategy.join(
+            || G1::msm(signatures, &scalars, strategy),
+            || {
+                // Pre-compute r_i * pk_i using 128-bit scalar multiplication
+                let scaled_pks: Vec<G2> = publics
+                    .iter()
+                    .zip(&scalars)
+                    .map(|(pk, s)| *pk * s)
+                    .collect();
+                // Batch convert scaled_pks to affine (1 inversion instead of n)
+                let scaled_pks_affine = G2::batch_to_affine(&scaled_pks);
+                // Batch convert hms to affine
+                let hms_affine = G1::batch_to_affine(hms);
+                (scaled_pks_affine, hms_affine)
+            },
+        );
 
         // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);
@@ -325,12 +357,8 @@ impl Variant for MinSig {
         }
 
         // Aggregate the `n` terms corresponding to public keys and messages: e(hm_i, r_i * pk_i)
-        for i in 0..publics.len() {
-            let mut scaled_pk = publics[i];
-            scaled_pk *= &scalars[i];
-            let pk_affine = scaled_pk.as_blst_p2_affine();
-            let hm_affine = hms[i].as_blst_p1_affine();
-            pairing.raw_aggregate(&pk_affine, &hm_affine);
+        for (pk_affine, hm_affine) in scaled_pks_affine.iter().zip(hms_affine.iter()) {
+            pairing.raw_aggregate(pk_affine.inner(), hm_affine.inner());
         }
 
         // Perform the final verification on the product of (n+1) pairing terms.
