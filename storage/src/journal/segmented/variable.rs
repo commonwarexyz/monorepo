@@ -302,7 +302,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                         0u64,
                         codec_config,
                         compressed,
-                        Vec::<u8>::new(), // Reusable buffer for incomplete items
                     ),
                     move |(
                         section,
@@ -312,7 +311,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                         mut valid_offset,
                         codec_config,
                         compressed,
-                        mut reuse_buf,
                     )| async move {
                         let blob_size = reader.blob_size();
 
@@ -330,7 +328,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                         valid_offset,
                                         codec_config,
                                         compressed,
-                                        reuse_buf,
                                     ),
                                 ));
                             }
@@ -373,31 +370,30 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                 )) => {
                                     // Item::Incomplete means the item spans buffer boundary: we have
                                     // the varint + partial data, but not the complete item.
-                                    // Reuse buffer, growing if needed. Copy prefix BEFORE advancing
-                                    // (which invalidates the prefix slice).
-                                    reuse_buf.resize(item_size, 0);
-                                    reuse_buf[..prefix.len()].copy_from_slice(prefix);
-                                    let filled = prefix.len();
+                                    // Get prefix as Bytes (ref-counted, stays valid after fill).
+                                    let prefix_bytes = reader.available_bytes();
+                                    let prefix_len = prefix_bytes.len();
+
+                                    // Sanity check: available_bytes should match prefix
+                                    debug_assert_eq!(prefix_len, prefix.len());
 
                                     // Now advance past all consumed data
                                     reader.advance(buf.len());
 
-                                    // Read remaining bytes from new pages
-                                    if let Err(err) = reader
-                                        .read_exact(
-                                            &mut reuse_buf[filled..item_size],
-                                            item_size - filled,
-                                        )
-                                        .await
-                                    {
-                                        batch.push(Err(err.into()));
-                                        break;
-                                    }
-                                    match decode_item::<V>(
-                                        &reuse_buf[..item_size],
-                                        &codec_config,
-                                        compressed,
-                                    ) {
+                                    // Read remaining bytes from new pages (may fill new buffer,
+                                    // but prefix_bytes remains valid due to ref-counting)
+                                    let remainder_len = item_size - prefix_len;
+                                    let remainder = match reader.read_bytes(remainder_len).await {
+                                        Ok(r) => r,
+                                        Err(err) => {
+                                            batch.push(Err(err.into()));
+                                            break;
+                                        }
+                                    };
+
+                                    // Chain without copying
+                                    let chained = prefix_bytes.chain(remainder);
+                                    match decode_item::<V>(chained, &codec_config, compressed) {
                                         Ok(decoded) => {
                                             batch.push(Ok((
                                                 section,
@@ -450,7 +446,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                 valid_offset,
                                 codec_config,
                                 compressed,
-                                reuse_buf,
                             ),
                         ))
                     },

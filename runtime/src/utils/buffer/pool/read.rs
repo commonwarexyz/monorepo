@@ -1,5 +1,6 @@
 use super::Checksum;
 use crate::{Blob, Error};
+use bytes::{Bytes, BytesMut};
 use commonware_codec::{CodecFixed, DecodeExt as _, Error as CodecError, FixedSize};
 use commonware_utils::StableBuf;
 use std::num::NonZeroUsize;
@@ -15,7 +16,8 @@ pub struct Read<B: Blob> {
     /// The logical size of the blob (actual data bytes, not including CRCs or padding).
     logical_blob_size: u64,
     /// The buffer storing the data read from the blob. The buffer stores logical bytes only.
-    buffer: Vec<u8>,
+    /// Uses Bytes for ref-counted slicing, allowing cross-boundary reads without copying.
+    buffer: Bytes,
     /// The current page in the blob from where the buffer was filled (the buffer always starts at a
     /// page boundary).
     blob_page: u64,
@@ -58,7 +60,7 @@ impl<B: Blob> Read<B> {
             blob,
             physical_blob_size,
             logical_blob_size,
-            buffer: Vec::with_capacity(capacity),
+            buffer: BytesMut::with_capacity(capacity).freeze(),
             blob_page: 0,
             buffer_position: 0,
             buffer_capacity: capacity,
@@ -139,29 +141,11 @@ impl<B: Blob> Read<B> {
 
     /// Reads and decodes a fixed-size codec item from the blob.
     ///
-    /// This is optimized to decode directly from the internal buffer when possible (zero-copy),
-    /// only allocating a temporary buffer when the item spans buffer boundaries.
-    ///
     /// Returns the decoded item, or an error if reading or decoding fails.
     /// Returns [Error::BlobInsufficientLength] if there aren't enough bytes remaining.
     pub async fn read_fixed<T: CodecFixed<Cfg = ()>>(&mut self) -> Result<T, Error> {
-        // Try to fill buffer and decode directly (zero-copy path)
-        if self.fill().await? == 0 {
-            return Err(Error::BlobInsufficientLength);
-        }
-
-        let buf = self.available();
-        if buf.len() >= T::SIZE {
-            // Fast path: decode directly from buffer without copying
-            let item = T::decode(&buf[..T::SIZE]).map_err(|e| Error::Codec(e.to_string()))?;
-            self.advance(T::SIZE);
-            return Ok(item);
-        }
-
-        // Slow path: item spans buffer boundary, need to copy
-        let mut tmp = vec![0u8; T::SIZE];
-        self.read_exact(&mut tmp, T::SIZE).await?;
-        T::decode(tmp.as_ref()).map_err(|e| Error::Codec(e.to_string()))
+        let bytes = self.read_bytes(T::SIZE).await?;
+        T::decode(bytes.as_ref()).map_err(|e| Error::Codec(e.to_string()))
     }
 
     /// Decodes a batch of fixed-size items from the buffer, calling a transform function for each.
@@ -207,7 +191,7 @@ impl<B: Blob> Read<B> {
         let available = self.available().len();
         if available < T::SIZE {
             // Buffer has less than one item. This happens when an item spans a page boundary.
-            // Use read_fixed which handles cross-page reads by copying to a temporary buffer.
+            // Use read_fixed which handles cross-page reads via read_bytes.
             match self.read_fixed::<T>().await {
                 Ok(item) => {
                     batch.push(f(0, Ok(item)));
@@ -240,6 +224,9 @@ impl<B: Blob> Read<B> {
 
     /// Fills the buffer from the blob starting at the current physical position and verifies the
     /// CRC of each page (including any trailing partial page).
+    ///
+    /// Uses BytesMut for mutable operations, then freezes to Bytes. This allows previous
+    /// Bytes slices to remain valid even after refilling (they reference the old Arc).
     async fn fill_buffer(&mut self) -> Result<(), Error> {
         let logical_page_size = self.page_size - Checksum::SIZE;
 
@@ -271,25 +258,30 @@ impl<B: Blob> Read<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Read physical data directly into the main buffer, then validate CRCs and compact in-place.
-        // This avoids allocating a separate staging buffer.
-        self.buffer.clear();
-        self.buffer.resize(bytes_to_read, 0);
-        let buf = std::mem::take(&mut self.buffer);
-        let buf = self.blob.read_at(buf, start_offset).await?;
-        self.buffer = buf.into();
+        // Allocate new BytesMut for this fill. Old Bytes stays alive if anyone holds a reference.
+        let buf = BytesMut::zeroed(bytes_to_read);
+
+        // Read physical data into BytesMut
+        let stable_buf: StableBuf = buf.into();
+        let stable_buf = self.blob.read_at(stable_buf, start_offset).await?;
+
+        // Convert back to BytesMut for in-place compaction
+        let mut buf: BytesMut = match stable_buf {
+            StableBuf::BytesMut(b) => b,
+            StableBuf::Vec(v) => BytesMut::from(v.as_slice()),
+        };
 
         // Validate CRCs and compact by removing CRC records in-place.
         let mut read_offset = 0;
         let mut write_offset = 0;
-        let physical_len = self.buffer.len();
+        let physical_len = buf.len();
 
         while read_offset < physical_len {
             let remaining = physical_len - read_offset;
 
             // Check if full page or partial
             if remaining >= self.page_size {
-                let page_slice = &self.buffer[read_offset..read_offset + self.page_size];
+                let page_slice = &buf[read_offset..read_offset + self.page_size];
                 let Some(record) = Checksum::validate_page(page_slice) else {
                     error!(
                         page = self.blob_page + (read_offset / self.page_size) as u64,
@@ -313,7 +305,7 @@ impl<B: Blob> Read<B> {
                 }
                 // Compact: move logical data to remove CRC record gap
                 if write_offset != read_offset {
-                    self.buffer
+                    buf.as_mut()
                         .copy_within(read_offset..read_offset + len, write_offset);
                 }
                 write_offset += len;
@@ -329,7 +321,7 @@ impl<B: Blob> Read<B> {
                 );
                 return Err(Error::InvalidChecksum);
             }
-            let page_slice = &self.buffer[read_offset..];
+            let page_slice = &buf[read_offset..];
             let Some(record) = Checksum::validate_page(page_slice) else {
                 error!(
                     page = self.blob_page + (read_offset / self.page_size) as u64,
@@ -341,15 +333,16 @@ impl<B: Blob> Read<B> {
             let logical_len = len as usize;
             // Compact: move logical data
             if write_offset != read_offset {
-                self.buffer
+                buf.as_mut()
                     .copy_within(read_offset..read_offset + logical_len, write_offset);
             }
             write_offset += logical_len;
             break;
         }
 
-        // Truncate buffer to only contain logical data
-        self.buffer.truncate(write_offset);
+        // Truncate buffer to only contain logical data and freeze to Bytes
+        buf.truncate(write_offset);
+        self.buffer = buf.freeze();
 
         // If we sought to a position that is beyond the end of what we just read, error.
         if self.buffer_position >= self.buffer.len() {
@@ -405,9 +398,70 @@ impl<B: Blob> Read<B> {
 
         self.blob_page = position / logical_page_size;
         self.buffer_position = (position % logical_page_size) as usize;
-        self.buffer.clear(); // Invalidate buffer, will be refilled on next read
+        // Invalidate buffer with pre-allocated capacity, will be refilled on next read
+        self.buffer = BytesMut::with_capacity(self.buffer_capacity).freeze();
 
         Ok(())
+    }
+
+    /// Returns available buffer content as Bytes (zero-copy, ref-counted).
+    ///
+    /// The returned Bytes remains valid even after `fill_buffer()` is called,
+    /// making it safe to hold across async operations that may refill the buffer.
+    pub fn available_bytes(&self) -> Bytes {
+        self.buffer.slice(self.buffer_position..)
+    }
+
+    /// Reads exactly `size` bytes, returning owned Bytes.
+    ///
+    /// This is more efficient than `read_exact` when the caller needs owned data
+    /// for use across buffer refills (e.g., for zero-copy chaining).
+    pub async fn read_bytes(&mut self, size: usize) -> Result<Bytes, Error> {
+        // Fast path: fits entirely in current buffer
+        if self.buffer_position + size <= self.buffer.len() {
+            let result = self
+                .buffer
+                .slice(self.buffer_position..self.buffer_position + size);
+            self.buffer_position += size;
+            return Ok(result);
+        }
+
+        // Slow path: spans buffer boundaries - collect pieces
+        let mut pieces = Vec::new();
+        let mut remaining = size;
+
+        while remaining > 0 {
+            // Refill if needed
+            if self.buffer_position >= self.buffer.len() {
+                self.fill_buffer().await?;
+            }
+
+            let available = self.buffer.len() - self.buffer_position;
+            if available == 0 {
+                return Err(Error::BlobInsufficientLength);
+            }
+
+            let take = remaining.min(available);
+            pieces.push(
+                self.buffer
+                    .slice(self.buffer_position..self.buffer_position + take),
+            );
+            self.buffer_position += take;
+            remaining -= take;
+        }
+
+        // Single piece - return directly
+        if pieces.len() == 1 {
+            return Ok(pieces.pop().unwrap());
+        }
+
+        // Multiple pieces - must concatenate
+        let total: usize = pieces.iter().map(|b| b.len()).sum();
+        let mut result = BytesMut::with_capacity(total);
+        for piece in pieces {
+            result.extend_from_slice(&piece);
+        }
+        Ok(result.freeze())
     }
 }
 
