@@ -1,5 +1,8 @@
 //! An implementation of a [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
+
 use crate::{sha256::Sha256, Hasher};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -639,13 +642,4 @@ mod tests {
         assert_eq!(bpe::FP_1E4, (bpe_1e4 * 65536.0).round() as u64);
     }
 
-    #[cfg(feature = "arbitrary")]
-    mod conformance {
-        use super::*;
-        use commonware_codec::conformance::CodecConformance;
-
-        commonware_conformance::conformance_tests! {
-            CodecConformance<BloomFilter>,
-        }
-    }
 }
