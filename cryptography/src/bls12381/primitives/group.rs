@@ -725,11 +725,6 @@ impl G1 {
         Self(p)
     }
 
-    /// Converts the G1 point to its affine representation.
-    pub fn to_affine(&self) -> G1Affine {
-        G1Affine::from_blst(self.as_blst_p1_affine())
-    }
-
     /// Batch converts projective G1 points to affine.
     ///
     /// This uses Montgomery's trick to reduce n field inversions to 1,
@@ -751,58 +746,6 @@ impl G1 {
         }
 
         out.into_iter().map(G1Affine::from_blst).collect()
-    }
-
-    /// Computes MSM on pre-converted affine points with 128-bit scalars.
-    ///
-    /// This is faster than `Space<Scalar>::msm` because:
-    /// 1. Points are already in affine form (avoids per-point conversion)
-    /// 2. Uses 128-bit scalars (halves Pippenger inner loop iterations)
-    /// 3. Skips zero-filtering (caller guarantees valid points)
-    ///
-    /// # Panics
-    ///
-    /// Panics if `points.len() != scalars.len()`.
-    ///
-    /// # Warning
-    ///
-    /// This function does NOT filter out identity points or zero scalars.
-    /// Passing such values may cause undefined behavior in BLST.
-    pub fn msm_affine(points: &[G1Affine], scalars: &[SmallScalar]) -> Self {
-        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-        if points.is_empty() {
-            return Self::zero();
-        }
-
-        // Build pointer arrays directly (no filtering/conversion)
-        let points_ptr: Vec<*const blst_p1_affine> =
-            points.iter().map(|p| p.inner() as *const _).collect();
-
-        // Get scalar pointers
-        let scalars_ptr: Vec<*const u8> = scalars.iter().map(|s| s.inner.b.as_ptr()).collect();
-
-        // Allocate scratch space
-        // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof is a pure function with no side effects.
-        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
-        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
-        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
-
-        // Perform MSM with 128-bit scalars
-        let mut result = blst_p1::default();
-        // SAFETY: All pointers are valid and point to data that outlives this call.
-        // Caller guarantees no identity points or zero scalars.
-        unsafe {
-            blst_p1s_mult_pippenger(
-                &mut result,
-                points_ptr.as_ptr(),
-                points.len(),
-                scalars_ptr.as_ptr(),
-                SMALL_SCALAR_BITS, // Always 128 bits for SmallScalar
-                scratch.as_mut_ptr() as *mut _,
-            );
-        }
-
-        Self::from_blst_p1(result)
     }
 }
 
@@ -1161,11 +1104,6 @@ impl G2 {
         Self(p)
     }
 
-    /// Converts the G2 point to its affine representation.
-    pub fn to_affine(&self) -> G2Affine {
-        G2Affine::from_blst(self.as_blst_p2_affine())
-    }
-
     /// Batch converts projective G2 points to affine.
     ///
     /// This uses Montgomery's trick to reduce n field inversions to 1,
@@ -1187,58 +1125,6 @@ impl G2 {
         }
 
         out.into_iter().map(G2Affine::from_blst).collect()
-    }
-
-    /// Computes MSM on pre-converted affine points with 128-bit scalars.
-    ///
-    /// This is faster than `Space<Scalar>::msm` because:
-    /// 1. Points are already in affine form (avoids per-point conversion)
-    /// 2. Uses 128-bit scalars (halves Pippenger inner loop iterations)
-    /// 3. Skips zero-filtering (caller guarantees valid points)
-    ///
-    /// # Panics
-    ///
-    /// Panics if `points.len() != scalars.len()`.
-    ///
-    /// # Warning
-    ///
-    /// This function does NOT filter out identity points or zero scalars.
-    /// Passing such values may cause undefined behavior in BLST.
-    pub fn msm_affine(points: &[G2Affine], scalars: &[SmallScalar]) -> Self {
-        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-        if points.is_empty() {
-            return Self::zero();
-        }
-
-        // Build pointer arrays directly (no filtering/conversion)
-        let points_ptr: Vec<*const blst_p2_affine> =
-            points.iter().map(|p| p.inner() as *const _).collect();
-
-        // Get scalar pointers
-        let scalars_ptr: Vec<*const u8> = scalars.iter().map(|s| s.inner.b.as_ptr()).collect();
-
-        // Allocate scratch space
-        // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof is a pure function with no side effects.
-        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
-        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
-        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
-
-        // Perform MSM with 128-bit scalars
-        let mut result = blst_p2::default();
-        // SAFETY: All pointers are valid and point to data that outlives this call.
-        // Caller guarantees no identity points or zero scalars.
-        unsafe {
-            blst_p2s_mult_pippenger(
-                &mut result,
-                points_ptr.as_ptr(),
-                points.len(),
-                scalars_ptr.as_ptr(),
-                SMALL_SCALAR_BITS, // Always 128 bits for SmallScalar
-                scratch.as_mut_ptr() as *mut _,
-            );
-        }
-
-        Self::from_blst_p2(result)
     }
 }
 
