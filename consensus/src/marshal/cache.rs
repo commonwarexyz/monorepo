@@ -3,7 +3,7 @@ use crate::{
     types::{Epoch, Round, View},
     Block,
 };
-use commonware_codec::Codec;
+use commonware_codec::CodecShared;
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
@@ -182,7 +182,7 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
     }
 
     /// Helper to initialize an archive.
-    async fn init_archive<T: Codec>(
+    async fn init_archive<T: CodecShared>(
         &self,
         epoch: Epoch,
         name: &str,

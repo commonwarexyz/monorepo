@@ -38,7 +38,7 @@ mod private {
 }
 
 /// Trait for valid MMR state types.
-pub trait State<D: Digest>: private::Sealed + Sized {
+pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
     /// Add the given leaf digest to the MMR, returning its position.
     fn add_leaf_digest<H: Hasher<D>>(mmr: &mut Mmr<D, Self>, hasher: &mut H, digest: D)
         -> Position;

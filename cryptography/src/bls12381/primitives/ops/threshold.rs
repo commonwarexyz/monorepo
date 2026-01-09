@@ -20,15 +20,15 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
-use commonware_parallel::{Sequential, Strategy};
-use commonware_utils::{ordered::Map, union_unique};
+use commonware_parallel::Strategy;
+use commonware_utils::{ordered::Map, union_unique, Participant};
 use rand_core::CryptoRngCore;
 
 /// Prepares partial signature evaluations for threshold recovery.
 fn prepare_evaluations<'a, V: Variant>(
     threshold: u32,
     partials: impl IntoIterator<Item = &'a PartialSignature<V>>,
-) -> Result<Map<u32, V::Signature>, Error> {
+) -> Result<Map<Participant, V::Signature>, Error> {
     let mut out = Map::from_iter_dedup(partials.into_iter().map(|eval| (eval.index, eval.value)));
     let t = threshold as usize;
     out.truncate(t);
@@ -130,7 +130,7 @@ pub fn verify_proof_of_possession<V: Variant>(
 pub fn batch_verify_same_signer<'a, R, V, I, S>(
     rng: &mut R,
     sharing: &Sharing<V>,
-    index: u32,
+    index: Participant,
     entries: I,
     strategy: &S,
 ) -> Result<(), Error>
@@ -249,16 +249,21 @@ where
 /// # Warning
 ///
 /// This function assumes that each partial signature is unique.
-pub fn recover<'a, V, I>(sharing: &Sharing<V>, partials: I) -> Result<V::Signature, Error>
+pub fn recover<'a, V, I, S>(
+    sharing: &Sharing<V>,
+    partials: I,
+    strategy: &S,
+) -> Result<V::Signature, Error>
 where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
+    S: Strategy,
 {
     let evals = prepare_evaluations::<V>(sharing.required(), partials)?;
     sharing
         .interpolator(evals.keys())?
-        .interpolate(&evals, &Sequential)
+        .interpolate(&evals, strategy)
         .ok_or(Error::InvalidRecovery)
 }
 
@@ -353,7 +358,6 @@ mod tests {
     use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::{quorum, test_rng, union_unique, NZUsize, NZU32};
-    use rand::{rngs::StdRng, SeedableRng};
 
     fn blst_verify_proof_of_possession<V: Variant>(
         public: &V::Public,
@@ -395,7 +399,7 @@ mod tests {
             verify_proof_of_possession::<V>(&sharing, namespace, p)
                 .expect("signature should be valid");
         }
-        let threshold_sig = recover::<V, _>(&sharing, &partials).unwrap();
+        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
         let threshold_pub = sharing.public();
 
         ops::verify_proof_of_possession::<V>(threshold_pub, namespace, &threshold_sig)
@@ -450,7 +454,7 @@ mod tests {
         for p in &partials {
             verify_message::<V>(&sharing, namespace, msg, p).expect("signature should be valid");
         }
-        let threshold_sig = recover::<V, _>(&sharing, &partials).unwrap();
+        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
         let threshold_pub = sharing.public();
 
         ops::verify_message::<V>(threshold_pub, namespace, msg, &threshold_sig)
@@ -529,7 +533,13 @@ mod tests {
         .expect("Verification with mixed namespaces should succeed");
 
         assert!(matches!(
-            batch_verify_same_signer::<_, V, _, _>(&mut rng, &public, 1, &entries, &Sequential),
+            batch_verify_same_signer::<_, V, _, _>(
+                &mut rng,
+                &public,
+                Participant::new(1),
+                &entries,
+                &Sequential
+            ),
             Err(Error::InvalidSignature)
         ));
 
@@ -572,7 +582,7 @@ mod tests {
     }
 
     fn recover_with_weights_correct<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(3333);
+        let mut rng = test_rng();
         let (n, t) = (6, quorum(6));
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
 
@@ -582,7 +592,7 @@ mod tests {
             .map(|s| sign_message::<V>(s, b"test", b"payload"))
             .collect();
 
-        let sig1 = recover::<V, _>(&sharing, &partials).unwrap();
+        let sig1 = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
 
         ops::verify_message::<V>(sharing.public(), b"test", b"payload", &sig1).unwrap();
     }
@@ -594,7 +604,7 @@ mod tests {
     }
 
     fn recover_multiple_test<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(3333);
+        let mut rng = test_rng();
         let (n, t) = (6, quorum(6));
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
 
@@ -646,7 +656,7 @@ mod tests {
             verify_message::<V>(&sharing, namespace, msg, partial).unwrap();
         });
 
-        let threshold_sig = recover::<V, _>(&sharing, &partials).unwrap();
+        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
         ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 
@@ -677,7 +687,7 @@ mod tests {
             ));
         });
 
-        let threshold_sig = recover::<V, _>(&sharing, &partials).unwrap();
+        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
         assert!(matches!(
             ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap_err(),
             Error::InvalidSignature
@@ -710,7 +720,7 @@ mod tests {
         });
 
         assert!(matches!(
-            recover::<V, _>(&group, &partials).unwrap_err(),
+            recover::<V, _, _>(&group, &partials, &Sequential).unwrap_err(),
             Error::NotEnoughPartialSignatures(4, 3)
         ));
     }
@@ -742,7 +752,7 @@ mod tests {
             verify_message::<V>(&sharing, namespace, msg, partial).unwrap();
         });
 
-        let threshold_sig = recover::<V, _>(&sharing, &partials).unwrap();
+        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
         ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 
@@ -801,7 +811,8 @@ mod tests {
                     "Exactly one signature should be invalid"
                 );
                 assert_eq!(
-                    invalid_sigs[0].index, corrupted_index as u32,
+                    invalid_sigs[0].index,
+                    Participant::from_usize(corrupted_index),
                     "The invalid signature should match the corrupted share's index"
                 );
             }
@@ -839,9 +850,12 @@ mod tests {
                     corrupted_indices.len(),
                     "Number of invalid signatures should match number of corrupted shares"
                 );
-                let invalid_indices: Vec<u32> = invalid_sigs.iter().map(|sig| sig.index).collect();
-                let expected_indices: Vec<u32> =
-                    corrupted_indices.iter().map(|&i| i as u32).collect();
+                let invalid_indices: Vec<Participant> =
+                    invalid_sigs.iter().map(|sig| sig.index).collect();
+                let expected_indices: Vec<Participant> = corrupted_indices
+                    .iter()
+                    .map(|&i| Participant::from_usize(i))
+                    .collect();
                 assert_eq!(
                     invalid_indices, expected_indices,
                     "Invalid signature indices should match corrupted share indices"
@@ -865,7 +879,7 @@ mod tests {
             .map(|s| sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        partials[0].index = 100;
+        partials[0].index = Participant::new(100);
 
         sharing.precompute_partial_publics();
         let result = batch_verify_same_message::<_, MinSig, _>(
@@ -879,7 +893,8 @@ mod tests {
                     "Exactly one signature should be invalid"
                 );
                 assert_eq!(
-                    invalid_sigs[0].index, 100,
+                    invalid_sigs[0].index,
+                    Participant::new(100),
                     "The invalid signature should match the corrupted index"
                 );
             }
@@ -925,7 +940,7 @@ mod tests {
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(invalid_sigs.len(), 1);
-                assert_eq!(invalid_sigs[0].index, 0);
+                assert_eq!(invalid_sigs[0].index, Participant::new(0));
             }
             _ => panic!("Expected an error with invalid signatures"),
         }
@@ -954,26 +969,31 @@ mod tests {
         match result {
             Err(invalid_sigs) => {
                 assert_eq!(invalid_sigs.len(), 1);
-                assert_eq!(invalid_sigs[0].index, corrupted_index);
+                assert_eq!(invalid_sigs[0].index, Participant::new(corrupted_index));
             }
             _ => panic!("Expected an error with invalid signatures"),
         }
     }
 
     fn threshold_derive_missing_partials<V: Variant>() {
-        fn lagrange_coeff(scalars: &[Scalar], eval_x: u32, i_x: u32, x_coords: &[u32]) -> Scalar {
+        fn lagrange_coeff(
+            scalars: &[Scalar],
+            eval_x: Participant,
+            i_x: Participant,
+            x_coords: &[Participant],
+        ) -> Scalar {
             let mut num = Scalar::one();
             let mut den = Scalar::one();
 
-            let eval_x = scalars[eval_x as usize].clone();
-            let xi = scalars[i_x as usize].clone();
+            let eval_x = scalars[usize::from(eval_x)].clone();
+            let xi = scalars[usize::from(i_x)].clone();
 
             for &j_x in x_coords {
                 if i_x == j_x {
                     continue;
                 }
 
-                let xj = scalars[j_x as usize].clone();
+                let xj = scalars[usize::from(j_x)].clone();
 
                 let mut term = eval_x.clone();
                 term -= &xj;
@@ -1001,7 +1021,8 @@ mod tests {
             .collect();
 
         let recovery_partials: Vec<_> = all_partials.iter().take(t as usize).collect();
-        let recovery_indices: Vec<u32> = recovery_partials.iter().map(|p| p.index).collect();
+        let recovery_indices: Vec<Participant> =
+            recovery_partials.iter().map(|p| p.index).collect();
 
         for target in &shares {
             let target = target.index;
@@ -1036,7 +1057,7 @@ mod tests {
     }
 
     fn batch_verify_same_message_rejects_malleability<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(12345);
+        let mut rng = test_rng();
         let n = 5;
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
@@ -1107,7 +1128,7 @@ mod tests {
     }
 
     fn batch_verify_same_signer_rejects_malleability<V: Variant>() {
-        let mut rng = StdRng::seed_from_u64(54321);
+        let mut rng = test_rng();
         let n = 5;
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
         let namespace: &[u8] = b"test";

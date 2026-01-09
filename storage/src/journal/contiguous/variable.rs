@@ -12,7 +12,7 @@ use crate::{
     mmr::Location,
     Persistable,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::ops::Range;
@@ -149,7 +149,7 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
     oldest_retained_pos: u64,
 }
 
-impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
@@ -794,7 +794,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 }
 
 // Implement Contiguous trait for variable-length items
-impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
 
     fn size(&self) -> u64 {
@@ -822,7 +822,7 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics, V: Codec> MutableContiguous for Journal<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> MutableContiguous for Journal<E, V> {
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
@@ -836,7 +836,7 @@ impl<E: Storage + Metrics, V: Codec> MutableContiguous for Journal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics, V: Codec> Persistable for Journal<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Persistable for Journal<E, V> {
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Error> {

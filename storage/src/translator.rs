@@ -1,9 +1,6 @@
 //! Primitive implementations of [Translator].
 
-use std::{
-    hash::{BuildHasher, Hash, Hasher},
-    marker::PhantomData,
-};
+use std::hash::{BuildHasher, Hash, Hasher};
 
 /// Translate keys into a new representation (often a smaller one).
 ///
@@ -11,13 +8,14 @@ use std::{
 ///
 /// The output of [Translator::transform] is often used as a key in a hash table. If the output is
 /// not uniformly distributed, the performance of said hash table will degrade substantially.
-pub trait Translator: Clone + BuildHasher {
+pub trait Translator: Clone + BuildHasher + Send + Sync + 'static {
     /// The type of the internal representation of keys.
     ///
     /// Although [Translator] is a [BuildHasher], the `Key` type must still implement [Hash] for
     /// compatibility with any hash table that wraps [Translator]. We also require [Ord] for
-    /// compatibility with ordered collections.
-    type Key: Ord + Hash + Copy;
+    /// compatibility with ordered collections. [Send] and [Sync] are required for thread-safe
+    /// concurrent access.
+    type Key: Ord + Hash + Copy + Send + Sync;
 
     /// Transform a key into its new representation.
     fn transform(&self, key: &[u8]) -> Self::Key;
@@ -149,21 +147,18 @@ impl<const N: usize> PartialEq<[u8; N]> for UnhashedArray<N> {
 
 /// Translators for keys that are not the length of a standard integer.
 #[derive(Clone, Copy)]
-pub struct Cap<const N: usize> {
-    _phantom: PhantomData<[u8; N]>,
-}
+pub struct Cap<const N: usize>;
 
 impl<const N: usize> Cap<N> {
     pub const fn new() -> Self {
         const {
             assert!(N <= 8 && N > 0, "Cap must be between 1 and 8");
         };
-        Self {
-            _phantom: PhantomData,
-        }
+        Self
     }
 }
 
+// Manually implement Default for Cap<N> so it calls new() which validates N.
 impl<const N: usize> Default for Cap<N> {
     fn default() -> Self {
         Self::new()

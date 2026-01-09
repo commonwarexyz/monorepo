@@ -18,7 +18,7 @@ use crate::{
     qmdb::{operation::Committable, Error, Merkleized},
     translator::Translator,
 };
-use commonware_codec::CodecFixed;
+use commonware_codec::CodecFixedShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
@@ -113,7 +113,7 @@ type AuthenticatedLog<E, O, H, S = Merkleized<H>> = authenticated::Journal<E, Jo
 /// floor specified by the last commit.
 pub(crate) async fn init_fixed_authenticated_log<
     E: Storage + Clock + Metrics,
-    O: Committable + CodecFixed<Cfg = ()>,
+    O: Committable + CodecFixedShared,
     H: Hasher,
     T: Translator,
 >(

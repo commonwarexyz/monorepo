@@ -8,7 +8,7 @@ use crate::{
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Storage};
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
@@ -100,7 +100,7 @@ where
 }
 
 /// Implementation of `Archive` storage.
-pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
+pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> {
     items_per_section: u64,
 
     /// Combined index + value storage with crash recovery.
@@ -129,7 +129,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     syncs: Counter,
 }
 
-impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V> {
+impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> Archive<T, E, K, V> {
     /// Calculate the section for a given index.
     const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_section) * self.items_per_section
@@ -338,7 +338,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     }
 }
 
-impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Archive
+impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> crate::archive::Archive
     for Archive<T, E, K, V>
 {
     type Key = K;

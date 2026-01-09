@@ -54,6 +54,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{ed25519, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Quota, Runner};
 use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
@@ -224,6 +225,7 @@ fn main() {
             skip_timeout: ViewDelta::new(5),
             fetch_concurrent: 32,
             buffer_pool: PoolRef::new(NZU16!(16_384), NZUsize!(10_000)),
+            strategy: Sequential,
         };
         let engine = simplex::Engine::new(context.with_label("engine"), cfg);
 

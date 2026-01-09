@@ -317,6 +317,7 @@ mod tests {
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin, SplitTarget},
         Recipients, Sender as _,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef, count_running_tasks, deterministic, Clock, Metrics, Quota, Runner, Spawner,
     };
@@ -619,6 +620,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -886,6 +888,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -1052,6 +1055,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -1241,6 +1245,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -1360,6 +1365,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 partition: me.to_string(),
                 mailbox_size: 1024,
                 epoch: Epoch::new(333),
@@ -1500,6 +1506,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -1761,6 +1768,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -1937,6 +1945,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -2150,6 +2159,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -2360,6 +2370,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -2598,6 +2609,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -2784,6 +2796,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.clone().to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -2962,6 +2975,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -3136,6 +3150,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -3225,6 +3240,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 partition: validator.to_string(),
                 mailbox_size: 1024,
                 epoch: Epoch::new(333),
@@ -3433,6 +3449,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -3599,6 +3616,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -3779,6 +3797,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -3928,6 +3947,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -4094,6 +4114,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 partition: participants[0].clone().to_string(),
                 mailbox_size: 64,
                 epoch: Epoch::new(333),
@@ -4255,6 +4276,7 @@ mod tests {
                     context.with_label("rng"),
                     schemes[idx].clone(),
                     mock_reporter.clone(),
+                    Sequential,
                     true, // Enable verification
                 );
                 reporters.push(mock_reporter.clone());
@@ -4281,6 +4303,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: attributable_reporter,
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -4516,6 +4539,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -4543,20 +4567,23 @@ mod tests {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes).expect("finalization quorum")
+                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                    .expect("finalization quorum")
             };
             // Helper: assemble notarization from explicit signer indices
             let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes).expect("notarization quorum")
+                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                    .expect("notarization quorum")
             };
             let build_nullification = |round: Round| -> TNullification<_> {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
                     .collect();
-                TNullification::from_nullifies(&schemes[0], &votes).expect("nullification quorum")
+                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                    .expect("nullification quorum")
             };
             // Choose F=1 and construct B_1, B_2A, B_2B
             let f_view = 1;
@@ -4847,6 +4874,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -4996,6 +5024,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -5091,6 +5120,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: selected_reporter,
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -5496,6 +5526,7 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: label,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -5552,6 +5583,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: label,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),

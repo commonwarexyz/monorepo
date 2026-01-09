@@ -14,6 +14,7 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_parallel::Sequential;
 use commonware_utils::{
     channels::fallible::AsyncFallibleExt,
     ordered::{Quorum, Set},
@@ -121,14 +122,14 @@ where
         let verified = activity.verified();
         match &activity {
             Activity::Notarize(notarize) => {
-                if !notarize.verify(&mut self.context, &self.scheme) {
+                if !notarize.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = notarize.encode();
                 Notarize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[notarize.signer() as usize].clone();
+                let public_key = self.participants.key(notarize.signer()).unwrap().clone();
                 self.notarizes
                     .lock()
                     .unwrap()
@@ -147,6 +148,7 @@ where
                         proposal: &notarization.proposal,
                     },
                     &notarization.certificate,
+                    &Sequential,
                 ) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
@@ -162,14 +164,14 @@ where
                 self.certified(notarization.round(), &notarization.certificate);
             }
             Activity::Nullify(nullify) => {
-                if !nullify.verify(&mut self.context, &self.scheme) {
+                if !nullify.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = nullify.encode();
                 Nullify::<S>::decode(encoded).unwrap();
-                let public_key = self.participants[nullify.signer() as usize].clone();
+                let public_key = self.participants.key(nullify.signer()).unwrap().clone();
                 self.nullifies
                     .lock()
                     .unwrap()
@@ -186,6 +188,7 @@ where
                         round: nullification.round,
                     },
                     &nullification.certificate,
+                    &Sequential,
                 ) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
@@ -201,14 +204,14 @@ where
                 self.certified(nullification.round, &nullification.certificate);
             }
             Activity::Finalize(finalize) => {
-                if !finalize.verify(&mut self.context, &self.scheme) {
+                if !finalize.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = finalize.encode();
                 Finalize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[finalize.signer() as usize].clone();
+                let public_key = self.participants.key(finalize.signer()).unwrap().clone();
                 self.finalizes
                     .lock()
                     .unwrap()
@@ -227,6 +230,7 @@ where
                         proposal: &finalization.proposal,
                     },
                     &finalization.certificate,
+                    &Sequential,
                 ) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
@@ -250,14 +254,14 @@ where
             }
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&mut self.context, &self.scheme) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
                 ConflictingNotarize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[conflicting.signer() as usize].clone();
+                let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
                 self.faults
                     .lock()
                     .unwrap()
@@ -269,14 +273,14 @@ where
             }
             Activity::ConflictingFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&mut self.context, &self.scheme) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
                 ConflictingFinalize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[conflicting.signer() as usize].clone();
+                let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
                 self.faults
                     .lock()
                     .unwrap()
@@ -288,14 +292,14 @@ where
             }
             Activity::NullifyFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&mut self.context, &self.scheme) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
                 NullifyFinalize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[conflicting.signer() as usize].clone();
+                let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
                 self.faults
                     .lock()
                     .unwrap()

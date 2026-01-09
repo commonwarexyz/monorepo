@@ -45,7 +45,7 @@ use super::{
     glob::{Config as GlobConfig, Glob},
 };
 use crate::journal::Error;
-use commonware_codec::{Codec, CodecFixed};
+use commonware_codec::{Codec, CodecFixed, CodecShared};
 use commonware_runtime::{Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
 use std::{collections::HashSet, num::NonZeroUsize};
@@ -99,7 +99,7 @@ pub struct Oversized<E: Storage + Metrics, I: Record, V: Codec> {
     values: Glob<E, V>,
 }
 
-impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
+impl<E: Storage + Metrics, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Initialize with crash recovery validation.
     ///
     /// Validates each index entry's glob reference during replay. Invalid entries
@@ -322,7 +322,7 @@ impl<E: Storage + Metrics, I: Record, V: Codec> Oversized<E, I, V> {
         &self,
         start_section: u64,
         buffer: NonZeroUsize,
-    ) -> Result<impl Stream<Item = Result<(u64, u64, I), Error>> + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, u64, I), Error>> + Send + '_, Error> {
         self.index.replay(start_section, buffer).await
     }
 

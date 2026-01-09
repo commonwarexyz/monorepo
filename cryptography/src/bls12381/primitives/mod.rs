@@ -36,7 +36,7 @@
 //! }
 //!
 //! // Aggregate partial signatures
-//! let threshold_sig = threshold::recover::<MinSig, _>(&sharing, &partials).unwrap();
+//! let threshold_sig = threshold::recover::<MinSig, _, _>(&sharing, &partials, &commonware_parallel::Sequential).unwrap();
 //!
 //! // Verify threshold signature
 //! let threshold_pub = sharing.public();

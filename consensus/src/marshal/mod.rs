@@ -128,6 +128,7 @@ mod tests {
         simulated::{self, Link, Network, Oracle},
         Manager,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_storage::archive::immutable;
     use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
@@ -192,6 +193,7 @@ mod tests {
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            strategy: Sequential,
         };
 
         // Create the resolver
@@ -329,7 +331,7 @@ mod tests {
             .collect();
 
         // Generate certificate signatures
-        Finalization::from_finalizes(&schemes[0], &finalizes).unwrap()
+        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
     }
 
     fn make_notarization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Notarization<S, D> {
@@ -341,7 +343,7 @@ mod tests {
             .collect();
 
         // Generate certificate signatures
-        Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()
+        Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
     }
 
     fn setup_network(

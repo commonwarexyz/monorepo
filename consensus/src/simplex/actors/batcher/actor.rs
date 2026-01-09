@@ -13,6 +13,7 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
@@ -39,6 +40,7 @@ pub struct Actor<
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
 > {
     context: ContextCell<E>,
 
@@ -47,6 +49,7 @@ pub struct Actor<
 
     blocker: B,
     reporter: R,
+    strategy: T,
 
     activity_timeout: ViewDelta,
     skip_timeout: ViewDelta,
@@ -69,9 +72,10 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
-    > Actor<E, S, B, D, R>
+        T: Strategy,
+    > Actor<E, S, B, D, R, T>
 {
-    pub fn new(context: E, cfg: Config<S, B, R>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, B, R, T>) -> (Self, Mailbox<S, D>) {
         let added = Counter::default();
         let verified = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
@@ -126,6 +130,7 @@ impl<
 
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
+                strategy: cfg.strategy,
 
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
@@ -301,6 +306,7 @@ impl<
                             if !notarization.verify(
                                 &mut self.context,
                                 &self.scheme,
+                                &self.strategy,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid notarization");
                                 self.blocker.block(sender).await;
@@ -327,6 +333,7 @@ impl<
                             if !nullification.verify::<_, D>(
                                 &mut self.context,
                                 &self.scheme,
+                                &self.strategy,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid nullification");
                                 self.blocker.block(sender).await;
@@ -353,6 +360,7 @@ impl<
                             if !finalization.verify(
                                 &mut self.context,
                                 &self.scheme,
+                                &self.strategy,
                             ) {
                                 warn!(?sender, %view, "blocking peer for invalid finalization");
                                 self.blocker.block(sender).await;
@@ -463,11 +471,11 @@ impl<
             // Batch verify votes if ready
             let mut timer = self.verify_latency.timer();
             let verified = if round.ready_notarizes() {
-                Some(round.verify_notarizes(&mut self.context))
+                Some(round.verify_notarizes(&mut self.context, &self.strategy))
             } else if round.ready_nullifies() {
-                Some(round.verify_nullifies(&mut self.context))
+                Some(round.verify_nullifies(&mut self.context, &self.strategy))
             } else if round.ready_finalizes() {
-                Some(round.verify_finalizes(&mut self.context))
+                Some(round.verify_finalizes(&mut self.context, &self.strategy))
             } else {
                 None
             };
@@ -506,7 +514,7 @@ impl<
             // Try to construct and forward certificates
             if let Some(notarization) = self
                 .recover_latency
-                .time_some(|| round.try_construct_notarization(&self.scheme))
+                .time_some(|| round.try_construct_notarization(&self.scheme, &self.strategy))
             {
                 debug!(view = %updated_view, "constructed notarization, forwarding to voter");
                 voter
@@ -515,7 +523,7 @@ impl<
             }
             if let Some(nullification) = self
                 .recover_latency
-                .time_some(|| round.try_construct_nullification(&self.scheme))
+                .time_some(|| round.try_construct_nullification(&self.scheme, &self.strategy))
             {
                 debug!(view = %updated_view, "constructed nullification, forwarding to voter");
                 voter
@@ -524,7 +532,7 @@ impl<
             }
             if let Some(finalization) = self
                 .recover_latency
-                .time_some(|| round.try_construct_finalization(&self.scheme))
+                .time_some(|| round.try_construct_finalization(&self.scheme, &self.strategy))
             {
                 debug!(view = %updated_view, "constructed finalization, forwarding to voter");
                 voter

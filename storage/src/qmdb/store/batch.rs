@@ -5,7 +5,7 @@ pub mod tests {
     use crate::{
         kv::{Batchable, Deletable as _, Gettable, Updatable as _},
         qmdb::{
-            any::states::{MutableAny, UnmerkleizedDurableAny as _},
+            any::states::{MutableAny, UnmerkleizedDurableAny},
             Error,
         },
         Persistable as _,
@@ -16,16 +16,16 @@ pub mod tests {
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::Array;
+    use commonware_utils::{test_rng, Array};
     use core::{fmt::Debug, future::Future};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::Rng;
     use std::collections::HashSet;
 
-    pub trait TestKey: Array + Copy {
+    pub trait TestKey: Array + Copy + Send + Sync {
         fn from_seed(seed: u8) -> Self;
     }
 
-    pub trait TestValue: Codec + Eq + PartialEq + Debug {
+    pub trait TestValue: Codec + Eq + PartialEq + Debug + Send + Sync {
         fn from_seed(seed: u8) -> Self;
     }
 
@@ -56,6 +56,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let executor = deterministic::Runner::default();
         let mut new_db_clone = new_db.clone();
@@ -84,6 +85,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         test_overlay_reads(new_db).await?;
         test_create(new_db).await?;
@@ -101,6 +103,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = new_db().await;
         let key = TestKey::from_seed(1);
@@ -121,6 +124,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = new_db().await;
         let mut batch = db.start_batch();
@@ -147,6 +151,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = new_db().await;
         let base_key = TestKey::from_seed(4);
@@ -172,6 +177,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = new_db().await;
         let key = TestKey::from_seed(6);
@@ -195,6 +201,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = new_db().await;
         let mut batch = db.start_batch();
@@ -219,6 +226,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = new_db().await;
         for i in 0..100 {
@@ -259,6 +267,7 @@ pub mod tests {
         D: MutableAny,
         D::Key: TestKey,
         <D as Gettable>::Value: TestValue,
+        <D::Durable as UnmerkleizedDurableAny>::Mutable: MutableAny<Durable = D::Durable>,
     {
         let mut db = new_db().await;
         // Create 100 keys and commit them.
@@ -272,7 +281,7 @@ pub mod tests {
         let mut db = durable.into_mutable();
 
         // Delete half of the keys at random.
-        let mut rng = StdRng::seed_from_u64(1337);
+        let mut rng = test_rng();
         let mut deleted = HashSet::new();
         let mut batch = db.start_batch();
         for i in 0..100 {

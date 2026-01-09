@@ -1,7 +1,9 @@
 use super::{Config, Error};
 use crate::{kv, rmap::RMap, Persistable};
 use bytes::{Buf, BufMut};
-use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{
+    CodecFixed, CodecFixedShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite,
+};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
@@ -415,7 +417,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Gettable for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixedShared> kv::Gettable for Ordinal<E, V> {
     type Key = u64;
     type Value = V;
     type Error = Error;
@@ -425,13 +427,13 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Gettable for Ord
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Updatable for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixedShared> kv::Updatable for Ordinal<E, V> {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Persistable for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixedShared> Persistable for Ordinal<E, V> {
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Self::Error> {

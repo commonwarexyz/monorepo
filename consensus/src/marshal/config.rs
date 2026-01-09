@@ -3,15 +3,17 @@ use crate::{
     Block,
 };
 use commonware_cryptography::certificate::Provider;
+use commonware_parallel::Strategy;
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
-pub struct Config<B, P, ES>
+pub struct Config<B, P, ES, T>
 where
     B: Block,
     P: Provider<Scope = Epoch>,
     ES: Epocher,
+    T: Strategy,
 {
     /// Provider for epoch-specific signing schemes.
     pub provider: P,
@@ -50,4 +52,7 @@ where
 
     /// Maximum number of blocks to repair at once.
     pub max_repair: NonZeroUsize,
+
+    /// Strategy for parallel operations.
+    pub strategy: T,
 }

@@ -408,7 +408,6 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
-    use rand::rngs::OsRng;
 
     fn test_sign_and_verify(
         private_key: PrivateKey,
@@ -563,7 +562,7 @@ mod tests {
     #[should_panic]
     fn bad_signature() {
         let (private_key, public_key, message, _) = vector_1();
-        let private_key_2 = PrivateKey::random(&mut OsRng);
+        let private_key_2 = PrivateKey::random(&mut test_rng());
         let bad_signature = private_key_2.sign_inner(None, &message);
         test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }
@@ -802,7 +801,7 @@ mod tests {
 
     #[test]
     fn test_from_signing_key() {
-        let signing_key = ed25519_consensus::SigningKey::new(OsRng);
+        let signing_key = ed25519_consensus::SigningKey::new(test_rng());
         let expected_public = signing_key.verification_key();
         let private_key = PrivateKey::from(signing_key);
         assert_eq!(private_key.public_key().key, expected_public);
@@ -810,7 +809,7 @@ mod tests {
 
     #[test]
     fn test_private_key_redacted() {
-        let private_key = PrivateKey::random(&mut OsRng);
+        let private_key = PrivateKey::random(&mut test_rng());
         let debug = format!("{:?}", private_key);
         let display = format!("{}", private_key);
         assert!(debug.contains("REDACTED"));
@@ -819,7 +818,7 @@ mod tests {
 
     #[test]
     fn test_from_private_key_to_public_key() {
-        let private_key = PrivateKey::random(&mut OsRng);
+        let private_key = PrivateKey::random(&mut test_rng());
         assert_eq!(private_key.public_key(), PublicKey::from(private_key));
     }
 

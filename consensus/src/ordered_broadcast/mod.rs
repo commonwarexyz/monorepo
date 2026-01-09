@@ -92,12 +92,13 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{channels::fallible::OneshotExt, NZUsize, NZU16};
+    use commonware_utils::{channels::fallible::OneshotExt, NZUsize, NZU16, NZU64};
     use futures::{channel::oneshot, future::join_all};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -253,12 +254,13 @@ mod tests {
                     rebroadcast_timeout,
                     epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                     height_bound: HeightDelta::new(2),
-                    journal_heights_per_section: 10,
+                    journal_heights_per_section: NZU64!(10),
                     journal_replay_buffer: NZUsize!(4096),
                     journal_write_buffer: NZUsize!(4096),
                     journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                     journal_compression: Some(3),
                     journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    strategy: Sequential,
                 },
             );
 
@@ -778,12 +780,13 @@ mod tests {
                         rebroadcast_timeout: Duration::from_secs(1),
                         priority_acks: false,
                         priority_proposals: false,
-                        journal_heights_per_section: 10,
+                        journal_heights_per_section: NZU64!(10),
                         journal_replay_buffer: NZUsize!(4096),
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
                         journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        strategy: Sequential,
                     },
                 );
 
@@ -935,12 +938,13 @@ mod tests {
                         rebroadcast_timeout: Duration::from_secs(5),
                         priority_acks: false,
                         priority_proposals: false,
-                        journal_heights_per_section: 10,
+                        journal_heights_per_section: NZU64!(10),
                         journal_replay_buffer: NZUsize!(4096),
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
                         journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        strategy: Sequential,
                     },
                 );
 
@@ -985,7 +989,7 @@ mod tests {
                         rebroadcast_timeout: Duration::from_secs(5),
                         priority_acks: false,
                         priority_proposals: false,
-                        journal_heights_per_section: 10,
+                        journal_heights_per_section: NZU64!(10),
                         journal_replay_buffer: NZUsize!(4096),
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!(
@@ -994,6 +998,7 @@ mod tests {
                         ),
                         journal_compression: Some(3),
                         journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        strategy: Sequential,
                     },
                 );
 

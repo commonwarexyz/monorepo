@@ -4,8 +4,12 @@ use crate::{
     Automaton, Monitor, Relay, Reporter,
 };
 use commonware_cryptography::{certificate::Provider, Digest, Signer};
+use commonware_parallel::Strategy;
 use commonware_runtime::buffer::PoolRef;
-use std::{num::NonZeroUsize, time::Duration};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
+};
 
 /// Configuration for the [super::Engine].
 pub struct Config<
@@ -17,6 +21,7 @@ pub struct Config<
     R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
+    T: Strategy,
 > {
     /// The signer used when this engine acts as a sequencer.
     ///
@@ -78,7 +83,7 @@ pub struct Config<
     pub journal_name_prefix: String,
 
     /// The number of entries to keep per journal section.
-    pub journal_heights_per_section: u64,
+    pub journal_heights_per_section: NonZeroU64,
 
     /// The number of bytes to buffer when replaying a journal.
     pub journal_replay_buffer: NonZeroUsize,
@@ -91,4 +96,7 @@ pub struct Config<
 
     /// Buffer pool for the journal.
     pub journal_buffer_pool: PoolRef,
+
+    /// Strategy for parallel operations.
+    pub strategy: T,
 }

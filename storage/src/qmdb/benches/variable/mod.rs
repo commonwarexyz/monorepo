@@ -168,18 +168,14 @@ where
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
         assert!(batch.update(rand_key, v).await.is_ok());
         if rng.next_u32() % commit_frequency == 0 {
-            let iter = batch.into_iter();
-            assert!(db.write_batch(iter).await.is_ok());
+            assert!(db.write_batch(batch.into_iter()).await.is_ok());
             let (durable, _) = db.commit(None).await.unwrap();
             db = durable.into_mutable();
             batch = db.start_batch();
         }
     }
 
-    let iter = batch.into_iter();
-    db.write_batch(iter)
-        .await
-        .expect("write_batch shouldn't fail");
+    assert!(db.write_batch(batch.into_iter()).await.is_ok());
     let (durable, _) = db.commit(None).await.expect("commit shouldn't fail");
     durable
 }
