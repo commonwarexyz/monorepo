@@ -312,6 +312,9 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
         B: FnOnce() -> RB + Send,
         RA: Send,
         RB: Send;
+
+    /// Return the number of threads that are available, as a hint to chunking.
+    fn parallelism_hint(&self) -> usize;
 }
 
 /// A sequential execution strategy.
@@ -369,6 +372,10 @@ impl Strategy for Sequential {
         RB: Send,
     {
         (a(), b())
+    }
+
+    fn parallelism_hint(&self) -> usize {
+        1
     }
 }
 
@@ -485,6 +492,10 @@ cfg_if! {
                 RB: Send,
             {
                 self.thread_pool.install(|| rayon::join(a, b))
+            }
+
+            fn parallelism_hint(&self) -> usize {
+                self.thread_pool.current_num_threads()
             }
         }
     }
