@@ -220,8 +220,8 @@ impl<B: Blob> Read<B> {
             match self.read_bytes(T::SIZE).await {
                 Ok(bytes) => {
                     let item = T::decode(bytes).map_err(|e| Error::Codec(e.to_string()))?;
-
                     batch.push(f(0, Ok(item)));
+
                     // After cross-page read, check remaining bytes. If less than one item,
                     // report as trailing (caller will check if at end of blob).
                     let remaining = self.available().len();
