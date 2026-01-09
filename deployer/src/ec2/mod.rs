@@ -182,34 +182,34 @@ pub enum Architecture {
 impl fmt::Display for Architecture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Architecture::Arm64 => write!(f, "arm64"),
-            Architecture::X86_64 => write!(f, "x86_64"),
+            Self::Arm64 => write!(f, "arm64"),
+            Self::X86_64 => write!(f, "x86_64"),
         }
     }
 }
 
 impl Architecture {
     /// Returns the architecture string used in Ubuntu AMI names
-    pub fn ami_arch(&self) -> &'static str {
+    pub const fn ami_arch(&self) -> &'static str {
         match self {
-            Architecture::Arm64 => "arm64",
-            Architecture::X86_64 => "amd64",
+            Self::Arm64 => "arm64",
+            Self::X86_64 => "amd64",
         }
     }
 
     /// Returns the architecture string used in download URLs (Go/Prometheus style)
-    pub fn download_arch(&self) -> &'static str {
+    pub const fn download_arch(&self) -> &'static str {
         match self {
-            Architecture::Arm64 => "arm64",
-            Architecture::X86_64 => "amd64",
+            Self::Arm64 => "arm64",
+            Self::X86_64 => "amd64",
         }
     }
 
     /// Returns the Linux library path prefix for this architecture
-    pub fn linux_lib_arch(&self) -> &'static str {
+    pub const fn linux_lib_arch(&self) -> &'static str {
         match self {
-            Architecture::Arm64 => "aarch64-linux-gnu",
-            Architecture::X86_64 => "x86_64-linux-gnu",
+            Self::Arm64 => "aarch64-linux-gnu",
+            Self::X86_64 => "x86_64-linux-gnu",
         }
     }
 }
