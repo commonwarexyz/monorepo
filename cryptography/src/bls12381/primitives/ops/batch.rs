@@ -82,21 +82,11 @@ where
 
     // Slow path: bisection to find invalid signatures
     // Pre-compute individual weighted values in parallel for bisection.
-    // Each branch computes n scalar multiplications, so parallelization helps.
-    let (weighted_pks, weighted_sigs) = strategy.join(
-        || {
-            pks.iter()
-                .zip(&scalars)
-                .map(|(pk, s)| *pk * s)
-                .collect::<Vec<_>>()
-        },
-        || {
-            sigs.iter()
-                .zip(&scalars)
-                .map(|(sig, s)| *sig * s)
-                .collect::<Vec<_>>()
-        },
-    );
+    let indices: Vec<_> = (0..entries.len()).collect();
+    let (weighted_pks, weighted_sigs): (Vec<_>, Vec<_>) = strategy
+        .map_collect_vec(&indices, |&i| (pks[i] * &scalars[i], sigs[i] * &scalars[i]))
+        .into_iter()
+        .unzip();
 
     // Parallel bisection to find invalid signatures.
     // Process all pending ranges at each level in parallel for maximum throughput.
