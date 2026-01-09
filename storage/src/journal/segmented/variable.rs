@@ -370,12 +370,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                 )) => {
                                     // Item::Incomplete means the item spans buffer boundary: we have
                                     // the varint + partial data, but not the complete item.
-                                    // Get prefix as Bytes (ref-counted, stays valid after fill).
-                                    let prefix_bytes = reader.available_bytes();
+                                    // Get just the item prefix as Bytes (skip varint, ref-counted).
+                                    let varint_len = buf.len() - prefix.len();
+                                    let prefix_bytes = reader.available_bytes().slice(varint_len..);
                                     let prefix_len = prefix_bytes.len();
-
-                                    // Sanity check: available_bytes should match prefix
-                                    debug_assert_eq!(prefix_len, prefix.len());
 
                                     // Now advance past all consumed data
                                     reader.advance(buf.len());
