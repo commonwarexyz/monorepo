@@ -21,7 +21,7 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_math::algebra::{Additive, Space};
-use commonware_parallel::Strategy;
+use commonware_parallel::{Sequential, Strategy};
 use rand_core::CryptoRngCore;
 
 /// Verifies multiple signatures over the same message from different public keys,
@@ -69,10 +69,11 @@ where
     let pks: Vec<V::Public> = entries.iter().map(|(pk, _)| *pk).collect();
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, sig)| *sig).collect();
 
-    // Compute MSMs for pk and sig in parallel using 128-bit scalars
+    // Compute MSMs for pk and sig in parallel using 128-bit scalars.
+    // Use Sequential for inner MSMs since join() already provides parallelism.
     let (sum_pk, sum_sig) = strategy.join(
-        || V::Public::msm(&pks, &scalars, strategy),
-        || V::Signature::msm(&sigs, &scalars, strategy),
+        || V::Public::msm(&pks, &scalars, &Sequential),
+        || V::Signature::msm(&sigs, &scalars, &Sequential),
     );
 
     // Fast path: if all signatures are valid, return empty
@@ -163,10 +164,11 @@ where
         .collect();
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
 
-    // Compute weighted sums in parallel using MSM with 128-bit scalars
+    // Compute weighted sums in parallel using MSM with 128-bit scalars.
+    // Use Sequential for inner MSMs since join() already provides parallelism.
     let (weighted_hm, weighted_sig) = strategy.join(
-        || V::Signature::msm(&hms, &scalars, strategy),
-        || V::Signature::msm(&sigs, &scalars, strategy),
+        || V::Signature::msm(&hms, &scalars, &Sequential),
+        || V::Signature::msm(&sigs, &scalars, &Sequential),
     );
 
     // Verify: e(pk, weighted_hm) == e(weighted_sig, G)
