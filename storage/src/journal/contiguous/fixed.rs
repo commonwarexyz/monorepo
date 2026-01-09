@@ -473,84 +473,58 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         readers.push((self.tail_index, tail_reader));
         let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
 
-        // Calculate how many items fit in a batch (round down to item boundary).
-        let items_per_batch = buffer.get() / Self::CHUNK_SIZE;
-        let batch_size = items_per_batch * Self::CHUNK_SIZE;
+        // Stream items as they are read to avoid occupying too much memory.
+        // Each blob is processed sequentially, yielding batches of items that are then
+        // flattened into individual stream elements.
+        //
+        // Note: Unlike segmented journals, contiguous journals handle trailing byte truncation
+        // during `init` rather than during replay. This is because contiguous journals validate
+        // blob sizes at initialization time.
+        let stream = stream::iter(readers)
+            .flat_map(move |(blob_index, mut reader)| {
+                // If this is the very first blob then we need to seek to the starting position.
+                let initial_offset = if blob_index == start_blob {
+                    reader.seek_to(start_offset).expect("invalid start_pos");
+                    start_offset
+                } else {
+                    0
+                };
 
-        // Replay all blobs in order and stream items as they are read (to avoid occupying too
-        // much memory with buffered data).
-        let stream = stream::iter(readers).flat_map(move |(blob_index, mut reader)| {
-            // If this is the very first blob then we need to seek to the starting position.
-            let initial_offset = if blob_index == start_blob {
-                reader.seek_to(start_offset).expect("invalid start_pos");
-                start_offset
-            } else {
-                0
-            };
+                stream::unfold(
+                    (reader, initial_offset),
+                    move |(mut reader, mut blob_offset)| async move {
+                        let mut batch = Vec::new();
 
-            let batch_buffer = vec![0u8; batch_size];
-            stream::unfold(
-                (batch_buffer, reader, initial_offset),
-                move |(mut batch_buffer, mut reader, blob_offset)| async move {
-                    if blob_offset >= reader.blob_size() {
-                        return None;
-                    }
-
-                    // Read up to batch_size bytes
-                    let bytes_remaining = (reader.blob_size() - blob_offset) as usize;
-                    let bytes_to_read = bytes_remaining.min(batch_buffer.len());
-                    // Round down to item boundary
-                    let bytes_to_read = (bytes_to_read / Self::CHUNK_SIZE) * Self::CHUNK_SIZE;
-                    if bytes_to_read == 0 {
-                        return None;
-                    }
-
-                    match reader
-                        .read_exact(&mut batch_buffer[..bytes_to_read], bytes_to_read)
-                        .await
-                    {
-                        Ok(()) => {
-                            // Decode all items in this batch
-                            let num_items = bytes_to_read / Self::CHUNK_SIZE;
-                            let mut batch: Vec<Result<(u64, A), Error>> =
-                                Vec::with_capacity(num_items);
-                            for i in 0..num_items {
-                                let offset = i * Self::CHUNK_SIZE;
-                                let item_slice = &batch_buffer[offset..offset + Self::CHUNK_SIZE];
+                        // Decode a batch of items from the buffer. The callback transforms each
+                        // decoded item into (position, item) tuple or an error.
+                        let (count, _trailing) = match reader
+                            .decode_batch_fixed::<A, _, _>(&mut batch, |i, result| {
                                 let item_pos = items_per_blob * blob_index
-                                    + (blob_offset + offset as u64) / Self::CHUNK_SIZE_U64;
-                                match Self::decode_buf(item_slice) {
-                                    Ok(item) => batch.push(Ok((item_pos, item))),
-                                    Err(err) => {
-                                        warn!("corrupted item at {item_pos}");
-                                        batch.push(Err(err));
-                                        let blob_size = reader.blob_size();
-                                        return Some((batch, (batch_buffer, reader, blob_size)));
-                                    }
-                                }
+                                    + blob_offset / Self::CHUNK_SIZE_U64
+                                    + i as u64;
+                                result
+                                    .map(|item| (item_pos, item))
+                                    .map_err(Error::Codec)
+                            })
+                            .await
+                        {
+                            Ok((0, _)) => return None, // End of blob
+                            Ok((count, trailing)) => (count, trailing),
+                            Err(err) => {
+                                let blob_size = reader.blob_size();
+                                return Some((
+                                    vec![Err(Error::Runtime(err))],
+                                    (reader, blob_size),
+                                ));
                             }
-                            let next_blob_offset = blob_offset + bytes_to_read as u64;
-                            Some((batch, (batch_buffer, reader, next_blob_offset)))
-                        }
-                        Err(err) => {
-                            let item_pos =
-                                items_per_blob * blob_index + blob_offset / Self::CHUNK_SIZE_U64;
-                            warn!(
-                                item_pos,
-                                err = err.to_string(),
-                                "error reading batch during replay"
-                            );
-                            let blob_size = reader.blob_size();
-                            Some((
-                                vec![Err(Error::Runtime(err))],
-                                (batch_buffer, reader, blob_size),
-                            ))
-                        }
-                    }
-                },
-            )
-            .flat_map(stream::iter)
-        });
+                        };
+
+                        blob_offset += (count * Self::CHUNK_SIZE) as u64;
+                        Some((batch, (reader, blob_offset)))
+                    },
+                )
+                .flat_map(stream::iter)
+            });
 
         Ok(stream)
     }

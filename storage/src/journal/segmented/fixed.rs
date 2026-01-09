@@ -161,141 +161,63 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         // Pre-create readers from blobs (async operation)
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
-            let blob_size = blob.size().await;
             let reader = blob.as_blob_reader(buffer).await?;
-            blob_info.push((section, blob.clone(), reader, blob_size));
+            blob_info.push((section, blob.clone(), reader));
         }
 
-        // Use batched reading internally for performance, then flatten to individual items
-        Ok(
-            stream::iter(blob_info).flat_map(move |(section, blob, reader, blob_size)| {
-                // Calculate how many items we can read per batch
-                let items_per_batch = buffer.get() / Self::CHUNK_SIZE;
-                let batch_buffer_size = items_per_batch * Self::CHUNK_SIZE;
-
+        // Stream items as they are read to avoid occupying too much memory.
+        // Each blob is processed sequentially, yielding batches of items that are then
+        // flattened into individual stream elements.
+        Ok(stream::iter(blob_info)
+            .flat_map(move |(section, blob, reader)| {
                 stream::unfold(
-                    (
-                        section,
-                        blob,
-                        reader,
-                        0u64,
-                        0u64,
-                        blob_size,
-                        batch_buffer_size,
-                    ),
-                    move |(
-                        section,
-                        blob,
-                        mut reader,
-                        mut offset,
-                        mut valid_size,
-                        blob_size,
-                        batch_buffer_size,
-                    )| async move {
-                        if offset >= blob_size {
-                            return None;
-                        }
+                    (section, blob, reader, 0u64),
+                    move |(section, blob, mut reader, mut offset)| async move {
+                        let blob_size = reader.blob_size();
+                        let mut batch = Vec::new();
 
-                        // Read a batch of items
-                        let remaining = (blob_size - offset) as usize;
-                        let read_size = batch_buffer_size.min(remaining);
-                        let buf = vec![0u8; read_size];
-
-                        let (buf, available) = match reader.read_up_to(buf).await {
-                            Ok(result) => result,
+                        // Decode a batch of items from the buffer. The callback transforms each
+                        // decoded item into (section, position, item) tuple or an error.
+                        let (count, trailing) = match reader
+                            .decode_batch_fixed::<A, _, _>(&mut batch, |i, result| {
+                                let position = offset / Self::CHUNK_SIZE_U64 + i as u64;
+                                result
+                                    .map(|item| (section, position, item))
+                                    .map_err(Error::Codec)
+                            })
+                            .await
+                        {
+                            Ok((0, _)) => return None, // End of blob
+                            Ok((count, trailing)) => (count, trailing),
                             Err(err) => {
-                                warn!(section, offset, ?err, "error reading batch");
                                 return Some((
                                     vec![Err(Error::Runtime(err))],
-                                    (
-                                        section,
-                                        blob,
-                                        reader,
-                                        blob_size,
-                                        valid_size,
-                                        blob_size,
-                                        batch_buffer_size,
-                                    ),
-                                ));
+                                    (section, blob, reader, blob_size),
+                                ))
                             }
                         };
 
-                        if available == 0 {
-                            return None;
-                        }
+                        offset += (count * Self::CHUNK_SIZE) as u64;
 
-                        // Parse complete items from the buffer
-                        let mut batch: Vec<Result<(u64, u64, A), Error>> = Vec::new();
-                        let complete_items = available / Self::CHUNK_SIZE;
-                        let buf_slice = buf.as_ref();
-
-                        for i in 0..complete_items {
-                            let item_start = i * Self::CHUNK_SIZE;
-                            let item_end = item_start + Self::CHUNK_SIZE;
-                            let item_bytes = &buf_slice[item_start..item_end];
-                            let position = offset / Self::CHUNK_SIZE_U64;
-
-                            match A::decode(item_bytes).map_err(Error::Codec) {
-                                Ok(item) => {
-                                    batch.push(Ok((section, position, item)));
-                                    valid_size = offset + Self::CHUNK_SIZE_U64;
-                                    offset += Self::CHUNK_SIZE_U64;
-                                }
-                                Err(err) => {
-                                    batch.push(Err(err));
-                                    return Some((
-                                        batch,
-                                        (
-                                            section,
-                                            blob,
-                                            reader,
-                                            blob_size,
-                                            valid_size,
-                                            blob_size,
-                                            batch_buffer_size,
-                                        ),
-                                    ));
-                                }
-                            }
-                        }
-
-                        // Check for trailing bytes
-                        let trailing = available % Self::CHUNK_SIZE;
-                        let effective_blob_size =
-                            if trailing > 0 && offset + trailing as u64 >= blob_size {
-                                warn!(
-                                    section,
-                                    position = offset / Self::CHUNK_SIZE_U64,
-                                    new_size = valid_size,
-                                    "trailing bytes detected: truncating"
-                                );
-                                blob.resize(valid_size).await.ok()?;
-                                valid_size
-                            } else {
-                                blob_size
-                            };
-
-                        if batch.is_empty() {
-                            return None;
-                        }
-
-                        Some((
-                            batch,
-                            (
+                        // Handle trailing bytes at end of blob. If there are leftover bytes that
+                        // don't form a complete item and we've reached the end of the blob, this
+                        // indicates corrupted or partially-written data. Truncate to the last
+                        // valid item to repair the journal.
+                        if trailing > 0 && offset + trailing as u64 >= blob_size {
+                            warn!(
                                 section,
-                                blob,
-                                reader,
-                                offset,
-                                valid_size,
-                                effective_blob_size,
-                                batch_buffer_size,
-                            ),
-                        ))
+                                position = offset / Self::CHUNK_SIZE_U64,
+                                new_size = offset,
+                                "trailing bytes detected: truncating"
+                            );
+                            blob.resize(offset).await.ok()?;
+                        }
+
+                        Some((batch, (section, blob, reader, offset)))
                     },
                 )
                 .flat_map(stream::iter)
-            }),
-        )
+            }))
     }
 
     /// Sync the given section to storage.

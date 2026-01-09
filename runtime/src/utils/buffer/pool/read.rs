@@ -1,6 +1,6 @@
 use super::Checksum;
 use crate::{Blob, Error};
-use commonware_codec::FixedSize;
+use commonware_codec::{CodecFixed, DecodeExt as _, Error as CodecError, FixedSize};
 use commonware_utils::StableBuf;
 use std::num::NonZeroUsize;
 use tracing::{debug, error};
@@ -137,6 +137,107 @@ impl<B: Blob> Read<B> {
         Ok(())
     }
 
+    /// Reads and decodes a fixed-size codec item from the blob.
+    ///
+    /// This is optimized to decode directly from the internal buffer when possible (zero-copy),
+    /// only allocating a temporary buffer when the item spans buffer boundaries.
+    ///
+    /// Returns the decoded item, or an error if reading or decoding fails.
+    /// Returns [Error::BlobInsufficientLength] if there aren't enough bytes remaining.
+    pub async fn read_fixed<T: CodecFixed<Cfg = ()>>(&mut self) -> Result<T, Error> {
+        // Try to fill buffer and decode directly (zero-copy path)
+        if self.fill().await? == 0 {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        let buf = self.available();
+        if buf.len() >= T::SIZE {
+            // Fast path: decode directly from buffer without copying
+            let item = T::decode(&buf[..T::SIZE]).map_err(|e| Error::Codec(e.to_string()))?;
+            self.advance(T::SIZE);
+            return Ok(item);
+        }
+
+        // Slow path: item spans buffer boundary, need to copy
+        let mut tmp = vec![0u8; T::SIZE];
+        self.read_exact(&mut tmp, T::SIZE).await?;
+        T::decode(tmp.as_ref()).map_err(|e| Error::Codec(e.to_string()))
+    }
+
+    /// Decodes a batch of fixed-size items from the buffer, calling a transform function for each.
+    ///
+    /// This method is optimized for high-throughput replay of fixed-size journal items. It fills
+    /// the buffer once, then decodes as many complete items as fit in a tight loop without any
+    /// async overhead between items. This is significantly faster than calling `read_fixed`
+    /// repeatedly.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch` - Output vector where transformed items are pushed. The caller provides this
+    ///   to avoid allocation overhead when the transform produces a different type than `T`.
+    /// * `f` - Transform function called as `f(index_in_batch, decode_result)` for each item.
+    ///   The index is relative to this batch (starts at 0), not the absolute position.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok((items_decoded, trailing_bytes))` - Number of items decoded and bytes remaining
+    ///   that don't form a complete item. When `trailing_bytes > 0` and we're at the end of
+    ///   the blob, this indicates corrupted/truncated data that the caller may want to handle.
+    /// * `Ok((0, 0))` - End of blob reached (no more data).
+    /// * `Err(_)` - I/O or checksum error.
+    ///
+    /// # Cross-Page Boundary Handling
+    ///
+    /// If the buffer contains less than one item's worth of data but the blob has more data
+    /// available, this method uses `read_fixed` internally to handle the cross-page read.
+    pub async fn decode_batch_fixed<T, R, F>(
+        &mut self,
+        batch: &mut Vec<R>,
+        mut f: F,
+    ) -> Result<(usize, usize), Error>
+    where
+        T: CodecFixed<Cfg = ()>,
+        F: FnMut(usize, Result<T, CodecError>) -> R,
+    {
+        // Fill buffer from blob. Returns 0 when at end of blob.
+        if self.fill().await? == 0 {
+            return Ok((0, 0));
+        }
+
+        let available = self.available().len();
+        if available < T::SIZE {
+            // Buffer has less than one item. This happens when an item spans a page boundary.
+            // Use read_fixed which handles cross-page reads by copying to a temporary buffer.
+            match self.read_fixed::<T>().await {
+                Ok(item) => {
+                    batch.push(f(0, Ok(item)));
+                    // After cross-page read, check remaining bytes. If less than one item,
+                    // report as trailing (caller will check if at end of blob).
+                    let remaining = self.available().len();
+                    let trailing = if remaining >= T::SIZE { 0 } else { remaining };
+                    return Ok((1, trailing));
+                }
+                // No more data in blob - return available as trailing bytes for caller to handle
+                Err(Error::BlobInsufficientLength) => return Ok((0, available)),
+                Err(err) => return Err(err),
+            }
+        }
+
+        // Fast path: decode all complete items directly from buffer without copying
+        let buf = self.available();
+        let items_in_buf = buf.len() / T::SIZE;
+        let trailing = buf.len() % T::SIZE;
+
+        batch.reserve(items_in_buf);
+        for i in 0..items_in_buf {
+            let slice = &buf[i * T::SIZE..][..T::SIZE];
+            batch.push(f(i, T::decode(slice)));
+        }
+
+        self.advance(items_in_buf * T::SIZE);
+        Ok((items_in_buf, trailing))
+    }
+
     /// Fills the buffer from the blob starting at the current physical position and verifies the
     /// CRC of each page (including any trailing partial page).
     async fn fill_buffer(&mut self) -> Result<(), Error> {
@@ -256,6 +357,38 @@ impl<B: Blob> Read<B> {
         }
 
         Ok(())
+    }
+
+    /// Returns available buffered data without copying.
+    pub fn available(&self) -> &[u8] {
+        &self.buffer[self.buffer_position..]
+    }
+
+    /// Fills buffer if empty. Returns bytes available (0 if at end of blob).
+    pub async fn fill(&mut self) -> Result<usize, Error> {
+        if self.buffer_position >= self.buffer.len() {
+            match self.fill_buffer().await {
+                Ok(()) => {}
+                Err(Error::BlobInsufficientLength) => return Ok(0),
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(self.available().len())
+    }
+
+    /// Advances the buffer position by `n` bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `n` would advance past the end of the buffer.
+    pub fn advance(&mut self, n: usize) {
+        debug_assert!(
+            self.buffer_position + n <= self.buffer.len(),
+            "advance({}) would exceed buffer length {}",
+            n,
+            self.buffer.len()
+        );
+        self.buffer_position += n;
     }
 
     /// Repositions the buffer to read from the specified logical position in the blob.
