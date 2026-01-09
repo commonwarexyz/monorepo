@@ -243,22 +243,24 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
 
     /// Put a value into [Metadata].
     ///
-    /// If the key already exists, the value will be overwritten. The
-    /// value stored will not be persisted until [Self::sync] is called.
-    pub fn put(&mut self, key: K, value: V) {
-        // Get value
-        let exists = self.map.insert(key.clone(), value).is_some();
+    /// If the key already exists, the value will be overwritten and the previous
+    /// value is returned. The value stored will not be persisted until [Self::sync]
+    /// is called.
+    pub fn put(&mut self, key: K, value: V) -> Option<V> {
+        // Insert value, getting previous value if it existed
+        let previous = self.map.insert(key.clone(), value);
 
         // Mark key as modified.
         //
         // We need to mark both blobs as modified because we may need to update both files.
-        if exists {
+        if previous.is_some() {
             self.blobs[self.cursor].modified.insert(key.clone());
             self.blobs[1 - self.cursor].modified.insert(key);
         } else {
             self.key_order_changed = self.next_version;
         }
         let _ = self.keys.try_set(self.map.len());
+        previous
     }
 
     /// Perform a [Self::put] and [Self::sync] in a single operation.

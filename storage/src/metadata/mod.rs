@@ -178,6 +178,60 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_put_returns_previous_value() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
+
+            let key = U64::new(42);
+
+            // First put returns None (no previous value)
+            let previous = metadata.put(key.clone(), b"first".to_vec());
+            assert!(previous.is_none());
+
+            // Second put returns the previous value
+            let previous = metadata.put(key.clone(), b"second".to_vec());
+            assert_eq!(previous, Some(b"first".to_vec()));
+
+            // Third put returns the previous value
+            let previous = metadata.put(key.clone(), b"third".to_vec());
+            assert_eq!(previous, Some(b"second".to_vec()));
+
+            // Current value is the latest
+            assert_eq!(metadata.get(&key), Some(&b"third".to_vec()));
+
+            // Different key returns None
+            let other_key = U64::new(99);
+            let previous = metadata.put(other_key.clone(), b"other".to_vec());
+            assert!(previous.is_none());
+
+            // Sync and verify persistence
+            metadata.sync().await.unwrap();
+            drop(metadata);
+
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
+
+            // After restart, put still returns previous value
+            let previous = metadata.put(key.clone(), b"fourth".to_vec());
+            assert_eq!(previous, Some(b"third".to_vec()));
+
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_multi_sync() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();

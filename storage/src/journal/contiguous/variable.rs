@@ -2243,4 +2243,193 @@ mod tests {
             journal.destroy().await.unwrap();
         });
     }
+
+    /// Test contiguous variable journal with items_per_section=1.
+    ///
+    /// This is a regression test for a bug where reading from size()-1 fails
+    /// when using items_per_section=1, particularly after pruning and restart.
+    #[test_traced]
+    fn test_single_item_per_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "single_item_per_section".to_string(),
+                items_per_section: NZU64!(1),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // === Test 1: Basic single item operation ===
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Verify empty state
+            assert_eq!(journal.size(), 0);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Append 1 item (value = position * 100, so position 0 has value 0)
+            let pos = journal.append(0).await.unwrap();
+            assert_eq!(pos, 0);
+            assert_eq!(journal.size(), 1);
+
+            // Sync
+            journal.sync().await.unwrap();
+
+            // Read from size() - 1
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, 0);
+
+            // === Test 2: Multiple items with single item per section ===
+            for i in 1..10u64 {
+                let pos = journal.append(i * 100).await.unwrap();
+                assert_eq!(pos, i);
+                assert_eq!(journal.size(), i + 1);
+
+                // Verify we can read the just-appended item at size() - 1
+                let value = journal.read(journal.size() - 1).await.unwrap();
+                assert_eq!(value, i * 100);
+            }
+
+            // Verify all items can be read
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.sync().await.unwrap();
+
+            // === Test 3: Pruning with single item per section ===
+            // Prune to position 5 (removes positions 0-4)
+            let pruned = journal.prune(5).await.unwrap();
+            assert!(pruned);
+
+            // Size should still be 10
+            assert_eq!(journal.size(), 10);
+
+            // oldest_retained_pos should be 5
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Reading from size() - 1 (position 9) should still work
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, 900);
+
+            // Reading from pruned positions should return ItemPruned
+            for i in 0..5 {
+                assert!(matches!(
+                    journal.read(i).await,
+                    Err(crate::journal::Error::ItemPruned(_))
+                ));
+            }
+
+            // Reading from retained positions should work
+            for i in 5..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            // Append more items after pruning
+            for i in 10..15u64 {
+                let pos = journal.append(i * 100).await.unwrap();
+                assert_eq!(pos, i);
+
+                // Verify we can read from size() - 1
+                let value = journal.read(journal.size() - 1).await.unwrap();
+                assert_eq!(value, i * 100);
+            }
+
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // === Test 4: Restart persistence with single item per section ===
+            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Verify size is preserved
+            assert_eq!(journal.size(), 15);
+
+            // Verify oldest_retained_pos is preserved
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Reading from size() - 1 should work after restart
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, 1400);
+
+            // Reading all retained positions should work
+            for i in 5..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.destroy().await.unwrap();
+
+            // === Test 5: Restart after pruning with non-zero index (KEY SCENARIO) ===
+            // Fresh journal for this test
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 10 items (positions 0-9)
+            for i in 0..10u64 {
+                journal.append(i * 1000).await.unwrap();
+            }
+
+            // Prune to position 5 (removes positions 0-4)
+            journal.prune(5).await.unwrap();
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Sync and restart
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Re-open journal
+            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Verify state after restart
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // KEY TEST: Reading from size() - 1 (position 9) should work
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, 9000);
+
+            // Verify all retained positions (5-9) work
+            for i in 5..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 1000);
+            }
+
+            journal.destroy().await.unwrap();
+
+            // === Test 6: Prune all items (edge case) ===
+            // This tests the scenario where prune removes everything.
+            // Callers must check oldest_retained_pos() before reading.
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..5u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Prune all items
+            journal.prune(5).await.unwrap();
+            assert_eq!(journal.size(), 5); // Size unchanged
+            assert_eq!(journal.oldest_retained_pos(), None); // All pruned
+
+            // size() - 1 = 4, but position 4 is pruned
+            let result = journal.read(journal.size() - 1).await;
+            assert!(matches!(result, Err(crate::journal::Error::ItemPruned(4))));
+
+            // After appending, reading works again
+            journal.append(500).await.unwrap();
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+            assert_eq!(journal.read(journal.size() - 1).await.unwrap(), 500);
+
+            journal.destroy().await.unwrap();
+        });
+    }
 }

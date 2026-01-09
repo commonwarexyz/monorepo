@@ -1500,4 +1500,213 @@ mod tests {
             journal.destroy().await.expect("Failed to destroy journal");
         });
     }
+
+    /// Test the contiguous fixed journal with items_per_blob: 1.
+    ///
+    /// This is an edge case where each item creates its own blob, and the
+    /// tail blob is always empty after sync (because the item fills the blob
+    /// and a new empty one is created).
+    #[test_traced]
+    fn test_single_item_per_blob() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "single_item_per_blob".into(),
+                items_per_blob: NZU64!(1),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(2048),
+            };
+
+            // === Test 1: Basic single item operation ===
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            // Verify empty state
+            assert_eq!(journal.size(), 0);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Append 1 item
+            let pos = journal
+                .append(test_digest(0))
+                .await
+                .expect("failed to append");
+            assert_eq!(pos, 0);
+            assert_eq!(journal.size(), 1);
+
+            // Sync
+            journal.sync().await.expect("failed to sync");
+
+            // Read from size() - 1
+            let value = journal
+                .read(journal.size() - 1)
+                .await
+                .expect("failed to read");
+            assert_eq!(value, test_digest(0));
+
+            // === Test 2: Multiple items with single item per blob ===
+            for i in 1..10u64 {
+                let pos = journal
+                    .append(test_digest(i))
+                    .await
+                    .expect("failed to append");
+                assert_eq!(pos, i);
+                assert_eq!(journal.size(), i + 1);
+
+                // Verify we can read the just-appended item at size() - 1
+                let value = journal
+                    .read(journal.size() - 1)
+                    .await
+                    .expect("failed to read");
+                assert_eq!(value, test_digest(i));
+            }
+
+            // Verify all items can be read
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+
+            journal.sync().await.expect("failed to sync");
+
+            // === Test 3: Pruning with single item per blob ===
+            // Prune to position 5 (removes positions 0-4)
+            journal.prune(5).await.expect("failed to prune");
+
+            // Size should still be 10
+            assert_eq!(journal.size(), 10);
+
+            // oldest_retained_pos should be 5
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Reading from size() - 1 (position 9) should still work
+            let value = journal
+                .read(journal.size() - 1)
+                .await
+                .expect("failed to read");
+            assert_eq!(value, test_digest(9));
+
+            // Reading from pruned positions should return ItemPruned
+            for i in 0..5 {
+                assert!(matches!(journal.read(i).await, Err(Error::ItemPruned(_))));
+            }
+
+            // Reading from retained positions should work
+            for i in 5..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+
+            // Append more items after pruning
+            for i in 10..15u64 {
+                let pos = journal
+                    .append(test_digest(i))
+                    .await
+                    .expect("failed to append");
+                assert_eq!(pos, i);
+
+                // Verify we can read from size() - 1
+                let value = journal
+                    .read(journal.size() - 1)
+                    .await
+                    .expect("failed to read");
+                assert_eq!(value, test_digest(i));
+            }
+
+            journal.sync().await.expect("failed to sync");
+            drop(journal);
+
+            // === Test 4: Restart persistence with single item per blob ===
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to re-initialize journal");
+
+            // Verify size is preserved
+            assert_eq!(journal.size(), 15);
+
+            // Verify oldest_retained_pos is preserved
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Reading from size() - 1 should work after restart
+            let value = journal
+                .read(journal.size() - 1)
+                .await
+                .expect("failed to read");
+            assert_eq!(value, test_digest(14));
+
+            // Reading all retained positions should work
+            for i in 5..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+
+            journal.destroy().await.expect("failed to destroy journal");
+
+            // === Test 5: Restart after pruning with non-zero index ===
+            // Fresh journal for this test
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            // Append 10 items (positions 0-9)
+            for i in 0..10u64 {
+                journal.append(test_digest(i + 100)).await.unwrap();
+            }
+
+            // Prune to position 5 (removes positions 0-4)
+            journal.prune(5).await.unwrap();
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Sync and restart
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Re-open journal
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to re-initialize journal");
+
+            // Verify state after restart
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Reading from size() - 1 (position 9) should work
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, test_digest(109));
+
+            // Verify all retained positions (5-9) work
+            for i in 5..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i + 100));
+            }
+
+            journal.destroy().await.expect("failed to destroy journal");
+
+            // === Test 6: Prune all items (edge case) ===
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            for i in 0..5u64 {
+                journal.append(test_digest(i + 200)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Prune all items
+            journal.prune(5).await.unwrap();
+            assert_eq!(journal.size(), 5); // Size unchanged
+            assert_eq!(journal.oldest_retained_pos(), None); // All pruned
+
+            // size() - 1 = 4, but position 4 is pruned
+            let result = journal.read(journal.size() - 1).await;
+            assert!(matches!(result, Err(Error::ItemPruned(4))));
+
+            // After appending, reading works again
+            journal.append(test_digest(205)).await.unwrap();
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+            assert_eq!(
+                journal.read(journal.size() - 1).await.unwrap(),
+                test_digest(205)
+            );
+
+            journal.destroy().await.expect("failed to destroy journal");
+        });
+    }
 }
