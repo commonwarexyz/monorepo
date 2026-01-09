@@ -142,7 +142,7 @@ impl SmallScalar {
     }
 
     /// Returns the underlying blst_scalar.
-    pub const fn as_blst_scalar(&self) -> &blst_scalar {
+    pub const fn inner(&self) -> &blst_scalar {
         &self.inner
     }
 
@@ -1030,16 +1030,14 @@ impl Space<SmallScalar> for G1 {
                 continue;
             }
             points_filtered.push(*point);
-            scalars_filtered.push(scalar.as_blst_scalar().clone());
+            scalars_filtered.push(scalar.inner().clone());
         }
-
         if points_filtered.is_empty() {
             return Self::zero();
         }
 
         // Batch convert to affine (1 field inversion via Montgomery's trick)
         let affine_points = Self::batch_to_affine(&points_filtered);
-
         let points_ptr: Vec<*const blst_p1_affine> = affine_points
             .iter()
             .map(|p| p.inner() as *const _)
@@ -1465,16 +1463,14 @@ impl Space<SmallScalar> for G2 {
                 continue;
             }
             points_filtered.push(*point);
-            scalars_filtered.push(scalar.as_blst_scalar().clone());
+            scalars_filtered.push(scalar.inner().clone());
         }
-
         if points_filtered.is_empty() {
             return Self::zero();
         }
 
         // Batch convert to affine (1 field inversion via Montgomery's trick)
         let affine_points = Self::batch_to_affine(&points_filtered);
-
         let points_ptr: Vec<*const blst_p2_affine> = affine_points
             .iter()
             .map(|p| p.inner() as *const _)

@@ -102,7 +102,6 @@ where
     // Process all pending ranges at each level in parallel for maximum throughput.
     let mut invalid = Vec::new();
     let mut pending = vec![(0, entries.len())];
-
     while !pending.is_empty() {
         // Verify all pending ranges in parallel
         let results: Vec<_> = strategy.map_collect_vec(&pending, |&(start, end)| {
