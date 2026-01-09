@@ -109,23 +109,15 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    pub(crate) type VarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
-
-    /// A type alias for the concrete [Db] type used in these unit tests.
-    pub(crate) type AnyTest =
-        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
-    type MutableAnyTest =
-        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
-
     pub(crate) fn create_test_config(seed: u64) -> VarConfig {
         VariableConfig {
-            mmr_journal_partition: format!("mmr_journal_{seed}"),
-            mmr_metadata_partition: format!("mmr_metadata_{seed}"),
-            mmr_items_per_blob: NZU64!(12),
-            mmr_write_buffer: NZUsize!(64),
+            mmr_journal_partition: format!("journal_{seed}"),
+            mmr_metadata_partition: format!("metadata_{seed}"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
             log_partition: format!("log_journal_{seed}"),
-            log_items_per_blob: NZU64!(14),
-            log_write_buffer: NZUsize!(64),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
@@ -133,6 +125,14 @@ pub(crate) mod test {
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
+
+    pub(crate) type VarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
+
+    /// A type alias for the concrete [Db] type used in these unit tests.
+    pub(crate) type AnyTest =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+    type MutableAnyTest =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {

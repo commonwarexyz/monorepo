@@ -1239,7 +1239,7 @@ mod harnesses {
     pub struct OrderedFixedHarness;
 
     impl SyncTestHarness for OrderedFixedHarness {
-        type Db = crate::qmdb::any::ordered::fixed::test::AnyTest;
+        type Db = crate::qmdb::any::ordered::fixed::test::CleanAnyTest;
 
         fn config(suffix: &str) -> crate::qmdb::any::FixedConfig<TwoCap> {
             crate::qmdb::any::ordered::fixed::test::create_test_config(suffix.parse().unwrap_or(0))
@@ -1379,7 +1379,7 @@ mod harnesses {
     pub struct UnorderedVariableHarness;
 
     impl SyncTestHarness for UnorderedVariableHarness {
-        type Db = crate::qmdb::any::unordered::variable::test::AnyTest;
+        type Db = crate::qmdb::any::unordered::variable::test::CleanAnyTest;
 
         fn config(suffix: &str) -> crate::qmdb::any::unordered::variable::test::VarConfig {
             crate::qmdb::any::unordered::variable::test::create_test_config(

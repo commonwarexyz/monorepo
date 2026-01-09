@@ -114,14 +114,14 @@ pub(crate) mod test {
     }
 
     /// Type aliases for concrete [Db] types used in these unit tests.
-    pub(crate) type AnyTest =
+    pub(crate) type CleanAnyTest =
         Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
     type MutableAnyTest =
         Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
     /// Return an `Any` database initialized with a fixed config.
-    async fn open_db(context: deterministic::Context) -> AnyTest {
-        AnyTest::init(context, any_db_config("partition"))
+    async fn open_db(context: deterministic::Context) -> CleanAnyTest {
+        CleanAnyTest::init(context, any_db_config("partition"))
             .await
             .unwrap()
     }
@@ -146,10 +146,10 @@ pub(crate) mod test {
     }
 
     /// Create a test database with unique partition names
-    pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
+    pub(crate) async fn create_test_db(mut context: Context) -> CleanAnyTest {
         let seed = context.next_u64();
         let config = create_test_config(seed);
-        AnyTest::init(context, config).await.unwrap()
+        CleanAnyTest::init(context, config).await.unwrap()
     }
 
     /// Create n random operations. Some portion of the updates are deletes.
@@ -1020,7 +1020,7 @@ pub(crate) mod test {
 
         type TestMmr = Mmr<deterministic::Context, Digest, Clean<Digest>>;
 
-        impl FromSyncTestable for AnyTest {
+        impl FromSyncTestable for CleanAnyTest {
             type Mmr = TestMmr;
 
             fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
