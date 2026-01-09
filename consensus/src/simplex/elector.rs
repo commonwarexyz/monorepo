@@ -239,8 +239,7 @@ mod tests {
         sha256::Digest as Sha256Digest, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{quorum_from_slice, TryFromIterator};
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{quorum_from_slice, test_rng, TryFromIterator};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -249,7 +248,7 @@ mod tests {
 
     #[test]
     fn round_robin_rotates_through_participants() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len() as u32;
@@ -272,7 +271,7 @@ mod tests {
 
     #[test]
     fn round_robin_cycles_through_epochs() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
@@ -298,7 +297,7 @@ mod tests {
 
     #[test]
     fn round_robin_shuffled_changes_order() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
 
@@ -357,7 +356,7 @@ mod tests {
 
     #[test]
     fn round_robin_same_seed_is_deterministic() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
 
@@ -383,7 +382,7 @@ mod tests {
 
     #[test]
     fn random_falls_back_to_round_robin_for_view_1() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture { participants, .. } =
             bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
@@ -409,7 +408,7 @@ mod tests {
 
     #[test]
     fn random_uses_certificate_randomness() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture {
             participants,
             schemes,
@@ -467,7 +466,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn random_panics_on_none_certificate_after_view_1() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture { participants, .. } =
             bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();

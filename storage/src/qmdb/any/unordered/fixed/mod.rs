@@ -92,8 +92,8 @@ pub(super) mod test {
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
-    use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use commonware_utils::{test_rng, NZUsize, NZU16, NZU64};
+    use rand::RngCore;
     use std::num::{NonZeroU16, NonZeroUsize};
 
     // Janky page & cache sizes to exercise boundary conditions.
@@ -158,7 +158,7 @@ pub(super) mod test {
     /// Create n random operations. Some portion of the updates are deletes.
     /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
     pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
-        let mut rng = StdRng::seed_from_u64(1337);
+        let mut rng = test_rng();
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {

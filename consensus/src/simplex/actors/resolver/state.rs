@@ -225,8 +225,7 @@ mod tests {
     };
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
-    use commonware_utils::vec::NonEmptyVec;
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{test_rng, vec::NonEmptyVec};
     use std::{
         collections::BTreeSet,
         sync::{Arc, Mutex},
@@ -296,7 +295,7 @@ mod tests {
     }
 
     fn ed25519_fixture() -> (Vec<TestScheme>, TestScheme) {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture {
             schemes, verifier, ..
         } = ed25519::fixture(&mut rng, NAMESPACE, 5);
