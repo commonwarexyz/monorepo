@@ -297,6 +297,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                         0u64,
                         codec_config,
                         compressed,
+                        Vec::<u8>::new(), // Reusable buffer for incomplete items
                     ),
                     move |(
                         section,
@@ -306,6 +307,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                         mut valid_offset,
                         codec_config,
                         compressed,
+                        mut reuse_buf,
                     )| async move {
                         let blob_size = reader.blob_size();
 
@@ -323,6 +325,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                         valid_offset,
                                         codec_config,
                                         compressed,
+                                        reuse_buf,
                                     ),
                                 ));
                             }
@@ -365,10 +368,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                 )) => {
                                     // Item::Incomplete means the item spans buffer boundary: we have
                                     // the varint + partial data, but not the complete item.
-                                    // Allocate buffer and copy prefix BEFORE advancing (which
-                                    // invalidates the prefix slice).
-                                    let mut buffer = vec![0u8; item_size];
-                                    buffer[..prefix.len()].copy_from_slice(prefix);
+                                    // Reuse buffer, growing if needed. Copy prefix BEFORE advancing
+                                    // (which invalidates the prefix slice).
+                                    reuse_buf.resize(item_size, 0);
+                                    reuse_buf[..prefix.len()].copy_from_slice(prefix);
                                     let filled = prefix.len();
 
                                     // Now advance past all consumed data
@@ -376,13 +379,13 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
                                     // Read remaining bytes from new pages
                                     if let Err(err) = reader
-                                        .read_exact(&mut buffer[filled..], item_size - filled)
+                                        .read_exact(&mut reuse_buf[filled..item_size], item_size - filled)
                                         .await
                                     {
                                         batch.push(Err(err.into()));
                                         break;
                                     }
-                                    match decode_item::<V>(&buffer, &codec_config, compressed) {
+                                    match decode_item::<V>(&reuse_buf[..item_size], &codec_config, compressed) {
                                         Ok(decoded) => {
                                             batch.push(Ok((
                                                 section,
@@ -435,6 +438,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                 valid_offset,
                                 codec_config,
                                 compressed,
+                                reuse_buf,
                             ),
                         ))
                     },

@@ -18,7 +18,7 @@ use std::{
 const PARTITION: &str = "variable_test_partition";
 
 /// Value of items_per_section to use in the journal config.
-const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10_000);
+const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(50_000);
 
 /// Replay all items in the given `journal`.
 async fn bench_run(journal: &Journal<Context, u64>, buffer: usize) {
