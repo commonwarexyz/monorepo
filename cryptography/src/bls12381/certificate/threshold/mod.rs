@@ -194,7 +194,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// Returns the index of "self" in the participant set, if available.
     pub const fn me(&self) -> Option<Participant> {
         match self {
-            Self::Signer { share, .. } => Some(Participant::new(share.index)),
+            Self::Signer { share, .. } => Some(share.index),
             _ => None,
         }
     }
@@ -216,7 +216,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         .value;
 
         Some(Attestation {
-            signer: Participant::new(share.index),
+            signer: share.index,
             signature,
         })
     }
@@ -232,7 +232,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         D: Digest,
     {
-        let Ok(evaluated) = self.polynomial().partial_public(attestation.signer.get()) else {
+        let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
             return false;
         };
 
@@ -263,7 +263,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let partials: Vec<_> = attestations
             .into_iter()
             .map(|attestation| PartialSignature::<V> {
-                index: attestation.signer.get(),
+                index: attestation.signer,
                 value: attestation.signature,
             })
             .collect();
@@ -277,15 +277,15 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             partials.iter(),
         ) {
             for partial in errs {
-                invalid.insert(Participant::new(partial.index));
+                invalid.insert(partial.index);
             }
         }
 
         let verified = partials
             .into_iter()
-            .filter(|partial| !invalid.contains(&Participant::new(partial.index)))
+            .filter(|partial| !invalid.contains(&partial.index))
             .map(|partial| Attestation {
-                signer: Participant::new(partial.index),
+                signer: partial.index,
                 signature: partial.value,
             })
             .collect();
@@ -303,7 +303,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let partials: Vec<_> = attestations
             .into_iter()
             .map(|attestation| PartialSignature::<V> {
-                index: attestation.signer.get(),
+                index: attestation.signer,
                 value: attestation.signature,
             })
             .collect();
@@ -1242,7 +1242,7 @@ mod tests {
 
         let (polynomial, mut shares) =
             dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
-        shares[0].index = 999;
+        shares[0].index = Participant::new(999);
         Scheme::<ed25519::PublicKey, V>::signer(
             NAMESPACE,
             participants,
@@ -1366,7 +1366,7 @@ mod tests {
 
         let expected = sign_message::<V>(share, NAMESPACE, MESSAGE);
 
-        assert_eq!(signature.signer, Participant::new(share.index));
+        assert_eq!(signature.signer, share.index);
         assert_eq!(signature.signature, expected.value);
     }
 

@@ -125,7 +125,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         D: Digest,
     {
-        let Some(public_key) = self.participants.value(attestation.signer.get() as usize) else {
+        let Some(public_key) = self.participants.value(attestation.signer.into()) else {
             return false;
         };
 
@@ -156,8 +156,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let mut candidates = Vec::new();
         let mut entries = Vec::new();
         for attestation in attestations.into_iter() {
-            let Some(public_key) = self.participants.value(attestation.signer.get() as usize)
-            else {
+            let Some(public_key) = self.participants.value(attestation.signer.into()) else {
                 invalid.insert(attestation.signer);
                 continue;
             };
@@ -200,7 +199,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
         for Attestation { signer, signature } in attestations {
-            if signer.get() as usize >= self.participants.len() {
+            if usize::from(signer) >= self.participants.len() {
                 return None;
             }
 
@@ -244,7 +243,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         // Collect the public keys.
         let mut publics = Vec::with_capacity(certificate.signers.count());
         for signer in certificate.signers.iter() {
-            let Some(public_key) = self.participants.value(signer.get() as usize) else {
+            let Some(public_key) = self.participants.value(signer.into()) else {
                 return false;
             };
 

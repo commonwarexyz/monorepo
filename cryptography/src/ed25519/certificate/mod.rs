@@ -214,7 +214,7 @@ impl<N: Namespace> Generic<N> {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
         for Attestation { signer, signature } in attestations {
-            if signer.get() as usize >= self.participants.len() {
+            if usize::from(signer) >= self.participants.len() {
                 return None;
             }
 
