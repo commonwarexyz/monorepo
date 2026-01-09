@@ -13,7 +13,6 @@
 //! which requires predicting the weights before they're generated (probability ~1/2^255 per invalid
 //! signature). Note, the weights must be unpredictable to the attacker for this to work (i.e. they
 //! must be generated securely).
-
 use super::{
     super::{group::SmallScalar, variant::Variant, Error},
     hash_with_namespace,
@@ -47,7 +46,7 @@ pub fn verify_same_message<R, V>(
     namespace: &[u8],
     message: &[u8],
     entries: &[(V::Public, V::Signature)],
-    strategy: &impl Strategy,
+    par: &impl Strategy,
 ) -> Vec<usize>
 where
     R: CryptoRngCore,
@@ -59,19 +58,19 @@ where
 
     let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
+    let len = entries.len();
+
     // Generate 128-bit random scalars (sufficient for batch verification security)
-    let scalars: Vec<SmallScalar> = (0..entries.len())
-        .map(|_| SmallScalar::random(&mut *rng))
-        .collect();
+    let scalars: Vec<SmallScalar> = (0..len).map(|_| SmallScalar::random(&mut *rng)).collect();
 
     // Extract pks and sigs for MSM
     let pks: Vec<V::Public> = entries.iter().map(|(pk, _)| *pk).collect();
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, sig)| *sig).collect();
 
     // Compute MSMs for pk and sig in parallel using 128-bit scalars.
-    let (sum_pk, sum_sig) = strategy.join(
-        || V::Public::msm(&pks, &scalars, strategy),
-        || V::Signature::msm(&sigs, &scalars, strategy),
+    let (sum_pk, sum_sig) = par.join(
+        || V::Public::msm(&pks, &scalars, par),
+        || V::Signature::msm(&sigs, &scalars, par),
     );
 
     // Fast path: if all signatures are valid, return empty
@@ -81,9 +80,20 @@ where
 
     // Slow path: bisection to find invalid signatures
     // Pre-compute individual weighted values for bisection
-    let weighted_pks: Vec<V::Public> = pks.iter().zip(&scalars).map(|(pk, s)| *pk * s).collect();
-    let weighted_sigs: Vec<V::Signature> =
-        sigs.iter().zip(&scalars).map(|(sig, s)| *sig * s).collect();
+    let (weighted_pks, weighted_sigs) = par.fold(
+        scalars.iter().zip(pks.iter().zip(sigs.iter())),
+        || (Vec::new(), Vec::new()),
+        |mut acc, (s, (&pk, &sig))| {
+            acc.0.push(pk * s);
+            acc.1.push(sig * s);
+            acc
+        },
+        |mut a, b| {
+            a.0.extend(b.0);
+            a.1.extend(b.1);
+            a
+        },
+    );
 
     let mut invalid = Vec::new();
     let mut stack = vec![(0, entries.len())];
