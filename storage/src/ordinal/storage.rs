@@ -68,7 +68,7 @@ where
 }
 
 /// Implementation of [Ordinal].
-pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()> + Send + Sync> {
+pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
     context: E,
     config: Config,
@@ -92,7 +92,7 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()> + Send 
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()> + Send + Sync> Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         Self::init_with_bits(context, config, None).await

@@ -1132,15 +1132,15 @@ mod test {
         assert_eq!(db.root(), root);
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
-        let mut db = db.into_mutable();
+        let mut mutable_db = db.into_mutable();
         for _ in 1..100 {
-            let (durable_db, _) = db.commit(None).await.unwrap();
+            let (durable_db, _) = mutable_db.commit(None).await.unwrap();
             let clean_db = durable_db.into_merkleized().await.unwrap();
             assert_eq!(clean_db.op_count() - 1, clean_db.inactivity_floor_loc());
-            let mutable: <D as CleanAny>::Mutable = clean_db.into_mutable();
-            db = mutable;
+            mutable_db = clean_db.into_mutable();
         }
-        db.commit(None)
+        mutable_db
+            .commit(None)
             .await
             .unwrap()
             .0
