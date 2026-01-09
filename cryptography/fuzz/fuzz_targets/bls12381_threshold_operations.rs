@@ -286,7 +286,7 @@ fn fuzz(op: FuzzOperation) {
                             ns.as_slice(),
                             msg.as_slice(),
                             PartialSignature {
-                                index: Participant::new(index.get() + i as u32),
+                                index: Participant::from_usize(usize::from(index) + i),
                                 value: *sig,
                             },
                         )
@@ -316,7 +316,7 @@ fn fuzz(op: FuzzOperation) {
                             ns.as_slice(),
                             msg.as_slice(),
                             PartialSignature {
-                                index: Participant::new(index.get() + i as u32),
+                                index: Participant::from_usize(usize::from(index) + i),
                                 value: *sig,
                             },
                         )
