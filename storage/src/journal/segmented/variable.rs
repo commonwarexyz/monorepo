@@ -88,9 +88,12 @@ use commonware_runtime::{
     Blob, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
-use std::{borrow::Cow, io::Cursor, num::NonZeroUsize};
+use std::num::NonZeroUsize;
 use tracing::{trace, warn};
 use zstd::{bulk::compress, decode_all};
+
+/// Maximum size of a varint for u32 (also the minimum useful read size for parsing item headers).
+const MAX_VARINT_SIZE: usize = 5;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -163,10 +166,10 @@ fn find_item(buf: &[u8], available: usize, offset: u64) -> Result<(u64, Item<'_>
 }
 
 /// Decode item data with optional decompression.
-fn decode_item<V: Codec>(item_data: &[u8], cfg: &V::Cfg, compressed: bool) -> Result<V, Error> {
+fn decode_item<V: Codec>(item_data: impl Buf, cfg: &V::Cfg, compressed: bool) -> Result<V, Error> {
     if compressed {
         let decompressed =
-            decode_all(Cursor::new(item_data)).map_err(|_| Error::DecompressionFailed)?;
+            decode_all(item_data.reader()).map_err(|_| Error::DecompressionFailed)?;
         V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)
     } else {
         V::decode_cfg(item_data, cfg).map_err(Error::Codec)
@@ -226,30 +229,32 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         blob: &Append<E::Blob>,
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
-        // Read varint header (max 5 bytes for u32). But allocate 64 bytes which will save one
-        // vector allocation for small enough items.
-        let buf = vec![0u8; 64];
+        // Read varint header (max 5 bytes for u32)
+        let buf = vec![0u8; MAX_VARINT_SIZE];
         let (buf, available) = blob.read_up_to(buf, offset).await?;
         let (next_offset, item) = find_item(buf.as_ref(), available, offset)?;
 
-        // Get item bytes - either from buffer directly or by reading more
-        let (item_data, item_size): (Cow<'_, [u8]>, u32) = match item {
-            Item::Complete(data) => (Cow::Borrowed(data), data.len() as u32),
+        // Decode item - either directly from buffer or by chaining prefix with remainder
+        let (item_size, decoded) = match item {
+            Item::Complete(data) => {
+                let decoded = decode_item::<V>(data, cfg, compressed)?;
+                (data.len() as u32, decoded)
+            }
             Item::Incomplete {
                 prefix,
                 size: item_size,
                 read_offset,
             } => {
-                let mut buffer = vec![0u8; item_size];
-                buffer[..prefix.len()].copy_from_slice(prefix);
-                blob.read_into(&mut buffer[prefix.len()..], read_offset)
-                    .await?;
-                (Cow::Owned(buffer), item_size as u32)
+                // Read remainder and chain with prefix to avoid copying
+                let remainder_len = item_size - prefix.len();
+                let mut remainder = vec![0u8; remainder_len];
+                blob.read_into(&mut remainder, read_offset).await?;
+                let chained = prefix.chain(remainder.as_slice());
+                let decoded = decode_item::<V>(chained, cfg, compressed)?;
+                (item_size as u32, decoded)
             }
         };
 
-        // Decode item (with optional decompression)
-        let decoded = decode_item::<V>(item_data.as_ref(), cfg, compressed)?;
         Ok((next_offset, item_size, decoded))
     }
 
@@ -379,13 +384,20 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
                                     // Read remaining bytes from new pages
                                     if let Err(err) = reader
-                                        .read_exact(&mut reuse_buf[filled..item_size], item_size - filled)
+                                        .read_exact(
+                                            &mut reuse_buf[filled..item_size],
+                                            item_size - filled,
+                                        )
                                         .await
                                     {
                                         batch.push(Err(err.into()));
                                         break;
                                     }
-                                    match decode_item::<V>(&reuse_buf[..item_size], &codec_config, compressed) {
+                                    match decode_item::<V>(
+                                        &reuse_buf[..item_size],
+                                        &codec_config,
+                                        compressed,
+                                    ) {
                                         Ok(decoded) => {
                                             batch.push(Ok((
                                                 section,
