@@ -1379,7 +1379,7 @@ mod harnesses {
     pub struct UnorderedVariableHarness;
 
     impl SyncTestHarness for UnorderedVariableHarness {
-        type Db = crate::qmdb::any::unordered::variable::test::CleanAnyTest;
+        type Db = crate::qmdb::any::unordered::variable::test::AnyTest;
 
         fn config(suffix: &str) -> crate::qmdb::any::unordered::variable::test::VarConfig {
             crate::qmdb::any::unordered::variable::test::create_test_config(
