@@ -11,6 +11,7 @@ use commonware_math::{
     algebra::{Additive, CryptoGroup},
     poly::Poly,
 };
+use commonware_utils::Participant;
 use rand::{rngs::StdRng, SeedableRng};
 
 #[allow(unused)]
@@ -95,20 +96,18 @@ pub fn arbitrary_bytes(
 }
 
 #[allow(unused)]
-pub fn arbitrary_scalar(u: &mut Unstructured) -> Result<Scalar, arbitrary::Error> {
-    u.arbitrary()
-}
-
-#[allow(unused)]
 pub fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> {
-    Ok(Share::new(u.arbitrary()?, arbitrary_scalar(u)?))
+    Ok(Share::new(
+        Participant::new(u.int_in_range(1..=100)?),
+        u.arbitrary()?,
+    ))
 }
 
 #[allow(unused)]
 pub fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbitrary::Error> {
     let degree = u.int_in_range(0..=10)?;
     let seed: [u8; 32] = u.arbitrary()?;
-    let constant = arbitrary_scalar(u)?;
+    let constant: Scalar = u.arbitrary()?;
     let mut rng = StdRng::from_seed(seed);
     Ok(Poly::new_with_constant(&mut rng, degree, constant))
 }
@@ -152,7 +151,7 @@ pub fn arbitrary_vec_scalar(
     max: usize,
 ) -> Result<Vec<Scalar>, arbitrary::Error> {
     let len = u.int_in_range(min..=max)?;
-    (0..len).map(|_| arbitrary_scalar(u)).collect()
+    (0..len).map(|_| u.arbitrary()).collect()
 }
 
 #[allow(unused)]
