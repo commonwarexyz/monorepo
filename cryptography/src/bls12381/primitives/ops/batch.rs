@@ -152,11 +152,10 @@ where
         .map(|_| SmallScalar::random(&mut *rng))
         .collect();
 
-    // Hash all messages and collect signatures
-    let hms: Vec<V::Signature> = entries
-        .iter()
-        .map(|(namespace, msg, _)| hash_with_namespace::<V>(V::MESSAGE, namespace, msg))
-        .collect();
+    // Hash all messages in parallel (hash-to-curve is expensive) and collect signatures
+    let hms: Vec<V::Signature> = strategy.map_collect_vec(&entries, |(namespace, msg, _)| {
+        hash_with_namespace::<V>(V::MESSAGE, namespace, msg)
+    });
     let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
 
     // Compute weighted sums in parallel using MSM with 128-bit scalars.
