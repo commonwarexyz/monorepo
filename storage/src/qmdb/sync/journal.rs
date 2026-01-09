@@ -27,17 +27,15 @@ where
     type Error = crate::journal::Error;
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
-        crate::journal::contiguous::variable::Journal::sync(self).await
+        Self::sync(self).await
     }
 
     async fn size(&self) -> u64 {
-        crate::journal::contiguous::variable::Journal::size(self)
+        Self::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        crate::journal::contiguous::variable::Journal::append(self, op)
-            .await
-            .map(|_| ())
+        Self::append(self, op).await.map(|_| ())
     }
 }
 
@@ -50,16 +48,14 @@ where
     type Error = crate::journal::Error;
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
-        crate::journal::contiguous::fixed::Journal::sync(self).await
+        Self::sync(self).await
     }
 
     async fn size(&self) -> u64 {
-        crate::journal::contiguous::fixed::Journal::size(self)
+        Self::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        crate::journal::contiguous::fixed::Journal::append(self, op)
-            .await
-            .map(|_| ())
+        Self::append(self, op).await.map(|_| ())
     }
 }
