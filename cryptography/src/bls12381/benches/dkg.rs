@@ -8,7 +8,7 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{ordered::Set, quorum, NZUsize, TryCollect};
+use commonware_utils::{ordered::Set, Bft3f1, FaultModel, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
@@ -127,7 +127,7 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
     };
     let mut rng = StdRng::seed_from_u64(0);
     for &n in CONTRIBUTORS {
-        let t = quorum(n);
+        let t = Bft3f1::quorum(n);
         let bench = Bench::new(&mut rng, reshare, n);
         for &concurrency in CONCURRENCY {
             let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();

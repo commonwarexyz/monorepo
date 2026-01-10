@@ -321,7 +321,7 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef, count_running_tasks, deterministic, Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{max_faults, quorum, test_rng, NZUsize, NZU16};
+    use commonware_utils::{test_rng, Bft3f1, FaultModel, NZUsize, NZU16};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use rand::{rngs::StdRng, Rng as _};
@@ -544,7 +544,7 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let quorum = quorum(n) as usize;
+        let quorum = Bft3f1::quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
@@ -1418,7 +1418,7 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let quorum = quorum(n) as usize;
+        let quorum = Bft3f1::quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
@@ -4451,7 +4451,7 @@ mod tests {
 
         // Create context
         let n = 10;
-        let quorum = quorum(n) as usize;
+        let quorum = Bft3f1::quorum(n) as usize;
         assert_eq!(quorum, 7);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
@@ -5354,7 +5354,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
-        let faults = max_faults(n);
+        let faults = Bft3f1::max_faults(n);
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);

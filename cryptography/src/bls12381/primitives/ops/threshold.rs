@@ -21,7 +21,7 @@ use super::{
 use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
 use commonware_parallel::Strategy;
-use commonware_utils::{ordered::Map, union_unique, Participant};
+use commonware_utils::{ordered::Map, union_unique, FaultModel, Participant};
 use rand_core::CryptoRngCore;
 
 /// Prepares partial signature evaluations for threshold recovery.
@@ -249,7 +249,7 @@ where
 /// # Warning
 ///
 /// This function assumes that each partial signature is unique.
-pub fn recover<'a, V, I, S>(
+pub fn recover<'a, V, I, S, M>(
     sharing: &Sharing<V>,
     partials: I,
     strategy: &S,
@@ -259,8 +259,9 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
     S: Strategy,
+    M: FaultModel,
 {
-    let evals = prepare_evaluations::<V>(sharing.required(), partials)?;
+    let evals = prepare_evaluations::<V>(sharing.required::<M>(), partials)?;
     sharing
         .interpolator(evals.keys())?
         .interpolate(&evals, strategy)
@@ -279,7 +280,7 @@ where
 ///
 /// This function assumes that each partial signature is unique and that
 /// each set of partial signatures has the same indices.
-pub fn recover_multiple<'a, V, I, S>(
+pub fn recover_multiple<'a, V, I, S, M>(
     sharing: &Sharing<V>,
     many_evals: Vec<I>,
     strategy: &S,
@@ -289,10 +290,11 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
     S: Strategy,
+    M: FaultModel,
 {
     let prepared_evals = many_evals
         .into_iter()
-        .map(|evals| prepare_evaluations::<V>(sharing.required(), evals))
+        .map(|evals| prepare_evaluations::<V>(sharing.required::<M>(), evals))
         .collect::<Result<Vec<_>, _>>()?;
     let Some(first_eval) = prepared_evals.first() else {
         return Ok(Vec::new());
@@ -321,7 +323,7 @@ where
 /// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
 ///
 /// This is just a wrapper around `recover_multiple`.
-pub fn recover_pair<'a, V, I, S>(
+pub fn recover_pair<'a, V, I, S, M>(
     sharing: &Sharing<V>,
     first: I,
     second: I,
@@ -332,8 +334,9 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
     S: Strategy,
+    M: FaultModel,
 {
-    let mut sigs = recover_multiple::<V, _, _>(sharing, vec![first, second], strategy)?;
+    let mut sigs = recover_multiple::<V, _, _, M>(sharing, vec![first, second], strategy)?;
     let second_sig = sigs.pop().unwrap();
     let first_sig = sigs.pop().unwrap();
     Ok((first_sig, second_sig))
@@ -357,7 +360,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{quorum, test_rng, union_unique, NZUsize, NZU32};
+    use commonware_utils::{test_rng, union_unique, Bft3f1, FaultModel, NZUsize, NZU32};
 
     fn blst_verify_proof_of_possession<V: Variant>(
         public: &V::Public,
@@ -399,7 +402,7 @@ mod tests {
             verify_proof_of_possession::<V>(&sharing, namespace, p)
                 .expect("signature should be valid");
         }
-        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _, _, Bft3f1>(&sharing, &partials, &Sequential).unwrap();
         let threshold_pub = sharing.public();
 
         ops::verify_proof_of_possession::<V>(threshold_pub, namespace, &threshold_sig)
@@ -454,7 +457,7 @@ mod tests {
         for p in &partials {
             verify_message::<V>(&sharing, namespace, msg, p).expect("signature should be valid");
         }
-        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _, _, Bft3f1>(&sharing, &partials, &Sequential).unwrap();
         let threshold_pub = sharing.public();
 
         ops::verify_message::<V>(threshold_pub, namespace, msg, &threshold_sig)
@@ -583,7 +586,7 @@ mod tests {
 
     fn recover_with_weights_correct<V: Variant>() {
         let mut rng = test_rng();
-        let (n, t) = (6, quorum(6));
+        let (n, t) = (6, Bft3f1::quorum(6));
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
 
         let partials: Vec<_> = shares
@@ -592,7 +595,7 @@ mod tests {
             .map(|s| sign_message::<V>(s, b"test", b"payload"))
             .collect();
 
-        let sig1 = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
+        let sig1 = recover::<V, _, _, Bft3f1>(&sharing, &partials, &Sequential).unwrap();
 
         ops::verify_message::<V>(sharing.public(), b"test", b"payload", &sig1).unwrap();
     }
@@ -605,7 +608,7 @@ mod tests {
 
     fn recover_multiple_test<V: Variant>() {
         let mut rng = test_rng();
-        let (n, t) = (6, quorum(6));
+        let (n, t) = (6, Bft3f1::quorum(6));
         let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
 
         let partials_1: Vec<_> = shares
@@ -620,14 +623,14 @@ mod tests {
             .collect();
 
         let (sig_1, sig_2) =
-            recover_pair::<V, _, _>(&sharing, &partials_1, &partials_2, &Sequential).unwrap();
+            recover_pair::<V, _, _, Bft3f1>(&sharing, &partials_1, &partials_2, &Sequential).unwrap();
 
         ops::verify_message::<V>(sharing.public(), b"test", b"payload1", &sig_1).unwrap();
         ops::verify_message::<V>(sharing.public(), b"test", b"payload2", &sig_2).unwrap();
 
         let parallel = Rayon::new(NZUsize!(4)).unwrap();
         let (sig_1_par, sig_2_par) =
-            recover_pair::<V, _, _>(&sharing, &partials_1, &partials_2, &parallel).unwrap();
+            recover_pair::<V, _, _, Bft3f1>(&sharing, &partials_1, &partials_2, &parallel).unwrap();
 
         assert_eq!(sig_1, sig_1_par);
         assert_eq!(sig_2, sig_2_par);
@@ -656,7 +659,7 @@ mod tests {
             verify_message::<V>(&sharing, namespace, msg, partial).unwrap();
         });
 
-        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _, _, Bft3f1>(&sharing, &partials, &Sequential).unwrap();
         ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 
@@ -687,7 +690,7 @@ mod tests {
             ));
         });
 
-        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _, _, Bft3f1>(&sharing, &partials, &Sequential).unwrap();
         assert!(matches!(
             ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap_err(),
             Error::InvalidSignature
@@ -720,7 +723,7 @@ mod tests {
         });
 
         assert!(matches!(
-            recover::<V, _, _>(&group, &partials, &Sequential).unwrap_err(),
+            recover::<V, _, _, Bft3f1>(&group, &partials, &Sequential).unwrap_err(),
             Error::NotEnoughPartialSignatures(4, 3)
         ));
     }
@@ -752,7 +755,7 @@ mod tests {
             verify_message::<V>(&sharing, namespace, msg, partial).unwrap();
         });
 
-        let threshold_sig = recover::<V, _, _>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _, _, Bft3f1>(&sharing, &partials, &Sequential).unwrap();
         ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 
@@ -1009,7 +1012,7 @@ mod tests {
         }
 
         let mut rng = test_rng();
-        let (n, t) = (NZU32!(5), quorum(5));
+        let (n, t) = (NZU32!(5), Bft3f1::quorum(5));
         let (public, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), n);
         let scalars = public.mode().all_scalars(n).collect::<Vec<_>>();
 

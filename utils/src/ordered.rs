@@ -32,7 +32,7 @@ pub enum Error {
     DuplicateValue,
 }
 
-use crate::{Participant, TryFromIterator};
+use crate::{FaultModel, Participant, TryFromIterator};
 
 /// An ordered, deduplicated collection of items.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -247,19 +247,19 @@ pub trait Quorum {
     /// The type of items in this set.
     type Item: Ord;
 
-    /// Returns the quorum value (2f+1) for this participant set.
+    /// Returns the quorum value for this participant set using the given fault model.
     ///
     /// ## Panics
     ///
     /// Panics if the number of participants exceeds `u32::MAX`.
-    fn quorum(&self) -> u32;
+    fn quorum<M: FaultModel>(&self) -> u32;
 
-    /// Returns the maximum number of faults (f) tolerated by this participant set.
+    /// Returns the maximum number of faults tolerated by this participant set.
     ///
     /// ## Panics
     ///
     /// Panics if the number of participants exceeds `u32::MAX`.
-    fn max_faults(&self) -> u32;
+    fn max_faults<M: FaultModel>(&self) -> u32;
 
     /// Returns the participant key at the given index.
     fn key(&self, index: Participant) -> Option<&Self::Item>;
@@ -275,12 +275,12 @@ pub trait Quorum {
 impl<T: Ord> Quorum for Set<T> {
     type Item = T;
 
-    fn quorum(&self) -> u32 {
-        crate::quorum(u32::try_from(self.len()).expect("too many participants"))
+    fn quorum<M: FaultModel>(&self) -> u32 {
+        M::quorum(u32::try_from(self.len()).expect("too many participants"))
     }
 
-    fn max_faults(&self) -> u32 {
-        crate::max_faults(u32::try_from(self.len()).expect("too many participants"))
+    fn max_faults<M: FaultModel>(&self) -> u32 {
+        M::max_faults(u32::try_from(self.len()).expect("too many participants"))
     }
 
     fn key(&self, index: Participant) -> Option<&Self::Item> {

@@ -1,14 +1,14 @@
 use commonware_cryptography::bls12381::primitives::group::{Scalar, G1};
 use commonware_math::{algebra::Random, poly::Poly};
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{quorum, NZUsize};
+use commonware_utils::{Bft3f1, FaultModel, NZUsize};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::hint::black_box;
 
 fn benchmark_evaluate_point(c: &mut Criterion) {
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
-        let t = quorum(n);
+        let t = Bft3f1::quorum(n);
         for concurrency in [1, 8] {
             let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
             c.bench_function(

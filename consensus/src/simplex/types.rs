@@ -12,6 +12,7 @@ use commonware_cryptography::{
     Digest, PublicKey,
 };
 use commonware_parallel::Strategy;
+use commonware_utils::Bft3f1;
 use rand_core::CryptoRngCore;
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
@@ -907,7 +908,8 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     ) -> Option<Self> {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
-        let certificate = scheme.assemble(iter.map(|n| n.attestation.clone()), strategy)?;
+        let certificate =
+            scheme.assemble::<_, Bft3f1>(iter.map(|n| n.attestation.clone()), strategy)?;
 
         Some(Self {
             proposal,
@@ -1144,7 +1146,8 @@ impl<S: Scheme> Nullification<S> {
     ) -> Option<Self> {
         let mut iter = nullifies.into_iter().peekable();
         let round = iter.peek()?.round;
-        let certificate = scheme.assemble(iter.map(|n| n.attestation.clone()), strategy)?;
+        let certificate =
+            scheme.assemble::<_, Bft3f1>(iter.map(|n| n.attestation.clone()), strategy)?;
 
         Some(Self { round, certificate })
     }
@@ -1388,7 +1391,8 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     ) -> Option<Self> {
         let mut iter = finalizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
-        let certificate = scheme.assemble(iter.map(|f| f.attestation.clone()), strategy)?;
+        let certificate =
+            scheme.assemble::<_, Bft3f1>(iter.map(|f| f.attestation.clone()), strategy)?;
 
         Some(Self {
             proposal,
@@ -2496,7 +2500,7 @@ mod tests {
         sha256::Digest as Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{quorum, quorum_from_slice, test_rng};
+    use commonware_utils::{test_rng, Bft3f1, FaultModel};
     use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test";
@@ -3003,7 +3007,7 @@ mod tests {
         let wrong_fixture = setup_seeded(5, 1, &f);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(3));
-        let quorum = quorum_from_slice(&fixture.schemes) as usize;
+        let quorum = Bft3f1::quorum_from_slice(&fixture.schemes) as usize;
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
@@ -3039,7 +3043,7 @@ mod tests {
         let mut rng = test_rng();
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(4));
-        let quorum = quorum_from_slice(&fixture.schemes) as usize;
+        let quorum = Bft3f1::quorum_from_slice(&fixture.schemes) as usize;
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
@@ -3072,7 +3076,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
-        let quorum_size = quorum(fixture.schemes.len() as u32) as usize;
+        let quorum_size = Bft3f1::quorum(fixture.schemes.len() as u32) as usize;
         assert!(quorum_size > 1, "test requires quorum larger than one");
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(5));
@@ -3174,7 +3178,7 @@ mod tests {
         let wrong_fixture = setup_seeded(5, 1, &f);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(9));
-        let quorum = quorum_from_slice(&fixture.schemes) as usize;
+        let quorum = Bft3f1::quorum_from_slice(&fixture.schemes) as usize;
         let finalizes: Vec<_> = fixture
             .schemes
             .iter()

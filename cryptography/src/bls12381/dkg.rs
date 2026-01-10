@@ -298,9 +298,11 @@ use commonware_math::{
     poly::{Interpolator, Poly},
 };
 use commonware_parallel::{Sequential, Strategy as ParStrategy};
+#[cfg(feature = "arbitrary")]
+use commonware_utils::FaultModel;
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
-    Participant, TryCollect, NZU32,
+    Bft3f1, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -349,7 +351,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
 
     /// Return the quorum, i.e. the number of players needed to reconstruct the key.
     pub fn quorum(&self) -> u32 {
-        self.players.quorum()
+        self.players.quorum::<Bft3f1>()
     }
 
     /// Get the public polynomial associated with this output.
@@ -441,7 +443,7 @@ where
         )
         .map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
-        let max_revealed = commonware_utils::max_faults(total as u32) as usize;
+        let max_revealed = commonware_utils::Bft3f1::max_faults(total as u32) as usize;
         let revealed = Set::from_iter_dedup(
             players
                 .iter()
@@ -505,11 +507,11 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     }
 
     fn degree(&self) -> u32 {
-        self.players.quorum().saturating_sub(1)
+        self.players.quorum::<Bft3f1>().saturating_sub(1)
     }
 
     fn required_commitments(&self) -> u32 {
-        let dealer_quorum = self.dealers.quorum();
+        let dealer_quorum = self.dealers.quorum::<Bft3f1>();
         let prev_quorum = self
             .previous
             .as_ref()
@@ -519,7 +521,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     }
 
     fn max_reveals(&self) -> u32 {
-        self.players.max_faults()
+        self.players.max_faults::<Bft3f1>()
     }
 
     fn player_index(&self, player: &P) -> Result<Participant, Error> {
@@ -1321,7 +1323,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
         strategy: &S,
     ) -> Result<Self, Error> {
         // Track players with too many reveals
-        let max_faults = info.players.max_faults();
+        let max_faults = info.players.max_faults::<Bft3f1>();
         let mut reveal_counts: BTreeMap<P, u32> = BTreeMap::new();
         let mut revealed = Vec::new();
         for log in selected.values() {
@@ -1541,7 +1543,7 @@ pub fn deal<V: Variant, P: Clone + Ord>(
         return Err(Error::NumPlayers(0));
     }
     let n = NZU32!(players.len() as u32);
-    let t = players.quorum();
+    let t = players.quorum::<Bft3f1>();
     let private = Poly::new(&mut rng, t - 1);
     let shares: Map<_, _> = players
         .iter()
@@ -1596,7 +1598,7 @@ mod test_plan {
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
-    use commonware_utils::{max_faults, quorum, TryCollect};
+    use commonware_utils::{Bft3f1, FaultModel, TryCollect};
     use core::num::NonZeroI32;
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;
@@ -1758,7 +1760,7 @@ mod test_plan {
                     }
                 }
                 // Must have >= quorum(prev_players) dealers
-                let required = quorum(prev_players.len() as u32);
+                let required = Bft3f1::quorum(prev_players.len() as u32);
                 if (self.dealers.len() as u32) < required {
                     return Err(anyhow!(
                         "not enough dealers: have {}, need {} (quorum of {} previous players)",
@@ -1777,7 +1779,7 @@ mod test_plan {
                 return true;
             }
             if let Some(shift) = self.shift_degrees.get(&dealer) {
-                let degree = quorum(self.players.len() as u32) as i32 - 1;
+                let degree = Bft3f1::quorum(self.players.len() as u32) as i32 - 1;
                 // We shift the degree, but saturate at 0, so it's possible
                 // that the shift isn't actually doing anything.
                 //
@@ -1797,7 +1799,7 @@ mod test_plan {
                 .chain(self.no_acks.iter().copied())
                 .filter_map(|(d, p)| if d == dealer { Some(p) } else { None })
                 .collect::<BTreeSet<_>>();
-            revealed_players.len() as u32 > max_faults(self.players.len() as u32)
+            revealed_players.len() as u32 > Bft3f1::max_faults(self.players.len() as u32)
         }
 
         /// Determine if this round is expected to fail.
@@ -1808,9 +1810,9 @@ mod test_plan {
                 .filter(|&&d| !self.bad(previous_successful_round.is_some(), d))
                 .count();
             let required = previous_successful_round
-                .map(quorum)
+                .map(Bft3f1::quorum)
                 .unwrap_or_default()
-                .max(quorum(self.dealers.len() as u32)) as usize;
+                .max(Bft3f1::quorum(self.dealers.len() as u32)) as usize;
             good_dealer_count < required
         }
     }
@@ -2176,7 +2178,7 @@ mod test_plan {
                 }
 
                 // Verify each player's revealed status
-                let max_faults = selected_players.max_faults();
+                let max_faults = selected_players.max_faults::<Bft3f1>();
                 for player in player_set.iter() {
                     let expected = expected_reveals.get(player).copied().unwrap_or(0) > max_faults;
                     let actual = observer_output.revealed().position(player).is_some();
@@ -2241,7 +2243,7 @@ mod test_plan {
                 }
 
                 let threshold = observer_output.quorum();
-                let threshold_sig = threshold::recover::<V, _, _>(
+                let threshold_sig = threshold::recover::<V, _, _, Bft3f1>(
                     &observer_output.public,
                     &partial_sigs[0..threshold as usize],
                     &Sequential,
@@ -2307,7 +2309,8 @@ mod test_plan {
             last_successful_players: Option<&Set<u32>>,
         ) -> arbitrary::Result<Round> {
             let dealers = if let Some(players) = last_successful_players {
-                let to_pick = u.int_in_range(players.quorum() as usize..=players.len())?;
+                let to_pick =
+                    u.int_in_range(players.quorum::<Bft3f1>() as usize..=players.len())?;
                 pick(u, to_pick, players.into_iter().copied().collect())?
             } else {
                 let to_pick = u.int_in_range(1..=num_participants as usize)?;
@@ -2359,7 +2362,7 @@ mod test_plan {
                     indices
                         .into_iter()
                         .map(|k| {
-                            let expected = quorum(players.len() as u32) as i32 - 1;
+                            let expected = Bft3f1::quorum(players.len() as u32) as i32 - 1;
                             let shift = u.int_in_range(1..=expected.max(1))?;
                             let shift = if bool::arbitrary(u)? { -shift } else { shift };
                             Ok((k, NonZeroI32::new(shift).expect("checked to not be zero")))

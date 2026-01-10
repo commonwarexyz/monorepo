@@ -12,7 +12,7 @@ use commonware_cryptography::{
     Digest,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::union;
+use commonware_utils::{union, Bft3f1};
 use futures::channel::oneshot;
 use rand_core::CryptoRngCore;
 use std::hash::Hash;
@@ -327,7 +327,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
         let attestations = iter
             .filter(|ack| ack.item == item)
             .map(|ack| ack.attestation.clone());
-        let certificate = scheme.assemble(attestations, strategy)?;
+        let certificate = scheme.assemble::<_, Bft3f1>(attestations, strategy)?;
 
         Some(Self { item, certificate })
     }
@@ -470,7 +470,7 @@ mod tests {
         Hasher, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Quorum, test_rng};
+    use commonware_utils::{ordered::Quorum, test_rng, Bft3f1};
     use rand::rngs::StdRng;
 
     const NAMESPACE: &[u8] = b"test";
@@ -539,7 +539,7 @@ mod tests {
         // Collect enough acks for a certificate
         let acks: Vec<_> = schemes
             .iter()
-            .take(schemes[0].participants().quorum() as usize)
+            .take(schemes[0].participants().quorum::<Bft3f1>() as usize)
             .filter_map(|scheme| Ack::sign(scheme, Epoch::new(1), item.clone()))
             .collect();
 

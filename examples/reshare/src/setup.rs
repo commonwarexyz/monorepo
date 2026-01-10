@@ -12,7 +12,7 @@ use commonware_math::algebra::Random;
 use commonware_utils::{
     from_hex, hex,
     ordered::{Map, Set},
-    quorum, TryCollect, NZU32,
+    Bft3f1, FaultModel, TryCollect, NZU32,
 };
 use rand::{
     rngs::{OsRng, StdRng},
@@ -186,7 +186,7 @@ fn generate_identities(
         .collect::<Vec<_>>();
 
     // Generate consensus key
-    let threshold = quorum(num_participants_per_epoch);
+    let threshold = Bft3f1::quorum(num_participants_per_epoch);
     let all_participants: Set<PublicKey> = peer_signers
         .iter()
         .map(|s| s.public_key())
