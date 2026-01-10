@@ -51,6 +51,19 @@
 //! be changed between initializations of `Journal`, however, it must remain populated if any data
 //! was written with compression enabled.
 //!
+//! # Dummy Items
+//!
+//! The journal supports "dummy" items: size-0 entries that consist of only a varint(0) header
+//! (a single `0x00` byte) with no data payload. Dummy items are used internally by
+//! [crate::journal::contiguous::variable::Journal] to efficiently initialize a journal at a
+//! non-zero offset without writing actual data.
+//!
+//! Dummy items:
+//! - Are appended via [Journal::append_dummy]
+//! - May only appear at the start of a section
+//! - Must not be read via [Journal::get] (decoding fails due to zero-length data)
+//! - Are NOT returned by [Journal::replay] (replay decodes items, which fails for dummy items)
+//!
 //! # Example
 //!
 //! ```rust
