@@ -1743,31 +1743,34 @@ mod tests {
     }
 
     #[test_traced]
+    /// Test init_at_size with a huge size to verify O(tail_items) complexity.
     fn test_init_at_size_large_offset() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init_at_size_large".to_string(),
-                items_per_section: NZU64!(5),
+                items_per_section: NZU64!(11),
                 compression: None,
                 codec_config: (),
                 buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
-            // Initialize at a large position (position 1000)
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 1000)
+            // Size 1 trillion + 7 with items_per_section=11 means tail_items=8.
+            // This completes instantly because we only write 8 dummies, not 1 trillion!
+            // If this were O(size), the test would never complete.
+            const SIZE: u64 = 1_000_000_000_007;
+            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), SIZE)
                 .await
                 .unwrap();
 
-            assert_eq!(journal.size(), 1000);
-            // No data yet, so no oldest retained position
+            assert_eq!(journal.size(), SIZE);
             assert_eq!(journal.oldest_retained_pos(), None);
 
-            // Next append should get position 1000
+            // Next append should get position SIZE
             let pos = journal.append(100000).await.unwrap();
-            assert_eq!(pos, 1000);
-            assert_eq!(journal.read(1000).await.unwrap(), 100000);
+            assert_eq!(pos, SIZE);
+            assert_eq!(journal.read(SIZE).await.unwrap(), 100000);
 
             journal.destroy().await.unwrap();
         });
