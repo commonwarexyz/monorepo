@@ -87,7 +87,7 @@ mod test {
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::{sequence::FixedBytes, test_rng, NZUsize, NZU16, NZU64};
+    use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::{rngs::StdRng, seq::IteratorRandom, RngCore, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -152,10 +152,17 @@ mod test {
         CleanAnyTest::init(context, config).await.unwrap()
     }
 
-    /// Create n random operations. Some portion of the updates are deletes.
-    /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
+    /// Create n random operations using the default seed (0). Some portion of
+    /// the updates are deletes. create_test_ops(n) is a prefix of
+    /// create_test_ops(n') for n < n'.
     fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
-        let mut rng = test_rng();
+        create_test_ops_seeded(n, 0)
+    }
+
+    /// Create n random operations using a specific seed. Use different seeds
+    /// when you need non-overlapping keys in the same test.
+    fn create_test_ops_seeded(n: usize, seed: u64) -> Vec<Operation<Digest, Digest>> {
+        let mut rng = test_rng_seeded(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -638,7 +645,8 @@ mod test {
             ));
 
             // Add more operations to the database
-            let more_ops = create_test_ops(5);
+            // (use different seed to avoid key collisions)
+            let more_ops = create_test_ops_seeded(5, 1);
             let mut db = db.into_mutable();
             apply_ops(&mut db, more_ops.clone()).await;
             let (db, _) = db.commit(None).await.unwrap();
@@ -763,8 +771,9 @@ mod test {
             let historical_size = db.op_count();
 
             let mut db = db.into_mutable();
-            for _ in 1..10 {
-                let more_ops = create_test_ops(100);
+            for i in 1..10 {
+                // Use different seed per iteration to avoid key collisions
+                let more_ops = create_test_ops_seeded(100, i);
                 apply_ops(&mut db, more_ops).await;
                 let (clean_db, _) = db.commit(None).await.unwrap();
                 let clean_db = clean_db.into_merkleized();

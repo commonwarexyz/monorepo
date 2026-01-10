@@ -92,7 +92,7 @@ pub(super) mod test {
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::{test_rng, NZUsize, NZU16, NZU64};
+    use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -155,10 +155,17 @@ pub(super) mod test {
         AnyTest::init(context, config).await.unwrap()
     }
 
-    /// Create n random operations. Some portion of the updates are deletes.
-    /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
+    /// Create n random operations using the default seed (0). Some portion of
+    /// the updates are deletes. create_test_ops(n) is a prefix of
+    /// create_test_ops(n') for n < n'.
     pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
-        let mut rng = test_rng();
+        create_test_ops_seeded(n, 0)
+    }
+
+    /// Create n random operations using a specific seed.
+    /// Use different seeds when you need non-overlapping keys in the same test.
+    pub(crate) fn create_test_ops_seeded(n: usize, seed: u64) -> Vec<Operation<Digest, Digest>> {
+        let mut rng = test_rng_seeded(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -328,8 +335,9 @@ pub(super) mod test {
             ));
 
             // Add more operations to the database
+            // (use different seed to avoid key collisions)
             let mut db = db.into_mutable();
-            let more_ops = create_test_ops(5);
+            let more_ops = create_test_ops_seeded(5, 1);
             apply_ops(&mut db, more_ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
 

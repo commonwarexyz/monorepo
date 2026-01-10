@@ -1,8 +1,8 @@
 //! Persistent storage for DKG protocol state.
 //!
-//! Stores epoch state and per-epoch messages (dealer broadcasts, player acks, logs)
-//! using append-only journals for crash recovery. In-memory BTreeMaps provide fast
-//! lookups while the journal ensures durability.
+//! Stores epoch state using key-value metadata storage and per-epoch messages
+//! (dealer broadcasts, player acks, logs) using append-only journals for crash recovery.
+//! In-memory BTreeMaps provide fast lookups while storage ensures durability.
 //!
 //! # Warning
 //!
@@ -25,18 +25,18 @@ use commonware_cryptography::{
     PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
-use commonware_runtime::{buffer::PoolRef, Metrics, Storage as RuntimeStorage};
-use commonware_storage::journal::{
-    contiguous::variable::{Config as CVConfig, Journal as CVJournal},
-    segmented::variable::{Config as SVConfig, Journal as SVJournal},
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RuntimeStorage};
+use commonware_storage::{
+    journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
+    metadata::{Config as MetadataConfig, Metadata},
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZUsize, NZU16};
 use futures::StreamExt;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU32, NonZeroUsize},
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(1 << 12);
 const POOL_CAPACITY: NonZeroUsize = NZUsize!(1 << 20);
@@ -170,11 +170,11 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 
 /// DKG persistent storage.
 ///
-/// Wraps journaled storage for epoch state and protocol messages,
-/// with in-memory BTreeMaps for fast lookups. The journal ensures
-/// durability while the maps provide O(log n) access.
-pub struct Storage<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
-    states: CVJournal<E, Epoch<V, P>>,
+/// Wraps metadata storage for epoch state and journaled storage for protocol messages,
+/// with in-memory BTreeMaps for fast lookups. Using metadata with epoch keys eliminates
+/// the position/epoch confusion that can occur with position-based journals.
+pub struct Storage<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
+    states: Metadata<E, u64, Epoch<V, P>>,
     msgs: SVJournal<E, Event<V, P>>,
 
     // In-memory state
@@ -182,25 +182,21 @@ pub struct Storage<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
     epochs: BTreeMap<EpochNum, EpochCache<V, P>>,
 }
 
-impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
+impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
     /// Initialize storage, creating partitions if needed.
-    /// Replays journals to populate in-memory caches.
+    /// Replays metadata and journals to populate in-memory caches.
     pub async fn init(context: E, partition_prefix: &str, max_read_size: NonZeroU32) -> Self {
         let buffer_pool = PoolRef::new(PAGE_SIZE, POOL_CAPACITY);
 
-        let states = CVJournal::init(
+        let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(
             context.with_label("states"),
-            CVConfig {
+            MetadataConfig {
                 partition: format!("{partition_prefix}_states"),
-                compression: None,
                 codec_config: max_read_size,
-                buffer_pool: buffer_pool.clone(),
-                write_buffer: WRITE_BUFFER,
-                items_per_section: NZU64!(1),
             },
         )
         .await
-        .expect("should be able to init dkg_states journal");
+        .expect("should be able to init dkg_states metadata");
 
         let msgs = SVJournal::init(
             context.with_label("msgs"),
@@ -215,21 +211,11 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         .await
         .expect("should be able to init dkg_msgs journal");
 
-        // Replay states to get current epoch
-        let current = {
-            let size = states.size();
-            if size == 0 {
-                None
-            } else {
-                Some((
-                    EpochNum::new(size - 1),
-                    states
-                        .read(size - 1)
-                        .await
-                        .expect("should be able to read epoch"),
-                ))
-            }
-        };
+        // Find the current epoch by looking for the highest key in metadata
+        let current = states.keys().max().map(|&epoch_num| {
+            let state = states.get(&epoch_num).expect("key must exist").clone();
+            (EpochNum::new(epoch_num), state)
+        });
 
         // Replay msgs to populate epoch caches
         let mut epochs = BTreeMap::<EpochNum, EpochCache<V, P>>::new();
@@ -414,35 +400,38 @@ impl<E: RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
         true
     }
 
-    /// Persists new epoch state, advancing to the next epoch.
-    pub async fn append_epoch(&mut self, state: Epoch<V, P>) {
-        // Persist to journal
-        self.states
-            .append(state.clone())
-            .await
-            .expect("should be able to write to state");
+    /// Persists epoch state.
+    pub async fn set_epoch(&mut self, epoch: EpochNum, state: Epoch<V, P>) {
+        // Persist to metadata using epoch number as key
+        let epoch_key = epoch.get();
+        if self.states.put(epoch_key, state.clone()).is_some() {
+            warn!(%epoch, "overwriting existing epoch state");
+        }
         self.states
             .sync()
             .await
             .expect("should be able to sync state");
 
-        // Update in-memory state first (clone before moving to journal)
-        let size = self.states.size();
-        let epoch = EpochNum::new(size - 1);
+        // Update in-memory state
         self.current = Some((epoch, state));
     }
 
     /// Removes all data from epochs older than `min`.
     pub async fn prune(&mut self, min: EpochNum) {
-        let section = min.get();
+        let min_epoch = min.get();
+
+        // Prune msgs journal
         self.msgs
-            .prune(section)
+            .prune(min_epoch)
             .await
             .expect("should be able to prune msgs");
+
+        // Prune states metadata - remove all epochs < min
+        self.states.retain(|&epoch_key, _| epoch_key >= min_epoch);
         self.states
-            .prune(section)
+            .sync()
             .await
-            .expect("should be able to prune states");
+            .expect("should be able to sync states after prune");
 
         // Remove old epoch caches
         self.epochs.retain(|&epoch, _| epoch >= min);
@@ -535,7 +524,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     ///
     /// If the ack is valid and new, persists it to storage.
     /// Returns true if the ack was successfully processed.
-    pub async fn handle<E: RuntimeStorage + Metrics>(
+    pub async fn handle<E: Clock + RuntimeStorage + Metrics>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
@@ -612,7 +601,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
     /// Handle an incoming dealer message.
     ///
     /// If this is a new valid dealer message, persists it to storage before returning.
-    pub async fn handle<E: RuntimeStorage + Metrics>(
+    pub async fn handle<E: Clock + RuntimeStorage + Metrics>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
