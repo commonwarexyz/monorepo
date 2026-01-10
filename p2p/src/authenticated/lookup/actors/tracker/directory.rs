@@ -11,7 +11,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     ordered::{Map, Set},
-    IpAddrExt, PrioritySet, SystemTimeExt, TryCollect,
+    PrioritySet, SystemTimeExt, TryCollect,
 };
 use rand::Rng;
 use std::{
@@ -225,17 +225,20 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Peers can be blocked even if they don't have a record yet. The block will be applied
     /// when they are added to a peer set via `add_set`.
+    ///
+    /// Also clears the tracked IPs for this peer to prevent accepting connections from those IPs.
     pub fn block(&mut self, peer: &C) {
         // Already blocked in queue
         if self.blocked.contains(peer) {
             return;
         }
 
-        // If record exists, check if it's blockable
-        if let Some(record) = self.peers.get(peer) {
+        // If record exists, check if it's blockable and clear tracked IPs
+        if let Some(record) = self.peers.get_mut(peer) {
             if !record.is_blockable() {
                 return;
             }
+            record.clear_ips();
         }
 
         let blocked_until = self.context.current() + self.block_duration;
@@ -297,15 +300,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Return egress IPs we should listen for (accept incoming connections from).
     ///
-    /// Only includes IPs from peers that are:
+    /// Returns all tracked IPs for peers that are:
     /// - Currently eligible (not blocked, in a peer set)
-    /// - Have a valid egress IP (global, or private IPs are allowed)
+    /// - Have valid IPs (global, or private IPs are allowed)
     pub fn listenable(&self) -> HashSet<IpAddr> {
         self.peers
             .iter()
             .filter(|(peer, r)| !self.blocked.contains(peer) && r.eligible())
-            .filter_map(|(_, r)| r.egress_ip())
-            .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
+            .flat_map(|(_, r)| r.ips(self.allow_private_ips))
             .collect()
     }
 
@@ -991,14 +993,22 @@ mod tests {
             // Now unblock_expired should unblock the peer
             assert!(directory.unblock_expired(), "Should have unblocked a peer");
 
-            // Verify peer is now listenable
+            // After unblock, peer is NOT listenable because tracked IPs were cleared during blocking.
+            // This is intentional - blocking clears tracked IPs as a security measure.
             assert!(
-                directory.listenable().contains(&addr_1.ip()),
-                "Unblocked peer should be listenable"
+                !directory.listenable().contains(&addr_1.ip()),
+                "Unblocked peer should not be listenable until re-added to peer set"
             );
 
             // Verify no more blocked peers
             assert_eq!(directory.blocked(), 0, "No more blocked peers");
+
+            // Re-add peer to a peer set to make them listenable again
+            directory.add_set(1, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            assert!(
+                directory.listenable().contains(&addr_1.ip()),
+                "Peer should be listenable after being re-added to peer set"
+            );
 
             // Re-block the peer and verify expiry time increased
             directory.block(&pk_1);
@@ -1585,10 +1595,18 @@ mod tests {
             context.sleep(block_duration + Duration::from_secs(1)).await;
             directory.unblock_expired();
 
-            // Peer's IP should be listenable again after unblock
+            // After unblock, peer is NOT listenable because tracked IPs were cleared during blocking.
+            // This is intentional - blocking clears tracked IPs as a security measure.
+            assert!(
+                !directory.listenable().contains(&addr_1.ip()),
+                "Peer's IP should not be listenable after unblock (tracked IPs cleared on block)"
+            );
+
+            // Re-add peer to a peer set to make them listenable again
+            directory.add_set(1, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             assert!(
                 directory.listenable().contains(&addr_1.ip()),
-                "Peer's IP should be listenable after unblock"
+                "Peer's IP should be listenable after being re-added to peer set"
             );
         });
     }
@@ -1640,6 +1658,174 @@ mod tests {
             assert!(
                 directory.eligible(&pk_1),
                 "Peer should be eligible after unblock"
+            );
+        });
+    }
+
+    #[test]
+    fn test_listenable_returns_all_tracked_ips() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let ip_1 = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+        let ip_2 = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+        let addr_1 = SocketAddr::new(ip_1, 1235);
+        let addr_2 = SocketAddr::new(ip_2, 1235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            // Add peer with first IP
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            // Initial IP should be listenable
+            let listenable = directory.listenable();
+            assert!(listenable.contains(&ip_1), "First IP should be listenable");
+            assert_eq!(listenable.len(), 1);
+
+            // Update peer with second IP via new peer set
+            directory.add_set(1, [(pk_1.clone(), addr(addr_2))].try_into().unwrap());
+
+            // Both IPs should now be listenable
+            let listenable = directory.listenable();
+            assert!(
+                listenable.contains(&ip_1),
+                "First IP should still be listenable"
+            );
+            assert!(listenable.contains(&ip_2), "Second IP should be listenable");
+            assert_eq!(listenable.len(), 2);
+        });
+    }
+
+    #[test]
+    fn test_blocking_clears_tracked_ips() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let ip_1 = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+        let ip_2 = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+        let ip_3 = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+        let addr_1 = SocketAddr::new(ip_1, 1235);
+        let addr_2 = SocketAddr::new(ip_2, 1235);
+        let addr_3 = SocketAddr::new(ip_3, 1235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            // Add peer with two IPs
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.add_set(1, [(pk_1.clone(), addr(addr_2))].try_into().unwrap());
+
+            // Both IPs should be listenable
+            let listenable = directory.listenable();
+            assert_eq!(listenable.len(), 2);
+
+            // Block the peer - this should clear tracked IPs
+            directory.block(&pk_1);
+
+            // No IPs should be listenable (peer is blocked)
+            let listenable = directory.listenable();
+            assert!(
+                listenable.is_empty(),
+                "Blocked peer's IPs should not be listenable"
+            );
+
+            // Unblock the peer
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            // Still no IPs should be listenable (tracked IPs were cleared)
+            let listenable = directory.listenable();
+            assert!(
+                listenable.is_empty(),
+                "Tracked IPs should have been cleared by blocking"
+            );
+
+            // Add new IP after unblock - this should be the only tracked IP
+            directory.add_set(2, [(pk_1.clone(), addr(addr_3))].try_into().unwrap());
+            let listenable = directory.listenable();
+            assert_eq!(listenable.len(), 1);
+            assert!(
+                listenable.contains(&ip_3),
+                "New IP after unblock should be listenable"
+            );
+            assert!(
+                !listenable.contains(&ip_1),
+                "Old IP should not be listenable after block cleared them"
+            );
+            assert!(
+                !listenable.contains(&ip_2),
+                "Old IP should not be listenable after block cleared them"
+            );
+        });
+    }
+
+    #[test]
+    fn test_acceptable_with_multiple_tracked_ips() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let ip_1 = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+        let ip_2 = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+        let wrong_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+        let addr_1 = SocketAddr::new(ip_1, 1235);
+        let addr_2 = SocketAddr::new(ip_2, 1235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            // Add peer with two IPs
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.add_set(1, [(pk_1.clone(), addr(addr_2))].try_into().unwrap());
+
+            // Both tracked IPs should be acceptable
+            assert!(
+                directory.acceptable(&pk_1, ip_1),
+                "First tracked IP should be acceptable"
+            );
+            assert!(
+                directory.acceptable(&pk_1, ip_2),
+                "Second tracked IP should be acceptable"
+            );
+
+            // Untracked IP should not be acceptable
+            assert!(
+                !directory.acceptable(&pk_1, wrong_ip),
+                "Untracked IP should not be acceptable"
             );
         });
     }
