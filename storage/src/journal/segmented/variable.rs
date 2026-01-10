@@ -7,7 +7,7 @@
 //! # Format
 //!
 //! Data stored in `Journal` is persisted in one of many Blobs within a caller-provided `partition`.
-//! The particular `Blob` in which data is stored is identified by a `section` number (`u64`).
+//! The particular [Blob] in which data is stored is identified by a `section` number (`u64`).
 //! Within a `section`, data is appended as an `item` with the following format:
 //!
 //! ```text
@@ -79,7 +79,7 @@
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     varint::UInt, Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
@@ -88,7 +88,7 @@ use commonware_runtime::{
     Blob, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
-use std::num::NonZeroUsize;
+use std::{io::Cursor, num::NonZeroUsize};
 use tracing::{trace, warn};
 use zstd::{bulk::compress, decode_all};
 
@@ -118,33 +118,39 @@ pub struct Config<C> {
 /// Decodes a varint length prefix from a buffer.
 /// Returns (item_size, varint_len).
 #[inline]
-fn decode_length_prefix(buf: &[u8]) -> Result<(usize, usize), Error> {
-    let mut cursor = buf;
-    let size = UInt::<u32>::read(&mut cursor)?.0 as usize;
-    let varint_len = buf.len() - cursor.remaining();
+fn decode_length_prefix(buf: &mut impl Buf) -> Result<(usize, usize), Error> {
+    let initial = buf.remaining();
+    let size = UInt::<u32>::read(buf)?.0 as usize;
+    let varint_len = initial - buf.remaining();
     Ok((size, varint_len))
 }
 
-/// Result of finding an item in a buffer.
-enum Item<'a> {
+/// Result of finding an item in a buffer (offsets/lengths, not slices).
+enum ItemInfo {
     /// All item data is available in the buffer.
-    Complete(&'a [u8]),
-    /// Need to read more bytes. Contains the prefix data available in the buffer.
+    Complete {
+        /// Length of the varint prefix.
+        varint_len: usize,
+        /// Length of the item data.
+        data_len: usize,
+    },
+    /// Only some item data is available.
     Incomplete {
-        /// The partial item data available in the buffer (prefix).
-        prefix: &'a [u8],
-        /// The total size of the item.
-        size: usize,
-        /// Offset to read remaining bytes from.
-        read_offset: u64,
+        /// Length of the varint prefix.
+        varint_len: usize,
+        /// Bytes of item data available in buffer.
+        prefix_len: usize,
+        /// Full size of the item.
+        total_len: usize,
     },
 }
 
 /// Find an item in a buffer by decoding its length prefix.
 ///
-/// Returns (next_offset, item).
-fn find_item(buf: &[u8], available: usize, offset: u64) -> Result<(u64, Item<'_>), Error> {
-    let (size, varint_len) = decode_length_prefix(&buf[..available])?;
+/// Returns (next_offset, item_info). The buffer is advanced past the varint.
+fn find_item(buf: &mut impl Buf, offset: u64) -> Result<(u64, ItemInfo), Error> {
+    let available = buf.remaining();
+    let (size, varint_len) = decode_length_prefix(buf)?;
     let next_offset = offset
         .checked_add(varint_len as u64)
         .ok_or(Error::OffsetOverflow)?
@@ -153,12 +159,15 @@ fn find_item(buf: &[u8], available: usize, offset: u64) -> Result<(u64, Item<'_>
     let buffered = available.saturating_sub(varint_len);
 
     let item = if buffered >= size {
-        Item::Complete(&buf[varint_len..varint_len + size])
+        ItemInfo::Complete {
+            varint_len,
+            data_len: size,
+        }
     } else {
-        Item::Incomplete {
-            prefix: &buf[varint_len..varint_len + buffered],
-            size,
-            read_offset: offset + varint_len as u64 + buffered as u64,
+        ItemInfo::Incomplete {
+            varint_len,
+            prefix_len: buffered,
+            total_len: size,
         }
     };
 
@@ -231,27 +240,36 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ) -> Result<(u64, u32, V), Error> {
         // Read varint header (max 5 bytes for u32)
         let buf = vec![0u8; MAX_VARINT_SIZE];
-        let (buf, available) = blob.read_up_to(buf, offset).await?;
-        let (next_offset, item) = find_item(buf.as_ref(), available, offset)?;
+        let (stable_buf, available) = blob.read_up_to(buf, offset).await?;
+        let buf = Bytes::from(stable_buf);
+        let mut cursor = Cursor::new(buf.slice(..available));
+        let (next_offset, item_info) = find_item(&mut cursor, offset)?;
 
         // Decode item - either directly from buffer or by chaining prefix with remainder
-        let (item_size, decoded) = match item {
-            Item::Complete(data) => {
+        let (item_size, decoded) = match item_info {
+            ItemInfo::Complete {
+                varint_len,
+                data_len,
+            } => {
+                // Data follows varint in buffer
+                let data = buf.slice(varint_len..varint_len + data_len);
                 let decoded = decode_item::<V>(data, cfg, compressed)?;
-                (data.len() as u32, decoded)
+                (data_len as u32, decoded)
             }
-            Item::Incomplete {
-                prefix,
-                size: item_size,
-                read_offset,
+            ItemInfo::Incomplete {
+                varint_len,
+                prefix_len,
+                total_len,
             } => {
                 // Read remainder and chain with prefix to avoid copying
-                let remainder_len = item_size - prefix.len();
+                let prefix = buf.slice(varint_len..varint_len + prefix_len);
+                let read_offset = offset + varint_len as u64 + prefix_len as u64;
+                let remainder_len = total_len - prefix_len;
                 let mut remainder = vec![0u8; remainder_len];
                 blob.read_into(&mut remainder, read_offset).await?;
-                let chained = prefix.chain(remainder.as_slice());
+                let chained = prefix.chain(Bytes::from(remainder));
                 let decoded = decode_item::<V>(chained, cfg, compressed)?;
-                (item_size as u32, decoded)
+                (total_len as u32, decoded)
             }
         };
 
@@ -302,7 +320,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                         0u64,
                         codec_config,
                         compressed,
-                        Vec::<u8>::new(), // Reusable buffer for incomplete items
                     ),
                     move |(
                         section,
@@ -312,7 +329,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                         mut valid_offset,
                         codec_config,
                         compressed,
-                        mut reuse_buf,
                     )| async move {
                         let blob_size = reader.blob_size();
 
@@ -330,7 +346,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                         valid_offset,
                                         codec_config,
                                         compressed,
-                                        reuse_buf,
                                     ),
                                 ));
                             }
@@ -341,19 +356,32 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                         let mut batch: Vec<Result<(u64, u64, u32, V), Error>> = Vec::new();
 
                         loop {
-                            let buf = reader.available();
-                            if buf.is_empty() {
+                            let mut physical_buf = reader.available();
+                            if physical_buf.is_empty() {
                                 break;
                             }
+                            let buf_remaining = physical_buf.remaining();
 
-                            match find_item(buf, buf.len(), offset) {
-                                Ok((next_offset, Item::Complete(data))) => {
+                            match find_item(&mut physical_buf, offset) {
+                                Ok((
+                                    next_offset,
+                                    ItemInfo::Complete {
+                                        varint_len,
+                                        data_len,
+                                    },
+                                )) => {
+                                    // physical_buf is now positioned after varint
+                                    let data = physical_buf.copy_to_bytes(data_len);
                                     match decode_item::<V>(data, &codec_config, compressed) {
                                         Ok(decoded) => {
-                                            let consumed = (next_offset - offset) as usize;
-                                            let data_len = data.len() as u32;
+                                            let consumed = varint_len + data_len;
                                             reader.advance(consumed);
-                                            batch.push(Ok((section, offset, data_len, decoded)));
+                                            batch.push(Ok((
+                                                section,
+                                                offset,
+                                                data_len as u32,
+                                                decoded,
+                                            )));
                                             valid_offset = next_offset;
                                             offset = next_offset;
                                         }
@@ -365,44 +393,36 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                 }
                                 Ok((
                                     next_offset,
-                                    Item::Incomplete {
-                                        prefix,
-                                        size: item_size,
-                                        ..
+                                    ItemInfo::Incomplete {
+                                        varint_len,
+                                        prefix_len,
+                                        total_len,
                                     },
                                 )) => {
-                                    // Item::Incomplete means the item spans buffer boundary: we have
-                                    // the varint + partial data, but not the complete item.
-                                    // Reuse buffer, growing if needed. Copy prefix BEFORE advancing
-                                    // (which invalidates the prefix slice).
-                                    reuse_buf.resize(item_size, 0);
-                                    reuse_buf[..prefix.len()].copy_from_slice(prefix);
-                                    let filled = prefix.len();
+                                    // physical_buf is positioned after varint, get available prefix
+                                    let prefix = physical_buf.copy_to_bytes(prefix_len);
 
-                                    // Now advance past all consumed data
-                                    reader.advance(buf.len());
+                                    // Advance reader past consumed data (varint + prefix)
+                                    reader.advance(varint_len + prefix_len);
 
                                     // Read remaining bytes from new pages
-                                    if let Err(err) = reader
-                                        .read_exact(
-                                            &mut reuse_buf[filled..item_size],
-                                            item_size - filled,
-                                        )
-                                        .await
-                                    {
-                                        batch.push(Err(err.into()));
-                                        break;
-                                    }
-                                    match decode_item::<V>(
-                                        &reuse_buf[..item_size],
-                                        &codec_config,
-                                        compressed,
-                                    ) {
+                                    let remainder_len = total_len - prefix_len;
+                                    let remainder = match reader.read_bytes(remainder_len).await {
+                                        Ok(r) => r,
+                                        Err(err) => {
+                                            batch.push(Err(err.into()));
+                                            break;
+                                        }
+                                    };
+
+                                    // Chain without copying
+                                    let chained = prefix.chain(remainder);
+                                    match decode_item::<V>(chained, &codec_config, compressed) {
                                         Ok(decoded) => {
                                             batch.push(Ok((
                                                 section,
                                                 offset,
-                                                item_size as u32,
+                                                total_len as u32,
                                                 decoded,
                                             )));
                                             valid_offset = next_offset;
@@ -417,7 +437,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                 Err(err) => {
                                     // Could be codec error from incomplete varint - treat as
                                     // end if at physical end
-                                    let at_physical_end = offset + buf.len() as u64 >= blob_size;
+                                    let at_physical_end =
+                                        offset + buf_remaining as u64 >= blob_size;
                                     if at_physical_end {
                                         if valid_offset < blob_size {
                                             warn!(
@@ -450,7 +471,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                 valid_offset,
                                 codec_config,
                                 compressed,
-                                reuse_buf,
                             ),
                         ))
                     },

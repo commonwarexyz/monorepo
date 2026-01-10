@@ -35,7 +35,10 @@ use crate::{
 };
 use commonware_cryptography::Crc32;
 use commonware_utils::StableBuf;
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{
+    num::{NonZeroU16, NonZeroUsize},
+    sync::Arc,
+};
 use tracing::warn;
 
 /// Indicates which CRC slot in a page record must not be overwritten.
@@ -717,10 +720,10 @@ impl<B: Blob> Append<B> {
     ///
     /// The returned reader can be used to sequentially read all data from the blob while ensuring
     /// all data passes integrity verification.
-    pub async fn as_blob_reader(&self, capacity: NonZeroUsize) -> Result<Read<B>, Error> {
+    pub async fn as_blob_reader(&self, capacity_pages: NonZeroUsize) -> Result<Read<B>, Error> {
         let logical_page_size = self.pool_ref.page_size();
         let logical_page_size_nz =
-            NonZeroUsize::new(logical_page_size as usize).expect("page_size is non-zero");
+            NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
 
         // Flush any buffered data (without fsync) so the Read wrapper sees all written data.
         // We don't need fsync here since we just want to ensure data has been written to the
@@ -760,7 +763,7 @@ impl<B: Blob> Append<B> {
             blob_guard.blob.clone(),
             physical_blob_size,
             logical_blob_size,
-            capacity,
+            capacity_pages,
             logical_page_size_nz,
         ))
     }

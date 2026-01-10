@@ -102,7 +102,7 @@ impl<C> Config<C> {
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
 /// the first invalid data read will be considered the new end of the journal (and the
-/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
+/// underlying [Blob](commonware_runtime::Blob) will be truncated to the last valid item). Repair occurs during
 /// init via the underlying segmented journals.
 ///
 /// # Invariants
