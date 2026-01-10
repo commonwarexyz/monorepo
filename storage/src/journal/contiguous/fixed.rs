@@ -347,7 +347,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
-        if start_pos >= self.size {
+        if start_pos > self.size {
             return Err(Error::ItemOutOfRange(start_pos));
         }
 
