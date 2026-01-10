@@ -15,16 +15,16 @@ use crate::Secret;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
-    blst_bendian_from_fp12, blst_expand_message_xmd, blst_fp12, blst_fr, blst_fr_add, blst_fr_cneg,
-    blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul, blst_fr_sub,
-    blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_lendian_from_scalar, blst_p1,
+    blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
+    blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
+    blst_fr_mul, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
     blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_from_affine,
     blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress,
     blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p2,
     blst_p2_add_or_double, blst_p2_affine, blst_p2_cneg, blst_p2_compress, blst_p2_from_affine,
     blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress,
     blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar,
-    blst_scalar_from_fr, blst_scalar_from_le_bytes, blst_scalar_from_lendian, blst_sk_check,
+    blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
     BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
@@ -74,10 +74,10 @@ impl arbitrary::Arbitrary<'_> for Scalar {
         // Generate 32 bytes and convert to scalar with automatic modular reduction
         let bytes = u.arbitrary::<[u8; SCALAR_LENGTH]>()?;
         let mut fr = blst_fr::default();
-        // SAFETY: bytes is a valid 32-byte array; blst_scalar_from_lendian handles reduction.
+        // SAFETY: bytes is a valid 32-byte array; blst_scalar_from_bendian handles reduction.
         unsafe {
             let mut scalar = blst_scalar::default();
-            blst_scalar_from_lendian(&mut scalar, bytes.as_ptr());
+            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
             blst_fr_from_scalar(&mut fr, &scalar);
         }
         let result = Self(fr);
@@ -92,7 +92,7 @@ impl arbitrary::Arbitrary<'_> for Scalar {
 }
 
 /// Number of bytes required to encode a scalar in its canonical
-/// little‑endian form (`32 × 8 = 256 bits`).
+/// big-endian form (`32 × 8 = 256 bits`).
 ///
 /// Because `r` is only 255 bits wide, the most‑significant byte is always in
 /// the range `0x00‥=0x7f`, leaving the top bit clear.
@@ -249,7 +249,7 @@ impl Scalar {
         // SAFETY: uniform_bytes is a valid 48-byte buffer.
         unsafe {
             let mut scalar = blst_scalar::default();
-            blst_scalar_from_le_bytes(&mut scalar, uniform_bytes.as_ptr(), L);
+            blst_scalar_from_be_bytes(&mut scalar, uniform_bytes.as_ptr(), L);
             blst_fr_from_scalar(&mut fr, &scalar);
         }
 
@@ -272,11 +272,11 @@ impl Scalar {
     /// Encodes the scalar into a byte array.
     fn as_slice(&self) -> [u8; Self::SIZE] {
         let mut slice = [0u8; Self::SIZE];
-        // SAFETY: All pointers valid; blst_lendian_from_scalar writes exactly 32 bytes.
+        // SAFETY: All pointers valid; blst_bendian_from_scalar writes exactly 32 bytes.
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_fr(&mut scalar, &self.0);
-            blst_lendian_from_scalar(slice.as_mut_ptr(), &scalar);
+            blst_bendian_from_scalar(slice.as_mut_ptr(), &scalar);
         }
         slice
     }
@@ -312,7 +312,7 @@ impl Read for Scalar {
         // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
         unsafe {
             let mut scalar = blst_scalar::default();
-            blst_scalar_from_lendian(&mut scalar, bytes.as_ptr());
+            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
             if !blst_sk_check(&scalar) {
                 return Err(Invalid("Scalar", "Invalid"));
             }
