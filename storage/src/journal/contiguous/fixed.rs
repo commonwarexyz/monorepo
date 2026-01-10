@@ -359,14 +359,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         if let Some(newest) = self.inner.newest_section() {
             for section in start_section.max(oldest)..newest {
                 let len = self.inner.section_len(section).await?;
-                let expected = if section == start_section {
-                    items_per_blob - start_pos_in_section
-                } else {
-                    items_per_blob
-                };
-                if len < expected {
+                if len < items_per_blob {
                     return Err(Error::Corruption(format!(
-                        "section {section} incomplete: expected {expected} items, got {len}"
+                        "section {section} incomplete: expected {items_per_blob} items, got {len}"
                     )));
                 }
             }
