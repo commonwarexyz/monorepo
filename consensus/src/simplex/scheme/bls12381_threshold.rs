@@ -642,13 +642,18 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         })
     }
 
-    fn verify_certificate<R: CryptoRngCore, D: Digest>(
+    fn verify_certificate<R, D, M>(
         &self,
         rng: &mut R,
         subject: Subject<'_, D>,
         certificate: &Self::Certificate,
         strategy: &impl Strategy,
-    ) -> bool {
+    ) -> bool
+    where
+        R: CryptoRngCore,
+        D: Digest,
+        M: FaultModel,
+    {
         let identity = self.identity();
         let namespace = self.namespace();
 
@@ -671,7 +676,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         batch::verify_same_signer::<_, V, _, _>(rng, identity, entries, strategy).is_ok()
     }
 
-    fn verify_certificates<'a, R, D, I>(
+    fn verify_certificates<'a, R, D, I, M>(
         &self,
         rng: &mut R,
         certificates: I,
@@ -681,6 +686,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
+        M: FaultModel,
     {
         let identity = self.identity();
         let namespace = self.namespace();
@@ -1060,7 +1066,7 @@ mod tests {
             .assemble::<_, Bft3f1>(votes, &Sequential)
             .expect("assemble certificate");
 
-        assert!(verifier.verify_certificate(
+        assert!(verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut test_rng(),
             Subject::Finalize {
                 proposal: &proposal,
@@ -1098,7 +1104,7 @@ mod tests {
             .assemble::<_, Bft3f1>(votes, &Sequential)
             .expect("assemble certificate");
 
-        assert!(verifier.verify_certificate(
+        assert!(verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut rng,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1109,7 +1115,7 @@ mod tests {
 
         let mut corrupted = certificate;
         corrupted.vote_signature = corrupted.seed_signature;
-        assert!(!verifier.verify_certificate(
+        assert!(!verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut rng,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1325,7 +1331,7 @@ mod tests {
                 .is_none(),
             "certificate verifier should not produce votes"
         );
-        assert!(certificate_verifier.verify_certificate(
+        assert!(certificate_verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut test_rng(),
             Subject::Finalize {
                 proposal: &proposal,
@@ -1497,7 +1503,7 @@ mod tests {
             .assemble::<_, Bft3f1>(votes, &Sequential)
             .expect("assemble certificate");
 
-        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut rng,
             Subject::Nullify {
                 round: proposal.round,
@@ -1508,7 +1514,7 @@ mod tests {
 
         let mut corrupted = certificate;
         corrupted.seed_signature = corrupted.vote_signature;
-        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+        assert!(!verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut rng,
             Subject::Nullify {
                 round: proposal.round,
@@ -1717,7 +1723,7 @@ mod tests {
             .assemble::<_, Bft3f1>(votes, &Sequential)
             .expect("assemble certificate");
 
-        assert!(verifier.verify_certificate(
+        assert!(verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut rng,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1738,7 +1744,7 @@ mod tests {
         assert_eq!(forged_sum, valid_sum, "signature sums should be equal");
 
         assert!(
-            !verifier.verify_certificate(
+            !verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
                 &mut rng,
                 Subject::Notarize {
                     proposal: &proposal,
@@ -1793,7 +1799,7 @@ mod tests {
             .assemble::<_, Bft3f1>(votes2, &Sequential)
             .expect("assemble certificate2");
 
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _, Bft3f1>(
             &mut rng,
             [
                 (
@@ -1833,7 +1839,7 @@ mod tests {
         );
 
         assert!(
-            !verifier.verify_certificates::<_, Sha256Digest, _>(
+            !verifier.verify_certificates::<_, Sha256Digest, _, Bft3f1>(
                 &mut rng,
                 [
                     (

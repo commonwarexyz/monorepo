@@ -37,7 +37,7 @@ impl Bench {
 
         let (output, shares) = if reshare {
             let (o, s) =
-                deal::<V, PublicKey>(&mut rng, Default::default(), dealers.clone()).unwrap();
+                deal::<V, PublicKey, Bft3f1>(&mut rng, Default::default(), dealers.clone()).unwrap();
             (Some(o), Some(s))
         } else {
             (None, None)

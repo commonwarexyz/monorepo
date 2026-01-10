@@ -298,11 +298,9 @@ use commonware_math::{
     poly::{Interpolator, Poly},
 };
 use commonware_parallel::{Sequential, Strategy as ParStrategy};
-#[cfg(feature = "arbitrary")]
-use commonware_utils::FaultModel;
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
-    Bft3f1, Participant, TryCollect, NZU32,
+    Bft3f1, FaultModel, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -350,8 +348,8 @@ impl<V: Variant, P: Ord> Output<V, P> {
     }
 
     /// Return the quorum, i.e. the number of players needed to reconstruct the key.
-    pub fn quorum(&self) -> u32 {
-        self.players.quorum::<Bft3f1>()
+    pub fn quorum<M: FaultModel>(&self) -> u32 {
+        self.players.quorum::<M>()
     }
 
     /// Get the public polynomial associated with this output.
@@ -506,22 +504,22 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         NZU32!(self.players.len() as u32)
     }
 
-    fn degree(&self) -> u32 {
-        self.players.quorum::<Bft3f1>().saturating_sub(1)
+    fn degree<M: FaultModel>(&self) -> u32 {
+        self.players.quorum::<M>().saturating_sub(1)
     }
 
-    fn required_commitments(&self) -> u32 {
-        let dealer_quorum = self.dealers.quorum::<Bft3f1>();
+    fn required_commitments<M: FaultModel>(&self) -> u32 {
+        let dealer_quorum = self.dealers.quorum::<M>();
         let prev_quorum = self
             .previous
             .as_ref()
-            .map(Output::quorum)
+            .map(Output::quorum::<M>)
             .unwrap_or(u32::MIN);
         dealer_quorum.max(prev_quorum)
     }
 
-    fn max_reveals(&self) -> u32 {
-        self.players.max_faults::<Bft3f1>()
+    fn max_reveals<M: FaultModel>(&self) -> u32 {
+        self.players.max_faults::<M>()
     }
 
     fn player_index(&self, player: &P) -> Result<Participant, Error> {
@@ -543,7 +541,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
 
     #[must_use]
     fn check_dealer_pub_msg(&self, dealer: &P, pub_msg: &DealerPubMsg<V>) -> bool {
-        if self.degree() != pub_msg.commitment.degree_exact() {
+        if self.degree::<Bft3f1>() != pub_msg.commitment.degree_exact() {
             return false;
         }
         if let Some(previous) = self.previous.as_ref() {
@@ -606,7 +604,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             {
                 return Err(Error::UnknownDealer(format!("{unknown:?}")));
             }
-            if dealers.len() < previous.quorum() as usize {
+            if dealers.len() < previous.quorum::<Bft3f1>() as usize {
                 return Err(Error::NumDealers(dealers.len()));
             }
         }
@@ -1185,7 +1183,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             // only exposed for the duration of this function).
             share.map(|x| x.private.expose_unwrap()),
         )?;
-        let my_poly = Poly::new_with_constant(&mut rng, info.degree(), share);
+        let my_poly = Poly::new_with_constant(&mut rng, info.degree::<Bft3f1>(), share);
         let priv_msgs = info
             .players
             .iter()
@@ -1251,7 +1249,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             .filter(|x| x.is_reveal())
             .count() as u32;
         // Omit results if there are too many reveals.
-        let results = if reveals > self.info.max_reveals() {
+        let results = if reveals > self.info.max_reveals::<Bft3f1>() {
             DealerResult::TooManyReveals
         } else {
             DealerResult::Ok(self.results)
@@ -1269,7 +1267,7 @@ fn select<V: Variant, P: PublicKey>(
     info: &Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
 ) -> Result<Map<P, DealerLog<V, P>>, Error> {
-    let required_commitments = info.required_commitments() as usize;
+    let required_commitments = info.required_commitments::<Bft3f1>() as usize;
     let transcript = transcript_for_round(info);
     let out = logs
         .into_iter()
@@ -1281,7 +1279,7 @@ fn select<V: Variant, P: PublicKey>(
             let results_iter = log.zip_players(&info.players)?;
             let transcript = transcript_for_ack(&transcript, &dealer, &log.pub_msg);
             let mut reveal_count = 0;
-            let max_reveals = info.max_reveals();
+            let max_reveals = info.max_reveals::<Bft3f1>();
             for (player, result) in results_iter {
                 match result {
                     AckOrReveal::Ack(ack) => {
@@ -1534,7 +1532,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
 pub type DealResult<V, P> = Result<(Output<V, P>, Map<P, Share>), Error>;
 
 /// Simply distribute shares at random, instead of performing a distributed protocol.
-pub fn deal<V: Variant, P: Clone + Ord>(
+pub fn deal<V: Variant, P: Clone + Ord, M: FaultModel>(
     mut rng: impl CryptoRngCore,
     mode: Mode,
     players: Set<P>,
@@ -1543,7 +1541,7 @@ pub fn deal<V: Variant, P: Clone + Ord>(
         return Err(Error::NumPlayers(0));
     }
     let n = NZU32!(players.len() as u32);
-    let t = players.quorum::<Bft3f1>();
+    let t = players.quorum::<M>();
     let private = Poly::new(&mut rng, t - 1);
     let shares: Map<_, _> = players
         .iter()
@@ -1582,7 +1580,7 @@ pub fn deal_anonymous<V: Variant>(
     n: NonZeroU32,
 ) -> (Sharing<V>, Vec<Share>) {
     let players = (0..n.get()).try_collect().unwrap();
-    let (output, shares) = deal::<V, _>(rng, mode, players).unwrap();
+    let (output, shares) = deal::<V, _, Bft3f1>(rng, mode, players).unwrap();
     (output.public().clone(), shares.values().to_vec())
 }
 
@@ -1949,7 +1947,7 @@ mod test_plan {
                     let (mut dealer, pub_msg, mut priv_msgs) =
                         if let Some(shift) = round.shift_degrees.get(&i_dealer) {
                             // Create dealer with shifted degree
-                            let degree = u32::try_from(info.degree() as i32 + shift.get())
+                            let degree = u32::try_from(info.degree::<Bft3f1>() as i32 + shift.get())
                                 .unwrap_or_default();
 
                             // Manually create the dealer with adjusted polynomial
@@ -2066,7 +2064,7 @@ mod test_plan {
                     // Apply BadReveal perturbations
                     match &mut log.results {
                         DealerResult::TooManyReveals => {
-                            assert!(num_reveals > info.max_reveals());
+                            assert!(num_reveals > info.max_reveals::<Bft3f1>());
                         }
                         DealerResult::Ok(results) => {
                             assert_eq!(results.len(), players.len());
@@ -2114,7 +2112,7 @@ mod test_plan {
 
                 // Compute expected dealers: good dealers up to required_commitments
                 // The select function iterates dealer_logs (BTreeMap) in public key order
-                let required_commitments = info.required_commitments() as usize;
+                let required_commitments = info.required_commitments::<Bft3f1>() as usize;
                 let expected_dealers: Set<ed25519::PublicKey> = dealer_set
                     .iter()
                     .filter(|pk| {
@@ -2242,7 +2240,7 @@ mod test_plan {
                     partial_sigs.push(partial_sig);
                 }
 
-                let threshold = observer_output.quorum();
+                let threshold = observer_output.quorum::<Bft3f1>();
                 let threshold_sig = threshold::recover::<V, _, _, Bft3f1>(
                     &observer_output.public,
                     &partial_sigs[0..threshold as usize],

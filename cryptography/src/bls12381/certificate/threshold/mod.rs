@@ -318,7 +318,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Verifies a certificate.
-    pub fn verify_certificate<'a, S, R, D>(
+    pub fn verify_certificate<'a, S, R, D, M>(
         &self,
         _rng: &mut R,
         subject: S::Subject<'a, D>,
@@ -329,6 +329,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRngCore,
         D: Digest,
+        M: FaultModel,
     {
         ops::verify_message::<V>(
             self.identity(),
@@ -340,7 +341,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Verifies multiple certificates in a batch.
-    pub fn verify_certificates<'a, S, R, D, I, T>(
+    pub fn verify_certificates<'a, S, R, D, I, T, M>(
         &self,
         rng: &mut R,
         certificates: I,
@@ -353,6 +354,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a V::Signature)>,
         T: Strategy,
+        M: FaultModel,
     {
         let mut entries: Vec<_> = Vec::new();
 
@@ -574,30 +576,36 @@ mod macros {
                     self.generic.assemble::<Self, _, _, M>(attestations, strategy)
                 }
 
-                fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: $crate::Digest>(
+                fn verify_certificate<R, D, M>(
                     &self,
                     rng: &mut R,
                     subject: Self::Subject<'_, D>,
                     certificate: &Self::Certificate,
                     _strategy: &impl commonware_parallel::Strategy,
-                ) -> bool {
+                ) -> bool
+                where
+                    R: rand_core::CryptoRngCore,
+                    D: $crate::Digest,
+                    M: commonware_utils::FaultModel,
+                {
                     self.generic
-                        .verify_certificate::<Self, _, D>(rng, subject, certificate)
+                        .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
                 }
 
-                fn verify_certificates<'a, R, D, I>(
+                fn verify_certificates<'a, R, D, I, M>(
                     &self,
                     rng: &mut R,
                     certificates: I,
                     strategy: &impl commonware_parallel::Strategy,
                 ) -> bool
                 where
-                    R: rand::Rng + rand::CryptoRng,
+                    R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                     I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+                    M: commonware_utils::FaultModel,
                 {
                     self.generic
-                        .verify_certificates::<Self, _, D, _, _>(rng, certificates, strategy)
+                        .verify_certificates::<Self, _, D, _, _, M>(rng, certificates, strategy)
                 }
 
                 fn is_attributable() -> bool {
@@ -828,7 +836,7 @@ mod tests {
         let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
 
         // Verify the assembled certificate
-        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut rng,
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
@@ -862,7 +870,7 @@ mod tests {
 
         let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
 
-        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut rng,
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
@@ -897,7 +905,7 @@ mod tests {
         let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
 
         // Valid certificate passes
-        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut rng,
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
@@ -908,7 +916,7 @@ mod tests {
 
         // Corrupted certificate fails
         let corrupted = V::Signature::zero();
-        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+        assert!(!verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut rng,
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
@@ -1012,7 +1020,7 @@ mod tests {
             )
         });
 
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _, Bft3f1>(
             &mut rng,
             certs_iter,
             &Sequential
@@ -1059,7 +1067,7 @@ mod tests {
             )
         });
 
-        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _, Bft3f1>(
             &mut rng,
             certs_iter,
             &Sequential
@@ -1096,7 +1104,7 @@ mod tests {
             Scheme::<ed25519::PublicKey, V>::certificate_verifier(NAMESPACE, *identity);
 
         // Should be able to verify certificates
-        assert!(cert_verifier.verify_certificate::<_, Sha256Digest>(
+        assert!(cert_verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut rng,
             TestSubject {
                 message: Bytes::from_static(MESSAGE),

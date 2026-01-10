@@ -258,16 +258,24 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         M: FaultModel;
 
     /// Verifies a certificate that was recovered or received from the network.
-    fn verify_certificate<R: CryptoRngCore, D: Digest>(
+    ///
+    /// The `M` type parameter specifies the fault model used to determine quorum thresholds.
+    fn verify_certificate<R, D, M>(
         &self,
         rng: &mut R,
         subject: Self::Subject<'_, D>,
         certificate: &Self::Certificate,
         strategy: &impl Strategy,
-    ) -> bool;
+    ) -> bool
+    where
+        R: CryptoRngCore,
+        D: Digest,
+        M: FaultModel;
 
     /// Verifies a stream of certificates, returning `false` at the first failure.
-    fn verify_certificates<'a, R, D, I>(
+    ///
+    /// The `M` type parameter specifies the fault model used to determine quorum thresholds.
+    fn verify_certificates<'a, R, D, I, M>(
         &self,
         rng: &mut R,
         certificates: I,
@@ -277,9 +285,10 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+        M: FaultModel,
     {
         for (subject, certificate) in certificates {
-            if !self.verify_certificate(rng, subject, certificate, strategy) {
+            if !self.verify_certificate::<_, _, M>(rng, subject, certificate, strategy) {
                 return false;
             }
         }

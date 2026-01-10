@@ -338,7 +338,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D>(rng, &self.item, &self.certificate, strategy)
+        scheme.verify_certificate::<_, D, Bft3f1>(rng, &self.item, &self.certificate, strategy)
     }
 }
 

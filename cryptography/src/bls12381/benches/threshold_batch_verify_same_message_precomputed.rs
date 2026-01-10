@@ -29,7 +29,7 @@ fn benchmark_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) 
                                 .try_collect()
                                 .unwrap();
                             let (output, shares) =
-                                deal::<MinSig, _>(&mut rng, Default::default(), players)
+                                deal::<MinSig, _, Bft3f1>(&mut rng, Default::default(), players)
                                     .expect("deal should succeed");
                             let polynomial = output.public().clone();
                             polynomial.precompute_partial_publics();

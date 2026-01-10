@@ -929,7 +929,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D>(
+        scheme.verify_certificate::<_, D, Bft3f1>(
             rng,
             Subject::Notarize {
                 proposal: &self.proposal,
@@ -1164,7 +1164,7 @@ impl<S: Scheme> Nullification<S> {
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D>(
+        scheme.verify_certificate::<_, D, Bft3f1>(
             rng,
             Subject::Nullify { round: self.round },
             &self.certificate,
@@ -1412,7 +1412,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D>(
+        scheme.verify_certificate::<_, D, Bft3f1>(
             rng,
             Subject::Finalize {
                 proposal: &self.proposal,
@@ -1708,7 +1708,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
             (context, &nullification.certificate)
         });
 
-        scheme.verify_certificates::<_, D, _>(rng, notarizations.chain(nullifications), strategy)
+        scheme.verify_certificates::<_, D, _, Bft3f1>(rng, notarizations.chain(nullifications), strategy)
     }
 }
 

@@ -195,7 +195,7 @@ fn generate_identities(
     let (output, shares) = if is_dkg {
         (None, Map::default())
     } else {
-        let (output, shares) = deal(
+        let (output, shares) = deal::<MinSig, _, Bft3f1>(
             OsRng,
             Default::default(),
             all_participants
