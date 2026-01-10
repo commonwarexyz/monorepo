@@ -1,24 +1,134 @@
 use super::Checksum;
 use crate::{Blob, Error};
-use bytes::{buf::Chain, Buf, Bytes, BytesMut};
-use commonware_codec::{CodecFixed, DecodeExt as _, Error as CodecError, FixedSize};
+use bytes::{buf::Chain, Buf, Bytes};
+use commonware_codec::{CodecFixed, DecodeExt as _, Error as CodecError, FixedSize, ReadExt as _};
 use commonware_utils::StableBuf;
-use std::num::NonZeroUsize;
-use tracing::{debug, error};
+use std::num::{NonZeroU16, NonZeroUsize};
+use tracing::error;
 
-/// A buffer that can hold either a single contiguous [`Bytes`] or two chained [`Bytes`].
+/// A buffer that provides a logical view over physical page data, skipping CRC regions.
+///
+/// Physical pages have the layout: `[logical_data (logical_page_size bytes)][CRC (12 bytes)]`
+/// This buffer presents a contiguous view of just the logical data across multiple pages.
+#[derive(Clone)]
+pub struct PhysicalBuf {
+    /// The physical buffer containing pages with CRC regions.
+    buffer: Bytes,
+    /// Physical page size (logical_page_size + CHECKSUM_SIZE).
+    page_size: usize,
+    /// Logical page size (data bytes per page, not including CRC).
+    logical_page_size: usize,
+    /// Total pages in buffer.
+    pages_in_buffer: usize,
+    /// Length of the last page (may be < logical_page_size for partial pages).
+    last_page_length: usize,
+
+    /// Current page index within the buffer.
+    current_page: usize,
+    /// Current offset within the current page's logical data.
+    offset_in_page: usize,
+}
+
+impl PhysicalBuf {
+    /// Returns the logical length of the specified page.
+    #[inline]
+    const fn page_length(&self, page_idx: usize) -> usize {
+        if page_idx == self.pages_in_buffer - 1 {
+            self.last_page_length
+        } else {
+            self.logical_page_size
+        }
+    }
+
+    /// Returns the total logical bytes remaining from current position.
+    pub const fn logical_remaining(&self) -> usize {
+        if self.current_page >= self.pages_in_buffer {
+            return 0;
+        }
+
+        // Current page remaining
+        let mut total = self.page_length(self.current_page) - self.offset_in_page;
+
+        // Full pages between current and last
+        if self.current_page + 1 < self.pages_in_buffer {
+            let full_pages_between = self.pages_in_buffer - self.current_page - 2;
+            total += full_pages_between * self.logical_page_size;
+
+            // Last page
+            total += self.last_page_length;
+        }
+
+        total
+    }
+
+    /// Returns the total logical bytes remaining (alias for remaining()).
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.remaining()
+    }
+
+    /// Returns true if no logical bytes remain.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.remaining() == 0
+    }
+
+    /// Copies all remaining logical bytes to a new Vec.
+    ///
+    /// This is useful when contiguous access is needed (e.g., for parsing variable-length items).
+    /// For zero-copy access, iterate using `chunk()` and `advance()`.
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut buf = self.clone();
+        let mut result = Vec::with_capacity(buf.remaining());
+        while buf.remaining() > 0 {
+            let chunk = buf.chunk();
+            result.extend_from_slice(chunk);
+            buf.advance(chunk.len());
+        }
+        result
+    }
+}
+
+impl Buf for PhysicalBuf {
+    fn remaining(&self) -> usize {
+        self.logical_remaining()
+    }
+
+    fn chunk(&self) -> &[u8] {
+        if self.current_page >= self.pages_in_buffer {
+            return &[];
+        }
+        let page_start = self.current_page * self.page_size;
+        let page_len = self.page_length(self.current_page);
+        &self.buffer[page_start + self.offset_in_page..page_start + page_len]
+    }
+
+    fn advance(&mut self, mut cnt: usize) {
+        while cnt > 0 && self.current_page < self.pages_in_buffer {
+            let remaining_in_page = self.page_length(self.current_page) - self.offset_in_page;
+            if cnt < remaining_in_page {
+                self.offset_in_page += cnt;
+                break;
+            }
+            cnt -= remaining_in_page;
+            self.current_page += 1;
+            self.offset_in_page = 0;
+        }
+    }
+}
+
+/// A buffer that can hold either a single [`PhysicalBuf`] or two chained [`PhysicalBuf`]s.
 ///
 /// This allows zero-copy reads that span buffer boundaries by chaining the tail
 /// of one buffer with the head of the next, rather than copying into a new allocation.
-#[derive(Debug)]
-pub enum BytesList {
-    /// A single contiguous buffer (common case: data fits in current buffer).
-    Single(Bytes),
+pub enum PhysicalBufList {
+    /// A single buffer (common case: data fits in current buffer).
+    Single(PhysicalBuf),
     /// Two buffers chained together (data spans buffer boundary).
-    Two(Chain<Bytes, Bytes>),
+    Two(Chain<PhysicalBuf, PhysicalBuf>),
 }
 
-impl Buf for BytesList {
+impl Buf for PhysicalBufList {
     fn remaining(&self) -> usize {
         match self {
             Self::Single(b) => b.remaining(),
@@ -43,6 +153,9 @@ impl Buf for BytesList {
 
 /// A reader that buffers content from a [Blob] with page-level CRCs to optimize the performance of
 /// a full scan of contents.
+///
+/// This implementation keeps physical bytes (with CRCs) in memory and provides a zero-copy view
+/// via [`PhysicalBuf`] that skips over CRC regions during iteration.
 pub struct Read<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
@@ -50,15 +163,20 @@ pub struct Read<B: Blob> {
     physical_blob_size: u64,
     /// The logical size of the blob (actual data bytes, not including CRCs or padding).
     logical_blob_size: u64,
-    /// The buffer storing logical data (CRCs validated and removed).
-    /// Uses Bytes for ref-counted slicing, allowing zero-copy reads.
+    /// The buffer storing physical data (with CRCs validated but not removed).
     buffer: Bytes,
-    /// The current page in the blob from where the buffer was filled.
+    /// The starting page index in the blob from where the buffer was filled.
     blob_page: u64,
-    /// The current position within the buffer.
-    buffer_position: usize,
-    /// The capacity of the buffer (in physical bytes read from blob).
-    buffer_capacity: usize,
+    /// Current page index within the buffer.
+    page_position: usize,
+    /// Current offset within the current page's logical data.
+    offset_in_page: usize,
+    /// Number of pages in the current buffer.
+    pages_in_buffer: usize,
+    /// Length of the last page's logical data (may be < logical_page_size).
+    last_page_length: u16,
+    /// The capacity of the buffer in pages.
+    buffer_capacity_pages: usize,
     /// The physical page size (logical_page_size + Checksum::SIZE).
     page_size: usize,
     /// The logical page size (data bytes per page, not including CRC).
@@ -66,31 +184,23 @@ pub struct Read<B: Blob> {
 }
 
 impl<B: Blob> Read<B> {
-    /// Creates a new `Read` that reads from the given blob with the specified buffer size. The
-    /// `logical_page_size` is the size of the logical data portion of each page (not including the
-    /// Checksum). If the buffer capacity is not a multiple of the physical page size, it will be
-    /// rounded up to the nearest.
+    /// Creates a new `Read` that reads from the given blob with the specified buffer size in pages.
+    ///
+    /// The `logical_page_size` is the size of the logical data portion of each page (not including
+    /// the Checksum).
     ///
     /// The `physical_blob_size` is the size of the underlying blob on disk (must be a multiple of
     /// the physical page size). The `logical_blob_size` is the actual data size (not including
     /// CRCs or padding in partial pages).
-    pub fn new(
+    pub const fn new(
         blob: B,
         physical_blob_size: u64,
         logical_blob_size: u64,
-        capacity: NonZeroUsize,
-        logical_page_size: NonZeroUsize,
+        capacity_pages: NonZeroUsize,
+        logical_page_size: NonZeroU16,
     ) -> Self {
-        let logical_page_size = logical_page_size.get();
+        let logical_page_size = logical_page_size.get() as usize;
         let page_size = logical_page_size + Checksum::SIZE;
-        let mut capacity = capacity.get();
-        if !capacity.is_multiple_of(page_size) {
-            capacity += page_size - capacity % page_size;
-            debug!(
-                capacity,
-                "rounded buffer capacity up to nearest multiple of page_size"
-            );
-        }
 
         Self {
             blob,
@@ -98,8 +208,11 @@ impl<B: Blob> Read<B> {
             logical_blob_size,
             buffer: Bytes::new(),
             blob_page: 0,
-            buffer_position: 0,
-            buffer_capacity: capacity,
+            page_position: 0,
+            offset_in_page: 0,
+            pages_in_buffer: 0,
+            last_page_length: 0,
+            buffer_capacity_pages: capacity_pages.get(),
             page_size,
             logical_page_size,
         }
@@ -111,8 +224,48 @@ impl<B: Blob> Read<B> {
     }
 
     /// Returns the current logical position in the blob.
-    pub const fn position(&self) -> u64 {
-        self.blob_page * self.logical_page_size as u64 + self.buffer_position as u64
+    pub fn position(&self) -> u64 {
+        // Pages before current buffer (all full)
+        let mut pos = self.blob_page * self.logical_page_size as u64;
+
+        // Sum actual page lengths for pages consumed in current buffer
+        for i in 0..self.page_position {
+            pos += self.page_length(i) as u64;
+        }
+
+        // Add current offset within page
+        pos + self.offset_in_page as u64
+    }
+
+    /// Returns the logical length of the specified page in the buffer.
+    #[inline]
+    const fn page_length(&self, page_idx: usize) -> usize {
+        if page_idx == self.pages_in_buffer - 1 {
+            self.last_page_length as usize
+        } else {
+            self.logical_page_size
+        }
+    }
+
+    /// Returns the total logical bytes available in the current buffer from current position.
+    const fn available_len(&self) -> usize {
+        if self.page_position >= self.pages_in_buffer {
+            return 0;
+        }
+
+        // Current page remaining
+        let mut total = self.page_length(self.page_position) - self.offset_in_page;
+
+        // Full pages between current and last
+        if self.page_position + 1 < self.pages_in_buffer {
+            let full_pages_between = self.pages_in_buffer - self.page_position - 2;
+            total += full_pages_between * self.logical_page_size;
+
+            // Last page
+            total += self.last_page_length as usize;
+        }
+
+        total
     }
 
     /// Reads up to `buf.len()` bytes from the current position, but only as many as are available.
@@ -152,23 +305,35 @@ impl<B: Blob> Read<B> {
         let mut bytes_copied = 0;
         while bytes_copied < size {
             // Refill buffer if exhausted
-            if self.buffer_position >= self.buffer.len() {
+            if self.page_position >= self.pages_in_buffer {
                 self.fill_buffer().await?;
             }
 
-            // Copy logical bytes
-            let available = self.buffer.len() - self.buffer_position;
-            if available == 0 {
-                return Err(Error::BlobInsufficientLength);
+            // Copy logical bytes from current page
+            let page_len = self.page_length(self.page_position);
+            let available_in_page = page_len - self.offset_in_page;
+            if available_in_page == 0 {
+                // Move to next page
+                self.page_position += 1;
+                self.offset_in_page = 0;
+                continue;
             }
 
-            let bytes_to_copy = (size - bytes_copied).min(available);
+            let bytes_to_copy = (size - bytes_copied).min(available_in_page);
+            let page_start = self.page_position * self.page_size;
             buf[bytes_copied..bytes_copied + bytes_to_copy].copy_from_slice(
-                &self.buffer[self.buffer_position..self.buffer_position + bytes_to_copy],
+                &self.buffer[page_start + self.offset_in_page
+                    ..page_start + self.offset_in_page + bytes_to_copy],
             );
 
             bytes_copied += bytes_to_copy;
-            self.buffer_position += bytes_to_copy;
+            self.offset_in_page += bytes_to_copy;
+
+            // Move to next page if we've consumed the current one
+            if self.offset_in_page >= page_len {
+                self.page_position += 1;
+                self.offset_in_page = 0;
+            }
         }
 
         Ok(())
@@ -198,7 +363,7 @@ impl<B: Blob> Read<B> {
     /// # Cross-Page Boundary Handling
     ///
     /// If the buffer contains less than one item's worth of data but the blob has more data
-    /// available, this method uses [`read_bytes`](Self::read_bytes) to handle the cross-page read.
+    /// available, this method uses [`read_buf`](Self::read_buf) to handle the cross-page read.
     pub async fn decode_batch_fixed<T, R, F>(
         &mut self,
         batch: &mut Vec<R>,
@@ -213,18 +378,18 @@ impl<B: Blob> Read<B> {
             return Ok((0, 0));
         }
 
-        let available = self.available().len();
+        let available = self.available_len();
         if available < T::SIZE {
             // Buffer has less than one item. This happens when an item spans a page boundary.
-            // Use read_bytes which handles cross-page reads via chaining.
-            match self.read_bytes(T::SIZE).await {
-                Ok(bytes) => {
-                    let item = T::decode(bytes)?;
+            // Use read_buf which handles cross-page reads via chaining.
+            match self.read_buf(T::SIZE).await {
+                Ok(mut bytes) => {
+                    let item = T::decode(&mut bytes)?;
                     batch.push(f(0, Ok(item)));
 
                     // After cross-page read, check remaining bytes. If less than one item,
                     // report as trailing (caller will check if at end of blob).
-                    let remaining = self.available().len();
+                    let remaining = self.available_len();
                     let trailing = if remaining >= T::SIZE { 0 } else { remaining };
                     return Ok((1, trailing));
                 }
@@ -234,35 +399,35 @@ impl<B: Blob> Read<B> {
             }
         }
 
-        // Fast path: decode all complete items directly from buffer without copying
-        let buf = self.available();
-        let items_in_buf = buf.len() / T::SIZE;
-        let trailing = buf.len() % T::SIZE;
+        // Fast path: read all complete items directly from buffer without copying
+        // Note: We use T::read (not T::decode) because read doesn't check for remaining
+        // bytes, allowing us to read multiple items from the same buffer.
+        let mut buf = self.available();
+        let items_in_buf = available / T::SIZE;
+        let trailing = available % T::SIZE;
 
         batch.reserve(items_in_buf);
         for i in 0..items_in_buf {
-            let slice = &buf[i * T::SIZE..][..T::SIZE];
-            batch.push(f(i, T::decode(slice)));
+            batch.push(f(i, T::read(&mut buf)));
         }
 
-        self.advance(items_in_buf * T::SIZE);
+        self.advance_by(items_in_buf * T::SIZE);
         Ok((items_in_buf, trailing))
     }
 
     /// Fills the buffer from the blob starting at the current physical position and verifies the
-    /// CRC of each page (including any trailing partial page).
+    /// CRC of each page.
     ///
-    /// The buffer stores compacted logical data (CRCs validated and removed).
+    /// The buffer stores physical data (CRCs validated but not removed) for zero-copy reads.
     async fn fill_buffer(&mut self) -> Result<(), Error> {
-        // Advance blob_page based on how many logical pages we had in the buffer.
-        let pages_consumed = self.buffer.len().div_ceil(self.logical_page_size);
-        self.blob_page += pages_consumed as u64;
+        // Advance blob_page based on how many pages we consumed from the buffer.
+        self.blob_page += self.pages_in_buffer as u64;
 
-        // Reset position to the offset within the new page. If the buffer was not empty, we are
-        // continuing a sequential read, so we start at the beginning of the next page. If the
-        // buffer was empty (e.g. after a seek), we preserve the offset set by seek_to.
-        if !self.buffer.is_empty() {
-            self.buffer_position = 0;
+        // Reset position. If the buffer was not empty, we're continuing sequential read.
+        // If the buffer was empty (e.g. after a seek), preserve offset set by seek_to.
+        if self.pages_in_buffer > 0 {
+            self.page_position = 0;
+            self.offset_in_page = 0;
         }
 
         // Calculate physical read parameters
@@ -275,200 +440,308 @@ impl<B: Blob> Read<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        let bytes_to_read =
-            ((self.physical_blob_size - start_offset) as usize).min(self.buffer_capacity);
-        if bytes_to_read == 0 {
+        // Calculate how many pages to read
+        let remaining_physical = (self.physical_blob_size - start_offset) as usize;
+        let max_pages = remaining_physical / self.page_size;
+        let pages_to_read = max_pages.min(self.buffer_capacity_pages);
+        if pages_to_read == 0 {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Read physical data into a temporary buffer
+        let bytes_to_read = pages_to_read * self.page_size;
+
+        // Read physical data (single allocation)
         let physical_buf: Vec<u8> = self
             .blob
             .read_at(vec![0u8; bytes_to_read], start_offset)
             .await?
             .into();
+        let physical_buf = Bytes::from(physical_buf);
 
-        // Calculate max logical size and pre-allocate destination buffer.
-        let num_full_pages = bytes_to_read / self.page_size;
-        let partial_page_bytes = bytes_to_read % self.page_size;
-        let max_logical_size = num_full_pages * self.logical_page_size
-            + partial_page_bytes.saturating_sub(Checksum::SIZE);
-        let mut logical_buf = BytesMut::with_capacity(max_logical_size);
+        // Validate CRCs for each page (but don't strip them - keep physical layout)
+        let mut last_page_length = self.logical_page_size as u16;
+        for page_idx in 0..pages_to_read {
+            let page_start = page_idx * self.page_size;
+            let page_slice = &physical_buf[page_start..page_start + self.page_size];
+            let Some(record) = Checksum::validate_page(page_slice) else {
+                error!(page = self.blob_page + page_idx as u64, "CRC mismatch");
+                return Err(Error::InvalidChecksum);
+            };
+            let (len, _) = record.get_crc();
 
-        // Validate CRCs and copy each page's logical data to the compacted buffer
-        let mut read_offset = 0;
-        while read_offset < bytes_to_read {
-            let remaining = bytes_to_read - read_offset;
+            // Check if this is the last page in the blob
+            let is_last_page_in_blob = start_offset + (page_idx + 1) as u64 * self.page_size as u64
+                >= self.physical_blob_size;
 
-            if remaining >= self.page_size {
-                // Full page
-                let page_slice = &physical_buf[read_offset..read_offset + self.page_size];
-                let Some(record) = Checksum::validate_page(page_slice) else {
-                    error!(
-                        page = self.blob_page + (read_offset / self.page_size) as u64,
-                        "CRC mismatch"
-                    );
-                    return Err(Error::InvalidChecksum);
-                };
-                let (len, _) = record.get_crc();
-                let len = len as usize;
-                let is_last_page = start_offset + read_offset as u64 + self.page_size as u64
-                    >= self.physical_blob_size;
-                if !is_last_page && len != self.logical_page_size {
-                    error!(
-                        page = self.blob_page + (read_offset / self.page_size) as u64,
-                        expected = self.logical_page_size,
-                        actual = len,
-                        "non-last page has partial length"
-                    );
-                    return Err(Error::InvalidChecksum);
-                }
-                logical_buf.extend_from_slice(&page_slice[..len]);
-                read_offset += self.page_size;
-            } else if remaining >= Checksum::SIZE {
-                // Partial page (last page in buffer)
-                let page_slice = &physical_buf[read_offset..];
-                let Some(record) = Checksum::validate_page(page_slice) else {
-                    error!(
-                        page = self.blob_page + (read_offset / self.page_size) as u64,
-                        "CRC mismatch"
-                    );
-                    return Err(Error::InvalidChecksum);
-                };
-                let (len, _) = record.get_crc();
-                logical_buf.extend_from_slice(&page_slice[..len as usize]);
-                break;
-            } else {
+            if is_last_page_in_blob {
+                last_page_length = len;
+            } else if (len as usize) != self.logical_page_size {
                 error!(
-                    page = self.blob_page + (read_offset / self.page_size) as u64,
-                    "short page"
+                    page = self.blob_page + page_idx as u64,
+                    expected = self.logical_page_size,
+                    actual = len,
+                    "non-last page has partial length"
                 );
                 return Err(Error::InvalidChecksum);
             }
         }
 
-        self.buffer = logical_buf.freeze();
+        self.buffer = physical_buf;
+        self.pages_in_buffer = pages_to_read;
+        self.last_page_length = last_page_length;
 
-        // If we sought to a position that is beyond the end of what we just read, error.
-        if self.buffer_position >= self.buffer.len() {
+        // If we sought to a position that is beyond what we just read, error.
+        if self.page_position >= self.pages_in_buffer
+            || (self.page_position == self.pages_in_buffer - 1
+                && self.offset_in_page >= self.last_page_length as usize)
+        {
             return Err(Error::BlobInsufficientLength);
         }
 
         Ok(())
     }
 
-    /// Returns available buffered data without copying.
-    pub fn available(&self) -> &[u8] {
-        &self.buffer[self.buffer_position..]
+    /// Returns available buffered data as a [`PhysicalBuf`] (zero-copy view over physical buffer).
+    pub fn available(&self) -> PhysicalBuf {
+        PhysicalBuf {
+            buffer: self.buffer.clone(), // Ref-counted, no copy
+            page_size: self.page_size,
+            logical_page_size: self.logical_page_size,
+            pages_in_buffer: self.pages_in_buffer,
+            last_page_length: self.last_page_length as usize,
+            current_page: self.page_position,
+            offset_in_page: self.offset_in_page,
+        }
     }
 
     /// Fills buffer if empty. Returns bytes available (0 if at end of blob).
     pub async fn fill(&mut self) -> Result<usize, Error> {
-        if self.buffer_position >= self.buffer.len() {
+        if self.page_position >= self.pages_in_buffer {
             match self.fill_buffer().await {
                 Ok(()) => {}
                 Err(Error::BlobInsufficientLength) => return Ok(0),
                 Err(err) => return Err(err),
             }
         }
-        Ok(self.available().len())
+        Ok(self.available_len())
     }
 
-    /// Advances the buffer position by `n` bytes.
+    /// Advances the logical position by `n` bytes.
+    pub const fn advance_by(&mut self, mut n: usize) {
+        while n > 0 && self.page_position < self.pages_in_buffer {
+            let remaining_in_page = self.page_length(self.page_position) - self.offset_in_page;
+            if n < remaining_in_page {
+                self.offset_in_page += n;
+                break;
+            }
+            n -= remaining_in_page;
+            self.page_position += 1;
+            self.offset_in_page = 0;
+        }
+    }
+
+    /// Advances the logical position by `n` bytes (alias for advance_by).
+    #[inline]
+    pub const fn advance(&mut self, n: usize) {
+        self.advance_by(n);
+    }
+
+    /// Returns available buffer content as Bytes by copying logical data.
     ///
-    /// # Panics
+    /// Note: This method copies data to produce contiguous bytes. For zero-copy access,
+    /// use [`available()`](Self::available) which returns a [`PhysicalBuf`].
+    pub fn available_bytes(&self) -> Bytes {
+        let mut buf = self.available();
+        let mut result = Vec::with_capacity(buf.remaining());
+        while buf.remaining() > 0 {
+            let chunk = buf.chunk();
+            result.extend_from_slice(chunk);
+            buf.advance(chunk.len());
+        }
+        Bytes::from(result)
+    }
+
+    /// Reads exactly `size` bytes, returning a [`BytesList`].
     ///
-    /// Panics in debug builds if `n` would advance past the end of the buffer.
-    pub fn advance(&mut self, n: usize) {
-        debug_assert!(
-            self.buffer_position + n <= self.buffer.len(),
-            "advance({}) would exceed buffer length {}",
-            n,
-            self.buffer.len()
-        );
-        self.buffer_position += n;
+    /// Note: This method may copy data. For zero-copy access, use [`read_buf()`](Self::read_buf).
+    pub async fn read_bytes(&mut self, size: usize) -> Result<BytesList, Error> {
+        // Collect logical bytes into a contiguous buffer
+        let mut buf = vec![0u8; size];
+        self.read_exact(&mut buf, size).await?;
+        Ok(BytesList::Single(Bytes::from(buf)))
     }
 
     /// Repositions the buffer to read from the specified logical position in the blob.
     pub fn seek_to(&mut self, position: u64) -> Result<(), Error> {
         let logical_page_size = self.logical_page_size as u64;
 
-        // Check if the position is within the current buffer.
-        let buffer_start = self.blob_page * logical_page_size;
-        let buffer_end = buffer_start + self.buffer.len() as u64;
-        if position >= buffer_start && position < buffer_end {
-            self.buffer_position = (position - buffer_start) as usize;
-            return Ok(());
+        // Calculate which page and offset within that page
+        let target_page = position / logical_page_size;
+        let target_offset = (position % logical_page_size) as usize;
+
+        // Check if the position is within the current buffer
+        let buffer_start_page = self.blob_page;
+        let buffer_end_page = self.blob_page + self.pages_in_buffer as u64;
+
+        if target_page >= buffer_start_page && target_page < buffer_end_page {
+            let page_in_buffer = (target_page - buffer_start_page) as usize;
+
+            // Verify offset is valid for the target page
+            let page_len = self.page_length(page_in_buffer);
+            if target_offset <= page_len {
+                self.page_position = page_in_buffer;
+                self.offset_in_page = target_offset;
+                return Ok(());
+            }
         }
 
-        self.blob_page = position / logical_page_size;
-        self.buffer_position = (position % logical_page_size) as usize;
+        // Position is outside current buffer - need to refill
+        self.blob_page = target_page;
+        self.page_position = 0;
+        self.offset_in_page = target_offset;
+        self.pages_in_buffer = 0;
         self.buffer = Bytes::new();
 
         Ok(())
     }
 
-    /// Returns available buffer content as Bytes (zero-copy, ref-counted).
+    /// Returns available buffer content as a [`PhysicalBuf`] (zero-copy, ref-counted).
     ///
-    /// The returned Bytes remains valid even after `fill_buffer()` is called,
+    /// The returned buffer remains valid even after `fill_buffer()` is called,
     /// making it safe to hold across async operations that may refill the buffer.
-    pub fn available_bytes(&self) -> Bytes {
-        self.buffer.slice(self.buffer_position..)
+    pub fn available_buf(&self) -> PhysicalBuf {
+        self.available()
     }
 
-    /// Reads exactly `size` bytes, returning a [BytesList].
+    /// Reads exactly `size` logical bytes, returning a [`PhysicalBufList`].
     ///
-    /// Returns [BytesList] to avoid copying when data spans buffer boundaries.
+    /// Returns [`PhysicalBufList`] to avoid copying when data spans buffer boundaries.
     /// Uses `chain()` to combine pieces without allocation.
-    pub async fn read_bytes(&mut self, size: usize) -> Result<BytesList, Error> {
+    pub async fn read_buf(&mut self, size: usize) -> Result<PhysicalBufList, Error> {
         // Fast path: fits entirely in current buffer
-        if self.buffer_position + size <= self.buffer.len() {
-            let result = self
-                .buffer
-                .slice(self.buffer_position..self.buffer_position + size);
-            self.buffer_position += size;
-            return Ok(BytesList::Single(result));
+        let available = self.available_len();
+        if available >= size {
+            let buf = PhysicalBuf {
+                buffer: self.buffer.clone(),
+                page_size: self.page_size,
+                logical_page_size: self.logical_page_size,
+                pages_in_buffer: self.pages_in_buffer,
+                last_page_length: self.last_page_length as usize,
+                current_page: self.page_position,
+                offset_in_page: self.offset_in_page,
+            };
+            self.advance_by(size);
+            return Ok(PhysicalBufList::Single(buf));
         }
 
-        let remaining_in_buffer = self.buffer.len() - self.buffer_position;
+        // Check if item spans 3+ buffers - use read_exact fallback
+        let logical_buffer_capacity = self.buffer_capacity_pages * self.logical_page_size;
+        if size > available + logical_buffer_capacity {
+            // Item is larger than remaining + one full buffer - read directly
+            let first_buf = self.available();
+            let first_len = first_buf.remaining();
+            self.advance_by(first_len);
 
-        // Calculate logical capacity per buffer (number of full pages * logical_page_size)
-        let pages_per_buffer = self.buffer_capacity / self.page_size;
-        let logical_buffer_capacity = pages_per_buffer * self.logical_page_size;
-
-        // Check if item spans 3+ buffers (larger than remaining + one full buffer).
-        // Read directly via read_exact - more efficient than multiple buffer fills.
-        if size > remaining_in_buffer + logical_buffer_capacity {
-            let first = self.buffer.slice(self.buffer_position..);
-            self.buffer_position = self.buffer.len();
-
-            let rest_size = size - remaining_in_buffer;
+            let rest_size = size - first_len;
             let mut rest = vec![0u8; rest_size];
             self.read_exact(&mut rest, rest_size).await?;
 
-            return Ok(BytesList::Two(first.chain(Bytes::from(rest))));
+            // Create a PhysicalBuf from the copied data (this path is rare)
+            let rest_buf = PhysicalBuf {
+                buffer: Bytes::from(rest),
+                page_size: rest_size, // Treat as single "page" of logical data
+                logical_page_size: rest_size,
+                pages_in_buffer: 1,
+                last_page_length: rest_size,
+                current_page: 0,
+                offset_in_page: 0,
+            };
+
+            return Ok(PhysicalBufList::Two(first_buf.chain(rest_buf)));
         }
 
         // Slow path: spans 2 buffers - chain pieces
-        let first = self.buffer.slice(self.buffer_position..);
-        let first_len = first.len();
-        self.buffer_position = self.buffer.len();
+        let first = PhysicalBuf {
+            buffer: self.buffer.clone(),
+            page_size: self.page_size,
+            logical_page_size: self.logical_page_size,
+            pages_in_buffer: self.pages_in_buffer,
+            last_page_length: self.last_page_length as usize,
+            current_page: self.page_position,
+            offset_in_page: self.offset_in_page,
+        };
+        let first_len = first.remaining();
 
+        // Consume rest of current buffer
+        self.page_position = self.pages_in_buffer;
+        self.offset_in_page = 0;
+
+        // Fill next buffer
         self.fill_buffer().await?;
-        if self.buffer.is_empty() {
+        if self.pages_in_buffer == 0 {
             return Err(Error::BlobInsufficientLength);
         }
 
         let second_len = size - first_len;
-        let second = self.buffer.slice(..second_len);
-        self.buffer_position = second_len;
-        Ok(BytesList::Two(first.chain(second)))
+        let second = PhysicalBuf {
+            buffer: self.buffer.clone(),
+            page_size: self.page_size,
+            logical_page_size: self.logical_page_size,
+            pages_in_buffer: self.pages_in_buffer,
+            last_page_length: self.last_page_length as usize,
+            current_page: 0,
+            offset_in_page: 0,
+        };
+
+        self.advance_by(second_len);
+        Ok(PhysicalBufList::Two(first.chain(second)))
+    }
+}
+
+// Keep the old BytesList type for backwards compatibility with existing code
+// that might use read_bytes directly. We can deprecate this later.
+
+/// A buffer that can hold either a single contiguous [`Bytes`] or two chained [`Bytes`].
+///
+/// This allows zero-copy reads that span buffer boundaries by chaining the tail
+/// of one buffer with the head of the next, rather than copying into a new allocation.
+#[derive(Debug)]
+pub enum BytesList {
+    /// A single contiguous buffer (common case: data fits in current buffer).
+    Single(Bytes),
+    /// Two buffers chained together (data spans buffer boundary).
+    Two(Chain<Bytes, Bytes>),
+}
+
+impl Buf for BytesList {
+    fn remaining(&self) -> usize {
+        match self {
+            Self::Single(b) => b.remaining(),
+            Self::Two(c) => c.remaining(),
+        }
+    }
+
+    fn chunk(&self) -> &[u8] {
+        match self {
+            Self::Single(b) => b.chunk(),
+            Self::Two(c) => c.chunk(),
+        }
+    }
+
+    fn advance(&mut self, cnt: usize) {
+        match self {
+            Self::Single(b) => b.advance(cnt),
+            Self::Two(c) => c.advance(cnt),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::{append::Append, PoolRef};
+    use super::{
+        super::{append::Append, PoolRef},
+        *,
+    };
     use crate::{deterministic, Blob, Error, Runner as _, Storage as _};
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
@@ -476,7 +749,7 @@ mod tests {
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // Logical page size (intentionally odd to test alignment)
-    const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+    const BUFFER_PAGES: usize = 2;
 
     #[test_traced("DEBUG")]
     fn test_read_after_append() {
@@ -486,8 +759,8 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_SIZE, pool_ref)
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, pool_ref)
                 .await
                 .unwrap();
 
@@ -496,7 +769,7 @@ mod tests {
             append.append(&data).await.unwrap();
 
             // Create a Read to read the data back
-            let mut reader = append.as_blob_reader(NZUsize!(BUFFER_SIZE)).await.unwrap();
+            let mut reader = append.as_blob_reader(NZUsize!(BUFFER_PAGES)).await.unwrap();
 
             // Verify initial position
             assert_eq!(reader.position(), 0);
@@ -518,8 +791,8 @@ mod tests {
             // Create a blob and write data using Append
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_SIZE, pool_ref)
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, pool_ref)
                 .await
                 .unwrap();
 
@@ -527,7 +800,7 @@ mod tests {
             let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
             append.append(&data).await.unwrap();
 
-            let mut reader = append.as_blob_reader(NZUsize!(BUFFER_SIZE)).await.unwrap();
+            let mut reader = append.as_blob_reader(NZUsize!(BUFFER_PAGES)).await.unwrap();
 
             // Read first 50 bytes
             let mut buf = vec![0u8; 50];
@@ -562,8 +835,8 @@ mod tests {
             // Create a blob and write data that doesn't fill the last page
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_SIZE, pool_ref)
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, pool_ref)
                 .await
                 .unwrap();
 
@@ -572,7 +845,7 @@ mod tests {
             assert_eq!(data.len(), PAGE_SIZE.get() as usize + 10);
             append.append(&data).await.unwrap();
 
-            let mut reader = append.as_blob_reader(NZUsize!(BUFFER_SIZE)).await.unwrap();
+            let mut reader = append.as_blob_reader(NZUsize!(BUFFER_PAGES)).await.unwrap();
 
             // Read all data back
             let mut read_buf = vec![0u8; data.len()];
@@ -593,8 +866,8 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_SIZE, pool_ref)
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, pool_ref)
                 .await
                 .unwrap();
 
@@ -602,7 +875,7 @@ mod tests {
             let data: Vec<u8> = (0u8..200).collect();
             append.append(&data).await.unwrap();
 
-            let mut reader = append.as_blob_reader(NZUsize!(BUFFER_SIZE)).await.unwrap();
+            let mut reader = append.as_blob_reader(NZUsize!(BUFFER_PAGES)).await.unwrap();
 
             // Seek to position 90 (13 bytes before first page boundary at 103)
             reader.seek_to(90).unwrap();
@@ -620,8 +893,8 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_SIZE, pool_ref)
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, pool_ref)
                 .await
                 .unwrap();
 
@@ -637,7 +910,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as u64;
             let short_len = page_size / 2;
             let crc = Crc32::checksum(&data[..short_len as usize]);
-            let record = super::Checksum::new(short_len as u16, crc);
+            let record = super::super::Checksum::new(short_len as u16, crc);
             let crc_offset = page_size; // CRC record starts after logical page bytes
             blob.write_at(record.to_bytes().to_vec(), crc_offset)
                 .await
@@ -645,14 +918,47 @@ mod tests {
             blob.sync().await.unwrap();
 
             // Capacity of one page => bug reproduces if last-page check is buffer-based.
-            let mut reader = append
-                .as_blob_reader(NZUsize!(page_size as usize))
-                .await
-                .unwrap();
+            let mut reader = append.as_blob_reader(NZUsize!(1)).await.unwrap();
             let mut buf = vec![0u8; page_size as usize];
             let result = reader.read_exact(&mut buf, page_size as usize).await;
 
             assert!(matches!(result, Err(Error::InvalidChecksum)));
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_physical_buf_iteration() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
+
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, pool_ref)
+                .await
+                .unwrap();
+
+            // Write data spanning multiple pages
+            let data: Vec<u8> = (0u8..=255).cycle().take(250).collect();
+            append.append(&data).await.unwrap();
+
+            let mut reader = append.as_blob_reader(NZUsize!(BUFFER_PAGES)).await.unwrap();
+
+            // Fill and get PhysicalBuf
+            reader.fill().await.unwrap();
+            let mut buf = reader.available();
+
+            // Verify we can iterate through the data correctly
+            let mut collected = Vec::new();
+            while buf.remaining() > 0 {
+                let chunk = buf.chunk();
+                collected.extend_from_slice(chunk);
+                let len = chunk.len();
+                buf.advance(len);
+            }
+
+            // Should have collected all data up to buffer capacity
+            assert!(!collected.is_empty());
+            assert_eq!(&collected[..], &data[..collected.len()]);
         });
     }
 }
