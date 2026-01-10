@@ -561,20 +561,22 @@ mod tests {
         executor.start(|context: Context| async move {
             let cfg = journal_config("large");
 
-            // Size 1_000_007 with items_per_section=11 means tail_section=90909, tail_items=8
-            // This should be fast because we only write 8 dummies, not 1 million!
+            // Size 1 trillion + 7 with items_per_section=11 means tail_items=8.
+            // This completes instantly because we only write 8 dummies, not 1 trillion!
+            // If this were O(size), the test would never complete.
+            const SIZE: u64 = 1_000_000_000_007;
             let mut journal =
-                variable::Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 1_000_007)
+                variable::Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), SIZE)
                     .await
                     .unwrap();
 
-            assert_eq!(journal.size(), 1_000_007);
+            assert_eq!(journal.size(), SIZE);
             assert_eq!(journal.oldest_retained_pos(), None);
 
-            // Can append starting at position 1_000_007
+            // Can append starting at position SIZE
             let pos = journal.append(999999).await.unwrap();
-            assert_eq!(pos, 1_000_007);
-            assert_eq!(journal.read(1_000_007).await.unwrap(), 999999);
+            assert_eq!(pos, SIZE);
+            assert_eq!(journal.read(SIZE).await.unwrap(), 999999);
 
             journal.destroy().await.unwrap();
         });
