@@ -6,7 +6,7 @@
 //! zero-copy decoding without byte swapping.
 
 use bytes::BytesMut;
-use commonware_codec::{FixedSize, Read, ReadExt, Write};
+use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
 use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 use rand::{Rng, SeedableRng};
@@ -355,4 +355,216 @@ fn benchmark_integers(c: &mut Criterion) {
     bench_roundtrip(c, "u64", &u64_values);
 }
 
-criterion_group!(benches, benchmark_integers, bench_le_vs_be, bench_zero_copy_read);
+/// Compare fixed-width little-endian u64 vs varint encoding/decoding.
+/// Fixed-width is faster but uses more space for small values.
+/// Varint is more compact for small values but slower due to bit manipulation.
+fn bench_fixed_vs_varint(c: &mut Criterion) {
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let count = 10000;
+
+    // Small values (1 byte varint vs 8 bytes fixed)
+    let small_values: Vec<u64> = (0..count).map(|_| rng.r#gen::<u64>() % 128).collect();
+
+    // Medium values (2-3 bytes varint vs 8 bytes fixed)
+    let medium_values: Vec<u64> = (0..count)
+        .map(|_| 128 + (rng.r#gen::<u64>() % (1 << 21)))
+        .collect();
+
+    // Large values (8-10 bytes varint vs 8 bytes fixed)
+    let large_values: Vec<u64> = (0..count).map(|_| rng.r#gen::<u64>()).collect();
+
+    // Pre-encode all variants
+    let encode_fixed = |values: &[u64]| -> bytes::Bytes {
+        let mut buf = BytesMut::with_capacity(count * 8);
+        for v in values {
+            v.write(&mut buf);
+        }
+        buf.freeze()
+    };
+
+    let encode_varint = |values: &[u64]| -> bytes::Bytes {
+        let total_size: usize = values.iter().map(|v| UInt(*v).encode_size()).sum();
+        let mut buf = BytesMut::with_capacity(total_size);
+        for v in values {
+            UInt(*v).write(&mut buf);
+        }
+        buf.freeze()
+    };
+
+    let small_fixed = encode_fixed(&small_values);
+    let small_varint = encode_varint(&small_values);
+    let medium_fixed = encode_fixed(&medium_values);
+    let medium_varint = encode_varint(&medium_values);
+    let large_fixed = encode_fixed(&large_values);
+    let large_varint = encode_varint(&large_values);
+
+    // --- DECODE BENCHMARKS ---
+
+    // Small values decode
+    let mut group = c.benchmark_group("fixed_vs_varint_decode/small");
+    group.throughput(Throughput::Elements(count as u64));
+
+    group.bench_function("fixed_le_u64", |b| {
+        b.iter(|| {
+            let mut slice = small_fixed.clone();
+            let mut sum: u64 = 0;
+            for _ in 0..count {
+                sum = sum.wrapping_add(u64::read(&mut slice).unwrap());
+            }
+            black_box(sum)
+        })
+    });
+
+    group.bench_function("varint_u64", |b| {
+        b.iter(|| {
+            let mut slice = small_varint.clone();
+            let mut sum: u64 = 0;
+            for _ in 0..count {
+                sum = sum.wrapping_add(UInt::<u64>::read(&mut slice).unwrap().0);
+            }
+            black_box(sum)
+        })
+    });
+
+    group.finish();
+
+    // Medium values decode
+    let mut group = c.benchmark_group("fixed_vs_varint_decode/medium");
+    group.throughput(Throughput::Elements(count as u64));
+
+    group.bench_function("fixed_le_u64", |b| {
+        b.iter(|| {
+            let mut slice = medium_fixed.clone();
+            let mut sum: u64 = 0;
+            for _ in 0..count {
+                sum = sum.wrapping_add(u64::read(&mut slice).unwrap());
+            }
+            black_box(sum)
+        })
+    });
+
+    group.bench_function("varint_u64", |b| {
+        b.iter(|| {
+            let mut slice = medium_varint.clone();
+            let mut sum: u64 = 0;
+            for _ in 0..count {
+                sum = sum.wrapping_add(UInt::<u64>::read(&mut slice).unwrap().0);
+            }
+            black_box(sum)
+        })
+    });
+
+    group.finish();
+
+    // Large values decode
+    let mut group = c.benchmark_group("fixed_vs_varint_decode/large");
+    group.throughput(Throughput::Elements(count as u64));
+
+    group.bench_function("fixed_le_u64", |b| {
+        b.iter(|| {
+            let mut slice = large_fixed.clone();
+            let mut sum: u64 = 0;
+            for _ in 0..count {
+                sum = sum.wrapping_add(u64::read(&mut slice).unwrap());
+            }
+            black_box(sum)
+        })
+    });
+
+    group.bench_function("varint_u64", |b| {
+        b.iter(|| {
+            let mut slice = large_varint.clone();
+            let mut sum: u64 = 0;
+            for _ in 0..count {
+                sum = sum.wrapping_add(UInt::<u64>::read(&mut slice).unwrap().0);
+            }
+            black_box(sum)
+        })
+    });
+
+    group.finish();
+
+    // --- ENCODE BENCHMARKS ---
+
+    // Small values encode
+    let mut group = c.benchmark_group("fixed_vs_varint_encode/small");
+    group.throughput(Throughput::Elements(count as u64));
+
+    group.bench_function("fixed_le_u64", |b| {
+        b.iter(|| {
+            let mut buf = BytesMut::with_capacity(count * 8);
+            for v in &small_values {
+                v.write(&mut buf);
+            }
+            black_box(buf)
+        })
+    });
+
+    group.bench_function("varint_u64", |b| {
+        b.iter(|| {
+            let mut buf = BytesMut::with_capacity(count * 2); // ~1-2 bytes per value
+            for v in &small_values {
+                UInt(*v).write(&mut buf);
+            }
+            black_box(buf)
+        })
+    });
+
+    group.finish();
+
+    // Large values encode
+    let mut group = c.benchmark_group("fixed_vs_varint_encode/large");
+    group.throughput(Throughput::Elements(count as u64));
+
+    group.bench_function("fixed_le_u64", |b| {
+        b.iter(|| {
+            let mut buf = BytesMut::with_capacity(count * 8);
+            for v in &large_values {
+                v.write(&mut buf);
+            }
+            black_box(buf)
+        })
+    });
+
+    group.bench_function("varint_u64", |b| {
+        b.iter(|| {
+            let mut buf = BytesMut::with_capacity(count * 10); // up to 10 bytes per value
+            for v in &large_values {
+                UInt(*v).write(&mut buf);
+            }
+            black_box(buf)
+        })
+    });
+
+    group.finish();
+
+    // --- SPACE COMPARISON ---
+    // Print encoded sizes for reference
+    println!("\n--- Encoded sizes for {} values ---", count);
+    println!(
+        "Small values: fixed={} bytes, varint={} bytes (ratio: {:.2}x)",
+        small_fixed.len(),
+        small_varint.len(),
+        small_fixed.len() as f64 / small_varint.len() as f64
+    );
+    println!(
+        "Medium values: fixed={} bytes, varint={} bytes (ratio: {:.2}x)",
+        medium_fixed.len(),
+        medium_varint.len(),
+        medium_fixed.len() as f64 / medium_varint.len() as f64
+    );
+    println!(
+        "Large values: fixed={} bytes, varint={} bytes (ratio: {:.2}x)",
+        large_fixed.len(),
+        large_varint.len(),
+        large_fixed.len() as f64 / large_varint.len() as f64
+    );
+}
+
+criterion_group!(
+    benches,
+    benchmark_integers,
+    bench_le_vs_be,
+    bench_zero_copy_read,
+    bench_fixed_vs_varint
+);
