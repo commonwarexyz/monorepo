@@ -62,7 +62,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::quorum;
+    use commonware_utils::{Bft3f1, FaultModel};
     use futures::{channel::mpsc, StreamExt};
     use std::{num::NonZeroU32, time::Duration};
 
@@ -117,7 +117,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
-        let quorum = quorum(n) as usize;
+        let quorum = Bft3f1::quorum(n) as usize;
         let namespace = b"batcher_test".to_vec();
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -278,7 +278,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
-        let quorum_size = quorum(n) as usize;
+        let quorum_size = Bft3f1::quorum(n) as usize;
         let namespace = b"batcher_test".to_vec();
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -424,7 +424,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
-        let quorum_size = quorum(n) as usize;
+        let quorum_size = Bft3f1::quorum(n) as usize;
         let namespace = b"batcher_test".to_vec();
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -1224,7 +1224,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
-        let quorum_size = quorum(n) as usize;
+        let quorum_size = Bft3f1::quorum(n) as usize;
         let namespace = b"batcher_test".to_vec();
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -1422,7 +1422,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
-        let quorum_size = quorum(n) as usize;
+        let quorum_size = Bft3f1::quorum(n) as usize;
         let namespace = b"batcher_test".to_vec();
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));

@@ -18,6 +18,7 @@ use commonware_parallel::Sequential;
 use commonware_utils::{
     channels::fallible::AsyncFallibleExt,
     ordered::{Quorum, Set},
+    Bft3f1,
 };
 use futures::channel::mpsc::{Receiver, Sender};
 use rand_core::CryptoRngCore;
@@ -142,7 +143,7 @@ where
             Activity::Notarization(notarization) | Activity::Certification(notarization) => {
                 // Verify notarization
                 let view = notarization.view();
-                if !self.scheme.verify_certificate::<_, D>(
+                if !self.scheme.verify_certificate::<_, D, Bft3f1>(
                     &mut self.context,
                     Subject::Notarize {
                         proposal: &notarization.proposal,
@@ -182,7 +183,7 @@ where
             Activity::Nullification(nullification) => {
                 // Verify nullification
                 let view = nullification.view();
-                if !self.scheme.verify_certificate::<_, D>(
+                if !self.scheme.verify_certificate::<_, D, Bft3f1>(
                     &mut self.context,
                     Subject::Nullify {
                         round: nullification.round,
@@ -224,7 +225,7 @@ where
             Activity::Finalization(finalization) => {
                 // Verify finalization
                 let view = finalization.view();
-                if !self.scheme.verify_certificate::<_, D>(
+                if !self.scheme.verify_certificate::<_, D, Bft3f1>(
                     &mut self.context,
                     Subject::Finalize {
                         proposal: &finalization.proposal,
