@@ -183,81 +183,46 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             blob_info.push((section, blob.clone(), reader, blob_size, initial_offset));
         }
 
-        Ok(
-            stream::iter(blob_info).flat_map(
-                move |(section, blob, reader, blob_size, initial_offset)| {
-                    let buf = vec![0u8; Self::CHUNK_SIZE];
+        // State: (section, buf, blob, reader, offset, valid_size, blob_size)
+        type State<B, R> = (u64, Vec<u8>, B, R, u64, u64, u64);
 
-                    stream::unfold(
-                        (
-                            section,
-                            buf,
-                            blob,
-                            reader,
-                            initial_offset,
-                            initial_offset,
-                            blob_size,
-                        ),
-                        move |(
-                            section,
-                            mut buf,
-                            blob,
-                            mut reader,
-                            offset,
-                            valid_size,
-                            blob_size,
-                        )| async move {
-                            if offset >= blob_size {
-                                return None;
-                            }
-
-                            let position = offset / Self::CHUNK_SIZE_U64;
-                            match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
-                                Ok(()) => {
-                                    let next_offset = offset + Self::CHUNK_SIZE_U64;
-                                    match A::decode(buf.as_slice()).map_err(Error::Codec) {
-                                        Ok(item) => Some((
-                                            Ok((section, position, item)),
-                                            (
-                                                section,
-                                                buf,
-                                                blob,
-                                                reader,
-                                                next_offset,
-                                                next_offset,
-                                                blob_size,
-                                            ),
-                                        )),
-                                        Err(err) => Some((
-                                            Err(err),
-                                            (
-                                                section, buf, blob, reader, offset, valid_size,
-                                                blob_size,
-                                            ),
-                                        )),
-                                    }
+        Ok(stream::iter(blob_info).flat_map(move |(sec, blob, reader, size, offset)| {
+            let buf = vec![0u8; Self::CHUNK_SIZE];
+            let state: State<_, _> = (sec, buf, blob, reader, offset, offset, size);
+            stream::unfold(state, move |(sec, mut buf, blob, mut reader, offset, valid, size)| {
+                async move {
+                    if offset >= size {
+                        return None;
+                    }
+                    let pos = offset / Self::CHUNK_SIZE_U64;
+                    match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
+                        Ok(()) => {
+                            let next = offset + Self::CHUNK_SIZE_U64;
+                            match A::decode(buf.as_slice()).map_err(Error::Codec) {
+                                Ok(item) => {
+                                    let state = (sec, buf, blob, reader, next, next, size);
+                                    Some((Ok((sec, pos, item)), state))
                                 }
-                                Err(RError::BlobInsufficientLength) => {
-                                    Some((
-                                        Err(Error::Corruption(format!(
-                                            "trailing bytes in section {section} at position {position}"
-                                        ))),
-                                        (section, buf, blob, reader, blob_size, valid_size, blob_size),
-                                    ))
-                                }
-                                Err(err) => {
-                                    warn!(section, position, ?err, "unexpected error");
-                                    Some((
-                                        Err(Error::Runtime(err)),
-                                        (section, buf, blob, reader, offset, valid_size, blob_size),
-                                    ))
+                                Err(e) => {
+                                    let state = (sec, buf, blob, reader, offset, valid, size);
+                                    Some((Err(e), state))
                                 }
                             }
-                        },
-                    )
-                },
-            ),
-        )
+                        }
+                        Err(RError::BlobInsufficientLength) => {
+                            let err = format!("trailing bytes in section {sec} at {pos}");
+                            let state = (sec, buf, blob, reader, size, valid, size);
+                            Some((Err(Error::Corruption(err)), state))
+                        }
+                        Err(e) => {
+                            warn!(sec, pos, err = ?e, "unexpected error");
+                            let state = (sec, buf, blob, reader, offset, valid, size);
+                            Some((Err(Error::Runtime(e)), state))
+                        }
+                    }
+                }
+            })
+        }))
     }
 
     /// Sync the given section to storage.
