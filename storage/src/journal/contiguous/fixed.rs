@@ -1091,7 +1091,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced("DEBUG")]
     fn test_fixed_journal_recover_from_unwritten_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1126,10 +1126,9 @@ mod tests {
                 .await
                 .expect("Failed to re-initialize journal");
 
-            // The extra bytes will be counted as items (they're zero-filled but still valid size)
-            // This is a behavior difference from the original - we should verify via replay
-            let original_size = journal.size();
-            assert!(original_size >= 1);
+            // The zero-filled pages are detected as invalid (bad checksum) and truncated.
+            // No items should be lost since we called sync before the corruption.
+            assert_eq!(journal.size(), 1);
 
             // Make sure journal still works for appending.
             journal
