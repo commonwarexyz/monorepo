@@ -440,7 +440,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// placeholder entries that need to be counted but never read.
     ///
     /// Returns the byte offset where the dummy was written.
-    pub async fn append_dummy(&mut self, section: u64) -> Result<u64, Error> {
+    pub(crate) async fn append_dummy(&mut self, section: u64) -> Result<u64, Error> {
         // varint(0) is a single 0x00 byte
         let buf = vec![0u8];
         let blob = self.manager.get_or_create(section).await?;
@@ -458,7 +458,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// If a truncated item is detected (varint header claims more bytes than exist),
     /// the blob is truncated to the last valid item offset.
-    pub async fn scan_section_offsets(&self, section: u64) -> Result<Vec<u64>, Error> {
+    pub(crate) async fn scan_section_offsets(&self, section: u64) -> Result<Vec<u64>, Error> {
         let blob = match self.manager.get(section)? {
             Some(blob) => blob,
             None => return Ok(Vec::new()),
