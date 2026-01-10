@@ -321,9 +321,12 @@ impl<E: Storage + Metrics, I: Record + Send + Sync, V: CodecShared> Oversized<E,
     pub async fn replay(
         &self,
         start_section: u64,
+        start_position: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u64, I), Error>> + Send + '_, Error> {
-        self.index.replay(start_section, buffer).await
+        self.index
+            .replay(start_section, start_position, buffer)
+            .await
     }
 
     /// Sync both journals for given section.
