@@ -325,12 +325,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let (section, pos_in_section) = self.position_to_section(pos);
 
         self.inner.get(section, pos_in_section).await.map_err(|e| {
-            // Map segmented errors to contiguous errors
+            // Since we check bounds above, any failure here is unexpected.
             match e {
-                Error::SectionOutOfRange(_)
-                | Error::AlreadyPrunedToSection(_)
-                | Error::ItemOutOfRange(_) => {
-                    unreachable!("range should have already been checked")
+                Error::SectionOutOfRange(e)
+                | Error::AlreadyPrunedToSection(e)
+                | Error::ItemOutOfRange(e) => {
+                    Error::Corruption(format!("section/item should be found, but got: {e}"))
                 }
                 other => other,
             }
