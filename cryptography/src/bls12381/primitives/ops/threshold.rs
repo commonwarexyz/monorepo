@@ -393,7 +393,8 @@ mod tests {
         let n = 5;
         let mut rng = test_rng();
         let namespace = b"test";
-        let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+        let (sharing, shares) =
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
         let partials: Vec<_> = shares
             .iter()
             .map(|s| sign_proof_of_possession::<V>(&sharing, s, namespace))
@@ -447,7 +448,8 @@ mod tests {
     fn threshold_message<V: Variant>() {
         let n = 5;
         let mut rng = test_rng();
-        let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+        let (sharing, shares) =
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
         let msg = &[1, 9, 6, 9];
         let namespace = b"test";
         let partials: Vec<_> = shares
@@ -477,7 +479,8 @@ mod tests {
     fn batch_verify_same_signer_correct<V: Variant>() {
         let mut rng = test_rng();
         let n = 5;
-        let (public, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+        let (public, shares) =
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let signer = &shares[0];
 
@@ -587,7 +590,8 @@ mod tests {
     fn recover_with_weights_correct<V: Variant>() {
         let mut rng = test_rng();
         let (n, t) = (6, Bft3f1::quorum(6));
-        let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+        let (sharing, shares) =
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let partials: Vec<_> = shares
             .iter()
@@ -609,7 +613,8 @@ mod tests {
     fn recover_multiple_test<V: Variant>() {
         let mut rng = test_rng();
         let (n, t) = (6, Bft3f1::quorum(6));
-        let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+        let (sharing, shares) =
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let partials_1: Vec<_> = shares
             .iter()
@@ -623,7 +628,8 @@ mod tests {
             .collect();
 
         let (sig_1, sig_2) =
-            recover_pair::<V, _, _, Bft3f1>(&sharing, &partials_1, &partials_2, &Sequential).unwrap();
+            recover_pair::<V, _, _, Bft3f1>(&sharing, &partials_1, &partials_2, &Sequential)
+                .unwrap();
 
         ops::verify_message::<V>(sharing.public(), b"test", b"payload1", &sig_1).unwrap();
         ops::verify_message::<V>(sharing.public(), b"test", b"payload2", &sig_2).unwrap();
@@ -646,7 +652,8 @@ mod tests {
         let (n, _) = (5, 4);
         let mut rng = test_rng();
 
-        let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+        let (sharing, shares) =
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let namespace = b"test";
         let msg = b"hello";
@@ -673,7 +680,8 @@ mod tests {
         let n = 5;
         let mut rng = test_rng();
 
-        let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+        let (sharing, shares) =
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let namespace = b"test";
         let msg = b"hello";
@@ -707,7 +715,8 @@ mod tests {
         let (n, t) = (5, 4);
         let mut rng = test_rng();
 
-        let (group, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+        let (group, shares) =
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let shares = shares.into_iter().take(t as usize - 1).collect::<Vec<_>>();
 
@@ -739,7 +748,7 @@ mod tests {
         let mut rng = test_rng();
 
         let (sharing, mut shares) =
-            dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let share = shares.get_mut(3).unwrap();
         share.private = Secret::new(Private::random(&mut rng));
@@ -771,7 +780,7 @@ mod tests {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, shares) =
-            dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -790,7 +799,7 @@ mod tests {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, mut shares) =
-            dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -828,7 +837,7 @@ mod tests {
         let mut rng = test_rng();
         let n = 6;
         let (sharing, mut shares) =
-            dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -873,7 +882,7 @@ mod tests {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, shares) =
-            dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -909,7 +918,7 @@ mod tests {
     fn test_batch_verify_same_message_single() {
         let mut rng = test_rng();
         let (sharing, shares) =
-            dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(1));
+            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(1));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -926,7 +935,7 @@ mod tests {
     fn test_batch_verify_same_message_single_invalid() {
         let mut rng = test_rng();
         let (sharing, mut shares) =
-            dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(1));
+            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(1));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -954,7 +963,7 @@ mod tests {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, mut shares) =
-            dkg::deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -1013,7 +1022,7 @@ mod tests {
 
         let mut rng = test_rng();
         let (n, t) = (NZU32!(5), Bft3f1::quorum(5));
-        let (public, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), n);
+        let (public, shares) = dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), n);
         let scalars = public.mode().all_scalars(n).collect::<Vec<_>>();
 
         let namespace = b"test";
@@ -1062,7 +1071,8 @@ mod tests {
     fn batch_verify_same_message_rejects_malleability<V: Variant>() {
         let mut rng = test_rng();
         let n = 5;
-        let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+        let (sharing, shares) =
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
         let msg = b"message";
 
@@ -1133,7 +1143,8 @@ mod tests {
     fn batch_verify_same_signer_rejects_malleability<V: Variant>() {
         let mut rng = test_rng();
         let n = 5;
-        let (sharing, shares) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(n));
+        let (sharing, shares) =
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace: &[u8] = b"test";
         let msg1: &[u8] = b"message 1";
         let msg2: &[u8] = b"message 2";

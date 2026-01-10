@@ -90,7 +90,8 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
                 attestations.push(ack.attestation.clone());
 
                 // Try to assemble certificate
-                let certificate = scheme.assemble::<_, Bft3f1>(attestations.iter().cloned(), strategy)?;
+                let certificate =
+                    scheme.assemble::<_, Bft3f1>(attestations.iter().cloned(), strategy)?;
 
                 // Take ownership of the votes, which must exist
                 p.attestations.remove(&ack.chunk.payload);

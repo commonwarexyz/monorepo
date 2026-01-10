@@ -699,7 +699,7 @@ mod tests {
 
         // Generate threshold polynomial and shares using DKG
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut *rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, Bft3f1>(&mut *rng, Default::default(), NZU32!(n));
 
         let signers = shares
             .into_iter()
@@ -833,7 +833,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
 
         // Verify the assembled certificate
         assert!(verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
@@ -868,7 +870,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
 
         assert!(verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut rng,
@@ -902,7 +906,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
@@ -948,7 +954,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
         let encoded = certificate.encode();
         let decoded = V::Signature::decode(encoded).expect("decode certificate");
         assert_eq!(decoded, certificate);
@@ -976,7 +984,9 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).is_none());
+        assert!(schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .is_none());
     }
 
     #[test]
@@ -1008,7 +1018,11 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap());
+            certificates.push(
+                schemes[0]
+                    .assemble::<_, Bft3f1>(attestations, &Sequential)
+                    .unwrap(),
+            );
         }
 
         let certs_iter = messages.iter().zip(&certificates).map(|(msg, cert)| {
@@ -1052,7 +1066,11 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap());
+            certificates.push(
+                schemes[0]
+                    .assemble::<_, Bft3f1>(attestations, &Sequential)
+                    .unwrap(),
+            );
         }
 
         // Corrupt second certificate
@@ -1096,7 +1114,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
 
         // Create a certificate-only verifier using the identity from the polynomial
         let identity = polynomial.public();
@@ -1251,7 +1271,7 @@ mod tests {
             .unwrap();
 
         let (polynomial, mut shares) =
-            dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(4));
         shares[0].index = Participant::new(999);
         Scheme::<ed25519::PublicKey, V>::signer(
             NAMESPACE,
@@ -1290,7 +1310,7 @@ mod tests {
         // so this should succeed. Let's use threshold 2 to make it fail.
         // quorum(5) = 4, but polynomial.required() = 2, so this should panic
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(2));
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(2));
         Scheme::<ed25519::PublicKey, V>::signer(
             NAMESPACE,
             participants,
@@ -1316,7 +1336,8 @@ mod tests {
         let participants = make_participants(&mut rng, 5);
         // Create a polynomial with threshold 2, but quorum of 5 participants is 4
         // quorum(5) = 4, but polynomial.required() = 2, so this should panic
-        let (polynomial, _) = dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(2));
+        let (polynomial, _) =
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(2));
         Scheme::<ed25519::PublicKey, V>::verifier(NAMESPACE, participants, polynomial);
     }
 
@@ -1348,7 +1369,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
         let mut encoded = certificate.encode();
         encoded.truncate(encoded.len() - 1);
         assert!(V::Signature::decode(encoded).is_err());

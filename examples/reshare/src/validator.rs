@@ -285,8 +285,9 @@ mod test {
                 num_participants_per_round: per_round.to_vec(),
                 participants: participants.keys().cloned().try_collect().unwrap(),
             };
-            let (output, shares) = deal::<MinSig, _, Bft3f1>(&mut rng, Default::default(), peer_config.dealers(0))
-                .expect("deal should succeed");
+            let (output, shares) =
+                deal::<MinSig, _, Bft3f1>(&mut rng, Default::default(), peer_config.dealers(0))
+                    .expect("deal should succeed");
             for (key, share) in shares.into_iter() {
                 if let Some((_, maybe_share)) = participants.get_mut(&key) {
                     *maybe_share = Some(share);

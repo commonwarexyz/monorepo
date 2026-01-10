@@ -1708,7 +1708,11 @@ impl<S: Scheme, D: Digest> Response<S, D> {
             (context, &nullification.certificate)
         });
 
-        scheme.verify_certificates::<_, D, _, Bft3f1>(rng, notarizations.chain(nullifications), strategy)
+        scheme.verify_certificates::<_, D, _, Bft3f1>(
+            rng,
+            notarizations.chain(nullifications),
+            strategy,
+        )
     }
 }
 

@@ -37,13 +37,14 @@ impl Bench {
 
         let (output, shares) = if reshare {
             let (o, s) =
-                deal::<V, PublicKey, Bft3f1>(&mut rng, Default::default(), dealers.clone()).unwrap();
+                deal::<V, PublicKey, Bft3f1>(&mut rng, Default::default(), dealers.clone())
+                    .unwrap();
             (Some(o), Some(s))
         } else {
             (None, None)
         };
         let players = dealers.clone();
-        let info = Info::new(
+        let info = Info::new::<Bft3f1>(
             b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_BENCH",
             0,
             output,
@@ -71,7 +72,7 @@ impl Bench {
         let mut logs = BTreeMap::new();
         for sk in private_keys {
             let pk = sk.public_key();
-            let (mut dealer, pub_msg, priv_msgs) = Dealer::start(
+            let (mut dealer, pub_msg, priv_msgs) = Dealer::start::<Bft3f1>(
                 &mut rng,
                 info.clone(),
                 sk,
@@ -83,13 +84,14 @@ impl Bench {
             for (target_pk, priv_msg) in priv_msgs {
                 // The only missing player should be ourselves.
                 if let Some(player) = player_states.get_mut(&target_pk) {
-                    if let Some(ack) = player.dealer_message(pk.clone(), pub_msg.clone(), priv_msg)
+                    if let Some(ack) =
+                        player.dealer_message::<Bft3f1>(pk.clone(), pub_msg.clone(), priv_msg)
                     {
                         dealer.receive_player_ack(target_pk.clone(), ack).unwrap();
                     }
                 }
             }
-            logs.insert(pk, dealer.finalize().check(&info).unwrap().1);
+            logs.insert(pk, dealer.finalize::<Bft3f1>().check(&info).unwrap().1);
         }
 
         Self { info, me, logs }
@@ -145,9 +147,9 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
                         || bench.pre_finalize(),
                         |(player, logs)| {
                             if concurrency > 1 {
-                                black_box(player.finalize(logs, &strategy).unwrap());
+                                black_box(player.finalize::<_, Bft3f1>(logs, &strategy).unwrap());
                             } else {
-                                black_box(player.finalize(logs, &Sequential).unwrap());
+                                black_box(player.finalize::<_, Bft3f1>(logs, &Sequential).unwrap());
                             }
                         },
                         BatchSize::SmallInput,

@@ -252,7 +252,11 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// The `M` type parameter specifies the fault model used to determine quorum thresholds.
     ///
     /// Callers must not include duplicate attestations from the same signer.
-    fn assemble<I, M>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
+    fn assemble<I, M>(
+        &self,
+        attestations: I,
+        strategy: &impl Strategy,
+    ) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>,
         M: FaultModel;

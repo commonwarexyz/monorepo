@@ -779,7 +779,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
         assert_eq!(certificate.signers.count(), quorum);
     }
 
@@ -816,7 +818,9 @@ mod tests {
                 .unwrap(),
         ];
 
-        let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
 
         // Verify signers are sorted by signer index
         let expected: Vec<_> = indexed.iter().map(|(idx, _)| *idx).collect();
@@ -845,7 +849,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
 
         assert!(verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
             &mut rng,
@@ -879,7 +885,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
@@ -926,7 +934,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
         let encoded = certificate.encode();
         let decoded =
             Certificate::<V>::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
@@ -955,7 +965,9 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).is_none());
+        assert!(schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .is_none());
     }
 
     #[test]
@@ -983,7 +995,9 @@ mod tests {
         // Corrupt signer index to be out of range
         attestations[0].signer = Participant::new(999);
 
-        assert!(schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).is_none());
+        assert!(schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .is_none());
     }
 
     #[test]
@@ -1008,7 +1022,9 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let mut certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
 
         // Artificially truncate to below quorum
         let mut signers: Vec<Participant> = certificate.signers.iter().collect();
@@ -1047,7 +1063,9 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let mut certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
 
         // Make the signers bitmap size larger than participants
         let signers: Vec<Participant> = certificate.signers.iter().collect();
@@ -1091,7 +1109,11 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap());
+            certificates.push(
+                schemes[0]
+                    .assemble::<_, Bft3f1>(attestations, &Sequential)
+                    .unwrap(),
+            );
         }
 
         let certs_iter = messages.iter().zip(&certificates).map(|(msg, cert)| {
@@ -1138,7 +1160,11 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap());
+            certificates.push(
+                schemes[0]
+                    .assemble::<_, Bft3f1>(attestations, &Sequential)
+                    .unwrap(),
+            );
         }
 
         // Corrupt second certificate
@@ -1248,7 +1274,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
 
         // Well-formed certificate decodes successfully
         let encoded = certificate.encode();
@@ -1295,7 +1323,9 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble::<_, Bft3f1>(attestations, &Sequential).unwrap();
+        let mut certificate = schemes[0]
+            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .unwrap();
 
         // Add an unknown signer (out of range)
         let mut signers: Vec<Participant> = certificate.signers.iter().collect();

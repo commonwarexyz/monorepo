@@ -794,7 +794,7 @@ mod tests {
         let mut rng = test_rng();
         let participants = ed25519_participants(&mut rng, 4);
         let (polynomial, mut shares) =
-            dkg::deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
+            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(4));
         shares[0].index = Participant::new(999);
         Scheme::<V>::signer(
             NAMESPACE,
@@ -818,7 +818,8 @@ mod tests {
     fn scheme_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = test_rng();
         let participants = ed25519_participants(&mut rng, 5);
-        let (polynomial, shares) = deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
+        let (polynomial, shares) =
+            deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(4));
         Scheme::<V>::signer(
             NAMESPACE,
             participants.keys().clone(),
@@ -842,7 +843,7 @@ mod tests {
     fn verifier_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = test_rng();
         let participants = ed25519_participants(&mut rng, 5);
-        let (polynomial, _) = deal_anonymous::<V>(&mut rng, Default::default(), NZU32!(4));
+        let (polynomial, _) = deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(4));
         Scheme::<V>::verifier(NAMESPACE, participants.keys().clone(), polynomial);
     }
 
@@ -1331,14 +1332,16 @@ mod tests {
                 .is_none(),
             "certificate verifier should not produce votes"
         );
-        assert!(certificate_verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
-            &mut test_rng(),
-            Subject::Finalize {
-                proposal: &proposal,
-            },
-            &certificate,
-            &Sequential,
-        ));
+        assert!(
+            certificate_verifier.verify_certificate::<_, Sha256Digest, Bft3f1>(
+                &mut test_rng(),
+                Subject::Finalize {
+                    proposal: &proposal,
+                },
+                &certificate,
+                &Sequential,
+            )
+        );
     }
 
     #[test]

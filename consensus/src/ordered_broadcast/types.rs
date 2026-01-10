@@ -664,7 +664,12 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             chunk: &parent_chunk,
             epoch: parent.epoch,
         };
-        if !parent_scheme.verify_certificate::<R, D, Bft3f1>(rng, ctx, &parent.certificate, strategy) {
+        if !parent_scheme.verify_certificate::<R, D, Bft3f1>(
+            rng,
+            ctx,
+            &parent.certificate,
+            strategy,
+        ) {
             return Err(Error::InvalidCertificate);
         }
         Ok(Some(parent_chunk))

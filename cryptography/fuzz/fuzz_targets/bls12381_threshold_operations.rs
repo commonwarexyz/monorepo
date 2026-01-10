@@ -399,8 +399,11 @@ fn fuzz(op: FuzzOperation) {
                     .map(|group| group.iter().collect())
                     .collect();
                 let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
-                let _ =
-                    threshold::recover_multiple::<MinPk, _, _, Bft3f1>(&sharing, groups_refs, &strategy);
+                let _ = threshold::recover_multiple::<MinPk, _, _, Bft3f1>(
+                    &sharing,
+                    groups_refs,
+                    &strategy,
+                );
             }
         }
 
@@ -415,8 +418,11 @@ fn fuzz(op: FuzzOperation) {
                     .map(|group| group.iter().collect())
                     .collect();
                 let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
-                let _ =
-                    threshold::recover_multiple::<MinSig, _, _, Bft3f1>(&sharing, groups_refs, &strategy);
+                let _ = threshold::recover_multiple::<MinSig, _, _, Bft3f1>(
+                    &sharing,
+                    groups_refs,
+                    &strategy,
+                );
             }
         }
 

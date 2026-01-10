@@ -39,8 +39,8 @@ where
         })
         .collect();
 
-    let (output, shares) =
-        deal::<V, _, Bft3f1>(rng, Default::default(), participants.clone()).expect("deal should succeed");
+    let (output, shares) = deal::<V, _, Bft3f1>(rng, Default::default(), participants.clone())
+        .expect("deal should succeed");
     let polynomial = output.public().clone();
 
     let schemes = shares
