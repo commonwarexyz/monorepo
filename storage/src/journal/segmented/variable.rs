@@ -450,64 +450,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(offset)
     }
 
-    /// Counts the number of items in a section.
-    ///
-    /// This scans varint length prefixes without decoding item data, allowing
-    /// it to count size-0 dummy items that cannot be decoded.
-    ///
-    /// If a truncated item is detected (varint header claims more bytes than exist),
-    /// the blob is truncated to the last valid item offset.
-    pub async fn count_items_in_section(&self, section: u64) -> Result<u64, Error> {
-        let blob = match self.manager.get(section)? {
-            Some(blob) => blob,
-            None => return Ok(0),
-        };
-
-        let blob_size = blob.size().await;
-        let mut offset = 0u64;
-        let mut count = 0u64;
-
-        while offset < blob_size {
-            // Read varint header (max 5 bytes for u32)
-            let buf = vec![0u8; MAX_VARINT_SIZE];
-            let (buf, available) = blob.read_up_to(buf, offset).await?;
-            if available == 0 {
-                break;
-            }
-
-            let (size, varint_len) = decode_length_prefix(&buf.as_ref()[..available])?;
-            let next_offset = offset
-                .checked_add(varint_len as u64)
-                .ok_or(Error::OffsetOverflow)?
-                .checked_add(size as u64)
-                .ok_or(Error::OffsetOverflow)?;
-
-            // Validate item data exists before counting
-            if next_offset > blob_size {
-                // Truncated item detected - resize blob to last valid offset
-                warn!(
-                    blob = section,
-                    bad_offset = offset,
-                    new_size = offset,
-                    "truncated item detected: truncating"
-                );
-                blob.resize(offset).await?;
-                break;
-            }
-
-            offset = next_offset;
-            count += 1;
-        }
-
-        Ok(count)
-    }
-
     /// Scans a section and returns the byte offset of each item without decoding.
     ///
-    /// This is similar to [`Self::count_items_in_section`] but returns the actual
-    /// byte offsets instead of just a count. This is useful for rebuilding offset
-    /// indices without needing to decode item data (e.g., for size-0 dummy items
-    /// that cannot be decoded).
+    /// This is useful for counting items or rebuilding offset indices without
+    /// needing to decode item data (e.g., for size-0 dummy items that cannot
+    /// be decoded).
     ///
     /// If a truncated item is detected (varint header claims more bytes than exist),
     /// the blob is truncated to the last valid item offset.
@@ -2069,9 +2016,9 @@ mod tests {
             assert!(offset1 > offset0);
             assert!(offset2 > offset1);
 
-            // Count should include dummies
-            let count = journal.count_items_in_section(0).await.unwrap();
-            assert_eq!(count, 3);
+            // Scan should include dummies
+            let offsets = journal.scan_section_offsets(0).await.unwrap();
+            assert_eq!(offsets.len(), 3);
 
             // Reading real items works
             assert_eq!(journal.get(0, offset0).await.unwrap(), 42u64);
@@ -2085,7 +2032,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_count_items_multiple_dummies() {
+    fn test_scan_section_multiple_dummies() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -2103,29 +2050,29 @@ mod tests {
             }
             journal.sync(0).await.unwrap();
 
-            // Count should be exactly 10
-            let count = journal.count_items_in_section(0).await.unwrap();
-            assert_eq!(count, 10);
+            // Scan should find exactly 10 items
+            let offsets = journal.scan_section_offsets(0).await.unwrap();
+            assert_eq!(offsets.len(), 10);
 
             // Add some real items
             journal.append(0, 100u64).await.unwrap();
             journal.append(0, 200u64).await.unwrap();
             journal.sync(0).await.unwrap();
 
-            // Count should now be 12
-            let count = journal.count_items_in_section(0).await.unwrap();
-            assert_eq!(count, 12);
+            // Scan should now find 12 items
+            let offsets = journal.scan_section_offsets(0).await.unwrap();
+            assert_eq!(offsets.len(), 12);
 
             journal.destroy().await.unwrap();
         });
     }
 
     #[test_traced]
-    fn test_count_items_empty_section() {
+    fn test_scan_section_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_count_empty".to_string(),
+                partition: "test_scan_empty".to_string(),
                 compression: None,
                 codec_config: (),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2133,12 +2080,12 @@ mod tests {
             };
             let journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
 
-            // Count on non-existent section should return 0
-            let count = journal.count_items_in_section(0).await.unwrap();
-            assert_eq!(count, 0);
+            // Scan on non-existent section should return empty vec
+            let offsets = journal.scan_section_offsets(0).await.unwrap();
+            assert!(offsets.is_empty());
 
-            let count = journal.count_items_in_section(999).await.unwrap();
-            assert_eq!(count, 0);
+            let offsets = journal.scan_section_offsets(999).await.unwrap();
+            assert!(offsets.is_empty());
 
             journal.destroy().await.unwrap();
         });

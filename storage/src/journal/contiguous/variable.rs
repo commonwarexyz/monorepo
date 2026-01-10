@@ -614,10 +614,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
         // === Handle empty data journal case ===
-        // Use count_items_in_section to count items without decoding them.
+        // Use scan_section_offsets to count items without decoding them.
         // This allows counting size-0 dummy items that cannot be decoded.
         let items_in_last_section = match data.newest_section() {
-            Some(last_section) => data.count_items_in_section(last_section).await?,
+            Some(last_section) => data.scan_section_offsets(last_section).await?.len() as u64,
             None => 0,
         };
 
@@ -788,17 +788,14 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         for section in start_section..=newest_section {
             let section_offsets = data.scan_section_offsets(section).await?;
 
-            // Calculate how many items to skip in this section
+            // Skip items already indexed in the start section
             let skip_count = if section == start_section {
                 items_already_indexed_in_start as usize
             } else {
                 0
             };
 
-            for (i, &byte_offset) in section_offsets.iter().enumerate() {
-                if i < skip_count {
-                    continue;
-                }
+            for &byte_offset in section_offsets.iter().skip(skip_count) {
                 offsets.append(byte_offset).await?;
             }
         }
