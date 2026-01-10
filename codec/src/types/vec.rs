@@ -122,7 +122,7 @@ mod tests {
         );
 
         let v_u16: Vec<u16> = vec![0x1234, 0xABCD];
-        assert_eq!(v_u16.encode(), &[0x02, 0x12, 0x34, 0xAB, 0xCD][..]);
+        assert_eq!(v_u16.encode(), &[0x02, 0x34, 0x12, 0xCD, 0xAB][..]); // little-endian
 
         let v_bool: Vec<bool> = vec![true, false, true];
         assert_eq!(v_bool.encode(), &[0x03, 0x01, 0x00, 0x01][..]);

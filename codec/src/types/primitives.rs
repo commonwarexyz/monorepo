@@ -15,8 +15,9 @@
 //! ## Safety & portability
 //! * `usize` is restricted to values that fit in a `u32` to keep the on-wire
 //!   format identical across 32-bit and 64-bit architectures.
-//! * All fixed-size integers and floats are written big-endian to avoid host-
-//!   endian ambiguity.
+//! * All fixed-size integers and floats are written little-endian to enable
+//!   zero-copy decoding on little-endian architectures (the vast majority of
+//!   modern hardware).
 
 use crate::{
     util::at_least, varint::UInt, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write,
@@ -49,17 +50,17 @@ macro_rules! impl_numeric {
 }
 
 impl_numeric!(u8, get_u8, put_u8);
-impl_numeric!(u16, get_u16, put_u16);
-impl_numeric!(u32, get_u32, put_u32);
-impl_numeric!(u64, get_u64, put_u64);
-impl_numeric!(u128, get_u128, put_u128);
+impl_numeric!(u16, get_u16_le, put_u16_le);
+impl_numeric!(u32, get_u32_le, put_u32_le);
+impl_numeric!(u64, get_u64_le, put_u64_le);
+impl_numeric!(u128, get_u128_le, put_u128_le);
 impl_numeric!(i8, get_i8, put_i8);
-impl_numeric!(i16, get_i16, put_i16);
-impl_numeric!(i32, get_i32, put_i32);
-impl_numeric!(i64, get_i64, put_i64);
-impl_numeric!(i128, get_i128, put_i128);
-impl_numeric!(f32, get_f32, put_f32);
-impl_numeric!(f64, get_f64, put_f64);
+impl_numeric!(i16, get_i16_le, put_i16_le);
+impl_numeric!(i32, get_i32_le, put_i32_le);
+impl_numeric!(i64, get_i64_le, put_i64_le);
+impl_numeric!(i128, get_i128_le, put_i128_le);
+impl_numeric!(f32, get_f32_le, put_f32_le);
+impl_numeric!(f64, get_f64_le, put_f64_le);
 
 // Usize implementation
 impl Write for usize {
@@ -236,17 +237,17 @@ mod tests {
 
     #[test]
     fn test_endianness() {
-        // u16
+        // u16 (little-endian: least significant byte first)
         let encoded = 0x0102u16.encode();
-        assert_eq!(encoded, Bytes::from_static(&[0x01, 0x02]));
+        assert_eq!(encoded, Bytes::from_static(&[0x02, 0x01]));
 
-        // u32
+        // u32 (little-endian)
         let encoded = 0x01020304u32.encode();
-        assert_eq!(encoded, Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]));
+        assert_eq!(encoded, Bytes::from_static(&[0x04, 0x03, 0x02, 0x01]));
 
-        // f32
+        // f32 (little-endian IEEE 754)
         let encoded = 1.0f32.encode();
-        assert_eq!(encoded, Bytes::from_static(&[0x3F, 0x80, 0x00, 0x00])); // Big-endian IEEE 754
+        assert_eq!(encoded, Bytes::from_static(&[0x00, 0x00, 0x80, 0x3F]));
     }
 
     #[test]
@@ -337,30 +338,30 @@ mod tests {
         assert_eq!(127i8.encode(), &[0x7F][..]);
         assert_eq!((-128i8).encode(), &[0x80][..]);
 
-        // 16-bit integers
+        // 16-bit integers (little-endian)
         assert_eq!(0u16.encode(), &[0x00, 0x00][..]);
-        assert_eq!(0xABCDu16.encode(), &[0xAB, 0xCD][..]);
+        assert_eq!(0xABCDu16.encode(), &[0xCD, 0xAB][..]);
         assert_eq!(u16::MAX.encode(), &[0xFF, 0xFF][..]);
         assert_eq!(0i16.encode(), &[0x00, 0x00][..]);
         assert_eq!((-1i16).encode(), &[0xFF, 0xFF][..]);
-        assert_eq!(0x1234i16.encode(), &[0x12, 0x34][..]);
+        assert_eq!(0x1234i16.encode(), &[0x34, 0x12][..]);
 
-        // 32-bit integers
+        // 32-bit integers (little-endian)
         assert_eq!(0u32.encode(), &[0x00, 0x00, 0x00, 0x00][..]);
-        assert_eq!(0xABCDEF01u32.encode(), &[0xAB, 0xCD, 0xEF, 0x01][..]);
+        assert_eq!(0xABCDEF01u32.encode(), &[0x01, 0xEF, 0xCD, 0xAB][..]);
         assert_eq!(u32::MAX.encode(), &[0xFF, 0xFF, 0xFF, 0xFF][..]);
         assert_eq!(0i32.encode(), &[0x00, 0x00, 0x00, 0x00][..]);
         assert_eq!((-1i32).encode(), &[0xFF, 0xFF, 0xFF, 0xFF][..]);
-        assert_eq!(0x12345678i32.encode(), &[0x12, 0x34, 0x56, 0x78][..]);
+        assert_eq!(0x12345678i32.encode(), &[0x78, 0x56, 0x34, 0x12][..]);
 
-        // 64-bit integers
+        // 64-bit integers (little-endian)
         assert_eq!(
             0u64.encode(),
             &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..]
         );
         assert_eq!(
             0x0123456789ABCDEFu64.encode(),
-            &[0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF][..]
+            &[0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x01][..]
         );
         assert_eq!(
             u64::MAX.encode(),
@@ -375,59 +376,59 @@ mod tests {
             &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF][..]
         );
 
-        // 128-bit integers
+        // 128-bit integers (little-endian)
         let u128_val = 0x0123456789ABCDEF0123456789ABCDEFu128;
         let u128_bytes = [
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB,
-            0xCD, 0xEF,
+            0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x01, 0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45,
+            0x23, 0x01,
         ];
         assert_eq!(u128_val.encode(), &u128_bytes[..]);
         assert_eq!(u128::MAX.encode(), &[0xFF; 16][..]);
         assert_eq!((-1i128).encode(), &[0xFF; 16][..]);
 
-        assert_eq!(0.0f32.encode(), 0.0f32.to_be_bytes()[..]);
-        assert_eq!(1.0f32.encode(), 1.0f32.to_be_bytes()[..]);
-        assert_eq!((-1.0f32).encode(), (-1.0f32).to_be_bytes()[..]);
-        assert_eq!(f32::MAX.encode(), f32::MAX.to_be_bytes()[..]);
-        assert_eq!(f32::MIN.encode(), f32::MIN.to_be_bytes()[..]);
-        assert_eq!(f32::NAN.encode(), f32::NAN.to_be_bytes()[..]);
-        assert_eq!(f32::INFINITY.encode(), f32::INFINITY.to_be_bytes()[..]);
+        assert_eq!(0.0f32.encode(), 0.0f32.to_le_bytes()[..]);
+        assert_eq!(1.0f32.encode(), 1.0f32.to_le_bytes()[..]);
+        assert_eq!((-1.0f32).encode(), (-1.0f32).to_le_bytes()[..]);
+        assert_eq!(f32::MAX.encode(), f32::MAX.to_le_bytes()[..]);
+        assert_eq!(f32::MIN.encode(), f32::MIN.to_le_bytes()[..]);
+        assert_eq!(f32::NAN.encode(), f32::NAN.to_le_bytes()[..]);
+        assert_eq!(f32::INFINITY.encode(), f32::INFINITY.to_le_bytes()[..]);
         assert_eq!(
             f32::NEG_INFINITY.encode(),
-            f32::NEG_INFINITY.to_be_bytes()[..]
+            f32::NEG_INFINITY.to_le_bytes()[..]
         );
 
-        // 32-bit floats
-        assert_eq!(1.0f32.encode(), &[0x3F, 0x80, 0x00, 0x00][..]);
-        assert_eq!((-1.0f32).encode(), &[0xBF, 0x80, 0x00, 0x00][..]);
+        // 32-bit floats (little-endian)
+        assert_eq!(1.0f32.encode(), &[0x00, 0x00, 0x80, 0x3F][..]);
+        assert_eq!((-1.0f32).encode(), &[0x00, 0x00, 0x80, 0xBF][..]);
 
-        // 64-bit floats
-        assert_eq!(0.0f64.encode(), 0.0f64.to_be_bytes()[..]);
-        assert_eq!(1.0f64.encode(), 1.0f64.to_be_bytes()[..]);
-        assert_eq!((-1.0f64).encode(), (-1.0f64).to_be_bytes()[..]);
-        assert_eq!(f64::MAX.encode(), f64::MAX.to_be_bytes()[..]);
-        assert_eq!(f64::MIN.encode(), f64::MIN.to_be_bytes()[..]);
-        assert_eq!(f64::NAN.encode(), f64::NAN.to_be_bytes()[..]);
-        assert_eq!(f64::INFINITY.encode(), f64::INFINITY.to_be_bytes()[..]);
+        // 64-bit floats (little-endian)
+        assert_eq!(0.0f64.encode(), 0.0f64.to_le_bytes()[..]);
+        assert_eq!(1.0f64.encode(), 1.0f64.to_le_bytes()[..]);
+        assert_eq!((-1.0f64).encode(), (-1.0f64).to_le_bytes()[..]);
+        assert_eq!(f64::MAX.encode(), f64::MAX.to_le_bytes()[..]);
+        assert_eq!(f64::MIN.encode(), f64::MIN.to_le_bytes()[..]);
+        assert_eq!(f64::NAN.encode(), f64::NAN.to_le_bytes()[..]);
+        assert_eq!(f64::INFINITY.encode(), f64::INFINITY.to_le_bytes()[..]);
         assert_eq!(
             f64::NEG_INFINITY.encode(),
-            f64::NEG_INFINITY.to_be_bytes()[..]
+            f64::NEG_INFINITY.to_le_bytes()[..]
         );
         assert_eq!(
             1.0f64.encode(),
-            &[0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..]
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x3F][..]
         );
         assert_eq!(
             (-1.0f64).encode(),
-            &[0xBF, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..]
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0xBF][..]
         );
 
         // Fixed-size array
         assert_eq!([1, 2, 3].encode(), &[0x01, 0x02, 0x03][..]);
         assert_eq!([].encode(), &[][..]);
 
-        // Option
-        assert_eq!(Some(42u32).encode(), &[0x01, 0x00, 0x00, 0x00, 0x2A][..]);
+        // Option (little-endian: 42 = 0x2A in LE is [0x2A, 0x00, 0x00, 0x00])
+        assert_eq!(Some(42u32).encode(), &[0x01, 0x2A, 0x00, 0x00, 0x00][..]);
         assert_eq!(None::<u32>.encode(), &[0][..]);
 
         // Usize

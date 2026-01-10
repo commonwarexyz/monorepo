@@ -24,7 +24,7 @@ pub struct U32([u8; u32::SIZE]);
 
 impl U32 {
     pub const fn new(value: u32) -> Self {
-        Self(value.to_be_bytes())
+        Self(value.to_le_bytes())
     }
 }
 
@@ -58,19 +58,19 @@ impl From<[u8; Self::SIZE]> for U32 {
 
 impl From<u32> for U32 {
     fn from(value: u32) -> Self {
-        Self(value.to_be_bytes())
+        Self(value.to_le_bytes())
     }
 }
 
 impl From<U32> for u32 {
     fn from(value: U32) -> Self {
-        Self::from_be_bytes(value.0)
+        Self::from_le_bytes(value.0)
     }
 }
 
 impl From<&U32> for u32 {
     fn from(value: &U32) -> Self {
-        Self::from_be_bytes(value.0)
+        Self::from_le_bytes(value.0)
     }
 }
 
@@ -89,13 +89,13 @@ impl Deref for U32 {
 
 impl Debug for U32 {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", u32::from_be_bytes(self.0))
+        write!(f, "{}", u32::from_le_bytes(self.0))
     }
 }
 
 impl Display for U32 {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", u32::from_be_bytes(self.0))
+        write!(f, "{}", u32::from_le_bytes(self.0))
     }
 }
 

@@ -168,7 +168,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         // Extract checksum
         let checksum_index = buf.len() - crc32::Digest::SIZE;
         let stored_checksum =
-            u32::from_be_bytes(buf.as_ref()[checksum_index..].try_into().unwrap());
+            u32::from_le_bytes(buf.as_ref()[checksum_index..].try_into().unwrap());
         let computed_checksum = Crc32::checksum(&buf.as_ref()[..checksum_index]);
         if stored_checksum != computed_checksum {
             // Truncate and return none
@@ -184,7 +184,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         }
 
         // Get parent
-        let version = u64::from_be_bytes(buf.as_ref()[..8].try_into().unwrap());
+        let version = u64::from_le_bytes(buf.as_ref()[..8].try_into().unwrap());
 
         // Extract data
         //
@@ -369,13 +369,13 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         // Overwrite existing data
         if overwrite {
             // Update version
-            let version = self.next_version.to_be_bytes();
+            let version = self.next_version.to_le_bytes();
             target.data[0..8].copy_from_slice(&version);
             writes.push(target.blob.write_at(version.as_slice().into(), 0));
 
             // Update checksum
             let checksum_index = target.data.len() - crc32::Digest::SIZE;
-            let checksum = Crc32::checksum(&target.data[..checksum_index]).to_be_bytes();
+            let checksum = Crc32::checksum(&target.data[..checksum_index]).to_le_bytes();
             target.data[checksum_index..].copy_from_slice(&checksum);
             writes.push(
                 target
