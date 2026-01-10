@@ -53,16 +53,16 @@
 //!
 //! # Dummy Items
 //!
-//! The journal supports "dummy" items: size-0 entries that consist of only a varint(0) header
-//! (a single `0x00` byte) with no data payload. Dummy items are used internally by
+//! The journal supports "dummy" items -- size-0 entries consisting of only a `varint(0)` header
+//! (a single `0x00` byte) with no data payload -- for crate internal use. These are used by the
 //! [crate::journal::contiguous::variable::Journal] to efficiently initialize a journal at a
-//! non-zero offset without writing actual data.
+//! whose earliest section _logically_ contains more items than it _physically_ does.
 //!
-//! Dummy items:
-//! - Are appended via [Journal::append_dummy]
-//! - May only appear at the start of a section
-//! - Must not be read via [Journal::get] (decoding fails due to zero-length data)
-//! - Are NOT returned by [Journal::replay] (replay decodes items, which fails for dummy items)
+//! For example, a section that begins with 2 dummy elements followed by 3 "regular" elements
+//! would report (via `scan_section_offsets`) having 5 items, but the section would only contain
+//! 3 "regular" elements.
+//!
+//! Users are responsible for ensuring that dummy items are not attempted to be read.
 //!
 //! # Example
 //!
