@@ -88,9 +88,8 @@ pub struct Config {
 
 /// Implementation of `Journal` storage.
 ///
-/// This is implemented as a wrapper around [SegmentedJournal] that provides
-/// position-based access where positions are automatically mapped to
-/// (section, position_in_section) pairs.
+/// This is implemented as a wrapper around [SegmentedJournal] that provides position-based access
+/// where positions are automatically mapped to (section, position_in_section) pairs.
 pub struct Journal<E: Storage + Metrics, A: CodecFixedShared> {
     inner: SegmentedJournal<E, A>,
 
