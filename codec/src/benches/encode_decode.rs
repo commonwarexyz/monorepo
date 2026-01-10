@@ -129,6 +129,150 @@ where
     group.finish();
 }
 
+/// Compare little-endian vs big-endian decoding performance.
+/// This demonstrates the advantage of LE encoding on LE hardware (x86, ARM, RISC-V).
+fn bench_le_vs_be(c: &mut Criterion) {
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let count = 10000;
+
+    // Generate random u64 values
+    let values: Vec<u64> = (0..count).map(|_| rng.r#gen()).collect();
+
+    // Pre-encode in little-endian (current codec)
+    let mut le_buf = BytesMut::with_capacity(count * 8);
+    for v in &values {
+        v.write(&mut le_buf);
+    }
+    let le_encoded = le_buf.freeze();
+
+    // Pre-encode in big-endian (old codec format)
+    let mut be_buf = BytesMut::with_capacity(count * 8);
+    for v in &values {
+        be_buf.extend_from_slice(&v.to_be_bytes());
+    }
+    let be_encoded = be_buf.freeze();
+
+    // Decode benchmarks
+    let mut group = c.benchmark_group("le_vs_be_decode/u64");
+    group.throughput(Throughput::Bytes((count * 8) as u64));
+
+    // Little-endian decode (current codec)
+    group.bench_function("little_endian", |b| {
+        b.iter(|| {
+            let mut slice = le_encoded.clone();
+            let mut sum: u64 = 0;
+            for _ in 0..count {
+                sum = sum.wrapping_add(u64::read(&mut slice).unwrap());
+            }
+            black_box(sum)
+        })
+    });
+
+    // Big-endian decode (simulating old codec)
+    group.bench_function("big_endian", |b| {
+        b.iter(|| {
+            let data = be_encoded.as_ref();
+            let mut sum: u64 = 0;
+            for i in 0..count {
+                let bytes: [u8; 8] = data[i * 8..(i + 1) * 8].try_into().unwrap();
+                sum = sum.wrapping_add(u64::from_be_bytes(bytes));
+            }
+            black_box(sum)
+        })
+    });
+
+    group.finish();
+
+    // Encode benchmarks (using codec's write method for both)
+    let mut group = c.benchmark_group("le_vs_be_encode/u64");
+    group.throughput(Throughput::Bytes((count * 8) as u64));
+
+    // Little-endian encode (current codec)
+    group.bench_function("little_endian", |b| {
+        b.iter(|| {
+            let mut buf = BytesMut::with_capacity(count * 8);
+            for v in &values {
+                v.write(&mut buf);
+            }
+            black_box(buf)
+        })
+    });
+
+    // Big-endian encode (simulating old codec using bytes crate)
+    group.bench_function("big_endian", |b| {
+        use bytes::BufMut;
+        b.iter(|| {
+            let mut buf = BytesMut::with_capacity(count * 8);
+            for v in &values {
+                buf.put_u64(*v); // put_u64 is big-endian by default
+            }
+            black_box(buf)
+        })
+    });
+
+    group.finish();
+
+    // Direct encode comparison (raw byte operations)
+    let mut group = c.benchmark_group("le_vs_be_direct_encode/u64");
+    group.throughput(Throughput::Bytes((count * 8) as u64));
+
+    // Direct LE encode
+    group.bench_function("little_endian", |b| {
+        b.iter(|| {
+            let mut buf = BytesMut::with_capacity(count * 8);
+            for v in &values {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            black_box(buf)
+        })
+    });
+
+    // Direct BE encode
+    group.bench_function("big_endian", |b| {
+        b.iter(|| {
+            let mut buf = BytesMut::with_capacity(count * 8);
+            for v in &values {
+                buf.extend_from_slice(&v.to_be_bytes());
+            }
+            black_box(buf)
+        })
+    });
+
+    group.finish();
+
+    // Direct memory read comparison (most relevant for zero-copy scenarios)
+    let mut group = c.benchmark_group("le_vs_be_direct_read/u64");
+    group.throughput(Throughput::Bytes((count * 8) as u64));
+
+    // Direct LE read (optimal on LE hardware - no byte swap needed)
+    group.bench_function("little_endian", |b| {
+        b.iter(|| {
+            let data = le_encoded.as_ref();
+            let mut sum: u64 = 0;
+            for i in 0..count {
+                let bytes: [u8; 8] = data[i * 8..(i + 1) * 8].try_into().unwrap();
+                sum = sum.wrapping_add(u64::from_le_bytes(bytes));
+            }
+            black_box(sum)
+        })
+    });
+
+    // Direct BE read (requires byte swap on LE hardware)
+    group.bench_function("big_endian", |b| {
+        b.iter(|| {
+            let data = be_encoded.as_ref();
+            let mut sum: u64 = 0;
+            for i in 0..count {
+                let bytes: [u8; 8] = data[i * 8..(i + 1) * 8].try_into().unwrap();
+                sum = sum.wrapping_add(u64::from_be_bytes(bytes));
+            }
+            black_box(sum)
+        })
+    });
+
+    group.finish();
+}
+
 /// Benchmark zero-copy access pattern (simulates reading integers from a buffer
 /// without copying). This is the key benefit of little-endian encoding on LE hardware.
 fn bench_zero_copy_read(c: &mut Criterion) {
@@ -211,4 +355,4 @@ fn benchmark_integers(c: &mut Criterion) {
     bench_roundtrip(c, "u64", &u64_values);
 }
 
-criterion_group!(benches, benchmark_integers, bench_zero_copy_read);
+criterion_group!(benches, benchmark_integers, bench_le_vs_be, bench_zero_copy_read);
