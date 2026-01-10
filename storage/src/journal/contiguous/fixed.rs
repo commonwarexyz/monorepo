@@ -346,7 +346,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         context.register("synced", "Number of syncs", synced.clone());
         context.register("pruned", "Number of blobs pruned", pruned.clone());
 
-        Ok(Self {
+        let mut journal = Self {
             context,
             cfg,
             blobs: BTreeMap::new(),
@@ -358,7 +358,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             size,
             pruning_boundary,
             _array: PhantomData,
-        })
+        };
+
+        journal.sync().await?;
+
+        Ok(journal)
     }
 
     /// Initialize a [Journal] for use in state sync.

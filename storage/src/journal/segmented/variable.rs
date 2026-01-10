@@ -454,6 +454,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// This scans varint length prefixes without decoding item data, allowing
     /// it to count size-0 dummy items that cannot be decoded.
+    ///
+    /// If a truncated item is detected (varint header claims more bytes than exist),
+    /// the blob is truncated to the last valid item offset.
     pub async fn count_items_in_section(&self, section: u64) -> Result<u64, Error> {
         let blob = match self.manager.get(section)? {
             Some(blob) => blob,
@@ -473,11 +476,26 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             }
 
             let (size, varint_len) = decode_length_prefix(&buf.as_ref()[..available])?;
-            offset = offset
+            let next_offset = offset
                 .checked_add(varint_len as u64)
                 .ok_or(Error::OffsetOverflow)?
                 .checked_add(size as u64)
                 .ok_or(Error::OffsetOverflow)?;
+
+            // Validate item data exists before counting
+            if next_offset > blob_size {
+                // Truncated item detected - resize blob to last valid offset
+                warn!(
+                    blob = section,
+                    bad_offset = offset,
+                    new_size = offset,
+                    "truncated item detected: truncating"
+                );
+                blob.resize(offset).await?;
+                break;
+            }
+
+            offset = next_offset;
             count += 1;
         }
 
