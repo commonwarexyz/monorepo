@@ -201,6 +201,7 @@ extern crate alloc;
 
 pub mod codec;
 pub mod config;
+pub mod decoder;
 pub mod error;
 pub mod extensions;
 pub mod types;
@@ -210,6 +211,7 @@ pub mod varint;
 // Re-export main types and traits
 pub use codec::*;
 pub use config::RangeCfg;
+pub use decoder::{Decoder, ZeroBuf};
 pub use error::Error;
 pub use extensions::*;
 
