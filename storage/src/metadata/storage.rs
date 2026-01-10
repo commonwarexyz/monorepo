@@ -398,14 +398,14 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         // Rewrite all data
         let mut lengths = HashMap::new();
         let mut next_data = Vec::with_capacity(target.data.len());
-        next_data.put_u64(self.next_version);
+        next_data.put_u64_le(self.next_version);
         for (key, value) in &self.map {
             key.write(&mut next_data);
             let start = next_data.len();
             value.write(&mut next_data);
             lengths.insert(key.clone(), Info::new(start, value.encode_size()));
         }
-        next_data.put_u32(Crc32::checksum(&next_data[..]));
+        next_data.put_u32_le(Crc32::checksum(&next_data[..]));
 
         // Persist changes
         target.blob.write_at(next_data.clone(), 0).await?;

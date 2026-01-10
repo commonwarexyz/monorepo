@@ -97,7 +97,7 @@ impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
             let mut compressed =
                 compress(&encoded, level as i32).map_err(|_| Error::CompressionFailed)?;
             let checksum = Crc32::checksum(&compressed);
-            compressed.put_u32(checksum);
+            compressed.put_u32_le(checksum);
             compressed
         } else {
             // Uncompressed: pre-allocate exact size to avoid copying
@@ -105,7 +105,7 @@ impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
             let mut buf = Vec::with_capacity(entry_size);
             value.write(&mut buf);
             let checksum = Crc32::checksum(&buf);
-            buf.put_u32(checksum);
+            buf.put_u32_le(checksum);
             buf
         };
 
@@ -142,7 +142,7 @@ impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
         let data_len = buf.len() - crc32::Digest::SIZE;
         let compressed_data = &buf[..data_len];
         let stored_checksum =
-            u32::from_be_bytes(buf[data_len..].try_into().expect("checksum is 4 bytes"));
+            u32::from_le_bytes(buf[data_len..].try_into().expect("checksum is 4 bytes"));
 
         // Verify checksum
         let checksum = Crc32::checksum(compressed_data);

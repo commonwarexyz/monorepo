@@ -15,7 +15,7 @@ pub struct Message<Key: Span> {
 
 impl<Key: Span> Write for Message<Key> {
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.id);
+        self.id.write(buf);
         self.payload.write(buf);
     }
 }
