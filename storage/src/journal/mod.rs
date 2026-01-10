@@ -61,10 +61,4 @@ pub enum Error {
     InvalidConfiguration(String),
     #[error("checksum mismatch: expected={0}, found={1}")]
     ChecksumMismatch(u32, u32),
-    #[error("section incomplete: section={section}, expected={expected}, got={got}")]
-    SectionIncomplete {
-        section: u64,
-        expected: u64,
-        got: u64,
-    },
 }

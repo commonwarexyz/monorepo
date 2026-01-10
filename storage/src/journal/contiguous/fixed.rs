@@ -339,10 +339,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Returns an ordered stream of all items in the journal with position >= `start_pos`.
     ///
-    /// # Panics
-    ///
-    /// Panics `start_pos` exceeds log size.
-    ///
     /// # Integrity
     ///
     /// If any corrupted data is found, or if any non-tail section has fewer items than
@@ -352,71 +348,45 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
-        assert!(start_pos <= self.size);
+        if start_pos >= self.size {
+            return Err(Error::ItemOutOfRange(start_pos));
+        }
 
         let (start_section, start_pos_in_section) = self.position_to_section(start_pos);
         let items_per_blob = self.items_per_blob;
-        let newest_section = self.inner.newest_section();
+
+        // Check all non-tail sections in range are complete before starting the stream.
+        let oldest = self.inner.oldest_section().unwrap_or(start_section);
+        if let Some(newest) = self.inner.newest_section() {
+            for section in start_section.max(oldest)..newest {
+                let len = self.inner.section_len(section).await?;
+                let expected = if section == start_section {
+                    items_per_blob - start_pos_in_section
+                } else {
+                    items_per_blob
+                };
+                if len < expected {
+                    return Err(Error::Corruption(format!(
+                        "section {section} incomplete: expected {expected} items, got {len}"
+                    )));
+                }
+            }
+        }
 
         let inner_stream = self
             .inner
             .replay(start_section, start_pos_in_section, buffer)
             .await?;
 
-        // Transform (section, pos_in_section, item) to (global_pos, item)
-        // and validate that non-tail sections are complete.
-        // We use scan to track state across items and detect incomplete sections.
-        Ok(inner_stream
-            .scan(
-                (None::<u64>, 0u64), // (last_section, last_pos_in_section)
-                move |(last_section, last_pos), result| {
-                    match result {
-                        Ok((section, pos_in_section, item)) => {
-                            // Check if we transitioned to a new section
-                            if let Some(prev_section) = *last_section {
-                                if section != prev_section {
-                                    // Verify the previous section was complete
-                                    // (unless it was the newest/tail section)
-                                    let expected_items = if prev_section == start_section {
-                                        items_per_blob - start_pos_in_section
-                                    } else {
-                                        items_per_blob
-                                    };
+        // Transform (section, pos_in_section, item) to (global_pos, item).
+        let stream = inner_stream.map(move |result| {
+            result.map(|(section, pos_in_section, item)| {
+                let global_pos = section * items_per_blob + pos_in_section;
+                (global_pos, item)
+            })
+        });
 
-                                    let got_items = if prev_section == start_section {
-                                        *last_pos - start_pos_in_section + 1
-                                    } else {
-                                        *last_pos + 1
-                                    };
-
-                                    if got_items < expected_items
-                                        && Some(prev_section) != newest_section
-                                    {
-                                        // Missing items in a non-tail section - return error
-                                        *last_section = Some(section);
-                                        *last_pos = pos_in_section;
-                                        return futures::future::ready(Some(Some(Err(
-                                            Error::SectionIncomplete {
-                                                section: prev_section,
-                                                expected: expected_items,
-                                                got: got_items,
-                                            },
-                                        ))));
-                                    }
-                                }
-                            }
-
-                            *last_section = Some(section);
-                            *last_pos = pos_in_section;
-
-                            let global_pos = section * items_per_blob + pos_in_section;
-                            futures::future::ready(Some(Some(Ok((global_pos, item)))))
-                        }
-                        Err(e) => futures::future::ready(Some(Some(Err(e)))),
-                    }
-                },
-            )
-            .filter_map(futures::future::ready))
+        Ok(stream)
     }
 
     /// Allow the journal to prune items older than `min_item_pos`. The journal may not prune all
@@ -858,23 +828,17 @@ mod tests {
             let expected_size = ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2;
             assert_eq!(journal.size(), expected_size);
 
-            // Replay should detect corruption (trailing bytes) in section 40
-            let stream = journal.replay(NZUsize!(1024), 0).await.unwrap();
-            pin_mut!(stream);
-            let mut found_error = false;
-            while let Some(result) = stream.next().await {
-                if let Err(Error::Corruption(msg)) = &result {
-                    assert!(msg.contains("section 40"), "Error should be for section 40");
-                    found_error = true;
-                    break;
-                } else if result.is_err() {
-                    panic!("Unexpected error: {:?}", result);
+            // Replay should detect corruption (incomplete section) in section 40
+            match journal.replay(NZUsize!(1024), 0).await {
+                Err(Error::Corruption(msg)) => {
+                    assert!(
+                        msg.contains("section 40"),
+                        "Error should mention section 40, got: {msg}"
+                    );
                 }
-            }
-            assert!(
-                found_error,
-                "Corruption error should be detected during replay"
-            );
+                Err(e) => panic!("Expected Corruption error for section 40, got: {:?}", e),
+                Ok(_) => panic!("Expected replay to fail with corruption"),
+            };
         });
     }
 
@@ -916,9 +880,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            // The size is computed from section_len which reflects the actual blob size
-            // After truncation, the last item is lost
-            assert!(journal.size() <= item_count);
+            // The truncation invalidates the last page (bad checksum), which is removed.
+            // This loses one item.
+            assert_eq!(journal.size(), item_count - 1);
 
             // Cleanup.
             journal.destroy().await.expect("Failed to destroy journal");
@@ -1025,8 +989,8 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
-            // the last corrupted item should get discarded (detected via section_len)
-            assert!(journal.size() <= 5);
+            // The truncation invalidates the last page, which is removed. This loses one item.
+            assert_eq!(journal.size(), 4);
             drop(journal);
 
             // Delete the second blob and re-init
