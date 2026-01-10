@@ -1,6 +1,6 @@
 //! Codec implementation for tuples.
 
-use crate::{EncodeSize, Error, Read, Write};
+use crate::{EncodeSize, Error, Read, ReadRef, Write};
 use bytes::{Buf, BufMut};
 use paste::paste;
 
@@ -28,6 +28,14 @@ macro_rules! impl_codec_for_tuple {
                 #[inline]
                 fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
                     Ok(( $( [<T $index>]::read_cfg(buf, &cfg.$index)?, )* ))
+                }
+            }
+
+            impl<'a, $( [<T $index>]: ReadRef<'a> ),*> ReadRef<'a> for ( $( [<T $index>], )* ) {
+                type Cfg = ( $( [<T $index>]::Cfg, )* );
+                #[inline]
+                fn read_ref(buf: &mut &'a [u8], cfg: &Self::Cfg) -> Result<Self, Error> {
+                    Ok(( $( [<T $index>]::read_ref(buf, &cfg.$index)?, )* ))
                 }
             }
         }

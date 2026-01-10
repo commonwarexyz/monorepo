@@ -19,7 +19,8 @@
 //!   endian ambiguity.
 
 use crate::{
-    util::at_least, varint::UInt, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write,
+    util::at_least, varint::UInt, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, ReadRef,
+    ReadRefExt, Write,
 };
 use bytes::{Buf, BufMut};
 
@@ -61,6 +62,46 @@ impl_numeric!(i128, get_i128, put_i128);
 impl_numeric!(f32, get_f32, put_f32);
 impl_numeric!(f64, get_f64, put_f64);
 
+/// Helper to advance a byte slice and return the consumed portion.
+#[inline]
+const fn advance<'a>(buf: &mut &'a [u8], n: usize) -> Result<&'a [u8], Error> {
+    if buf.len() < n {
+        return Err(Error::EndOfBuffer);
+    }
+    let (data, rest) = buf.split_at(n);
+    *buf = rest;
+    Ok(data)
+}
+
+// ReadRef implementations for numeric types
+macro_rules! impl_numeric_read_ref {
+    ($type:ty, $from_be_bytes:path) => {
+        impl<'a> ReadRef<'a> for $type {
+            type Cfg = ();
+
+            #[inline]
+            fn read_ref(buf: &mut &'a [u8], _: &()) -> Result<Self, Error> {
+                let bytes = advance(buf, core::mem::size_of::<$type>())?;
+                // SAFETY: advance guarantees bytes.len() == size_of::<$type>()
+                Ok($from_be_bytes(bytes.try_into().unwrap()))
+            }
+        }
+    };
+}
+
+impl_numeric_read_ref!(u8, u8::from_be_bytes);
+impl_numeric_read_ref!(u16, u16::from_be_bytes);
+impl_numeric_read_ref!(u32, u32::from_be_bytes);
+impl_numeric_read_ref!(u64, u64::from_be_bytes);
+impl_numeric_read_ref!(u128, u128::from_be_bytes);
+impl_numeric_read_ref!(i8, i8::from_be_bytes);
+impl_numeric_read_ref!(i16, i16::from_be_bytes);
+impl_numeric_read_ref!(i32, i32::from_be_bytes);
+impl_numeric_read_ref!(i64, i64::from_be_bytes);
+impl_numeric_read_ref!(i128, i128::from_be_bytes);
+impl_numeric_read_ref!(f32, f32::from_be_bytes);
+impl_numeric_read_ref!(f64, f64::from_be_bytes);
+
 // Usize implementation
 impl Write for usize {
     #[inline]
@@ -93,6 +134,20 @@ impl EncodeSize for usize {
     }
 }
 
+impl<'a> ReadRef<'a> for usize {
+    type Cfg = RangeCfg<Self>;
+
+    #[inline]
+    fn read_ref(buf: &mut &'a [u8], range: &Self::Cfg) -> Result<Self, Error> {
+        let self_as_u32: u32 = <UInt<u32> as ReadRefExt>::read_ref(buf)?.into();
+        let result = Self::try_from(self_as_u32).map_err(|_| Error::InvalidUsize)?;
+        if !range.contains(&result) {
+            return Err(Error::InvalidLength(result));
+        }
+        Ok(result)
+    }
+}
+
 // Bool implementation
 impl Write for bool {
     #[inline]
@@ -115,6 +170,19 @@ impl Read for bool {
 
 impl FixedSize for bool {
     const SIZE: usize = 1;
+}
+
+impl<'a> ReadRef<'a> for bool {
+    type Cfg = ();
+
+    #[inline]
+    fn read_ref(buf: &mut &'a [u8], _: &()) -> Result<Self, Error> {
+        match ReadRefExt::read_ref(buf)? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(Error::InvalidBool),
+        }
+    }
 }
 
 // Constant-size array implementation
@@ -140,6 +208,17 @@ impl<const N: usize> FixedSize for [u8; N] {
     const SIZE: usize = N;
 }
 
+impl<'a, const N: usize> ReadRef<'a> for [u8; N] {
+    type Cfg = ();
+
+    #[inline]
+    fn read_ref(buf: &mut &'a [u8], _: &()) -> Result<Self, Error> {
+        let bytes = advance(buf, N)?;
+        // SAFETY: advance guarantees bytes.len() == N
+        Ok(bytes.try_into().unwrap())
+    }
+}
+
 impl Write for () {
     #[inline]
     fn write(&self, _buf: &mut impl BufMut) {}
@@ -156,6 +235,15 @@ impl Read for () {
 
 impl FixedSize for () {
     const SIZE: usize = 0;
+}
+
+impl<'a> ReadRef<'a> for () {
+    type Cfg = ();
+
+    #[inline]
+    fn read_ref(_buf: &mut &'a [u8], _: &()) -> Result<Self, Error> {
+        Ok(())
+    }
 }
 
 // Option implementation
@@ -183,6 +271,19 @@ impl<T: Read> Read for Option<T> {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         if bool::read(buf)? {
             Ok(Some(T::read_cfg(buf, cfg)?))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl<'a, T: ReadRef<'a>> ReadRef<'a> for Option<T> {
+    type Cfg = T::Cfg;
+
+    #[inline]
+    fn read_ref(buf: &mut &'a [u8], cfg: &Self::Cfg) -> Result<Self, Error> {
+        if ReadRefExt::read_ref(buf)? {
+            Ok(Some(T::read_ref(buf, cfg)?))
         } else {
             Ok(None)
         }

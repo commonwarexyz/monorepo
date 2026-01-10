@@ -58,6 +58,37 @@ pub trait Read: Sized {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error>;
 }
 
+/// Trait for zero-copy reading from a byte slice.
+///
+/// Unlike [Read], which works with any [Buf] implementation, this trait operates directly
+/// on `&[u8]` slices. This enables zero-copy decoding where the returned value can borrow
+/// directly from the input buffer instead of copying data.
+///
+/// The primary use case is decoding byte slices (`&'a [u8]`) without allocation. Types that
+/// need to own their data should implement [Read] instead.
+///
+/// # Example
+///
+/// ```
+/// use commonware_codec::{ReadRef, ReadRefRangeExt, RangeCfg};
+///
+/// // Zero-copy: returns a slice borrowing from the input
+/// let data = &[3u8, 1, 2, 3, 0x2A][..];
+/// let mut buf = data;
+/// let slice: &[u8] = <&[u8]>::read_ref_range(&mut buf, ..=10).unwrap();
+/// assert_eq!(slice, &[1, 2, 3]);
+/// assert_eq!(buf, &[0x2A]); // remaining data
+/// ```
+pub trait ReadRef<'a>: Sized {
+    /// Configuration type for reading (same semantics as [Read::Cfg]).
+    type Cfg: Clone + Send + Sync + 'static;
+
+    /// Reads a value from the byte slice, potentially borrowing from it.
+    ///
+    /// The buffer slice is advanced past the consumed bytes.
+    fn read_ref(buf: &mut &'a [u8], cfg: &Self::Cfg) -> Result<Self, Error>;
+}
+
 /// Trait combining [Write] and [EncodeSize] for types that can be fully encoded.
 ///
 /// This trait provides the convenience [Encode::encode] method which handles
@@ -130,6 +161,30 @@ pub trait Decode: Read {
 
 // Automatically implement `Decode` for types that implement `Read`.
 impl<T: Read> Decode for T {}
+
+/// Trait combining [ReadRef] with a check for remaining bytes.
+///
+/// Ensures that *all* bytes from the input buffer were consumed during zero-copy decoding.
+pub trait DecodeRef<'a>: ReadRef<'a> {
+    /// Decodes a value from `buf` using `cfg`, ensuring the entire buffer is consumed.
+    ///
+    /// Returns [Error] if decoding fails via [ReadRef::read_ref] or if there are leftover bytes
+    /// in `buf` after reading.
+    fn decode_ref(buf: &'a [u8], cfg: &Self::Cfg) -> Result<Self, Error> {
+        let mut slice = buf;
+        let result = Self::read_ref(&mut slice, cfg)?;
+
+        // Check that the buffer is fully consumed.
+        if !slice.is_empty() {
+            return Err(Error::ExtraData(slice.len()));
+        }
+
+        Ok(result)
+    }
+}
+
+// Automatically implement `DecodeRef` for types that implement `ReadRef`.
+impl<'a, T: ReadRef<'a>> DecodeRef<'a> for T {}
 
 /// Convenience trait combining [Encode] and [Decode].
 ///

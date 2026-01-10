@@ -29,7 +29,7 @@
 //! assert_eq!(decoded, -3);
 //! ```
 
-use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, ReadRef, ReadRefExt, Write};
 use bytes::{Buf, BufMut};
 use core::{fmt::Debug, mem::size_of};
 use sealed::{SPrim, UPrim};
@@ -281,6 +281,13 @@ impl<U: UPrim> Read for UInt<U> {
     }
 }
 
+impl<'a, U: UPrim> ReadRef<'a> for UInt<U> {
+    type Cfg = ();
+    fn read_ref(buf: &mut &'a [u8], _: &()) -> Result<Self, Error> {
+        read_ref(buf).map(UInt)
+    }
+}
+
 impl<U: UPrim> EncodeSize for UInt<U> {
     fn encode_size(&self) -> usize {
         size(self.0)
@@ -328,6 +335,13 @@ impl<S: SPrim> Read for SInt<S> {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         read_signed::<S>(buf).map(SInt)
+    }
+}
+
+impl<'a, S: SPrim> ReadRef<'a> for SInt<S> {
+    type Cfg = ();
+    fn read_ref(buf: &mut &'a [u8], _: &()) -> Result<Self, Error> {
+        read_ref_signed::<S>(buf).map(SInt)
     }
 }
 
@@ -384,6 +398,17 @@ fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
     }
 }
 
+/// Decodes an unsigned integer from a varint (zero-copy variant).
+fn read_ref<T: UPrim>(buf: &mut &[u8]) -> Result<T, Error> {
+    let mut decoder = Decoder::<T>::new();
+    loop {
+        let byte = ReadRefExt::read_ref(buf)?;
+        if let Some(value) = decoder.feed(byte)? {
+            return Ok(value);
+        }
+    }
+}
+
 /// Calculates the number of bytes needed to encode an unsigned integer as a varint.
 fn size<T: UPrim>(value: T) -> usize {
     let total_bits = size_of::<T>() * 8;
@@ -400,6 +425,11 @@ fn write_signed<S: SPrim>(value: S, buf: &mut impl BufMut) {
 /// Decodes a signed integer from varint ZigZag encoding.
 fn read_signed<S: SPrim>(buf: &mut impl Buf) -> Result<S, Error> {
     Ok(S::un_zigzag(read(buf)?))
+}
+
+/// Decodes a signed integer from varint ZigZag encoding (zero-copy variant).
+fn read_ref_signed<S: SPrim>(buf: &mut &[u8]) -> Result<S, Error> {
+    Ok(S::un_zigzag(read_ref(buf)?))
 }
 
 /// Calculates the number of bytes needed to encode a signed integer as a varint.
