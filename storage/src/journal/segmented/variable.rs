@@ -502,6 +502,60 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(count)
     }
 
+    /// Scans a section and returns the byte offset of each item without decoding.
+    ///
+    /// This is similar to [`Self::count_items_in_section`] but returns the actual
+    /// byte offsets instead of just a count. This is useful for rebuilding offset
+    /// indices without needing to decode item data (e.g., for size-0 dummy items
+    /// that cannot be decoded).
+    ///
+    /// If a truncated item is detected (varint header claims more bytes than exist),
+    /// the blob is truncated to the last valid item offset.
+    pub async fn scan_section_offsets(&self, section: u64) -> Result<Vec<u64>, Error> {
+        let blob = match self.manager.get(section)? {
+            Some(blob) => blob,
+            None => return Ok(Vec::new()),
+        };
+
+        let blob_size = blob.size().await;
+        let mut offset = 0u64;
+        let mut offsets = Vec::new();
+
+        while offset < blob_size {
+            // Read varint header (max 5 bytes for u32)
+            let buf = vec![0u8; MAX_VARINT_SIZE];
+            let (buf, available) = blob.read_up_to(buf, offset).await?;
+            if available == 0 {
+                break;
+            }
+
+            let (size, varint_len) = decode_length_prefix(&buf.as_ref()[..available])?;
+            let next_offset = offset
+                .checked_add(varint_len as u64)
+                .ok_or(Error::OffsetOverflow)?
+                .checked_add(size as u64)
+                .ok_or(Error::OffsetOverflow)?;
+
+            // Validate item data exists before recording offset
+            if next_offset > blob_size {
+                // Truncated item detected - resize blob to last valid offset
+                warn!(
+                    blob = section,
+                    bad_offset = offset,
+                    new_size = offset,
+                    "truncated item detected: truncating"
+                );
+                blob.resize(offset).await?;
+                break;
+            }
+
+            offsets.push(offset);
+            offset = next_offset;
+        }
+
+        Ok(offsets)
+    }
+
     /// Appends an item to `Journal` in a given `section`, returning the offset
     /// where the item was written and the size of the item (which may now be smaller
     /// than the encoded size from the codec, if compression is enabled).

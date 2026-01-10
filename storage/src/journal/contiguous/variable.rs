@@ -14,13 +14,10 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
-use commonware_utils::NZUsize;
 use core::ops::Range;
 use futures::{future::Either, stream, Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, info};
-
-const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 /// Suffix appended to the base partition name for the data journal.
 const DATA_SUFFIX: &str = "_data";
@@ -735,11 +732,13 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok((data_oldest_pos, data_size))
     }
 
-    /// Rebuild missing offset entries by replaying the data journal and
+    /// Rebuild missing offset entries by scanning the data journal and
     /// appending the missing entries to the offsets journal.
     ///
     /// The data journal is the source of truth. This function brings the offsets
-    /// journal up to date by replaying data items and indexing their positions.
+    /// journal up to date by scanning data items for their byte offsets and
+    /// indexing their positions. Unlike replay, this does not decode item data,
+    /// allowing it to handle size-0 dummy items that cannot be decoded.
     ///
     /// # Warning
     ///
@@ -756,46 +755,52 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             "rebuild_offsets called with empty data journal"
         );
 
-        // Find where to start replaying
-        let (start_section, resume_offset, skip_first) =
-            if let Some(oldest) = offsets.oldest_retained_pos() {
+        // Find where to start scanning.
+        // We calculate which section to start from based on offsets_size.
+        // SAFETY: data is non-empty (checked above), so oldest_section() returns Some.
+        let start_section = offsets.oldest_retained_pos().map_or_else(
+            // Offsets empty -- start from first data section
+            || data.oldest_section().unwrap(),
+            |oldest| {
                 if oldest < offsets_size {
-                    // Offsets has items -- resume from last indexed position
-                    let last_offset = offsets.read(offsets_size - 1).await?;
-                    let last_section = position_to_section(offsets_size - 1, items_per_section);
-                    (last_section, last_offset, true)
+                    // Offsets has items -- resume from the section containing the last indexed item
+                    position_to_section(offsets_size - 1, items_per_section)
                 } else {
                     // Offsets fully pruned but data has items -- start from first data section
-                    // SAFETY: data is non-empty (checked above)
-                    let first_section = data.oldest_section().unwrap();
-                    (first_section, 0, false)
+                    data.oldest_section().unwrap()
                 }
+            },
+        );
+
+        // Calculate how many items are already indexed in start_section.
+        // This is used to skip items that are already in the offsets journal.
+        // Note: We skip based on COUNT, not offset values, because after init_at_size
+        // the offsets journal may contain uninitialized (garbage) values.
+        let items_already_indexed_in_start =
+            offsets_size.saturating_sub(start_section * items_per_section);
+
+        // SAFETY: data is non-empty (checked above)
+        let newest_section = data.newest_section().unwrap();
+
+        // Scan data journal from start position through the end and index all items.
+        // The data journal is the source of truth. We use scan_section_offsets instead
+        // of replay to avoid decoding items (which fails for size-0 dummy items).
+        for section in start_section..=newest_section {
+            let section_offsets = data.scan_section_offsets(section).await?;
+
+            // Calculate how many items to skip in this section
+            let skip_count = if section == start_section {
+                items_already_indexed_in_start as usize
             } else {
-                // Offsets empty -- start from first data section
-                // SAFETY: data is non-empty (checked above)
-                let first_section = data.oldest_section().unwrap();
-                (first_section, 0, false)
+                0
             };
 
-        // Replay data journal from start position through the end and index all items.
-        // The data journal is the source of truth, so we consume the entire stream.
-        // (replay streams from start_section onwards through all subsequent sections)
-        let stream = data
-            .replay(start_section, resume_offset, REPLAY_BUFFER_SIZE)
-            .await?;
-        futures::pin_mut!(stream);
-
-        let mut skipped_first = false;
-        while let Some(result) = stream.next().await {
-            let (_section, offset, _size, _item) = result?;
-
-            // Skip first item if resuming from last indexed offset
-            if skip_first && !skipped_first {
-                skipped_first = true;
-                continue;
+            for (i, &byte_offset) in section_offsets.iter().enumerate() {
+                if i < skip_count {
+                    continue;
+                }
+                offsets.append(byte_offset).await?;
             }
-
-            offsets.append(offset).await?;
         }
 
         Ok(())
@@ -2342,6 +2347,63 @@ mod tests {
             let pos = journal.append(2200).await.unwrap();
             assert_eq!(pos, 22);
             assert_eq!(journal.read(22).await.unwrap(), 2200);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that crash recovery works when offsets journal needs to be rebuilt
+    /// from data journal that contains dummy items (size-0 items from init_at_size).
+    ///
+    /// This is a regression test for a bug where `add_missing_offsets` used `replay()`
+    /// which tried to decode items. Dummies (size-0) cannot be decoded, causing crash
+    /// recovery to fail. The fix uses `scan_section_offsets()` which doesn't decode.
+    #[test_traced]
+    fn test_crash_recovery_with_dummies() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "crash_recovery_dummies".to_string(),
+                items_per_section: NZU64!(11),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Step 1: Create journal via init_at_size(15)
+            // This creates 4 dummies in data section 1 (positions 11-14)
+            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 15)
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 15);
+
+            // Step 2: Simulate a crash scenario where offsets is behind data.
+            // We do this by directly appending to the data journal without updating offsets.
+            // This mimics a crash after data.append but before offsets.append.
+            journal.data.append(1, 1500u64).await.unwrap();
+            journal.data.sync(1).await.unwrap();
+            // Offsets still has size 15, but data now has 5 items in section 1
+
+            // Step 3: Sync offsets (which is still at size 15) and drop
+            journal.offsets.sync().await.unwrap();
+            drop(journal);
+
+            // Step 4: Recover via init() - this should trigger add_missing_offsets
+            // which now uses scan_section_offsets instead of replay.
+            // The data journal has 4 dummies + 1 real item, and add_missing_offsets
+            // must scan through the dummies to rebuild the offset for position 15.
+            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .expect("recovery should succeed with dummies");
+
+            // Verify recovery worked
+            assert_eq!(journal.size(), 16);
+            assert_eq!(journal.oldest_retained_pos(), Some(11));
+
+            // Verify the real item at position 15 is readable
+            assert_eq!(journal.read(15).await.unwrap(), 1500);
 
             journal.destroy().await.unwrap();
         });
