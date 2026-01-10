@@ -54,15 +54,16 @@
 //! # Dummy Items
 //!
 //! The journal supports "dummy" items -- size-0 entries consisting of only a `varint(0)` header
-//! (a single `0x00` byte) with no data payload -- for crate internal use. These are used by the
-//! [crate::journal::contiguous::variable::Journal] to efficiently initialize a journal at a
-//! whose earliest section _logically_ contains more items than it _physically_ does.
+//! (a single `0x00` byte) with no data payload -- for crate-internal use.
 //!
-//! For example, a section that begins with 2 dummy elements followed by 3 "regular" elements
-//! would report (via `scan_section_offsets`) having 5 items, but the section would only contain
-//! 3 "regular" elements.
+//! Dummies enable [crate::journal::contiguous::variable::Journal] to efficiently initialize at
+//! a non-zero logical position. For example, to create a journal starting at logical position
+//! 1,000,007, instead of writing 1,000,007 entries, only the tail section needs entries. If
+//! `items_per_section` is 1000, position 1,000,007 falls in section 1000 at offset 7. So we
+//! write 7 dummy items to the tail section, making the next append position 1,000,007.
 //!
-//! Users are responsible for ensuring that dummy items are not attempted to be read.
+//! Dummy items are counted by `scan_section_offsets` but cannot be decoded via [Journal::get]
+//! or [Journal::replay]. Callers must ensure dummies are never read.
 //!
 //! # Example
 //!
@@ -465,12 +466,12 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
     /// Scans a section and returns the byte offset of each item without decoding.
     ///
-    /// This is useful for counting items or rebuilding offset indices without
-    /// needing to decode item data (e.g., for size-0 dummy items that cannot
-    /// be decoded).
+    /// This parses only the varint length headers, not the item data itself. This is
+    /// essential for handling dummy items (size-0 entries) which have no data to decode.
+    /// See the module-level "Dummy Items" section for details.
     ///
     /// If a truncated item is detected (varint header claims more bytes than exist),
-    /// the blob is truncated to the last valid item offset.
+    /// the blob is truncated to the last valid item offset and scanning stops.
     pub(crate) async fn scan_section_offsets(&self, section: u64) -> Result<Vec<u64>, Error> {
         let blob = match self.manager.get(section)? {
             Some(blob) => blob,
@@ -2099,6 +2100,355 @@ mod tests {
 
             let offsets = journal.scan_section_offsets(999).await.unwrap();
             assert!(offsets.is_empty());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test the primary state sync use case: dummies at start of section followed by real items.
+    ///
+    /// This simulates init_at_size(N) where N falls mid-section, creating dummy items
+    /// at the start of the tail section, followed by real appended items.
+    #[test_traced]
+    fn test_scan_section_dummies_then_real_items() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_dummies_then_real".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
+
+            // Simulate init_at_size pattern: 5 dummies at start of section
+            for _ in 0..5 {
+                journal.append_dummy(0).await.unwrap();
+            }
+
+            // Then append 3 real items (simulating user appends after init_at_size)
+            let (real_offset0, _) = journal.append(0, 100u64).await.unwrap();
+            let (real_offset1, _) = journal.append(0, 200u64).await.unwrap();
+            let (real_offset2, _) = journal.append(0, 300u64).await.unwrap();
+            journal.sync(0).await.unwrap();
+
+            // Scan should find all 8 items
+            let offsets = journal.scan_section_offsets(0).await.unwrap();
+            assert_eq!(offsets.len(), 8);
+
+            // First 5 offsets should be sequential single bytes (varint(0) = 0x00)
+            // Each dummy is 1 byte, so offsets are 0, 1, 2, 3, 4
+            for i in 0..5 {
+                assert_eq!(offsets[i], i as u64, "dummy offset {i} incorrect");
+            }
+
+            // Verify the real item offsets match what append returned
+            assert_eq!(offsets[5], real_offset0);
+            assert_eq!(offsets[6], real_offset1);
+            assert_eq!(offsets[7], real_offset2);
+
+            // Verify real items are readable at those offsets
+            assert_eq!(journal.get(0, real_offset0).await.unwrap(), 100);
+            assert_eq!(journal.get(0, real_offset1).await.unwrap(), 200);
+            assert_eq!(journal.get(0, real_offset2).await.unwrap(), 300);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test scan_section_offsets correctly handles truncation during real item write.
+    ///
+    /// Simulates a crash where: dummies written, then a real item's header is written
+    /// but only partial data, leaving the blob in a truncated state.
+    #[test_traced]
+    fn test_scan_section_truncated_real_item_after_dummies() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_truncated_after_dummies".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Write 3 dummies
+            for _ in 0..3 {
+                journal.append_dummy(0).await.unwrap();
+            }
+
+            // Write a real item
+            let (real_offset, _) = journal.append(0, 42u64).await.unwrap();
+            journal.sync(0).await.unwrap();
+            drop(journal);
+
+            // Manually truncate the blob to simulate crash during next item write.
+            // The blob should have: 3 dummy bytes + real item (varint + data + checksum)
+            let (blob, size) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+
+            // Append a partial item: just the varint header claiming 100 bytes, but no data
+            // varint(100) = 0x64 (single byte for values < 128)
+            blob.write_at(vec![0x64], size).await.unwrap();
+            blob.sync().await.unwrap();
+
+            // Re-open journal and scan - should detect truncation and repair
+            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Scan should find only the valid items (3 dummies + 1 real)
+            let offsets = journal.scan_section_offsets(0).await.unwrap();
+            assert_eq!(offsets.len(), 4);
+
+            // Verify offsets
+            assert_eq!(offsets[0], 0); // dummy 0
+            assert_eq!(offsets[1], 1); // dummy 1
+            assert_eq!(offsets[2], 2); // dummy 2
+            assert_eq!(offsets[3], real_offset); // real item
+
+            // Verify the real item is still readable
+            assert_eq!(journal.get(0, real_offset).await.unwrap(), 42);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test scan_section_offsets correctly handles truncation during dummy write.
+    ///
+    /// This is an edge case where the crash happens while writing dummies themselves.
+    /// Since dummies are just 1 byte (varint(0)), this tests partial varint handling.
+    #[test_traced]
+    fn test_scan_section_truncated_during_dummy_sequence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_truncated_dummy".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Write 5 valid dummies
+            for _ in 0..5 {
+                journal.append_dummy(0).await.unwrap();
+            }
+            journal.sync(0).await.unwrap();
+            drop(journal);
+
+            // Manually append garbage that looks like a truncated item header.
+            // Write a multi-byte varint that claims a large size but has no data.
+            // varint encoding for larger values uses multiple bytes with continuation bits.
+            let (blob, size) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+
+            // Write varint for value 1000: 0xE8 0x07 (claims 1000 bytes of data follow)
+            blob.write_at(vec![0xE8, 0x07], size).await.unwrap();
+            blob.sync().await.unwrap();
+
+            // Re-open and scan - should truncate back to 5 valid dummies
+            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            let offsets = journal.scan_section_offsets(0).await.unwrap();
+            assert_eq!(offsets.len(), 5);
+
+            // All offsets should be sequential bytes (dummies are 1 byte each)
+            for i in 0..5 {
+                assert_eq!(offsets[i], i as u64);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test scan handles the boundary case where we have ONLY dummies (no real items yet).
+    ///
+    /// This is the state immediately after init_at_size before any real appends.
+    #[test_traced]
+    fn test_scan_section_only_dummies() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_only_dummies".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
+
+            // Write many dummies (simulating a large init_at_size offset within section)
+            let num_dummies = 100;
+            for _ in 0..num_dummies {
+                journal.append_dummy(0).await.unwrap();
+            }
+            journal.sync(0).await.unwrap();
+
+            // Scan should find exactly num_dummies items
+            let offsets = journal.scan_section_offsets(0).await.unwrap();
+            assert_eq!(offsets.len(), num_dummies);
+
+            // All offsets should be sequential (each dummy is 1 byte)
+            for i in 0..num_dummies {
+                assert_eq!(offsets[i], i as u64);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test scan_section_offsets after a restart maintains consistency.
+    ///
+    /// Verifies that scan works correctly after journal is closed and reopened,
+    /// which is the actual crash recovery scenario.
+    #[test_traced]
+    fn test_scan_section_persistence_with_dummies() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_scan_persist".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Phase 1: Create journal with dummies + real items
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // 7 dummies
+            for _ in 0..7 {
+                journal.append_dummy(0).await.unwrap();
+            }
+
+            // 3 real items
+            journal.append(0, 1000u64).await.unwrap();
+            journal.append(0, 2000u64).await.unwrap();
+            journal.append(0, 3000u64).await.unwrap();
+            journal.sync(0).await.unwrap();
+
+            let offsets_before = journal.scan_section_offsets(0).await.unwrap();
+            assert_eq!(offsets_before.len(), 10);
+            drop(journal);
+
+            // Phase 2: Reopen and verify scan returns same results
+            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            let offsets_after = journal.scan_section_offsets(0).await.unwrap();
+            assert_eq!(offsets_after.len(), 10);
+            assert_eq!(offsets_before, offsets_after);
+
+            // Verify real items are readable at correct offsets
+            assert_eq!(journal.get(0, offsets_after[7]).await.unwrap(), 1000);
+            assert_eq!(journal.get(0, offsets_after[8]).await.unwrap(), 2000);
+            assert_eq!(journal.get(0, offsets_after[9]).await.unwrap(), 3000);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test scan_section_offsets handles crash with truncated item after dummies + real items.
+    ///
+    /// This is the full state sync scenario: init_at_size creates dummies, user appends
+    /// real items, then crashes mid-write of another item. Recovery must:
+    /// 1. Parse through all the dummies
+    /// 2. Parse through all the complete real items
+    /// 3. Detect and truncate the partial item
+    /// 4. Return correct offsets for all valid items
+    #[test_traced]
+    fn test_scan_section_full_state_sync_crash_scenario() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_full_crash".to_string(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Simulate init_at_size: write 5 dummies
+            for _ in 0..5 {
+                journal.append_dummy(0).await.unwrap();
+            }
+
+            // Simulate user appends after init_at_size: write 3 real items
+            let (offset5, _) = journal.append(0, 500u64).await.unwrap();
+            let (offset6, _) = journal.append(0, 600u64).await.unwrap();
+            let (offset7, _) = journal.append(0, 700u64).await.unwrap();
+            journal.sync(0).await.unwrap();
+            drop(journal);
+
+            // Manually corrupt: append a truncated item (varint header with missing data)
+            let (blob, size) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+
+            // Write a varint claiming 500 bytes but provide no data
+            // varint(500) = 0xF4 0x03 (two bytes)
+            blob.write_at(vec![0xF4, 0x03], size).await.unwrap();
+            blob.sync().await.unwrap();
+
+            // Verify the blob has extra bytes (re-open to check size)
+            let (_, corrupted_size) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(corrupted_size, size + 2);
+
+            // Re-init and scan - should detect corruption and repair
+            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            let offsets = journal.scan_section_offsets(0).await.unwrap();
+
+            // Should have exactly 8 valid items (5 dummies + 3 real)
+            assert_eq!(offsets.len(), 8);
+
+            // First 5 are dummies (1 byte each, sequential)
+            for i in 0..5 {
+                assert_eq!(offsets[i], i as u64);
+            }
+
+            // Next 3 are the real items at their original offsets
+            assert_eq!(offsets[5], offset5);
+            assert_eq!(offsets[6], offset6);
+            assert_eq!(offsets[7], offset7);
+
+            // Verify real items are still readable
+            assert_eq!(journal.get(0, offset5).await.unwrap(), 500);
+            assert_eq!(journal.get(0, offset6).await.unwrap(), 600);
+            assert_eq!(journal.get(0, offset7).await.unwrap(), 700);
+
+            // Verify blob was truncated back to valid size
+            let (_, repaired_size) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(repaired_size, size, "blob should be truncated to last valid item");
 
             journal.destroy().await.unwrap();
         });
