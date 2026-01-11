@@ -324,7 +324,7 @@ pub async fn launch_instances(
     name: &str,
     tag: &str,
 ) -> Result<Vec<String>, Ec2Error> {
-    let builder = client
+    let resp = client
         .run_instances()
         .image_id(ami_id)
         .instance_type(instance_type)
@@ -359,9 +359,9 @@ pub async fn launch_instances(
                         .build(),
                 )
                 .build(),
-        );
-
-    let resp = builder.send().await?;
+        )
+        .send()
+        .await?;
     Ok(resp
         .instances
         .unwrap()

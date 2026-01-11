@@ -7,7 +7,7 @@ use aws_sdk_s3::{
     operation::head_object::HeadObjectError,
     presigning::PresigningConfig,
     primitives::ByteStream,
-    types::{BucketLocationConstraint, CreateBucketConfiguration},
+    types::{BucketLocationConstraint, CreateBucketConfiguration, Delete, ObjectIdentifier},
     Client as S3Client,
 };
 use std::{path::Path, time::Duration};
@@ -149,9 +149,8 @@ pub async fn presign_url(
     Ok(presigned_request.uri().to_string())
 }
 
-/// Deletes all objects under a prefix in S3
+/// Deletes all objects under a prefix in S3 using batch delete (up to 1000 objects per request)
 pub async fn delete_prefix(client: &S3Client, bucket: &str, prefix: &str) -> Result<(), Error> {
-    // List all objects with the prefix
     let mut continuation_token: Option<String> = None;
     let mut deleted_count = 0;
 
@@ -167,23 +166,38 @@ pub async fn delete_prefix(client: &S3Client, bucket: &str, prefix: &str) -> Res
             .await
             .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
 
-        // Delete each object
+        // Collect object identifiers for batch delete
         if let Some(objects) = response.contents {
-            for object in objects {
-                if let Some(key) = object.key {
-                    client
-                        .delete_object()
-                        .bucket(bucket)
-                        .key(&key)
-                        .send()
-                        .await
-                        .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
-                    deleted_count += 1;
-                }
+            let identifiers: Vec<ObjectIdentifier> = objects
+                .into_iter()
+                .filter_map(|obj| obj.key)
+                .map(|key| ObjectIdentifier::builder().key(key).build())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    Error::DownloadFailed(format!("failed to build object identifier: {e}"))
+                })?;
+
+            if !identifiers.is_empty() {
+                let count = identifiers.len();
+                let delete = Delete::builder()
+                    .set_objects(Some(identifiers))
+                    .build()
+                    .map_err(|e| {
+                        Error::DownloadFailed(format!("failed to build delete request: {e}"))
+                    })?;
+
+                client
+                    .delete_objects()
+                    .bucket(bucket)
+                    .delete(delete)
+                    .send()
+                    .await
+                    .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+
+                deleted_count += count;
             }
         }
 
-        // Check if there are more objects
         if response.is_truncated == Some(true) {
             continuation_token = response.next_continuation_token;
         } else {
