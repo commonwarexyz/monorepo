@@ -202,10 +202,7 @@ impl Buf for ReplayBuf {
     }
 
     fn chunk(&self) -> &[u8] {
-        self.pages
-            .front()
-            .map(|p| &p[self.offset..])
-            .unwrap_or(&[])
+        self.pages.front().map(|p| &p[self.offset..]).unwrap_or(&[])
     }
 
     fn advance(&mut self, mut cnt: usize) {

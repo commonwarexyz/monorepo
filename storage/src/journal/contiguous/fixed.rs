@@ -58,9 +58,8 @@ use crate::{
     journal::{contiguous::MutableContiguous, Error},
     Persistable,
 };
-use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _};
 use bytes::Buf;
-use commonware_codec::ReadExt as _;
+use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef, Replay},
     telemetry::metrics::status::GaugeExt,
