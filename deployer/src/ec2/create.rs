@@ -117,7 +117,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let s3_client = s3_client.clone();
         async move {
             if !object_exists(&s3_client, S3_BUCKET_NAME, &s3_key).await? {
-                info!(key = s3_key.as_str(), "tool not cached, downloading and uploading");
+                info!(
+                    key = s3_key.as_str(),
+                    "tool not cached, downloading and uploading"
+                );
                 let temp_path = tag_directory.join(s3_key.replace('/', "_"));
                 download_file(&download_url, &temp_path).await?;
                 let url = upload_and_presign(
@@ -517,15 +520,33 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     info!("uploading deployment-specific config files");
     let instances: Vec<(&str, &str, &str)> = deployments
         .iter()
-        .map(|d| (d.instance.name.as_str(), d.ip.as_str(), d.instance.region.as_str()))
+        .map(|d| {
+            (
+                d.instance.name.as_str(),
+                d.ip.as_str(),
+                d.instance.region.as_str(),
+            )
+        })
         .collect();
     let prom_config = generate_prometheus_config(&instances);
     let prom_path = tag_directory.join("prometheus.yml");
     std::fs::write(&prom_path, &prom_config)?;
     let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
     let [prometheus_config_url, dashboard_url]: [String; 2] = try_join_all([
-        upload_and_presign(&s3_client, S3_BUCKET_NAME, &prometheus_config_s3_key(tag), &prom_path, presign_duration),
-        upload_and_presign(&s3_client, S3_BUCKET_NAME, &dashboard_s3_key(tag), &dashboard_path, presign_duration),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &prometheus_config_s3_key(tag),
+            &prom_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &dashboard_s3_key(tag),
+            &dashboard_path,
+            presign_duration,
+        ),
     ])
     .await?
     .try_into()
