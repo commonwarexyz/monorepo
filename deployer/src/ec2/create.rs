@@ -140,40 +140,41 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         ),
     ];
 
-    let tool_urls: [String; 7] = try_join_all(tools_to_cache.iter().map(
-        |(s3_key, download_url)| {
-            let tag_directory = tag_directory.clone();
-            let s3_client = s3_client.clone();
-            async move {
-                if !object_exists(&s3_client, S3_BUCKET_NAME, s3_key).await? {
-                    info!(
-                        key = s3_key.as_str(),
-                        "tool not cached, downloading and uploading"
-                    );
-                    let temp_path = tag_directory.join(s3_key.replace('/', "_"));
-                    download_file(download_url, &temp_path).await?;
-                    let url = upload_and_presign(
-                        &s3_client,
-                        S3_BUCKET_NAME,
-                        s3_key,
-                        &temp_path,
-                        presign_duration,
-                    )
-                    .await?;
-                    std::fs::remove_file(&temp_path)?;
-                    Ok::<_, Error>(url)
-                } else {
-                    info!(key = s3_key.as_str(), "tool already cached");
-                    presign_url(&s3_client, S3_BUCKET_NAME, s3_key, presign_duration).await
-                }
+    let tool_urls = try_join_all(tools_to_cache.iter().map(|(s3_key, download_url)| {
+        let tag_directory = tag_directory.clone();
+        let s3_client = s3_client.clone();
+        async move {
+            if !object_exists(&s3_client, S3_BUCKET_NAME, s3_key).await? {
+                info!(
+                    key = s3_key.as_str(),
+                    "tool not cached, downloading and uploading"
+                );
+                let temp_path = tag_directory.join(s3_key.replace('/', "_"));
+                download_file(download_url, &temp_path).await?;
+                let url = upload_and_presign(
+                    &s3_client,
+                    S3_BUCKET_NAME,
+                    s3_key,
+                    &temp_path,
+                    presign_duration,
+                )
+                .await?;
+                std::fs::remove_file(&temp_path)?;
+                Ok::<_, Error>(url)
+            } else {
+                info!(key = s3_key.as_str(), "tool already cached");
+                presign_url(&s3_client, S3_BUCKET_NAME, s3_key, presign_duration).await
             }
-        },
-    ))
-    .await?
-    .try_into()
-    .unwrap();
-    let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url] =
-        tool_urls;
+        }
+    }))
+    .await?;
+    let prometheus_url = tool_urls[0].clone();
+    let grafana_url = tool_urls[1].clone();
+    let loki_url = tool_urls[2].clone();
+    let pyroscope_url = tool_urls[3].clone();
+    let tempo_url = tool_urls[4].clone();
+    let node_exporter_url = tool_urls[5].clone();
+    let promtail_url = tool_urls[6].clone();
     info!("observability tools ready");
 
     // Upload instance binaries and configs to S3 concurrently

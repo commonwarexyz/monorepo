@@ -150,7 +150,7 @@ pub fn exact_cidr(ip: &str) -> String {
 }
 
 /// Maximum number of download attempts before failing
-pub const MAX_DOWNLOAD_ATTEMPTS: usize = 5;
+pub const MAX_DOWNLOAD_ATTEMPTS: usize = 10;
 
 /// Downloads a file from a URL to a local path with retries
 pub async fn download_file(url: &str, dest: &Path) -> Result<(), Error> {
