@@ -22,8 +22,9 @@
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
-use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _};
-use commonware_runtime::{buffer::PoolRef, Blob, Error as RError, Metrics, Storage};
+use bytes::Buf;
+use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
+use commonware_runtime::{buffer::pool::PoolRef, Blob, Metrics, Storage};
 use futures::{
     stream::{self, Stream},
     StreamExt,
@@ -48,6 +49,16 @@ pub struct Config {
 ///
 /// Each section is stored in a separate blob. Within each blob, items are
 /// fixed-size.
+///
+/// # Repair
+///
+/// Like
+/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+/// and
+/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+/// the first invalid data read will be considered the new end of the journal (and the
+/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
+/// init by checking each blob's size.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     manager: Manager<E, AppendFactory>,
     _array: PhantomData<A>,
@@ -62,10 +73,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// All backing blobs are opened but not read during initialization. Use `replay`
     /// to iterate over all items.
-    ///
-    /// # Repair
-    ///
-    /// Corrupted trailing data in blobs is automatically truncated during replay.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
@@ -74,7 +81,24 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 pool_ref: cfg.buffer_pool,
             },
         };
-        let manager = Manager::init(context, manager_cfg).await?;
+        let mut manager = Manager::init(context, manager_cfg).await?;
+
+        // Repair any blobs with trailing bytes (incomplete items from crash)
+        let sections: Vec<_> = manager.sections().collect();
+        for section in sections {
+            let size = manager.size(section).await?;
+            if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
+                let valid_size = size - (size % Self::CHUNK_SIZE_U64);
+                warn!(
+                    section,
+                    invalid_size = size,
+                    new_size = valid_size,
+                    "trailing bytes detected: truncating"
+                );
+                manager.rewind_section(section, valid_size).await?;
+            }
+        }
+
         Ok(Self {
             manager,
             _array: PhantomData,
@@ -149,10 +173,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Returns a stream of all items starting from the given section.
     ///
     /// Each item is returned as (section, position, item).
-    ///
-    /// # Repair
-    ///
-    /// Corrupted trailing data is automatically truncated.
     pub async fn replay(
         &self,
         start_section: u64,
@@ -161,58 +181,67 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Pre-create readers from blobs (async operation)
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
-            let blob_size = blob.size().await;
-            let reader = blob.as_blob_reader(buffer).await?;
-            blob_info.push((section, blob.clone(), reader, blob_size));
+            let replay = blob.replay(buffer).await?;
+            blob_info.push((section, replay));
         }
 
-        Ok(stream::iter(blob_info).flat_map(
-            move |(section, blob, reader, blob_size)| {
-                let buf = vec![0u8; Self::CHUNK_SIZE];
+        // Stream items as they are read to avoid occupying too much memory.
+        // Each blob is processed sequentially, yielding batches of items that are then
+        // flattened into individual stream elements.
+        Ok(stream::iter(blob_info).flat_map(move |(section, replay)| {
+            stream::unfold(
+                (section, replay, 0u64, false),
+                move |(section, mut replay, mut position, mut done)| async move {
+                    if done {
+                        return None;
+                    }
 
-                stream::unfold(
-                    (section, buf, blob, reader, 0u64, 0u64, blob_size),
-                    move |(section, mut buf, blob, mut reader, offset, valid_size, blob_size)| async move {
-                        if offset >= blob_size {
-                            return None;
-                        }
+                    let mut batch: Vec<Result<(u64, u64, A), Error>> = Vec::new();
 
-                        let position = offset / Self::CHUNK_SIZE_U64;
-                        match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
-                            Ok(()) => {
-                                let next_offset = offset + Self::CHUNK_SIZE_U64;
-                                match A::decode(buf.as_slice()).map_err(Error::Codec) {
-                                    Ok(item) => Some((
-                                        Ok((section, position, item)),
-                                        (section, buf, blob, reader, next_offset, next_offset, blob_size),
-                                    )),
-                                    Err(err) => {
-                                        Some((Err(err), (section, buf, blob, reader, offset, valid_size, blob_size)))
-                                    }
-                                }
-                            }
-                            Err(RError::BlobInsufficientLength) => {
-                                warn!(
-                                    section,
-                                    position,
-                                    new_size = valid_size,
-                                    "trailing bytes detected: truncating"
-                                );
-                                blob.resize(valid_size).await.ok()?;
-                                None
+                    loop {
+                        // Ensure we have enough data for one item
+                        match replay.ensure(Self::CHUNK_SIZE).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                // Reader exhausted - we're done with this blob
+                                done = true;
+                                return if batch.is_empty() {
+                                    None
+                                } else {
+                                    Some((batch, (section, replay, position, done)))
+                                };
                             }
                             Err(err) => {
-                                warn!(section, position, ?err, "unexpected error");
-                                Some((
-                                    Err(Error::Runtime(err)),
-                                    (section, buf, blob, reader, offset, valid_size, blob_size),
-                                ))
+                                batch.push(Err(Error::Runtime(err)));
+                                done = true;
+                                return Some((batch, (section, replay, position, done)));
                             }
                         }
-                    },
-                )
-            },
-        ))
+
+                        // Decode items from buffer
+                        while replay.remaining() >= Self::CHUNK_SIZE {
+                            match A::read(&mut replay) {
+                                Ok(item) => {
+                                    batch.push(Ok((section, position, item)));
+                                    position += 1;
+                                }
+                                Err(err) => {
+                                    batch.push(Err(Error::Codec(err)));
+                                    done = true;
+                                    return Some((batch, (section, replay, position, done)));
+                                }
+                            }
+                        }
+
+                        // Return batch if we have items
+                        if !batch.is_empty() {
+                            return Some((batch, (section, replay, position, done)));
+                        }
+                    }
+                },
+            )
+            .flat_map(stream::iter)
+        }))
     }
 
     /// Sync the given section to storage.

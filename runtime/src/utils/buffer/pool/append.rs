@@ -26,16 +26,20 @@
 //! invalid. Immutable blob initialization will fail if any trailing data is detected that cannot be
 //! validated by a CRC.
 
+use super::read::{PageReader, Replay};
 use crate::{
     buffer::{
-        pool::{Checksum, PoolRef, Read, CHECKSUM_SIZE},
+        pool::{Checksum, PoolRef, CHECKSUM_SIZE},
         tip::Buffer,
     },
     Blob, Error, RwLock, RwLockWriteGuard,
 };
 use commonware_cryptography::Crc32;
 use commonware_utils::StableBuf;
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{
+    num::{NonZeroU16, NonZeroUsize},
+    sync::Arc,
+};
 use tracing::warn;
 
 /// Indicates which CRC slot in a page record must not be overwritten.
@@ -713,18 +717,16 @@ impl<B: Blob> Append<B> {
         }
     }
 
-    /// Flushes any buffered data, then returns a [Read] wrapper for the underlying blob.
+    /// Flushes any buffered data, then returns a [Replay] for the underlying blob.
     ///
-    /// The returned reader can be used to sequentially read all data from the blob while ensuring
-    /// all data passes integrity verification.
-    pub async fn as_blob_reader(&self, capacity: NonZeroUsize) -> Result<Read<B>, Error> {
+    /// The returned replay can be used to sequentially read all pages from the blob while ensuring
+    /// all data passes integrity verification. CRCs are validated but not included in the output.
+    pub async fn replay(&self, buffer_size: NonZeroUsize) -> Result<Replay<B>, Error> {
         let logical_page_size = self.pool_ref.page_size();
         let logical_page_size_nz =
-            NonZeroUsize::new(logical_page_size as usize).expect("page_size is non-zero");
+            NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
 
-        // Flush any buffered data (without fsync) so the Read wrapper sees all written data.
-        // We don't need fsync here since we just want to ensure data has been written to the
-        // underlying blob, not durably persisted.
+        // Flush any buffered data (without fsync) so the reader sees all written data.
         {
             let buf_guard = self.buffer.write().await;
             if !buf_guard.immutable {
@@ -733,6 +735,10 @@ impl<B: Blob> Append<B> {
         }
 
         let physical_page_size = logical_page_size + CHECKSUM_SIZE;
+
+        // Convert buffer size (bytes) to page count
+        let prefetch_pages = buffer_size.get() / physical_page_size as usize;
+        let prefetch_pages = prefetch_pages.max(1); // At least 1 page
         let blob_guard = self.blob_state.read().await;
 
         // Compute both physical and logical blob sizes.
@@ -756,13 +762,14 @@ impl<B: Blob> Append<B> {
                 },
             );
 
-        Ok(Read::new(
+        let reader = PageReader::new(
             blob_guard.blob.clone(),
             physical_blob_size,
             logical_blob_size,
-            capacity,
+            prefetch_pages,
             logical_page_size_nz,
-        ))
+        );
+        Ok(Replay::new(reader))
     }
 }
 
@@ -1816,7 +1823,7 @@ mod tests {
             );
             drop(append);
 
-            // Also verify that reading via a Read wrapper fails the same way.
+            // Also verify that reading via Replay fails the same way.
             let (blob, size) = context
                 .open("test_partition", b"non_last_page")
                 .await
@@ -1824,13 +1831,13 @@ mod tests {
             let append = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
                 .await
                 .unwrap();
-            let mut reader = append.as_blob_reader(NZUsize!(1024)).await.unwrap();
+            let mut replay = append.replay(NZUsize!(1024)).await.unwrap();
 
-            // Try to read from offset 0 (page 0) via the Read wrapper.
-            let result = reader.read_up_to(vec![0u8; 10]).await;
+            // Try to fill pages - should fail on CRC validation.
+            let result = replay.ensure(1).await;
             assert!(
                 result.is_err(),
-                "Reading from corrupted non-last page via Read wrapper should fail, but got: {:?}",
+                "Reading from corrupted non-last page via Replay should fail, but got: {:?}",
                 result
             );
         });
