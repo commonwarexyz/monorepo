@@ -10,7 +10,7 @@
 //!    - Reads from uncorrupted pages should succeed with correct data
 //!    - Reads from corrupted pages should either fail OR return correct data
 //!      (if the bit flip was in padding/unused bytes)
-//! 4. Test both Append.read_at() and as_blob_reader()
+//! 4. Test both Append.read_at() and Replay
 
 #![no_main]
 
@@ -185,21 +185,21 @@ fn fuzz(input: FuzzInput) {
                 start_page <= corrupted_page && corrupted_page <= end_page;
 
             if read_op.use_reader {
-                // PageReader is for streaming replay, not random access.
-                // Test integrity via page reader by filling and reading.
-                let reader_result = append.as_page_reader(NZUsize!(READER_BUFFER_CAPACITY)).await;
-                let mut reader = match reader_result {
+                // Replay is for streaming replay, not random access.
+                // Test integrity via Replay by ensuring bytes and reading.
+                let replay_result = append.replay(NZUsize!(READER_BUFFER_CAPACITY)).await;
+                let mut replay = match replay_result {
                     Ok(r) => r,
-                    Err(_) => continue, // Reader creation failed due to corruption, skip.
+                    Err(_) => continue, // Replay creation failed due to corruption, skip.
                 };
 
-                // Try to fill - this validates CRCs
-                match reader.fill().await {
+                // Try to ensure - this validates CRCs
+                match replay.ensure(1).await {
                     Ok(_) => {
-                        // Fill succeeded - pages are valid
+                        // Ensure succeeded - pages are valid
                     }
                     Err(_) => {
-                        // Fill failed due to CRC error - acceptable if we have corruption
+                        // Ensure failed due to CRC error - acceptable if we have corruption
                     }
                 }
             } else {

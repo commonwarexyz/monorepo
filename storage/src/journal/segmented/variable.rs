@@ -84,7 +84,7 @@ use commonware_codec::{
     varint::UInt, Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
 use commonware_runtime::{
-    buffer::pool::{Append, PoolRef, Replay},
+    buffer::pool::{Append, PoolRef},
     Blob, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
@@ -293,7 +293,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             blobs.push((
                 section,
                 blob.clone(),
-                Replay::new(blob.as_page_reader(buffer).await?),
+                blob.replay(buffer).await?,
                 codec_config.clone(),
                 compressed,
             ));

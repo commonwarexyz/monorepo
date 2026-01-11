@@ -61,7 +61,7 @@ use crate::{
 use bytes::Buf;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::pool::{Append, PoolRef, Replay},
+    buffer::pool::{Append, PoolRef},
     telemetry::metrics::status::GaugeExt,
     Blob, Error as RError, Metrics, Storage,
 };
@@ -469,13 +469,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let blobs = self.blobs.range(start_blob..).collect::<Vec<_>>();
         let mut readers = Vec::with_capacity(blobs.len() + 1);
         for (blob_index, blob) in blobs {
-            let reader = blob.as_page_reader(buffer).await?;
-            readers.push((*blob_index, reader));
+            let replay = blob.replay(buffer).await?;
+            readers.push((*blob_index, replay));
         }
 
         // Include the tail blob.
-        let tail_reader = self.tail.as_page_reader(buffer).await?;
-        readers.push((self.tail_index, tail_reader));
+        let tail_replay = self.tail.replay(buffer).await?;
+        readers.push((self.tail_index, tail_replay));
         let start_item_in_blob = start_pos % items_per_blob;
 
         // Stream items as they are read to avoid occupying too much memory.
@@ -485,7 +485,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Note: Unlike segmented journals, contiguous journals handle trailing byte truncation
         // during `init` rather than during replay. This is because contiguous journals validate
         // blob sizes at initialization time.
-        let stream = stream::iter(readers).flat_map(move |(blob_index, reader)| {
+        let stream = stream::iter(readers).flat_map(move |(blob_index, replay)| {
             // Calculate starting item index within this blob
             let initial_item_idx = if blob_index == start_blob {
                 start_item_in_blob
@@ -496,7 +496,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             let skip_bytes = initial_item_idx * Self::CHUNK_SIZE_U64;
 
             stream::unfold(
-                (Replay::new(reader), initial_item_idx, skip_bytes, false),
+                (replay, initial_item_idx, skip_bytes, false),
                 move |(mut replay, mut item_idx, mut skip_bytes, mut done)| async move {
                     if done {
                         return None;

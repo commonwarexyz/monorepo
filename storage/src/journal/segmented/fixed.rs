@@ -25,7 +25,7 @@ use crate::journal::Error;
 use bytes::Buf;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::pool::{PoolRef, Replay},
+    buffer::pool::PoolRef,
     Blob, Metrics, Storage,
 };
 use futures::{
@@ -184,16 +184,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Pre-create readers from blobs (async operation)
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
-            let reader = blob.as_page_reader(buffer).await?;
-            blob_info.push((section, reader));
+            let replay = blob.replay(buffer).await?;
+            blob_info.push((section, replay));
         }
 
         // Stream items as they are read to avoid occupying too much memory.
         // Each blob is processed sequentially, yielding batches of items that are then
         // flattened into individual stream elements.
-        Ok(stream::iter(blob_info).flat_map(move |(section, reader)| {
+        Ok(stream::iter(blob_info).flat_map(move |(section, replay)| {
             stream::unfold(
-                (section, Replay::new(reader), 0u64, false),
+                (section, replay, 0u64, false),
                 move |(section, mut replay, mut position, mut done)| async move {
                     if done {
                         return None;

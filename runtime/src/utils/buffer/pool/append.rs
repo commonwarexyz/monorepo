@@ -28,11 +28,12 @@
 
 use crate::{
     buffer::{
-        pool::{Checksum, PageReader, PoolRef, CHECKSUM_SIZE},
+        pool::{Checksum, PoolRef, CHECKSUM_SIZE},
         tip::Buffer,
     },
     Blob, Error, RwLock, RwLockWriteGuard,
 };
+use super::read::{PageReader, Replay};
 use commonware_cryptography::Crc32;
 use commonware_utils::StableBuf;
 use std::{
@@ -716,14 +717,11 @@ impl<B: Blob> Append<B> {
         }
     }
 
-    /// Flushes any buffered data, then returns a [PageReader] for the underlying blob.
+    /// Flushes any buffered data, then returns a [Replay] for the underlying blob.
     ///
-    /// The returned reader can be used to sequentially read all pages from the blob while ensuring
+    /// The returned replay can be used to sequentially read all pages from the blob while ensuring
     /// all data passes integrity verification. CRCs are validated but not included in the output.
-    pub async fn as_page_reader(
-        &self,
-        prefetch_pages: NonZeroUsize,
-    ) -> Result<PageReader<B>, Error> {
+    pub async fn replay(&self, prefetch_pages: NonZeroUsize) -> Result<Replay<B>, Error> {
         let logical_page_size = self.pool_ref.page_size();
         let logical_page_size_nz =
             NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
@@ -760,13 +758,14 @@ impl<B: Blob> Append<B> {
                 },
             );
 
-        Ok(PageReader::new(
+        let reader = PageReader::new(
             blob_guard.blob.clone(),
             physical_blob_size,
             logical_blob_size,
             prefetch_pages.get(),
             logical_page_size_nz,
-        ))
+        );
+        Ok(Replay::new(reader))
     }
 }
 
@@ -1820,7 +1819,7 @@ mod tests {
             );
             drop(append);
 
-            // Also verify that reading via a PageReader fails the same way.
+            // Also verify that reading via Replay fails the same way.
             let (blob, size) = context
                 .open("test_partition", b"non_last_page")
                 .await
@@ -1828,13 +1827,13 @@ mod tests {
             let append = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
                 .await
                 .unwrap();
-            let mut reader = append.as_page_reader(NZUsize!(1024)).await.unwrap();
+            let mut replay = append.replay(NZUsize!(1024)).await.unwrap();
 
             // Try to fill pages - should fail on CRC validation.
-            let result = reader.fill().await;
+            let result = replay.ensure(1).await;
             assert!(
                 result.is_err(),
-                "Reading from corrupted non-last page via PageReader should fail, but got: {:?}",
+                "Reading from corrupted non-last page via Replay should fail, but got: {:?}",
                 result
             );
         });

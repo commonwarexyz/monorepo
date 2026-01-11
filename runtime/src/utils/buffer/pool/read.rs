@@ -9,7 +9,7 @@ use tracing::error;
 ///
 /// This is the async I/O component of the replay system. It prefetches pages in batches
 /// and validates checksums. Use `fill()` to load pages, then `next_page()` to get them.
-pub struct PageReader<B: Blob> {
+pub(super) struct PageReader<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
     /// Physical page size (logical_page_size + CHECKSUM_SIZE).
@@ -40,7 +40,7 @@ impl<B: Blob> PageReader<B> {
     /// - `logical_blob_size`: Total logical data size (excluding CRCs and padding).
     /// - `prefetch_count`: Number of pages to prefetch at once.
     /// - `logical_page_size`: Size of the logical data in each page (excluding CRC).
-    pub const fn new(
+    pub(super) const fn new(
         blob: B,
         physical_blob_size: u64,
         logical_blob_size: u64,
@@ -163,7 +163,7 @@ impl<B: Blob> PageReader<B> {
 /// This is the sync buffering component of the replay system. It holds pages from
 /// `PageReader` and provides a contiguous `Buf` interface for codec decoding.
 #[derive(Default)]
-pub struct ReplayBuf {
+struct ReplayBuf {
     /// Queue of pages (each is a Bytes from PageReader).
     pages: VecDeque<Bytes>,
     /// Current offset within the first page.
@@ -180,13 +180,8 @@ impl ReplayBuf {
     }
 
     /// Adds a page to the buffer (zero-copy, just moves Bytes into VecDeque).
-    pub fn push(&mut self, page: Bytes) {
+    fn push(&mut self, page: Bytes) {
         self.pages.push_back(page);
-    }
-
-    /// Returns true if the buffer is empty.
-    pub fn is_empty(&self) -> bool {
-        self.remaining() == 0
     }
 }
 
@@ -235,7 +230,7 @@ pub struct Replay<B: Blob> {
 
 impl<B: Blob> Replay<B> {
     /// Creates a new Replay from a PageReader.
-    pub fn new(reader: PageReader<B>) -> Self {
+    pub(super) fn new(reader: PageReader<B>) -> Self {
         Self {
             reader,
             buf: ReplayBuf::new(),
@@ -313,7 +308,7 @@ mod tests {
     const BUFFER_PAGES: usize = 2;
 
     #[test_traced("DEBUG")]
-    fn test_page_reader_basic() {
+    fn test_replay_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
@@ -329,31 +324,22 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            // Create PageReader
-            let mut reader = append.as_page_reader(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            // Create Replay
+            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
 
-            // Collect all pages
-            let mut buf = ReplayBuf::new();
-            loop {
-                let pages = reader.fill().await.unwrap();
-                if pages == 0 {
-                    break;
-                }
-                while let Some(page) = reader.next_page() {
-                    buf.push(page);
-                }
-            }
+            // Ensure all data is available
+            replay.ensure(300).await.unwrap();
 
             // Verify we got all the data
-            assert_eq!(buf.remaining(), 300);
+            assert_eq!(replay.remaining(), 300);
 
             // Read all data via Buf interface
             let mut collected = Vec::new();
-            while buf.remaining() > 0 {
-                let chunk = buf.chunk();
+            while replay.remaining() > 0 {
+                let chunk = replay.chunk();
                 collected.extend_from_slice(chunk);
                 let len = chunk.len();
-                buf.advance(len);
+                replay.advance(len);
             }
             assert_eq!(collected, data);
         });
@@ -382,7 +368,7 @@ mod tests {
 
         // Advance past everything
         buf.advance(5);
-        assert!(buf.is_empty());
+        assert_eq!(buf.remaining(), 0);
         assert_eq!(buf.chunk(), b"");
     }
 
@@ -400,7 +386,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    fn test_page_reader_partial_page() {
+    fn test_replay_partial_page() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
@@ -415,20 +401,12 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            let mut reader = append.as_page_reader(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
 
-            let mut buf = ReplayBuf::new();
-            loop {
-                let pages = reader.fill().await.unwrap();
-                if pages == 0 {
-                    break;
-                }
-                while let Some(page) = reader.next_page() {
-                    buf.push(page);
-                }
-            }
+            // Ensure all data is available
+            replay.ensure(data.len()).await.unwrap();
 
-            assert_eq!(buf.remaining(), data.len());
+            assert_eq!(replay.remaining(), data.len());
         });
     }
 }
