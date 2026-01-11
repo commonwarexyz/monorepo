@@ -122,9 +122,8 @@ impl<B: Blob> Append<B> {
         let capacity = capacity_with_floor(capacity, pool_ref.page_size());
 
         let (blob_state, data) = match partial_page_state {
-            Some((mut partial_page, crc_record)) => {
+            Some((partial_page, crc_record)) => {
                 // A partial page exists, make sure we buffer it.
-                partial_page.reserve(capacity - partial_page.len());
                 (
                     BlobState {
                         blob,
@@ -140,16 +139,15 @@ impl<B: Blob> Append<B> {
                     current_page: pages,
                     partial_page_state: None,
                 },
-                Vec::with_capacity(capacity),
+                vec![],
             ),
         };
 
-        let buffer = Buffer {
-            offset: blob_state.current_page * pool_ref.page_size(),
+        let buffer = Buffer::with_data(
             data,
+            blob_state.current_page * pool_ref.page_size(),
             capacity,
-            immutable: false,
-        };
+        );
 
         Ok(Self {
             blob_state: Arc::new(RwLock::new(blob_state)),
@@ -180,9 +178,8 @@ impl<B: Blob> Append<B> {
         let capacity = capacity_with_floor(capacity, pool_ref.page_size());
 
         let (blob_state, data) = match partial_page_state {
-            Some((mut partial_page, crc_record)) => {
+            Some((partial_page, crc_record)) => {
                 // A partial page exists, so put it in the buffer.
-                partial_page.shrink_to_fit();
                 (
                     BlobState {
                         blob,
@@ -201,12 +198,12 @@ impl<B: Blob> Append<B> {
                 vec![],
             ),
         };
-        let buffer = Buffer {
+        let mut buffer = Buffer::with_data(
             data,
+            blob_state.current_page * pool_ref.page_size(),
             capacity,
-            offset: blob_state.current_page * pool_ref.page_size(),
-            immutable: true,
-        };
+        );
+        buffer.immutable = true;
 
         Ok(Self {
             blob_state: Arc::new(RwLock::new(blob_state)),
@@ -240,7 +237,7 @@ impl<B: Blob> Append<B> {
         // re-acquiring the write lock.
         {
             let mut buf_guard = self.buffer.write().await;
-            buf_guard.data.shrink_to_fit();
+            buf_guard.shrink_to_fit();
         }
 
         // Sync the underlying blob to ensure new_immutable on restart will succeed even in the
@@ -353,11 +350,15 @@ impl<B: Blob> Append<B> {
     ) -> Result<(), Error> {
         let buffer = &mut *buf_guard;
 
+        // Collect buffer data for caching and physical page generation.
+        // This is necessary because we need a contiguous view for CRC computation.
+        let buffer_data = buffer.to_vec();
+
         // Cache the pages we are writing in the buffer pool so they remain cached for concurrent
         // reads while we flush the buffer.
         let remaining_byte_count = self
             .pool_ref
-            .cache(self.id, &buffer.data, buffer.offset)
+            .cache(self.id, &buffer_data, buffer.offset)
             .await;
 
         // Read the old partial page state before doing the heavy work of preparing physical pages.
@@ -371,7 +372,7 @@ impl<B: Blob> Append<B> {
         // Prepare the *physical* pages corresponding to the data in the buffer.
         // Pass the old partial page state so the CRC record is constructed correctly.
         let (physical_pages, partial_page_state) = self.to_physical_pages(
-            &*buffer,
+            &buffer_data,
             write_partial_page,
             old_partial_page_state.as_ref(),
         );
@@ -383,9 +384,8 @@ impl<B: Blob> Append<B> {
 
         // Drain the provided buffer of the full pages that are now cached in the buffer pool and
         // will be written to the blob.
-        let bytes_to_drain = buffer.data.len() - remaining_byte_count;
-        buffer.data.drain(0..bytes_to_drain);
-        buffer.offset += bytes_to_drain as u64;
+        let bytes_to_drain = buffer.total_len - remaining_byte_count;
+        buffer.drain(bytes_to_drain);
         let new_offset = buffer.offset;
 
         // Acquire a write lock on the blob state so nobody tries to read or modify the blob while
@@ -548,7 +548,7 @@ impl<B: Blob> Append<B> {
                         bytes_before_buffer,
                     )
                     .await?;
-                cached_buf.push(buffer_bytes);
+                cached_buf.extend(buffer_bytes);
                 Ok(cached_buf)
             }
         }
@@ -615,7 +615,7 @@ impl<B: Blob> Append<B> {
                         bytes_before_buffer,
                     )
                     .await?;
-                cached_buf.push(buffer_bytes);
+                cached_buf.extend(buffer_bytes);
                 Ok(cached_buf)
             }
         }
@@ -658,20 +658,20 @@ impl<B: Blob> Append<B> {
     ///   and place the new CRC in the other slot.
     fn to_physical_pages(
         &self,
-        buffer: &Buffer,
+        data: &[u8],
         include_partial_page: bool,
         old_crc_record: Option<&Checksum>,
     ) -> (Vec<u8>, Option<Checksum>) {
         let logical_page_size = self.pool_ref.page_size() as usize;
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
-        let pages_to_write = buffer.data.len() / logical_page_size;
+        let pages_to_write = data.len() / logical_page_size;
         let mut write_buffer = Vec::with_capacity(pages_to_write * physical_page_size);
 
         // For each logical page, copy over the data and then write a crc record for it.
         for page in 0..pages_to_write {
             let start_read_idx = page * logical_page_size;
             let end_read_idx = start_read_idx + logical_page_size;
-            let logical_page = &buffer.data[start_read_idx..end_read_idx];
+            let logical_page = &data[start_read_idx..end_read_idx];
             write_buffer.extend_from_slice(logical_page);
 
             let crc = Crc32::checksum(logical_page);
@@ -692,7 +692,7 @@ impl<B: Blob> Append<B> {
             return (write_buffer, None);
         }
 
-        let partial_page = &buffer.data[pages_to_write * logical_page_size..];
+        let partial_page = &data[pages_to_write * logical_page_size..];
         if partial_page.is_empty() {
             // No partial page data to write.
             return (write_buffer, None);
@@ -976,10 +976,10 @@ impl<B: Blob> Blob for Append<B> {
                 return Err(Error::InvalidChecksum);
             }
 
-            buf_guard.data = page_data.as_ref()[..partial_bytes as usize].to_vec();
+            buf_guard.set_data(page_data.as_ref()[..partial_bytes as usize].to_vec());
         } else {
             // No partial page - all pages are full or blob is empty.
-            buf_guard.data = vec![];
+            buf_guard.set_data(vec![]);
         }
 
         Ok(())

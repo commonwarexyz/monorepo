@@ -1,6 +1,17 @@
 use crate::{buffer::tip::Buffer, Blob, Error, RwLock};
+use bytes::Bytes;
 use commonware_utils::StableBuf;
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
+
+/// Converts a `VecDeque<Bytes>` into a contiguous `Vec<u8>`.
+fn chunks_to_vec(chunks: VecDeque<Bytes>) -> Vec<u8> {
+    let total_len: usize = chunks.iter().map(|c| c.len()).sum();
+    let mut result = Vec::with_capacity(total_len);
+    for chunk in chunks {
+        result.extend_from_slice(&chunk);
+    }
+    result
+}
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
 /// updating data.
@@ -126,8 +137,10 @@ impl<B: Blob> Blob for Write<B> {
         // Write cannot be merged, so flush the buffer if the range overlaps, and check if merge is
         // possible after.
         if buffer.offset < end_offset {
-            if let Some((old_buf, old_offset)) = buffer.take() {
-                self.blob.write_at(old_buf, old_offset).await?;
+            if let Some((old_chunks, old_offset)) = buffer.take() {
+                self.blob
+                    .write_at(chunks_to_vec(old_chunks), old_offset)
+                    .await?;
                 if buffer.merge(buf.as_ref(), offset) {
                     return Ok(());
                 }
@@ -154,8 +167,8 @@ impl<B: Blob> Blob for Write<B> {
         // Flush buffered data to the underlying blob.
         //
         // This can only happen if the new size is greater than the current size.
-        if let Some((buf, offset)) = buffer.resize(len) {
-            self.blob.write_at(buf, offset).await?;
+        if let Some((chunks, offset)) = buffer.resize(len) {
+            self.blob.write_at(chunks_to_vec(chunks), offset).await?;
         }
 
         // Resize the underlying blob.
@@ -166,8 +179,8 @@ impl<B: Blob> Blob for Write<B> {
 
     async fn sync(&self) -> Result<(), Error> {
         let mut buffer = self.buffer.write().await;
-        if let Some((buf, offset)) = buffer.take() {
-            self.blob.write_at(buf, offset).await?;
+        if let Some((chunks, offset)) = buffer.take() {
+            self.blob.write_at(chunks_to_vec(chunks), offset).await?;
         }
         self.blob.sync().await
     }

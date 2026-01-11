@@ -383,18 +383,18 @@ impl CachedBuf {
         }
     }
 
-    /// Creates a CachedBuf from a single Bytes slice.
-    pub(super) fn from_bytes(bytes: Bytes) -> Self {
-        let remaining = bytes.len();
-        let mut slices = VecDeque::with_capacity(1);
-        slices.push_back(bytes);
+    /// Creates a CachedBuf from a collection of Bytes slices.
+    pub(super) fn from_bytes(slices: VecDeque<Bytes>) -> Self {
+        let remaining = slices.iter().map(|s| s.len()).sum();
         Self { slices, remaining }
     }
 
-    /// Appends a Bytes slice to the end of this buffer.
-    pub(super) fn push(&mut self, bytes: Bytes) {
-        self.remaining += bytes.len();
-        self.slices.push_back(bytes);
+    /// Appends multiple Bytes slices to the end of this buffer.
+    pub(super) fn extend(&mut self, slices: VecDeque<Bytes>) {
+        for slice in slices {
+            self.remaining += slice.len();
+            self.slices.push_back(slice);
+        }
     }
 }
 
