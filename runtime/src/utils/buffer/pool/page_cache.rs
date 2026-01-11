@@ -344,16 +344,94 @@ impl PoolRef {
                 offset += slice_len as u64;
                 len -= slice_len;
             } else {
-                // Cache miss - fetch the page
-                let mut buf = vec![0u8; self.page_size as usize];
+                // Cache miss - ensure the page is cached without copying
                 let (page_num, _) = self.offset_to_page(offset);
-                self.read_after_page_fault(blob, blob_id, &mut buf, page_num * self.page_size)
-                    .await?;
+                self.ensure_page_cached(blob, blob_id, page_num).await?;
                 // Page is now cached, retry in next iteration
             }
         }
 
         Ok(CachedBuf::new(slices))
+    }
+
+    /// Ensures a page is in the cache, fetching it from the blob if necessary.
+    ///
+    /// Unlike `read_after_page_fault`, this method does not copy data to a buffer -
+    /// it only ensures the page is cached for subsequent zero-copy reads.
+    async fn ensure_page_cached<B: Blob>(
+        &self,
+        blob: &B,
+        blob_id: u64,
+        page_num: u64,
+    ) -> Result<(), Error> {
+        trace!(page_num, blob_id, "ensuring page is cached");
+
+        // Create or clone a future that retrieves the desired page from the underlying blob.
+        let (fetch_future, is_first_fetcher) = {
+            let mut pool = self.pool.write().await;
+
+            // Check if page is already cached (may have been fetched by another task).
+            if pool.index.contains_key(&(blob_id, page_num)) {
+                return Ok(());
+            }
+
+            let entry = pool.page_fetches.entry((blob_id, page_num));
+            match entry {
+                Entry::Occupied(o) => {
+                    // Another thread is already fetching this page.
+                    (o.get().clone(), false)
+                }
+                Entry::Vacant(v) => {
+                    // Create a future to fetch the page.
+                    let blob = blob.clone();
+                    let page_size = self.page_size;
+                    let future = async move {
+                        let page = get_page_from_blob(&blob, page_num, page_size)
+                            .await
+                            .map_err(Arc::new)?;
+                        let len = page.as_ref().len();
+                        if len != page_size as usize {
+                            error!(
+                                page_num,
+                                expected = page_size,
+                                actual = len,
+                                "attempted to fetch partial page from blob"
+                            );
+                            return Err(Arc::new(Error::InvalidChecksum));
+                        }
+                        Ok(page)
+                    };
+
+                    let shareable = future.boxed().shared();
+                    v.insert(shareable.clone());
+                    (shareable, true)
+                }
+            }
+        };
+
+        // Await the fetch.
+        let fetch_result = fetch_future.await;
+
+        if !is_first_fetcher {
+            // Just ensure the fetch succeeded.
+            fetch_result.map_err(|_| Error::ReadFailed)?;
+            return Ok(());
+        }
+
+        // First fetcher: clean up and cache the page.
+        let mut pool = self.pool.write().await;
+        let _ = pool.page_fetches.remove(&(blob_id, page_num));
+
+        let page_buf = match fetch_result {
+            Ok(page_buf) => page_buf,
+            Err(err) => {
+                error!(page_num, ?err, "Page fetch failed");
+                return Err(Error::ReadFailed);
+            }
+        };
+
+        pool.cache(self.page_size, blob_id, page_buf.as_ref(), page_num);
+        Ok(())
     }
 }
 
