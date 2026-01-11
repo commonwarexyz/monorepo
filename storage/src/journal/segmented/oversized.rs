@@ -2491,10 +2491,10 @@ mod tests {
             let crc = Crc32::checksum(&entry_data);
             let len1 = TestEntry::SIZE as u16;
             let mut crc_record = Vec::new();
-            crc_record.extend_from_slice(&len1.to_be_bytes()); // len1
-            crc_record.extend_from_slice(&crc.to_be_bytes()); // crc1
-            crc_record.extend_from_slice(&0u16.to_be_bytes()); // len2 (unused)
-            crc_record.extend_from_slice(&0u32.to_be_bytes()); // crc2 (unused)
+            crc_record.extend_from_slice(&len1.to_le_bytes()); // len1
+            crc_record.extend_from_slice(&crc.to_le_bytes()); // crc1
+            crc_record.extend_from_slice(&0u16.to_le_bytes()); // len2 (unused)
+            crc_record.extend_from_slice(&0u32.to_le_bytes()); // crc2 (unused)
             assert_eq!(crc_record.len(), 12);
 
             // Write the complete physical page: entry_data + crc_record

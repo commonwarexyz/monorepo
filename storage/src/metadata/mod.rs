@@ -1120,46 +1120,52 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Add some keys with different prefixes
-            metadata.put(U64::new(0x1000), b"value1".to_vec());
-            metadata.put(U64::new(0x1001), b"value2".to_vec());
-            metadata.put(U64::new(0x1002), b"value3".to_vec());
-            metadata.put(U64::new(0x2000), b"value4".to_vec());
-            metadata.put(U64::new(0x2001), b"value5".to_vec());
-            metadata.put(U64::new(0x3000), b"value6".to_vec());
+            // Add some keys with different low-order bytes (which come first in little-endian).
+            // With little-endian encoding, values sharing the same low-order byte(s) will
+            // share a common prefix in their byte representation.
+            // 0x0010, 0x0110, 0x0210 all have 0x10 as their lowest byte:
+            //   LE: [0x10, 0x00, ...], [0x10, 0x01, ...], [0x10, 0x02, ...]
+            // 0x0020, 0x0120 both have 0x20 as their lowest byte:
+            //   LE: [0x20, 0x00, ...], [0x20, 0x01, ...]
+            metadata.put(U64::new(0x0010), b"value1".to_vec());
+            metadata.put(U64::new(0x0110), b"value2".to_vec());
+            metadata.put(U64::new(0x0210), b"value3".to_vec());
+            metadata.put(U64::new(0x0020), b"value4".to_vec());
+            metadata.put(U64::new(0x0120), b"value5".to_vec());
+            metadata.put(U64::new(0x0030), b"value6".to_vec());
 
             // Test iterating over all keys
             let all_keys: Vec<_> = metadata.keys().cloned().collect();
             assert_eq!(all_keys.len(), 6);
-            assert!(all_keys.contains(&U64::new(0x1000)));
-            assert!(all_keys.contains(&U64::new(0x3000)));
+            assert!(all_keys.contains(&U64::new(0x0010)));
+            assert!(all_keys.contains(&U64::new(0x0030)));
 
-            // Test iterating with prefix 0x10
-            let prefix = hex!("0x00000000000010");
+            // Test iterating with prefix 0x10 (matches keys with low byte = 0x10)
+            let prefix = hex!("10");
             let prefix_keys: Vec<_> = metadata
                 .keys()
                 .filter(|k| k.as_ref().starts_with(&prefix))
                 .cloned()
                 .collect();
             assert_eq!(prefix_keys.len(), 3);
-            assert!(prefix_keys.contains(&U64::new(0x1000)));
-            assert!(prefix_keys.contains(&U64::new(0x1001)));
-            assert!(prefix_keys.contains(&U64::new(0x1002)));
-            assert!(!prefix_keys.contains(&U64::new(0x2000)));
+            assert!(prefix_keys.contains(&U64::new(0x0010)));
+            assert!(prefix_keys.contains(&U64::new(0x0110)));
+            assert!(prefix_keys.contains(&U64::new(0x0210)));
+            assert!(!prefix_keys.contains(&U64::new(0x0020)));
 
-            // Test iterating with prefix 0x20
-            let prefix = hex!("0x00000000000020");
+            // Test iterating with prefix 0x20 (matches keys with low byte = 0x20)
+            let prefix = hex!("20");
             let prefix_keys: Vec<_> = metadata
                 .keys()
                 .filter(|k| k.as_ref().starts_with(&prefix))
                 .cloned()
                 .collect();
             assert_eq!(prefix_keys.len(), 2);
-            assert!(prefix_keys.contains(&U64::new(0x2000)));
-            assert!(prefix_keys.contains(&U64::new(0x2001)));
+            assert!(prefix_keys.contains(&U64::new(0x0020)));
+            assert!(prefix_keys.contains(&U64::new(0x0120)));
 
             // Test with non-matching prefix
-            let prefix = hex!("0x00000000000040");
+            let prefix = hex!("40");
             let prefix_keys: Vec<_> = metadata
                 .keys()
                 .filter(|k| k.as_ref().starts_with(&prefix))
@@ -1185,20 +1191,22 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Add some keys with different prefixes
-            metadata.put(U64::new(0x1000), b"value1".to_vec());
-            metadata.put(U64::new(0x1001), b"value2".to_vec());
-            metadata.put(U64::new(0x1002), b"value3".to_vec());
-            metadata.put(U64::new(0x2000), b"value4".to_vec());
-            metadata.put(U64::new(0x2001), b"value5".to_vec());
-            metadata.put(U64::new(0x3000), b"value6".to_vec());
+            // Add some keys with different low-order bytes (which come first in little-endian).
+            // With little-endian encoding, values sharing the same low-order byte(s) will
+            // share a common prefix in their byte representation.
+            metadata.put(U64::new(0x0010), b"value1".to_vec());
+            metadata.put(U64::new(0x0110), b"value2".to_vec());
+            metadata.put(U64::new(0x0210), b"value3".to_vec());
+            metadata.put(U64::new(0x0020), b"value4".to_vec());
+            metadata.put(U64::new(0x0120), b"value5".to_vec());
+            metadata.put(U64::new(0x0030), b"value6".to_vec());
 
             // Check initial metrics
             let buffer = context.encode();
             assert!(buffer.contains("keys 6"));
 
-            // Remove keys with prefix 0x10
-            let prefix = hex!("0x00000000000010");
+            // Remove keys with prefix 0x10 (matches keys with low byte = 0x10)
+            let prefix = hex!("10");
             metadata.retain(|k, _| !k.as_ref().starts_with(&prefix));
 
             // Check metrics after removal
@@ -1206,12 +1214,12 @@ mod tests {
             assert!(buffer.contains("keys 3"));
 
             // Verify remaining keys
-            assert!(metadata.get(&U64::new(0x1000)).is_none());
-            assert!(metadata.get(&U64::new(0x1001)).is_none());
-            assert!(metadata.get(&U64::new(0x1002)).is_none());
-            assert!(metadata.get(&U64::new(0x2000)).is_some());
-            assert!(metadata.get(&U64::new(0x2001)).is_some());
-            assert!(metadata.get(&U64::new(0x3000)).is_some());
+            assert!(metadata.get(&U64::new(0x0010)).is_none());
+            assert!(metadata.get(&U64::new(0x0110)).is_none());
+            assert!(metadata.get(&U64::new(0x0210)).is_none());
+            assert!(metadata.get(&U64::new(0x0020)).is_some());
+            assert!(metadata.get(&U64::new(0x0120)).is_some());
+            assert!(metadata.get(&U64::new(0x0030)).is_some());
 
             // Sync and reopen to ensure persistence
             metadata.sync().await.unwrap();
@@ -1225,12 +1233,12 @@ mod tests {
                 .unwrap();
 
             // Verify keys are still removed after restart
-            assert!(metadata.get(&U64::new(0x1000)).is_none());
-            assert!(metadata.get(&U64::new(0x2000)).is_some());
+            assert!(metadata.get(&U64::new(0x0010)).is_none());
+            assert!(metadata.get(&U64::new(0x0020)).is_some());
             assert_eq!(metadata.keys().count(), 3);
 
             // Remove non-existing prefix
-            let prefix = hex!("0x00000000000040");
+            let prefix = hex!("40");
             metadata.retain(|k, _| !k.as_ref().starts_with(&prefix));
 
             // Remove all remaining keys

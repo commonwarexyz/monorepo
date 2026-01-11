@@ -852,7 +852,7 @@ mod tests {
                 // This avoids partial record issues
                 let mut garbage = vec![0xFF; 32]; // Invalid value
                 let invalid_crc = 0xDEADBEEFu32;
-                garbage.extend_from_slice(&invalid_crc.to_be_bytes());
+                garbage.extend_from_slice(&invalid_crc.to_le_bytes());
                 assert_eq!(garbage.len(), 36); // Full record size
                 blob.write_at(garbage, size).await.unwrap();
                 blob.sync().await.unwrap();
@@ -913,7 +913,7 @@ mod tests {
                 // Write a valid record after the zeros
                 let mut valid_record = vec![44u8; 32];
                 let crc = Crc32::checksum(&valid_record);
-                valid_record.extend_from_slice(&crc.to_be_bytes());
+                valid_record.extend_from_slice(&crc.to_le_bytes());
                 blob.write_at(valid_record, 36 * 5).await.unwrap();
 
                 blob.sync().await.unwrap();

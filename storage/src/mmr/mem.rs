@@ -1288,7 +1288,7 @@ mod tests {
         let mmr = dirty_mmr.merkleize(hasher, None);
         let updated_root = *mmr.root();
         assert_eq!(
-            "af3acad6aad59c1a880de643b1200a0962a95d06c087ebf677f29eb93fc359a4",
+            "0a3c782c7eefb98c4198b096d22fe41d125badbfc3e87748ee7f4ce40e6d64b9",
             hex(&updated_root)
         );
 
