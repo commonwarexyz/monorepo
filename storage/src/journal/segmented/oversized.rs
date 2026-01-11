@@ -46,7 +46,7 @@ use super::{
 };
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
-use commonware_runtime::{Metrics, Storage};
+use commonware_runtime::{Spawner, Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
 use std::{collections::HashSet, num::NonZeroUsize};
 use tracing::{debug, warn};
@@ -94,12 +94,12 @@ pub struct Config<C> {
 ///
 /// Combines a fixed-size index journal with glob storage for variable-length values.
 /// Provides coordinated operations and crash recovery.
-pub struct Oversized<E: Storage + Metrics, I: Record, V: Codec> {
+pub struct Oversized<E: Storage + Metrics + Spawner, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
 }
 
-impl<E: Storage + Metrics, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
+impl<E: Storage + Metrics + Spawner, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Initialize with crash recovery validation.
     ///
     /// Validates each index entry's glob reference during replay. Invalid entries
@@ -318,12 +318,13 @@ impl<E: Storage + Metrics, I: Record + Send + Sync, V: CodecShared> Oversized<E,
     /// Replay index entries starting from given section.
     ///
     /// Returns a stream of `(section, position, entry)` tuples.
-    pub async fn replay(
+    pub async fn replay<S: Spawner>(
         &self,
         start_section: u64,
         buffer: NonZeroUsize,
+        spawner: S,
     ) -> Result<impl Stream<Item = Result<(u64, u64, I), Error>> + Send + '_, Error> {
-        self.index.replay(start_section, buffer).await
+        self.index.replay(start_section, buffer, spawner).await
     }
 
     /// Sync both journals for given section.
@@ -444,7 +445,7 @@ mod tests {
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
+    use commonware_runtime::{Spawner, buffer::PoolRef, deterministic, Blob as _, Runner};
     use commonware_utils::{NZUsize, NZU16};
 
     /// Convert offset + size to byte end position (for truncation tests).

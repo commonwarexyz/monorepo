@@ -85,7 +85,7 @@ use commonware_codec::{
 };
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef},
-    Blob, Metrics, Storage,
+    Blob, Metrics, Spawner, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
@@ -198,7 +198,7 @@ fn decode_item<V: Codec>(item_data: impl Buf, cfg: &V::Cfg, compressed: bool) ->
 /// the first invalid data read will be considered the new end of the journal (and the
 /// underlying [Blob] will be truncated to the last valid item). Repair occurs during
 /// replay (not init) because any blob could have trailing bytes.
-pub struct Journal<E: Storage + Metrics, V: Codec> {
+pub struct Journal<E: Storage + Metrics + Spawner, V: Codec> {
     manager: Manager<E, AppendFactory>,
 
     /// Compression level (if enabled).
@@ -208,7 +208,7 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
     codec_config: V::Cfg,
 }
 
-impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
+impl<E: Storage + Metrics + Spawner, V: CodecShared> Journal<E, V> {
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during
@@ -279,11 +279,12 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Returns an ordered stream of all items in the journal starting with the item at the given
     /// `start_section` and `offset` into that section. Each item is returned as a tuple of
     /// (section, offset, size, item).
-    pub async fn replay(
+    pub async fn replay<S: Spawner>(
         &self,
         start_section: u64,
         mut start_offset: u64,
         buffer: NonZeroUsize,
+        spawner: S,
     ) -> Result<impl Stream<Item = Result<(u64, u64, u32, V), Error>> + Send + '_, Error> {
         // Collect all blobs to replay (keeping blob reference for potential resize)
         let codec_config = self.codec_config.clone();
@@ -293,7 +294,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             blobs.push((
                 section,
                 blob.clone(),
-                blob.replay(buffer).await?,
+                blob.replay(buffer, spawner.clone()).await?,
                 codec_config.clone(),
                 compressed,
             ));
@@ -788,7 +789,7 @@ mod tests {
             // Replay the journal and collect items
             let mut items = Vec::new();
             let stream = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), context.clone())
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -848,6 +849,7 @@ mod tests {
 
             // Drop and re-open the journal to simulate a restart
             drop(journal);
+            let spawner = context.clone();
             let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to re-initialize journal");
@@ -856,7 +858,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), spawner)
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -942,7 +944,7 @@ mod tests {
             let mut items = Vec::<(u64, u64)>::new();
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), context.clone())
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1205,13 +1207,14 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
+            let spawner = context.clone();
             let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
             let stream = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), spawner)
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -1262,13 +1265,14 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
+            let spawner = context.clone();
             let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
             let stream = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), spawner)
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -1322,6 +1326,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
+            let spawner = context.clone();
             let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
@@ -1330,7 +1335,7 @@ mod tests {
             //
             // This will truncate the leftover bytes from our manual write.
             let stream = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), spawner)
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -1393,7 +1398,7 @@ mod tests {
             // Attempt to replay the journal
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), context.clone())
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1474,7 +1479,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), context.clone())
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1508,7 +1513,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), context.clone())
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1545,7 +1550,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), context.clone())
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1615,6 +1620,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
+            let spawner = context.clone();
             let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to re-initialize journal");
@@ -1622,7 +1628,7 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, i32)>::new();
             let stream = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), spawner)
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -1782,13 +1788,14 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
+            let spawner = context.clone();
             let journal = Journal::<_, u8>::init(context, cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
             // Replay and verify all items
             let stream = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), spawner)
                 .await
                 .expect("Failed to setup replay");
             pin_mut!(stream);
@@ -1851,7 +1858,7 @@ mod tests {
 
             // Verify data integrity via replay
             {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(0, 0, NZUsize!(1024), context.clone()).await.unwrap();
                 pin_mut!(stream);
                 let mut items = Vec::new();
                 while let Some(result) = stream.next().await {
@@ -1900,7 +1907,7 @@ mod tests {
 
             // Verify first 3 items via replay
             {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(0, 0, NZUsize!(1024), context.clone()).await.unwrap();
                 pin_mut!(stream);
                 let mut items = Vec::new();
                 while let Some(result) = stream.next().await {
@@ -1947,7 +1954,7 @@ mod tests {
 
             // Verify replay returns nothing
             {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(0, 0, NZUsize!(1024), context.clone()).await.unwrap();
                 pin_mut!(stream);
                 let items: Vec<_> = stream.collect().await;
                 assert!(items.is_empty());
@@ -2001,7 +2008,7 @@ mod tests {
 
             // Verify data integrity via replay
             {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(0, 0, NZUsize!(1024), context.clone()).await.unwrap();
                 pin_mut!(stream);
                 let mut items = Vec::new();
                 while let Some(result) = stream.next().await {
@@ -2051,7 +2058,7 @@ mod tests {
 
             // Verify replay returns nothing
             {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(0, 0, NZUsize!(1024), context.clone()).await.unwrap();
                 pin_mut!(stream);
                 let items: Vec<_> = stream.collect().await;
                 assert!(items.is_empty());

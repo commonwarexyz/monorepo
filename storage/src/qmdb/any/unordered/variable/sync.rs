@@ -10,13 +10,13 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, Storage, Spawner};
 use commonware_utils::Array;
 use std::ops::Range;
 
 impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T, Merkleized<H>, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     H: Hasher,

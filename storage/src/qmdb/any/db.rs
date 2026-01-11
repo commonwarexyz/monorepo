@@ -23,7 +23,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_utils::Array;
 use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
@@ -38,7 +38,7 @@ pub(crate) type AuthenticatedLog<E, C, H, M = Merkleized<H>> = authenticated::Jo
 /// - [crate::qmdb::any::unordered::fixed::Db]
 /// - [crate::qmdb::any::unordered::variable::Db]
 pub struct Db<
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: Contiguous<Item: CodecShared>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
@@ -83,7 +83,7 @@ pub struct Db<
 // Functionality shared across all DB states, such as most non-mutating operations.
 impl<E, K, V, U, C, I, H, M, D> Db<E, C, I, H, U, M, D>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
@@ -131,7 +131,7 @@ where
 // state root, and compute proofs.
 impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, Merkleized<H>, D>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
@@ -189,7 +189,7 @@ where
 // Functionality specific to (Merkleized,Durable) state, such as ability to initialize and persist.
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
@@ -264,7 +264,7 @@ where
 // Functionality specific to (Unmerkleized,Durable) state.
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Unmerkleized, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
@@ -302,7 +302,7 @@ where
 // Functionality specific to (Unmerkleized,NonDurable) state.
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Unmerkleized, NonDurable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
@@ -327,7 +327,7 @@ where
 // Functionality specific to (Merkleized,NonDurable) state.
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Merkleized<H>, NonDurable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
@@ -353,7 +353,7 @@ where
 // Funtionality shared across NonDurable states.
 impl<E, K, V, U, C, I, H, M> Db<E, C, I, H, U, M, NonDurable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
@@ -465,7 +465,7 @@ where
 
 impl<E, K, V, U, C, I, H> Persistable for Db<E, C, I, H, U, Merkleized<H>, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
@@ -492,7 +492,7 @@ where
 
 impl<E, K, V, U, C, I, H, D> MerkleizedStore for Db<E, C, I, H, U, Merkleized<H>, D>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
@@ -522,7 +522,7 @@ where
 
 impl<E, K, V, U, C, I, H, M, D> LogStore for Db<E, C, I, H, U, M, D>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
@@ -554,7 +554,7 @@ where
 
 impl<E, K, V, U, C, I, H, D> PrunableStore for Db<E, C, I, H, U, Merkleized<H>, D>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,

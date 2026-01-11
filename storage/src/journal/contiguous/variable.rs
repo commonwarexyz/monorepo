@@ -13,7 +13,7 @@ use crate::{
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
-use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
+use commonware_runtime::{buffer::PoolRef, Metrics, Spawner, Storage};
 use commonware_utils::NZUsize;
 use core::ops::Range;
 use futures::{future::Either, stream, Stream, StreamExt as _};
@@ -127,7 +127,10 @@ impl<C> Config<C> {
 /// Note that we don't recover from the case where offsets.oldest_retained_pos() >
 /// data.oldest_retained_pos(). This should never occur because we always prune the data journal
 /// before the offsets journal.
-pub struct Journal<E: Storage + Metrics, V: Codec> {
+pub struct Journal<E: Storage + Metrics + Spawner, V: Codec> {
+    /// Runtime context for spawning tasks.
+    context: E,
+
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,
 
@@ -159,7 +162,7 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
     oldest_retained_pos: u64,
 }
 
-impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
+impl<E: Storage + Metrics + Spawner, V: CodecShared> Journal<E, V> {
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
@@ -186,7 +189,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         // Initialize offsets journal
         let mut offsets = fixed::Journal::init(
-            context,
+            context.clone(),
             fixed::Config {
                 partition: offsets_partition,
                 items_per_blob: cfg.items_per_section,
@@ -198,13 +201,15 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         // Validate and align offsets journal to match data journal
         let (oldest_retained_pos, size) =
-            Self::align_journals(&mut data, &mut offsets, items_per_section).await?;
+            Self::align_journals(&mut data, &mut offsets, items_per_section, context.clone())
+                .await?;
         assert!(
             oldest_retained_pos.is_multiple_of(items_per_section),
             "oldest_retained_pos is not section-aligned"
         );
 
         Ok(Self {
+            context,
             data,
             offsets,
             items_per_section,
@@ -245,7 +250,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         // Initialize offsets journal at the target size
         let offsets = crate::qmdb::any::unordered::fixed::sync::init_journal_at_size(
-            context,
+            context.clone(),
             fixed::Config {
                 partition: cfg.offsets_partition(),
                 items_per_blob: cfg.items_per_section,
@@ -257,6 +262,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         .await?;
 
         Ok(Self {
+            context,
             data,
             offsets,
             items_per_section: cfg.items_per_section.get(),
@@ -497,10 +503,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// Returns an error if `start_pos` exceeds the journal size or if any storage/decoding
     /// errors occur during replay.
-    pub async fn replay(
+    pub async fn replay<S: Spawner>(
         &self,
         start_pos: u64,
         buffer_size: NonZeroUsize,
+        spawner: S,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + '_, Error> {
         // Validate start position is within bounds.
         if start_pos < self.oldest_retained_pos {
@@ -520,7 +527,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         let start_section = position_to_section(start_pos, self.items_per_section);
         let data_stream = self
             .data
-            .replay(start_section, start_offset, buffer_size)
+            .replay(start_section, start_offset, buffer_size, spawner)
             .await?;
 
         // Transform the stream to include position information
@@ -605,15 +612,18 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// # Returns
     ///
     /// Returns `(oldest_retained_pos, size)` for the contiguous journal.
-    async fn align_journals(
+    async fn align_journals<S: Spawner>(
         data: &mut variable::Journal<E, V>,
         offsets: &mut fixed::Journal<E, u64>,
         items_per_section: u64,
+        spawner: S,
     ) -> Result<(u64, u64), Error> {
         // === Handle empty data journal case ===
         let items_in_last_section = match data.newest_section() {
             Some(last_section) => {
-                let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
+                let stream = data
+                    .replay(last_section, 0, REPLAY_BUFFER_SIZE, spawner.clone())
+                    .await?;
                 futures::pin_mut!(stream);
                 let mut count = 0u64;
                 while let Some(result) = stream.next().await {
@@ -725,7 +735,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         } else if offsets_size < data_size {
             // We must have crashed after writing the data journal but before writing the offsets
             // journal.
-            Self::add_missing_offsets(data, offsets, offsets_size, items_per_section).await?;
+            Self::add_missing_offsets(data, offsets, offsets_size, items_per_section, spawner)
+                .await?;
         }
 
         assert_eq!(offsets.size(), data_size);
@@ -746,11 +757,12 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// - Panics if data journal is empty
     /// - Panics if `offsets_size` >= `data.size()`
-    async fn add_missing_offsets(
+    async fn add_missing_offsets<S: Spawner>(
         data: &variable::Journal<E, V>,
         offsets: &mut fixed::Journal<E, u64>,
         offsets_size: u64,
         items_per_section: u64,
+        spawner: S,
     ) -> Result<(), Error> {
         assert!(
             !data.is_empty(),
@@ -782,7 +794,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         // The data journal is the source of truth, so we consume the entire stream.
         // (replay streams from start_section onwards through all subsequent sections)
         let stream = data
-            .replay(start_section, resume_offset, REPLAY_BUFFER_SIZE)
+            .replay(start_section, resume_offset, REPLAY_BUFFER_SIZE, spawner)
             .await?;
         futures::pin_mut!(stream);
 
@@ -804,19 +816,23 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 }
 
 // Implement Contiguous trait for variable-length items
-impl<E: Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> {
+impl<E: Storage + Metrics + Spawner, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
 
     fn size(&self) -> u64 {
-        Self::size(self)
+        self.size
     }
 
     fn oldest_retained_pos(&self) -> Option<u64> {
-        Self::oldest_retained_pos(self)
+        if self.size == self.oldest_retained_pos {
+            None
+        } else {
+            Some(self.oldest_retained_pos)
+        }
     }
 
     fn pruning_boundary(&self) -> u64 {
-        Self::pruning_boundary(self)
+        self.oldest_retained_pos().unwrap_or(self.size)
     }
 
     async fn replay(
@@ -824,41 +840,41 @@ impl<E: Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> {
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error> {
-        Self::replay(self, start_pos, buffer).await
+        Journal::replay(self, start_pos, buffer, self.context.clone()).await
     }
 
     async fn read(&self, position: u64) -> Result<Self::Item, Error> {
-        Self::read(self, position).await
+        Journal::read(self, position).await
     }
 }
 
-impl<E: Storage + Metrics, V: CodecShared> MutableContiguous for Journal<E, V> {
+impl<E: Storage + Metrics + Spawner, V: CodecShared> MutableContiguous for Journal<E, V> {
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
-        Self::append(self, item).await
+        Journal::append(self, item).await
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
-        Self::prune(self, min_position).await
+        Journal::prune(self, min_position).await
     }
 
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
-        Self::rewind(self, size).await
+        Journal::rewind(self, size).await
     }
 }
 
-impl<E: Storage + Metrics, V: CodecShared> Persistable for Journal<E, V> {
+impl<E: Storage + Metrics + Spawner, V: CodecShared> Persistable for Journal<E, V> {
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Error> {
-        Self::commit(self).await
+        Journal::commit(self).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        Self::sync(self).await
+        Journal::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        Self::destroy(self).await
+        Journal::destroy(self).await
     }
 }
 #[cfg(test)]

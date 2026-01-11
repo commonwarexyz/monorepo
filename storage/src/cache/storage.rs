@@ -6,7 +6,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, CodecShared, EncodeSize, Read, ReadExt, Write};
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Storage};
+use commonware_runtime::{Spawner, telemetry::metrics::status::GaugeExt, Metrics, Storage};
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,7 +59,7 @@ where
 }
 
 /// Implementation of `Cache` storage.
-pub struct Cache<E: Storage + Metrics, V: CodecShared> {
+pub struct Cache<E: Storage + Metrics + Spawner, V: CodecShared> {
     items_per_blob: u64,
     journal: Journal<E, Record<V>>,
     pending: BTreeSet<u64>,
@@ -75,7 +75,7 @@ pub struct Cache<E: Storage + Metrics, V: CodecShared> {
     syncs: Counter,
 }
 
-impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
+impl<E: Storage + Metrics + Spawner, V: CodecShared> Cache<E, V> {
     /// Calculate the section for a given index.
     const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_blob) * self.items_per_blob
@@ -87,6 +87,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     /// by replaying the journal.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize journal
+        let spawner = context.clone();
         let journal = Journal::<E, Record<V>>::init(
             context.with_label("journal"),
             JConfig {
@@ -104,7 +105,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         let mut intervals = RMap::new();
         {
             debug!("initializing cache");
-            let stream = journal.replay(0, 0, cfg.replay_buffer).await?;
+            let stream = journal.replay(0, 0, cfg.replay_buffer, spawner).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
@@ -304,7 +305,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     }
 }
 
-impl<E: Storage + Metrics, V: CodecShared> kv::Gettable for Cache<E, V> {
+impl<E: Storage + Metrics + Spawner, V: CodecShared> kv::Gettable for Cache<E, V> {
     type Key = u64;
     type Value = V;
     type Error = Error;

@@ -19,7 +19,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage, Spawner};
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::num::NonZeroU64;
@@ -72,7 +72,7 @@ impl<D: Digest> RangeProof<D> {
     /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
     pub async fn new_with_ops<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         H: CHasher<Digest = D>,
         C: Contiguous,
         const N: usize,

@@ -29,7 +29,7 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Spawner, Storage as RStorage};
 use commonware_utils::sequence::prefixed_u64::U64;
 use core::ops::Range;
 use std::{
@@ -86,7 +86,7 @@ pub struct SyncConfig<D: Digest> {
 }
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync = Dirty> {
+pub struct Mmr<E: RStorage + Clock + Metrics + Spawner, D: Digest, S: State<D> + Send + Sync = Dirty> {
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
     /// the journaled MMR's pruning boundary.
@@ -112,7 +112,7 @@ pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sy
     pool: Option<ThreadPool>,
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> From<CleanMmr<E, D>> for DirtyMmr<E, D> {
+impl<E: RStorage + Clock + Metrics + Spawner, D: Digest> From<CleanMmr<E, D>> for DirtyMmr<E, D> {
     fn from(clean: Mmr<E, D, Clean<D>>) -> Self {
         Self {
             mem_mmr: clean.mem_mmr.into(),
@@ -131,7 +131,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the prune_to_pos position in the metadata.
 const PRUNE_TO_POS_PREFIX: u8 = 1;
 
-impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E, D, S> {
+impl<E: RStorage + Clock + Metrics + Spawner, D: Digest, S: State<D> + Send + Sync> Mmr<E, D, S> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
@@ -223,7 +223,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E,
     }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
+impl<E: RStorage + Clock + Metrics + Spawner, D: Digest> CleanMmr<E, D> {
     /// Initialize a new `Mmr` instance.
     pub async fn init(context: E, hasher: &mut impl Hasher<D>, cfg: Config) -> Result<Self, Error> {
         let journal_cfg = JConfig {
@@ -713,7 +713,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
+impl<E: RStorage + Clock + Metrics + Spawner, D: Digest> DirtyMmr<E, D> {
     /// Merkleize the MMR and compute the root digest.
     pub fn merkleize(self, h: &mut impl Hasher<D>) -> CleanMmr<E, D> {
         CleanMmr {
@@ -812,7 +812,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for CleanMmr<E, D> {
+impl<E: RStorage + Clock + Metrics + Spawner + Sync, D: Digest> Storage<D> for CleanMmr<E, D> {
     fn size(&self) -> Position {
         self.size()
     }
@@ -834,7 +834,7 @@ mod tests {
         Hasher, Sha256,
     };
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner, Spawner};
     use commonware_utils::{hex, NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -856,7 +856,7 @@ mod tests {
         }
     }
 
-    pub async fn build_batched_and_check_test_roots_journaled<E: RStorage + Clock + Metrics>(
+    pub async fn build_batched_and_check_test_roots_journaled<E: RStorage + Clock + Metrics + Spawner>(
         journaled_mmr: CleanMmr<E, sha256::Digest>,
     ) -> CleanMmr<E, sha256::Digest> {
         let mut hasher: Standard<Sha256> = Standard::new();

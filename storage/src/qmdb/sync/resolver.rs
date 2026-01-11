@@ -15,7 +15,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, RwLock, Storage};
+use commonware_runtime::{Clock, Metrics, RwLock, Storage, Spawner};
 use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{future::Future, num::NonZeroU64, sync::Arc};
@@ -65,7 +65,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
 
 impl<E, K, V, H, T> Resolver for Arc<FixedDb<E, K, V, H, T, Merkleized<H>, Durable>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: FixedValue + Send + Sync + 'static,
     H: Hasher,
@@ -97,7 +97,7 @@ where
 /// while allowing direct database access.
 impl<E, K, V, H, T> Resolver for Arc<RwLock<FixedDb<E, K, V, H, T, Merkleized<H>, Durable>>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: FixedValue + Send + Sync + 'static,
     H: Hasher,
@@ -128,7 +128,7 @@ where
 
 impl<E, K, V, H, T> Resolver for Arc<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue + Send + Sync + 'static,
     H: Hasher,
@@ -160,7 +160,7 @@ where
 /// types while allowing direct database access.
 impl<E, K, V, H, T> Resolver for Arc<RwLock<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue + Send + Sync + 'static,
     H: Hasher,
@@ -192,7 +192,7 @@ where
 /// Implement Resolver for `Arc<RwLock<Option<FixedDb>>>` to allow taking ownership during sync.
 impl<E, K, V, H, T> Resolver for Arc<RwLock<Option<FixedDb<E, K, V, H, T, Merkleized<H>, Durable>>>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: FixedValue + Send + Sync + 'static,
     H: Hasher,
@@ -227,7 +227,7 @@ where
 impl<E, K, V, H, T> Resolver
     for Arc<RwLock<Option<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue + Send + Sync + 'static,
     H: Hasher,
@@ -260,7 +260,7 @@ where
 
 impl<E, K, V, H, T> Resolver for Arc<Immutable<E, K, V, H, T, Merkleized<H>, Durable>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue + Send + Sync + 'static,
     H: Hasher,
@@ -292,7 +292,7 @@ where
 /// types while allowing direct database access.
 impl<E, K, V, H, T> Resolver for Arc<RwLock<Immutable<E, K, V, H, T, Merkleized<H>, Durable>>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue + Send + Sync + 'static,
     H: Hasher,

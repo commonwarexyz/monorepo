@@ -35,7 +35,7 @@ use crate::{
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::{DigestOf, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage, Spawner};
 use commonware_utils::Array;
 use core::ops::Range;
 use std::num::NonZeroU64;
@@ -50,7 +50,7 @@ pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
 /// of the hash digest being produced by the hasher. A compile-time assertion is used to prevent any
 /// other setting.
 pub struct Db<
-    E: RStorage + Clock + Metrics,
+    E: RStorage + Clock + Metrics + Spawner,
     K: Array,
     V: FixedValue,
     H: Hasher,
@@ -77,7 +77,7 @@ pub struct Db<
 
 // Functionality shared across all DB states, such as most non-mutating operations.
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -154,7 +154,7 @@ impl<
 
 // Functionality for the Clean state.
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -265,7 +265,7 @@ impl<
 
 // Functionality for any Merkleized state (both Durable and NonDurable).
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -342,7 +342,7 @@ impl<
 
 // Functionality for the Mutable state.
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -481,7 +481,7 @@ impl<
 
 // Functionality for (Merkleized, NonDurable) state.
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -519,7 +519,7 @@ impl<
 
 // Functionality for (Unmerkleized, Durable) state.
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -577,7 +577,7 @@ impl<
 
 // LogStore implementation for all states.
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -608,7 +608,7 @@ impl<
 
 // Store implementation for all states
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -629,7 +629,7 @@ impl<
 
 // StoreMut for (Unmerkleized,NonDurable) (aka mutable) state
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -644,7 +644,7 @@ impl<
 
 // StoreDeletable for (Unmerkleized,NonDurable) (aka mutable) state
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -660,7 +660,7 @@ impl<
 // Batchable for (Unmerkleized,NonDurable) (aka mutable) state
 impl<E, K, V, T, H, const N: usize> Batchable for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
 where
-    E: RStorage + Clock + Metrics,
+    E: RStorage + Clock + Metrics + Spawner,
     K: Array,
     V: FixedValue,
     T: Translator,
@@ -687,7 +687,7 @@ where
 // proofs only over the any db mmr not the grafted mmr, so they won't validate against the grafted
 // root.
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -718,7 +718,7 @@ impl<
 
 // PrunableStore for both Merkleized states.
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -734,7 +734,7 @@ impl<
 
 // Persistable for Clean state
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -761,7 +761,7 @@ impl<
 // CleanAny implementation
 #[cfg(any(test, feature = "test-traits"))]
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -779,7 +779,7 @@ impl<
 // UnmerkleizedDurableAny implementation
 #[cfg(any(test, feature = "test-traits"))]
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -810,7 +810,7 @@ impl<
 // MerkleizedNonDurableAny implementation
 #[cfg(any(test, feature = "test-traits"))]
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -833,7 +833,7 @@ impl<
 // MutableAny implementation
 #[cfg(any(test, feature = "test-traits"))]
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -868,7 +868,7 @@ pub mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, Spawner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use std::{

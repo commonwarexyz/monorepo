@@ -1,9 +1,14 @@
 use super::Checksum;
-use crate::{Blob, Error};
+use crate::{utils::Handle, Blob, Error, Spawner};
 use bytes::{Buf, Bytes};
 use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
+
+struct PrefetchParams {
+    start_offset: u64,
+    pages_to_read: usize,
+}
 
 /// Fetches pages from a blob, validates CRCs, and yields logical bytes per page.
 ///
@@ -156,6 +161,99 @@ impl<B: Blob> PageReader<B> {
         // Return just the logical data portion (no CRC)
         Some(self.buffer.slice(page_start..page_start + page_len))
     }
+
+    /// Calculates parameters for the next read without modifying state.
+    ///
+    /// Returns None if there's no more data to read.
+    fn calculate_next_read(&self) -> Option<PrefetchParams> {
+        let start_offset = self.blob_page.checked_mul(self.page_size as u64)?;
+
+        if start_offset >= self.physical_blob_size {
+            return None;
+        }
+
+        let remaining_physical = (self.physical_blob_size - start_offset) as usize;
+        let max_pages = remaining_physical / self.page_size;
+        let pages_to_read = max_pages.min(self.prefetch_count);
+
+        if pages_to_read == 0 {
+            return None;
+        }
+
+        Some(PrefetchParams {
+            start_offset,
+            pages_to_read,
+        })
+    }
+
+    /// Starts a prefetch I/O operation by spawning a background task.
+    ///
+    /// Returns the handle and parameters needed to complete the prefetch later.
+    fn start_prefetch<S: Spawner>(
+        &self,
+        spawner: S,
+    ) -> Option<(Handle<Result<Bytes, Error>>, PrefetchParams)> {
+        let params = self.calculate_next_read()?;
+        let bytes_to_read = params.pages_to_read * self.page_size;
+        let start_offset = params.start_offset;
+
+        let blob = self.blob.clone();
+        let handle = spawner.spawn(move |_| async move {
+            let physical_buf: Vec<u8> = blob
+                .read_at(vec![0u8; bytes_to_read], start_offset)
+                .await?
+                .into();
+            Ok(Bytes::from(physical_buf))
+        });
+
+        Some((handle, params))
+    }
+
+    /// Completes a prefetch by validating CRCs and updating state.
+    ///
+    /// Returns the number of pages processed.
+    fn complete_prefetch(
+        &mut self,
+        physical_buf: Bytes,
+        params: &PrefetchParams,
+    ) -> Result<usize, Error> {
+        self.page_lengths.clear();
+        self.page_lengths.reserve(params.pages_to_read);
+
+        for page_idx in 0..params.pages_to_read {
+            let page_start = page_idx * self.page_size;
+            let page_slice = &physical_buf[page_start..page_start + self.page_size];
+            let Some(record) = Checksum::validate_page(page_slice) else {
+                error!(page = self.blob_page + page_idx as u64, "CRC mismatch");
+                return Err(Error::InvalidChecksum);
+            };
+            let (len, _) = record.get_crc();
+
+            let is_last_page_in_blob = params.start_offset
+                + (page_idx + 1) as u64 * self.page_size as u64
+                >= self.physical_blob_size;
+
+            if is_last_page_in_blob {
+                self.page_lengths.push(len);
+            } else if (len as usize) != self.logical_page_size {
+                error!(
+                    page = self.blob_page + page_idx as u64,
+                    expected = self.logical_page_size,
+                    actual = len,
+                    "non-last page has partial length"
+                );
+                return Err(Error::InvalidChecksum);
+            } else {
+                self.page_lengths.push(len);
+            }
+        }
+
+        self.buffer = physical_buf;
+        self.buffer_idx = 0;
+        self.blob_page += params.pages_to_read as u64;
+
+        Ok(params.pages_to_read)
+    }
 }
 
 /// A buffer that chains pages together and implements `Buf` for ergonomic decoding.
@@ -221,19 +319,26 @@ impl Buf for ReplayBuf {
 /// This helper encapsulates the common pattern of filling a buffer from a page reader
 /// and provides a `Buf` interface for decoding. It tracks whether the reader has been
 /// exhausted to help callers handle end-of-data scenarios.
-pub struct Replay<B: Blob> {
+///
+/// The implementation overlaps I/O with decoding by spawning a background task to
+/// prefetch the next batch of pages while the decoder consumes the current buffer.
+pub struct Replay<B: Blob, S: Spawner> {
     reader: PageReader<B>,
     buf: ReplayBuf,
     exhausted: bool,
+    spawner: S,
+    prefetch: Option<(Handle<Result<Bytes, Error>>, PrefetchParams)>,
 }
 
-impl<B: Blob> Replay<B> {
-    /// Creates a new Replay from a PageReader.
-    pub(super) fn new(reader: PageReader<B>) -> Self {
+impl<B: Blob, S: Spawner> Replay<B, S> {
+    /// Creates a new Replay from a PageReader and Spawner.
+    pub(super) fn new(reader: PageReader<B>, spawner: S) -> Self {
         Self {
             reader,
             buf: ReplayBuf::new(),
             exhausted: false,
+            spawner,
+            prefetch: None,
         }
     }
 
@@ -260,25 +365,50 @@ impl<B: Blob> Replay<B> {
     /// When `Ok(false)` is returned, callers should still attempt to process
     /// the remaining bytes in the buffer (check `remaining()`), as they may
     /// contain valid data that doesn't require the full `n` bytes.
+    ///
+    /// The implementation keeps exactly one prefetch in flight. After every
+    /// completed read, the next prefetch is spawned immediately so it runs
+    /// in the background while the caller processes the returned data.
     pub async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
         while self.buf.remaining() < n && !self.exhausted {
-            match self.reader.fill().await {
-                Ok(0) => {
+            if let Some((handle, params)) = self.prefetch.take() {
+                // Await pending prefetch
+                let physical_buf = handle.await??;
+                match self.reader.complete_prefetch(physical_buf, &params) {
+                    Ok(0) => self.exhausted = true,
+                    Ok(_) => self.drain_pages(),
+                    Err(err) => return Err(err),
+                }
+            } else {
+                // No prefetch pending (first call) - do sync read
+                match self.reader.fill().await {
+                    Ok(0) => self.exhausted = true,
+                    Ok(_) => self.drain_pages(),
+                    Err(err) => return Err(err),
+                }
+            }
+
+            // Immediately spawn next prefetch (runs while caller decodes)
+            if !self.exhausted {
+                self.prefetch = self.reader.start_prefetch(self.spawner.clone());
+                if self.prefetch.is_none() {
                     self.exhausted = true;
                 }
-                Ok(_) => {
-                    while let Some(page) = self.reader.next_page() {
-                        self.buf.push(page);
-                    }
-                }
-                Err(err) => return Err(err),
             }
         }
+
         Ok(self.buf.remaining() >= n)
+    }
+
+    /// Drains all available pages from the reader into the buffer.
+    fn drain_pages(&mut self) {
+        while let Some(page) = self.reader.next_page() {
+            self.buf.push(page);
+        }
     }
 }
 
-impl<B: Blob> Buf for Replay<B> {
+impl<B: Blob, S: Spawner> Buf for Replay<B, S> {
     fn remaining(&self) -> usize {
         self.buf.remaining()
     }
@@ -323,8 +453,11 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            // Create Replay
-            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            // Create Replay (pass context as spawner for background prefetch)
+            let mut replay = append
+                .replay(NZUsize!(BUFFER_PAGES), context.clone())
+                .await
+                .unwrap();
 
             // Ensure all data is available
             replay.ensure(300).await.unwrap();
@@ -400,7 +533,10 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(BUFFER_PAGES), context.clone())
+                .await
+                .unwrap();
 
             // Ensure all data is available
             replay.ensure(data.len()).await.unwrap();

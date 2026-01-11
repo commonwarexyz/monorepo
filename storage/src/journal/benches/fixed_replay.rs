@@ -17,9 +17,9 @@ use std::{
 const PARTITION: &str = "test_partition";
 
 /// Replay all items in the given `journal`.
-async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {
+async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize, spawner: Context) {
     let stream = journal
-        .replay(NZUsize!(buffer), 0)
+        .replay(NZUsize!(buffer), 0, spawner)
         .await
         .expect("failed to replay journal");
     pin_mut!(stream);
@@ -67,7 +67,7 @@ fn bench_fixed_replay(c: &mut Criterion) {
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
-                            bench_run(&j, buffer).await;
+                            bench_run(&j, buffer, ctx.clone()).await;
                             duration += start.elapsed();
                         }
 

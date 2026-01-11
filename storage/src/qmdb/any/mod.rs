@@ -21,7 +21,7 @@ use crate::{
 use commonware_codec::CodecFixedShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
+use commonware_runtime::{Spawner, buffer::PoolRef, Clock, Metrics, Storage};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub(crate) mod db;
@@ -112,7 +112,7 @@ type AuthenticatedLog<E, O, H, S = Merkleized<H>> = authenticated::Journal<E, Jo
 /// Initialize the authenticated log from the given config, returning it along with the inactivity
 /// floor specified by the last commit.
 pub(crate) async fn init_fixed_authenticated_log<
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     O: Committable + CodecFixedShared,
     H: Hasher,
     T: Translator,

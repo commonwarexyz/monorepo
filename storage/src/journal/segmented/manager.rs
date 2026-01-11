@@ -4,7 +4,7 @@
 //! section-based blob storage, pruning, syncing, and metrics.
 
 use crate::journal::Error;
-use commonware_runtime::{
+use commonware_runtime::{Spawner, 
     buffer::{pool::Append, PoolRef, Write},
     telemetry::metrics::status::GaugeExt,
     Blob, Error as RError, Metrics, Storage,
@@ -95,7 +95,7 @@ pub struct Config<F> {
 /// Each section is stored in a separate blob, named by its section number
 /// (big-endian u64). This component handles initialization, pruning, syncing,
 /// and metrics.
-pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
+pub struct Manager<E: Storage + Metrics + Spawner, F: BufferFactory<E::Blob>> {
     context: E,
     partition: String,
     factory: F,
@@ -112,7 +112,7 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     pruned: Counter,
 }
 
-impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
+impl<E: Storage + Metrics + Spawner, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Initialize a new `Manager`.
     ///
     /// Scans the partition for existing blobs and opens them.

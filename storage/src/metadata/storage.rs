@@ -2,7 +2,7 @@ use super::{Config, Error};
 use bytes::BufMut;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_runtime::{
+use commonware_runtime::{Spawner, 
     telemetry::metrics::status::GaugeExt, Blob, Clock, Error as RError, Metrics, Storage,
 };
 use commonware_utils::Span;
@@ -61,7 +61,7 @@ impl<B: Blob, K: Span> Wrapper<B, K> {
 }
 
 /// Implementation of [Metadata] storage.
-pub struct Metadata<E: Clock + Storage + Metrics, K: Span, V: Codec> {
+pub struct Metadata<E: Clock + Storage + Metrics + Spawner, K: Span, V: Codec> {
     context: E,
 
     map: BTreeMap<K, V>,
@@ -76,7 +76,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Span, V: Codec> {
     keys: Gauge,
 }
 
-impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
+impl<E: Clock + Storage + Metrics + Spawner, K: Span, V: Codec> Metadata<E, K, V> {
     /// Initialize a new [Metadata] instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Open dedicated blobs

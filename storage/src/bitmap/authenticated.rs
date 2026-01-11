@@ -25,7 +25,7 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Spawner, Clock, Metrics, Storage as RStorage};
 use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::prefixed_u64::U64};
 use std::collections::HashSet;
 use tracing::{debug, error, warn};
@@ -262,7 +262,7 @@ impl<D: Digest, const N: usize, S: State<D>> BitMap<D, N, S> {
     }
 
     /// Destroy the bitmap metadata from disk.
-    pub async fn destroy<C: RStorage + Metrics + Clock>(
+    pub async fn destroy<C: RStorage + Metrics + Clock + Spawner>(
         context: C,
         partition: &str,
     ) -> Result<(), Error> {
@@ -305,7 +305,7 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
     ///
     /// Returns an error if the bitmap could not be restored, e.g. because of data corruption or
     /// underlying storage error.
-    pub async fn restore_pruned<C: RStorage + Metrics + Clock>(
+    pub async fn restore_pruned<C: RStorage + Metrics + Clock + Spawner>(
         context: C,
         partition: &str,
         pool: Option<ThreadPool>,
@@ -376,7 +376,7 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
     /// Write the information necessary to restore the bitmap in its fully pruned state at its last
     /// pruning boundary. Restoring the entire bitmap state is then possible by replaying the
     /// retained elements.
-    pub async fn write_pruned<C: RStorage + Metrics + Clock>(
+    pub async fn write_pruned<C: RStorage + Metrics + Clock + Spawner>(
         &self,
         context: C,
         partition: &str,
@@ -627,7 +627,7 @@ mod tests {
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256, Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{Spawner, deterministic, Runner as _};
 
     const SHA256_SIZE: usize = sha256::Digest::SIZE;
 

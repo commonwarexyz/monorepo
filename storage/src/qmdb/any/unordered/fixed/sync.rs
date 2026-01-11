@@ -11,7 +11,7 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_cryptography::{DigestOf, Hasher};
-use commonware_runtime::{
+use commonware_runtime::{Spawner, 
     buffer::pool::Append, telemetry::metrics::status::GaugeExt, Blob, Clock, Metrics, Storage,
 };
 use commonware_utils::Array;
@@ -21,7 +21,7 @@ use tracing::debug;
 
 impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T, Merkleized<H>, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: FixedValue,
     H: Hasher,
@@ -141,7 +141,7 @@ where
 /// # Invariants
 ///
 /// The returned [fixed::Journal] has size in the given range.
-pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixedShared>(
+pub(crate) async fn init_journal<E: Storage + Metrics + Spawner, A: CodecFixedShared>(
     context: E,
     cfg: fixed::Config,
     range: Range<u64>,
@@ -201,7 +201,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixedShared>(
 /// - Reading from positions 0-19 will return `ItemPruned` since those blobs don't exist
 /// - This represents a journal that had operations 0-24, with operations 0-19 pruned,
 ///   leaving operations 20-24 in tail blob 2.
-pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixedShared>(
+pub(crate) async fn init_journal_at_size<E: Storage + Metrics + Spawner, A: CodecFixedShared>(
     context: E,
     cfg: fixed::Config,
     size: u64,
@@ -276,7 +276,7 @@ mod tests {
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{
+    use commonware_runtime::{Spawner, 
         buffer::PoolRef,
         deterministic::{self, Context},
         Runner as _,

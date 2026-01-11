@@ -24,7 +24,7 @@ use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use bytes::Buf;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
-use commonware_runtime::{buffer::pool::PoolRef, Blob, Metrics, Storage};
+use commonware_runtime::{buffer::pool::PoolRef, Blob, Metrics, Spawner, Storage};
 use futures::{
     stream::{self, Stream},
     StreamExt,
@@ -59,12 +59,12 @@ pub struct Config {
 /// the first invalid data read will be considered the new end of the journal (and the
 /// underlying [Blob] will be truncated to the last valid item). Repair occurs during
 /// init by checking each blob's size.
-pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
+pub struct Journal<E: Storage + Metrics + Spawner, A: CodecFixed> {
     manager: Manager<E, AppendFactory>,
     _array: PhantomData<A>,
 }
 
-impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
+impl<E: Storage + Metrics + Spawner, A: CodecFixedShared> Journal<E, A> {
     /// Size of each entry.
     pub const CHUNK_SIZE: usize = A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
@@ -173,15 +173,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Returns a stream of all items starting from the given section.
     ///
     /// Each item is returned as (section, position, item).
-    pub async fn replay(
+    pub async fn replay<S: Spawner>(
         &self,
         start_section: u64,
         buffer: NonZeroUsize,
+        spawner: S,
     ) -> Result<impl Stream<Item = Result<(u64, u64, A), Error>> + Send + '_, Error> {
         // Pre-create readers from blobs (async operation)
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
-            let replay = blob.replay(buffer).await?;
+            let replay = blob.replay(buffer, spawner.clone()).await?;
             blob_info.push((section, replay));
         }
 
@@ -408,7 +409,7 @@ mod tests {
 
             let items = {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, NZUsize!(1024), context.clone())
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -554,7 +555,7 @@ mod tests {
             // Verify data integrity via replay
             {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, NZUsize!(1024), context.clone())
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -656,7 +657,7 @@ mod tests {
 
             let count = {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, NZUsize!(1024), context.clone())
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);

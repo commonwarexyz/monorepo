@@ -18,7 +18,7 @@ use crate::{
 };
 use commonware_cryptography::{DigestOf, Hasher as CHasher};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, Spawner};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod ordered;
@@ -81,7 +81,7 @@ impl<T: Translator> FixedConfig<T> {
 }
 
 /// Return the root of the current QMDB represented by the provided mmr and bitmap.
-async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
+async fn root<E: RStorage + Clock + Metrics + Spawner, H: CHasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
     height: u32,
     status: &CleanBitMap<H::Digest, N>,

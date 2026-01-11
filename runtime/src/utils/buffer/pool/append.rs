@@ -32,7 +32,7 @@ use crate::{
         pool::{Checksum, PoolRef, CHECKSUM_SIZE},
         tip::Buffer,
     },
-    Blob, Error, RwLock, RwLockWriteGuard,
+    Blob, Error, RwLock, RwLockWriteGuard, Spawner,
 };
 use commonware_cryptography::Crc32;
 use commonware_utils::StableBuf;
@@ -721,7 +721,13 @@ impl<B: Blob> Append<B> {
     ///
     /// The returned replay can be used to sequentially read all pages from the blob while ensuring
     /// all data passes integrity verification. CRCs are validated but not included in the output.
-    pub async fn replay(&self, buffer_size: NonZeroUsize) -> Result<Replay<B>, Error> {
+    ///
+    /// The `spawner` is used to spawn background prefetch tasks for overlapped I/O.
+    pub async fn replay<S: Spawner>(
+        &self,
+        buffer_size: NonZeroUsize,
+        spawner: S,
+    ) -> Result<Replay<B, S>, Error> {
         let logical_page_size = self.pool_ref.page_size();
         let logical_page_size_nz =
             NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
@@ -769,7 +775,7 @@ impl<B: Blob> Append<B> {
             prefetch_pages,
             logical_page_size_nz,
         );
-        Ok(Replay::new(reader))
+        Ok(Replay::new(reader, spawner))
     }
 }
 
@@ -1831,7 +1837,10 @@ mod tests {
             let append = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
                 .await
                 .unwrap();
-            let mut replay = append.replay(NZUsize!(1024)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(1024), context.clone())
+                .await
+                .unwrap();
 
             // Try to fill pages - should fail on CRC validation.
             let result = replay.ensure(1).await;

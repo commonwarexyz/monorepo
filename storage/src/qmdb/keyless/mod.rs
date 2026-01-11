@@ -16,7 +16,7 @@ use crate::{
 };
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, Spawner};
 use core::{marker::PhantomData, ops::Range};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
@@ -66,7 +66,7 @@ type Journal<E, V, H, S> = authenticated::Journal<E, ContiguousJournal<E, Operat
 
 /// A keyless authenticated database for variable-length data.
 pub struct Keyless<
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     V: VariableValue,
     H: Hasher,
     M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
@@ -84,7 +84,7 @@ pub struct Keyless<
 
 // Impl block for functionality available in all states.
 impl<
-        E: Storage + Clock + Metrics,
+        E: Storage + Clock + Metrics + Spawner,
         V: VariableValue,
         H: Hasher,
         M: MerkleizationState<DigestOf<H>>,
@@ -141,7 +141,7 @@ impl<
 }
 
 // Implementation for the Clean state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
+impl<E: Storage + Clock + Metrics + Spawner, V: VariableValue, H: Hasher>
     Keyless<E, V, H, Merkleized<H>, Durable>
 {
     /// Returns a [Keyless] qmdb initialized from `cfg`. Any uncommitted operations will be discarded
@@ -263,7 +263,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
 }
 
 // Implementation for the Mutable state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
+impl<E: Storage + Clock + Metrics + Spawner, V: VariableValue, H: Hasher>
     Keyless<E, V, H, Unmerkleized, NonDurable>
 {
     /// Append a value to the db, returning its location which can be used to retrieve it.
@@ -308,7 +308,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
 }
 
 // Implementation for the (Unmerkleized, Durable) state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
+impl<E: Storage + Clock + Metrics + Spawner, V: VariableValue, H: Hasher>
     Keyless<E, V, H, Unmerkleized, Durable>
 {
     /// Convert this database into the Mutable state for accepting more operations without
@@ -332,7 +332,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
 }
 
 // Implementation of MerkleizedStore for the Merkleized state (any durability).
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> MerkleizedStore
+impl<E: Storage + Clock + Metrics + Spawner, V: VariableValue, H: Hasher, D: DurabilityState> MerkleizedStore
     for Keyless<E, V, H, Merkleized<H>, D>
 {
     type Digest = H::Digest;
@@ -357,7 +357,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilitySta
 
 // Implementation of LogStore for all states.
 impl<
-        E: Storage + Clock + Metrics,
+        E: Storage + Clock + Metrics + Spawner,
         V: VariableValue,
         H: Hasher,
         M: MerkleizationState<DigestOf<H>>,
@@ -386,7 +386,7 @@ impl<
 }
 
 // Implementation of PrunableStore for the Merkleized state (any durability).
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> PrunableStore
+impl<E: Storage + Clock + Metrics + Spawner, V: VariableValue, H: Hasher, D: DurabilityState> PrunableStore
     for Keyless<E, V, H, Merkleized<H>, D>
 {
     async fn prune(&mut self, loc: Location) -> Result<(), Error> {
@@ -404,7 +404,7 @@ mod test {
     use crate::{mmr::StandardHasher as Standard, qmdb::verify_proof};
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, Runner as _, Spawner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::num::NonZeroU16;

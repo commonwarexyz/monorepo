@@ -22,7 +22,7 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, Storage, Spawner};
 use commonware_utils::Array;
 use tracing::warn;
 
@@ -34,7 +34,7 @@ pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
 pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
     super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
+impl<E: Storage + Clock + Metrics + Spawner, K: Array, V: VariableValue, H: Hasher, T: Translator>
     Db<E, K, V, H, T, Merkleized<H>, Durable>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
@@ -95,7 +95,7 @@ pub(super) mod test {
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, Spawner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::RngCore;
     use std::num::{NonZeroU16, NonZeroUsize};

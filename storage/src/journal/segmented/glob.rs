@@ -31,7 +31,7 @@ use crate::journal::Error;
 use bytes::BufMut;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_runtime::{Blob as _, Error as RError, Metrics, Storage};
+use commonware_runtime::{Spawner, Blob as _, Error as RError, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
@@ -56,7 +56,7 @@ pub struct Config<C> {
 /// Uses [`buffer::Write`](commonware_runtime::buffer::Write) for batching writes.
 /// Reads go directly to blobs without any caching (ideal for large values that
 /// shouldn't pollute a buffer pool cache).
-pub struct Glob<E: Storage + Metrics, V: Codec> {
+pub struct Glob<E: Storage + Metrics + Spawner, V: Codec> {
     manager: Manager<E, WriteFactory>,
 
     /// Compression level (if enabled).
@@ -66,7 +66,7 @@ pub struct Glob<E: Storage + Metrics, V: Codec> {
     codec_config: V::Cfg,
 }
 
-impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
+impl<E: Storage + Metrics + Spawner, V: CodecShared> Glob<E, V> {
     /// Initialize blob storage, opening existing section blobs.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
@@ -231,7 +231,7 @@ impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
 mod tests {
     use super::*;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Spawner, deterministic, Runner};
     use commonware_utils::NZUsize;
 
     fn test_cfg() -> Config<()> {

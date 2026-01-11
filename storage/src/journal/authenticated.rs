@@ -19,7 +19,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{DigestOf, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use thiserror::Error;
@@ -40,7 +40,7 @@ pub enum Error {
 /// specific location.
 pub struct Journal<E, C, H, S: State<H::Digest> + Send + Sync = Dirty>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -57,7 +57,7 @@ where
 
 impl<E, C, H, S> Journal<E, C, H, S>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
     S: State<DigestOf<H>> + Send + Sync,
@@ -87,7 +87,7 @@ where
 
 impl<E, C, H, S> Journal<E, C, H, S>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
     S: State<DigestOf<H>> + Send + Sync,
@@ -109,7 +109,7 @@ where
 
 impl<E, C, H, S> Journal<E, C, H, S>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
     S: State<DigestOf<H>> + Send + Sync,
@@ -123,7 +123,7 @@ where
 
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -231,7 +231,7 @@ where
 
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -320,7 +320,7 @@ where
 
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
@@ -346,7 +346,7 @@ where
 
 impl<E, C, H> Journal<E, C, H, Dirty>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -367,7 +367,7 @@ where
 
 impl<E, C, H> Journal<E, C, H, Dirty>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -394,7 +394,7 @@ const APPLY_BATCH_SIZE: u64 = 1 << 16;
 
 impl<E, O, H> Journal<E, fixed::Journal<E, O>, H, Clean<H::Digest>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     O: CodecFixedShared,
     H: Hasher,
 {
@@ -433,7 +433,7 @@ where
 
 impl<E, O, H> Journal<E, variable::Journal<E, O>, H, Clean<H::Digest>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     O: CodecShared,
     H: Hasher,
 {
@@ -473,7 +473,7 @@ where
 
 impl<E, C, H, S> Contiguous for Journal<E, C, H, S>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
     S: State<DigestOf<H>> + Send + Sync,
@@ -510,7 +510,7 @@ where
 
 impl<E, C, H> MutableContiguous for Journal<E, C, H, Dirty>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -544,7 +544,7 @@ where
 
 impl<E, C, H> MutableContiguous for Journal<E, C, H, Clean<H::Digest>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -587,7 +587,7 @@ where
 
 impl<E, C, H> Persistable for Journal<E, C, H, Clean<H::Digest>>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {

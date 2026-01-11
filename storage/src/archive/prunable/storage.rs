@@ -9,7 +9,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Storage};
+use commonware_runtime::{Spawner, telemetry::metrics::status::GaugeExt, Metrics, Storage};
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -100,7 +100,7 @@ where
 }
 
 /// Implementation of `Archive` storage.
-pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> {
+pub struct Archive<T: Translator, E: Storage + Metrics + Spawner, K: Array, V: CodecShared> {
     items_per_section: u64,
 
     /// Combined index + value storage with crash recovery.
@@ -129,7 +129,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared
     syncs: Counter,
 }
 
-impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> Archive<T, E, K, V> {
+impl<T: Translator, E: Storage + Metrics + Spawner, K: Array, V: CodecShared> Archive<T, E, K, V> {
     /// Calculate the section for a given index.
     const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_section) * self.items_per_section
@@ -140,6 +140,9 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> Archive<T, E
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying only the index journal (no values are read).
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
+        // Save a clone of context for spawning replay tasks
+        let spawner = context.clone();
+
         // Initialize oversized journal
         let oversized_cfg = OversizedConfig {
             index_partition: cfg.key_partition,
@@ -159,7 +162,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> Archive<T, E
         let mut intervals = RMap::new();
         {
             debug!("initializing archive from index journal");
-            let stream = oversized.replay(0, cfg.replay_buffer).await?;
+            let stream = oversized.replay(0, cfg.replay_buffer, spawner).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 let (_section, position, entry) = result?;
@@ -338,7 +341,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> Archive<T, E
     }
 }
 
-impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> crate::archive::Archive
+impl<T: Translator, E: Storage + Metrics + Spawner, K: Array, V: CodecShared> crate::archive::Archive
     for Archive<T, E, K, V>
 {
     type Key = K;

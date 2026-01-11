@@ -21,7 +21,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, Storage, Spawner};
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
@@ -35,7 +35,7 @@ pub(crate) mod sync_tests;
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
 
 impl<
-        E: Storage + Clock + Metrics,
+        E: Storage + Clock + Metrics + Spawner,
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
@@ -77,7 +77,7 @@ where
 }
 
 impl<
-        E: Storage + Clock + Metrics,
+        E: Storage + Clock + Metrics + Spawner,
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
@@ -235,7 +235,7 @@ where
 }
 
 impl<
-        E: Storage + Clock + Metrics,
+        E: Storage + Clock + Metrics + Spawner,
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
@@ -272,7 +272,7 @@ where
 }
 
 impl<
-        E: Storage + Clock + Metrics,
+        E: Storage + Clock + Metrics + Spawner,
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
@@ -295,7 +295,7 @@ where
 }
 
 impl<
-        E: Storage + Clock + Metrics,
+        E: Storage + Clock + Metrics + Spawner,
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
@@ -312,7 +312,7 @@ where
 }
 
 impl<
-        E: Storage + Clock + Metrics,
+        E: Storage + Clock + Metrics + Spawner,
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
@@ -329,7 +329,7 @@ where
 
 impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>>,
@@ -348,7 +348,7 @@ where
 #[cfg(any(test, feature = "test-traits"))]
 impl<E, K, V, C, I, H> CleanAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
@@ -367,7 +367,7 @@ where
 impl<E, K, V, C, I, H> UnmerkleizedDurableAny
     for Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
@@ -394,7 +394,7 @@ where
 impl<E, K, V, C, I, H> MerkleizedNonDurableAny
     for Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
@@ -421,7 +421,7 @@ where
 #[cfg(any(test, feature = "test-traits"))]
 impl<E, K, V, C, I, H> MutableAny for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,

@@ -5,7 +5,7 @@ use commonware_codec::{
     CodecFixed, CodecFixedShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite,
 };
 use commonware_cryptography::{crc32, Crc32};
-use commonware_runtime::{
+use commonware_runtime::{Spawner, 
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
 };
@@ -70,7 +70,7 @@ where
 }
 
 /// Implementation of [Ordinal].
-pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
+pub struct Ordinal<E: Storage + Metrics + Clock + Spawner, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
     context: E,
     config: Config,
@@ -94,7 +94,7 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock + Spawner, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         Self::init_with_bits(context, config, None).await
@@ -417,7 +417,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixedShared> kv::Gettable for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock + Spawner, V: CodecFixedShared> kv::Gettable for Ordinal<E, V> {
     type Key = u64;
     type Value = V;
     type Error = Error;
@@ -427,13 +427,13 @@ impl<E: Storage + Metrics + Clock, V: CodecFixedShared> kv::Gettable for Ordinal
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixedShared> kv::Updatable for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock + Spawner, V: CodecFixedShared> kv::Updatable for Ordinal<E, V> {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixedShared> Persistable for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock + Spawner, V: CodecFixedShared> Persistable for Ordinal<E, V> {
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Self::Error> {

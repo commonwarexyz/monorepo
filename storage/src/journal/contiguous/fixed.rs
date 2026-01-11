@@ -63,7 +63,7 @@ use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as 
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef},
     telemetry::metrics::status::GaugeExt,
-    Blob, Error as RError, Metrics, Storage,
+    Blob, Error as RError, Metrics, Spawner, Storage,
 };
 use commonware_utils::hex;
 use futures::{
@@ -112,7 +112,7 @@ pub struct Config {
 /// the first invalid data read will be considered the new end of the journal (and the
 /// underlying [Blob] will be truncated to the last valid item). Repair occurs during
 /// init because only the tail blob can have trailing bytes.
-pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
+pub struct Journal<E: Storage + Metrics + Spawner, A: CodecFixed> {
     pub(crate) context: E,
     pub(crate) cfg: Config,
 
@@ -148,7 +148,7 @@ pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     pub(crate) _array: PhantomData<A>,
 }
 
-impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
+impl<E: Storage + Metrics + Spawner, A: CodecFixedShared> Journal<E, A> {
     pub(crate) const CHUNK_SIZE: usize = A::SIZE;
     pub(crate) const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
@@ -455,10 +455,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// # Integrity
     ///
     /// If any corrupted data is found, the stream will return an error.
-    pub async fn replay(
+    pub async fn replay<S: Spawner>(
         &self,
         buffer: NonZeroUsize,
         start_pos: u64,
+        spawner: S,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
         assert!(start_pos <= self.size());
 
@@ -469,12 +470,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let blobs = self.blobs.range(start_blob..).collect::<Vec<_>>();
         let mut readers = Vec::with_capacity(blobs.len() + 1);
         for (blob_index, blob) in blobs {
-            let replay = blob.replay(buffer).await?;
+            let replay = blob.replay(buffer, spawner.clone()).await?;
             readers.push((*blob_index, replay));
         }
 
         // Include the tail blob.
-        let tail_replay = self.tail.replay(buffer).await?;
+        let tail_replay = self.tail.replay(buffer, spawner).await?;
         readers.push((self.tail_index, tail_replay));
         let start_item_in_blob = start_pos % items_per_blob;
 
@@ -636,7 +637,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 }
 
 // Implement Contiguous trait for fixed-length journals
-impl<E: Storage + Metrics, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
+impl<E: Storage + Metrics + Spawner, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
 
     fn size(&self) -> u64 {
@@ -656,7 +657,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> super::Contiguous for Journal<E,
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error> {
-        Self::replay(self, buffer, start_pos).await
+        Self::replay(self, buffer, start_pos, self.context.clone()).await
     }
 
     async fn read(&self, position: u64) -> Result<Self::Item, Error> {
@@ -664,7 +665,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> super::Contiguous for Journal<E,
     }
 }
 
-impl<E: Storage + Metrics, A: CodecFixedShared> MutableContiguous for Journal<E, A> {
+impl<E: Storage + Metrics + Spawner, A: CodecFixedShared> MutableContiguous for Journal<E, A> {
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
@@ -678,7 +679,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> MutableContiguous for Journal<E,
     }
 }
 
-impl<E: Storage + Metrics, A: CodecFixedShared> Persistable for Journal<E, A> {
+impl<E: Storage + Metrics + Spawner, A: CodecFixedShared> Persistable for Journal<E, A> {
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Error> {
@@ -855,7 +856,7 @@ mod tests {
 
             {
                 let stream = journal
-                    .replay(NZUsize!(1024), 0)
+                    .replay(NZUsize!(1024), 0, context.clone())
                     .await
                     .expect("failed to replay journal");
                 pin_mut!(stream);
@@ -943,7 +944,7 @@ mod tests {
             // Replay should return all items
             {
                 let stream = journal
-                    .replay(NZUsize!(1024), 0)
+                    .replay(NZUsize!(1024), 0, context.clone())
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -1000,7 +1001,7 @@ mod tests {
             {
                 let mut error_found = false;
                 let stream = journal
-                    .replay(NZUsize!(1024), 0)
+                    .replay(NZUsize!(1024), 0, context.clone())
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -1149,7 +1150,7 @@ mod tests {
             // Replay should return all items except the first `START_POS`.
             {
                 let stream = journal
-                    .replay(NZUsize!(1024), START_POS)
+                    .replay(NZUsize!(1024), START_POS, context.clone())
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();

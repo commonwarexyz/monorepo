@@ -21,7 +21,7 @@ use crate::{
 use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher as CHasher};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, Spawner};
 use commonware_utils::Array;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -80,7 +80,7 @@ pub struct Config<T: Translator, C> {
 /// An authenticated database that only supports adding new keyed values (no updates or
 /// deletions), where values can have varying sizes.
 pub struct Immutable<
-    E: RStorage + Clock + Metrics,
+    E: RStorage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     H: CHasher,
@@ -107,7 +107,7 @@ pub struct Immutable<
 
 // Functionality shared across all DB states.
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: VariableValue,
         H: CHasher,
@@ -178,7 +178,7 @@ impl<
 
 // Functionality shared across Merkleized states.
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: VariableValue,
         H: CHasher,
@@ -246,7 +246,7 @@ impl<
 }
 
 // Functionality specific to (Merkleized, Durable) state.
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics + Spawner, K: Array, V: VariableValue, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T, Merkleized<H>, Durable>
 {
     /// Returns an [Immutable] qmdb initialized from `cfg`. Any uncommitted log operations will be
@@ -392,7 +392,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 }
 
 // Functionality specific to (Unmerkleized, Durable) state.
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics + Spawner, K: Array, V: VariableValue, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T, Unmerkleized, Durable>
 {
     /// Convert this database into a mutable state for batched updates.
@@ -417,7 +417,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 }
 
 // Functionality specific to (Merkleized, NonDurable) state.
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics + Spawner, K: Array, V: VariableValue, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T, Merkleized<H>, NonDurable>
 {
     /// Convert this database into a mutable state for batched updates.
@@ -432,7 +432,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 }
 
 // Functionality specific to (Unmerkleized, NonDurable) state - the mutable state.
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics + Spawner, K: Array, V: VariableValue, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T, Unmerkleized, NonDurable>
 {
     /// Update the operations MMR with the given operation, and append the operation to the log. The
@@ -499,7 +499,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 }
 
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: VariableValue,
         H: CHasher,
@@ -518,7 +518,7 @@ impl<
 }
 
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: VariableValue,
         H: CHasher,
@@ -548,7 +548,7 @@ impl<
 }
 
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: VariableValue,
         H: CHasher,
@@ -575,7 +575,7 @@ impl<
 }
 
 impl<
-        E: RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics + Spawner,
         K: Array,
         V: VariableValue,
         H: CHasher,

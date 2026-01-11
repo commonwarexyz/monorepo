@@ -9,13 +9,13 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, Storage, Spawner};
 use commonware_utils::Array;
 use std::ops::Range;
 
 impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     H: Hasher,
@@ -121,7 +121,7 @@ where
 /// Configuration for syncing an [immutable::Immutable] to a target state.
 pub struct Config<E, K, V, T, D, C>
 where
-    E: Storage + Metrics,
+    E: Storage + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -167,7 +167,7 @@ mod tests {
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock, Spawner};
     use commonware_utils::{test_rng, test_rng_seeded, NZUsize, NZU16, NZU64};
     use futures::{channel::mpsc, SinkExt as _};
     use rand::RngCore as _;

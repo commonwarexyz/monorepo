@@ -21,7 +21,7 @@
 //! use commonware_utils::{NZUsize, NZU16, NZU64};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
 //! use commonware_math::algebra::Random;
-//! use commonware_runtime::{buffer::PoolRef, deterministic::Runner, Metrics, Runner as _};
+//! use commonware_runtime::{buffer::PoolRef, deterministic::Runner, Metrics, Runner as _, Spawner};
 //!
 //! use std::num::NonZeroU16;
 //! const PAGE_SIZE: NonZeroU16 = NZU16!(8192);
@@ -95,7 +95,7 @@ use crate::{
     Persistable,
 };
 use commonware_codec::Read;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, Spawner};
 use commonware_utils::Array;
 use core::ops::Range;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -129,7 +129,7 @@ pub struct Config<T: Translator, C> {
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
 pub struct Db<E, K, V, T, S = Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -167,7 +167,7 @@ where
 
 impl<E, K, V, T, S> Db<E, K, V, T, S>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -258,7 +258,7 @@ where
 
 impl<E, K, V, T> Db<E, K, V, T, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -339,7 +339,7 @@ where
 
 impl<E, K, V, T> Db<E, K, V, T, NonDurable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -462,7 +462,7 @@ where
 
 impl<E, K, V, T> Persistable for Db<E, K, V, T, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -485,7 +485,7 @@ where
 
 impl<E, K, V, T, S> LogStore for Db<E, K, V, T, S>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -512,7 +512,7 @@ where
 
 impl<E, K, V, T, S> PrunableStore for Db<E, K, V, T, S>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -525,7 +525,7 @@ where
 
 impl<E, K, V, T, S> crate::kv::Gettable for Db<E, K, V, T, S>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -542,7 +542,7 @@ where
 
 impl<E, K, V, T> Updatable for Db<E, K, V, T, NonDurable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -554,7 +554,7 @@ where
 
 impl<E, K, V, T> Deletable for Db<E, K, V, T, NonDurable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -566,7 +566,7 @@ where
 
 impl<E, K, V, T> Batchable for Db<E, K, V, T, NonDurable>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -596,7 +596,7 @@ mod test {
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Runner, Spawner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
