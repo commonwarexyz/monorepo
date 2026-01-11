@@ -1638,7 +1638,8 @@ mod tests {
 
             // === Step 3: Corrupt ONLY crc2 (not len2) ===
             // crc2 is 4 bytes at offset PAGE_SIZE + 8
-            blob.write_at(vec![0xDE, 0xAD, 0xBE, 0xEF], crc2_offset)
+            // Write 0xDEADBEEF in little-endian byte order
+            blob.write_at(vec![0xEF, 0xBE, 0xAD, 0xDE], crc2_offset)
                 .await
                 .unwrap();
             blob.sync().await.unwrap();
