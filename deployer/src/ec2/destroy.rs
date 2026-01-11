@@ -32,12 +32,13 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
     }
 
     // Clean up S3 deployment data (preserves cached tools)
-    info!("cleaning up S3 deployment data");
+    info!(bucket = S3_BUCKET_NAME, "cleaning up S3 deployment data");
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     let deployment_prefix = format!("{}/{}/", S3_DEPLOYMENTS_PREFIX, tag);
     match delete_prefix(&s3_client, S3_BUCKET_NAME, &deployment_prefix).await {
         Ok(()) => {
             info!(
+                bucket = S3_BUCKET_NAME,
                 prefix = deployment_prefix.as_str(),
                 "deleted S3 deployment data"
             );
@@ -45,9 +46,12 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
         Err(e) => {
             let err_str = format!("{:?}", e);
             if err_str.contains("NoSuchBucket") {
-                info!("S3 bucket does not exist, skipping S3 cleanup");
+                info!(
+                    bucket = S3_BUCKET_NAME,
+                    "bucket does not exist, skipping S3 cleanup"
+                );
             } else {
-                warn!(%e, "failed to delete S3 deployment data, continuing with destroy");
+                warn!(bucket = S3_BUCKET_NAME, %e, "failed to delete S3 deployment data, continuing with destroy");
             }
         }
     }

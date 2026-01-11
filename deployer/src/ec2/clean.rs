@@ -9,7 +9,7 @@ use tracing::info;
 
 /// Deletes the shared S3 cache bucket and all its contents
 pub async fn clean() -> Result<(), Error> {
-    info!("cleaning S3 cache bucket");
+    info!(bucket = S3_BUCKET_NAME, "cleaning S3 cache bucket");
 
     // Create S3 client in the monitoring region (where bucket is located)
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;

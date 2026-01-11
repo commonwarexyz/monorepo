@@ -105,7 +105,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .insert(config.monitoring.instance_type.clone());
 
     // Setup S3 bucket and cache observability tools
-    info!("setting up S3 cache bucket");
+    info!(bucket = S3_BUCKET_NAME, "setting up S3 cache bucket");
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     ensure_bucket_exists(&s3_client, S3_BUCKET_NAME, MONITORING_REGION).await?;
 
