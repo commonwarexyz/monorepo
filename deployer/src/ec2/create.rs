@@ -109,8 +109,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     ensure_bucket_exists(&s3_client, S3_BUCKET_NAME, MONITORING_REGION).await?;
 
-    // Cache observability tools concurrently if not already cached
-    info!("checking and caching observability tools");
+    // Cache observability tools (if not already cached) and generate pre-signed URLs concurrently
+    info!("checking, caching, and generating pre-signed URLs for observability tools");
+    let presign_duration = Duration::from_secs(6 * 60 * 60);
     let tools_to_cache = [
         (
             prometheus_s3_key(PROMETHEUS_VERSION),
@@ -139,52 +140,41 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         ),
     ];
 
-    // Check which tools need caching and cache them concurrently
-    try_join_all(tools_to_cache.iter().map(|(s3_key, download_url)| {
-        let tag_directory = tag_directory.clone();
-        let s3_client = s3_client.clone();
-        async move {
-            if !object_exists(&s3_client, S3_BUCKET_NAME, s3_key).await? {
-                info!(
-                    key = s3_key.as_str(),
-                    "tool not cached, downloading and uploading"
-                );
-                let temp_path = tag_directory.join(s3_key.replace('/', "_"));
-                download_file(download_url, &temp_path).await?;
-                upload_file(&s3_client, S3_BUCKET_NAME, s3_key, &temp_path).await?;
-                std::fs::remove_file(&temp_path)?;
-            } else {
-                info!(key = s3_key.as_str(), "tool already cached");
+    let tool_urls: [String; 7] = try_join_all(tools_to_cache.iter().map(
+        |(s3_key, download_url)| {
+            let tag_directory = tag_directory.clone();
+            let s3_client = s3_client.clone();
+            async move {
+                if !object_exists(&s3_client, S3_BUCKET_NAME, s3_key).await? {
+                    info!(
+                        key = s3_key.as_str(),
+                        "tool not cached, downloading and uploading"
+                    );
+                    let temp_path = tag_directory.join(s3_key.replace('/', "_"));
+                    download_file(download_url, &temp_path).await?;
+                    let url = upload_and_presign(
+                        &s3_client,
+                        S3_BUCKET_NAME,
+                        s3_key,
+                        &temp_path,
+                        presign_duration,
+                    )
+                    .await?;
+                    std::fs::remove_file(&temp_path)?;
+                    Ok::<_, Error>(url)
+                } else {
+                    info!(key = s3_key.as_str(), "tool already cached");
+                    presign_url(&s3_client, S3_BUCKET_NAME, s3_key, presign_duration).await
+                }
             }
-            Ok::<_, Error>(())
-        }
-    }))
-    .await?;
-    info!("observability tools cached");
-
-    // Generate pre-signed URLs for tools concurrently (valid for 6 hours)
-    info!("generating pre-signed URLs for tools");
-    let presign_duration = Duration::from_secs(6 * 60 * 60);
-    let tool_keys = [
-        prometheus_s3_key(PROMETHEUS_VERSION),
-        grafana_s3_key(GRAFANA_VERSION),
-        loki_s3_key(LOKI_VERSION),
-        pyroscope_s3_key(PYROSCOPE_VERSION),
-        tempo_s3_key(TEMPO_VERSION),
-        node_exporter_s3_key(NODE_EXPORTER_VERSION),
-        promtail_s3_key(PROMTAIL_VERSION),
-    ];
-    let tool_urls: [String; 7] = try_join_all(
-        tool_keys
-            .iter()
-            .map(|key| presign_url(&s3_client, S3_BUCKET_NAME, key, presign_duration)),
-    )
+        },
+    ))
     .await?
     .try_into()
     .unwrap();
     let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url] =
         tool_urls;
-    info!("generated pre-signed URLs for tools");
+    info!("observability tools ready");
 
     // Upload instance binaries and configs to S3 concurrently
     info!("uploading instance binaries and configs to S3");
