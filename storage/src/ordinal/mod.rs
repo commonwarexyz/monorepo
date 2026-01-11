@@ -520,7 +520,7 @@ mod tests {
             // Corrupt the data
             {
                 let (blob, _) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test_ordinal", &0u64.to_le_bytes())
                     .await
                     .unwrap();
                 // Corrupt the CRC by changing a byte
@@ -647,7 +647,7 @@ mod tests {
             // Corrupt by writing partial record (only value, no CRC)
             {
                 let (blob, _) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test_ordinal", &0u64.to_le_bytes())
                     .await
                     .unwrap();
                 // Overwrite second record with partial data (32 bytes instead of 36)
@@ -714,7 +714,7 @@ mod tests {
             // Corrupt the value portion of a record
             {
                 let (blob, _) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test_ordinal", &0u64.to_le_bytes())
                     .await
                     .unwrap();
                 // Corrupt some bytes in the value of the first record
@@ -773,7 +773,7 @@ mod tests {
             {
                 // Corrupt CRC in first blob
                 let (blob, _) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test_ordinal", &0u64.to_le_bytes())
                     .await
                     .unwrap();
                 blob.write_at(vec![0xFF], 32).await.unwrap(); // Corrupt CRC of index 0
@@ -781,7 +781,7 @@ mod tests {
 
                 // Corrupt value in second blob (which will invalidate CRC)
                 let (blob, _) = context
-                    .open("test_ordinal", &1u64.to_be_bytes())
+                    .open("test_ordinal", &1u64.to_le_bytes())
                     .await
                     .unwrap();
                 blob.write_at(vec![0xFF; 4], 5).await.unwrap(); // Corrupt value of index 10
@@ -845,7 +845,7 @@ mod tests {
             // Add extra bytes at the end of blob
             {
                 let (blob, size) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test_ordinal", &0u64.to_le_bytes())
                     .await
                     .unwrap();
                 // Add garbage data that forms a complete but invalid record
@@ -902,7 +902,7 @@ mod tests {
             // Create blob with zero-filled space
             {
                 let (blob, _) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test_ordinal", &0u64.to_le_bytes())
                     .await
                     .unwrap();
 
@@ -964,7 +964,7 @@ mod tests {
                 // Generate a pseudo-random index (sparse to test gaps)
                 let mut index_bytes = [0u8; 8];
                 context.fill_bytes(&mut index_bytes);
-                let index_offset = u64::from_be_bytes(index_bytes) % 1000;
+                let index_offset = u64::from_le_bytes(index_bytes) % 1000;
                 let index = rng_index + index_offset;
                 rng_index = index + 1;
 
@@ -1021,7 +1021,7 @@ mod tests {
             for _ in 0..10 {
                 let mut index_bytes = [0u8; 8];
                 context.fill_bytes(&mut index_bytes);
-                let index = u64::from_be_bytes(index_bytes) % 10000;
+                let index = u64::from_le_bytes(index_bytes) % 10000;
 
                 let mut value = [0u8; 128];
                 context.fill_bytes(&mut value);
@@ -1953,7 +1953,7 @@ mod tests {
             // Corrupt record at index 2
             {
                 let (blob, _) = context
-                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .open("test_ordinal", &0u64.to_le_bytes())
                     .await
                     .unwrap();
                 // Corrupt the CRC of record at index 2

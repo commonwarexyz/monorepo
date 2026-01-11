@@ -102,6 +102,8 @@ macro_rules! define_cap_translator {
             #[inline]
             fn transform(&self, key: &[u8]) -> Self::Key {
                 let capped = cap::<$size>(key);
+                // Big-endian preserves lexicographic ordering: keys are compared
+                // by their first byte first, then second byte, etc.
                 <$int>::from_be_bytes(capped)
             }
         }

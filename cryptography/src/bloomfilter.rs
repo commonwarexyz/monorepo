@@ -45,10 +45,10 @@ impl BloomFilter {
         let digest = Sha256::hash(item);
         let mut h1_bytes = [0u8; HALF_DIGEST_LEN];
         h1_bytes.copy_from_slice(&digest[0..HALF_DIGEST_LEN]);
-        let h1 = u128::from_be_bytes(h1_bytes);
+        let h1 = u128::from_le_bytes(h1_bytes);
         let mut h2_bytes = [0u8; HALF_DIGEST_LEN];
         h2_bytes.copy_from_slice(&digest[HALF_DIGEST_LEN..FULL_DIGEST_LEN]);
-        let h2 = u128::from_be_bytes(h2_bytes);
+        let h2 = u128::from_le_bytes(h2_bytes);
 
         // Generate `hashers` hashes using the Kirsch-Mitzenmacher optimization:
         //
@@ -166,18 +166,18 @@ mod tests {
     fn test_false_positives() {
         let mut bf = BloomFilter::new(NZU8!(10), NZUsize!(100));
         for i in 0..10usize {
-            bf.insert(&i.to_be_bytes());
+            bf.insert(&i.to_le_bytes());
         }
 
         // Check for inserted items
         for i in 0..10usize {
-            assert!(bf.contains(&i.to_be_bytes()));
+            assert!(bf.contains(&i.to_le_bytes()));
         }
 
         // Check for non-inserted items and count false positives
         let mut false_positives = 0;
         for i in 100..1100usize {
-            if bf.contains(&i.to_be_bytes()) {
+            if bf.contains(&i.to_le_bytes()) {
                 false_positives += 1;
             }
         }

@@ -22,8 +22,8 @@ impl<D: Digest> Block<D> {
     fn compute_digest<H: Hasher<Digest = D>>(parent: &D, height: Height, timestamp: u64) -> D {
         let mut hasher = H::new();
         hasher.update(parent);
-        hasher.update(&height.get().to_be_bytes());
-        hasher.update(&timestamp.to_be_bytes());
+        hasher.update(&height.get().to_le_bytes());
+        hasher.update(&timestamp.to_le_bytes());
         hasher.finalize()
     }
 

@@ -174,14 +174,14 @@ fn fuzz(mut input: FuzzInput) {
                     if input.commit_counter == 0 {
                         assert!(db.get_metadata().await.unwrap().is_none());
                     } else {
-                        commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
+                        commit_id[..8].copy_from_slice(&input.commit_counter.to_le_bytes());
                         assert_eq!(
                             db.get_metadata().await.unwrap().unwrap(),
                             FixedBytes::new(commit_id),
                         );
                     }
                     input.commit_counter += 1;
-                    commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
+                    commit_id[..8].copy_from_slice(&input.commit_counter.to_le_bytes());
                     let (durable_db, _) = db
                         .commit(Some(FixedBytes::new(commit_id)))
                         .await
@@ -204,7 +204,7 @@ fn fuzz(mut input: FuzzInput) {
                     }
                     input.commit_counter += 1;
                     let mut commit_id = [0u8; 32];
-                    commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
+                    commit_id[..8].copy_from_slice(&input.commit_counter.to_le_bytes());
                     let (durable_db, _) = db
                         .commit(Some(FixedBytes::new(commit_id)))
                         .await

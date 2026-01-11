@@ -218,7 +218,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixedShar
 
     // Create the tail blob with the correct size to reflect the position
     let (tail_blob, tail_actual_size) = context
-        .open(&cfg.partition, &tail_index.to_be_bytes())
+        .open(&cfg.partition, &tail_index.to_le_bytes())
         .await?;
     assert_eq!(
         tail_actual_size, 0,
@@ -291,7 +291,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
 
     fn test_digest(value: u64) -> Digest {
-        Sha256::hash(&value.to_be_bytes())
+        Sha256::hash(&value.to_le_bytes())
     }
 
     /// Harness for sync tests.

@@ -175,7 +175,7 @@ impl<D: Digest, const N: usize, S: State<D>> BitMap<D, N, S> {
         assert!(next_bit > 0);
         assert!(next_bit < Self::CHUNK_SIZE_BITS);
         hasher.update(mmr_root);
-        hasher.update(&next_bit.to_be_bytes());
+        hasher.update(&next_bit.to_le_bytes());
         hasher.update(last_chunk_digest);
         hasher.finalize()
     }

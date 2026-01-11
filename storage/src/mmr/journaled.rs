@@ -268,7 +268,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         // location.
         let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
         let metadata_prune_pos = metadata.get(&key).map_or(0, |bytes| {
-            u64::from_be_bytes(
+            u64::from_le_bytes(
                 bytes
                     .as_slice()
                     .try_into()
@@ -395,7 +395,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
         metadata.put(
             pruning_boundary_key,
-            (*cfg.range.start).to_be_bytes().into(),
+            (*cfg.range.start).to_le_bytes().into(),
         );
 
         // Write the required pinned nodes to metadata.
@@ -459,7 +459,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         }
 
         let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        self.metadata.put(key, (*prune_to_pos).to_be_bytes().into());
+        self.metadata.put(key, (*prune_to_pos).to_le_bytes().into());
 
         self.metadata.sync().await.map_err(Error::MetadataError)?;
 
@@ -839,7 +839,7 @@ mod tests {
     use std::num::NonZeroU16;
 
     fn test_digest(v: usize) -> Digest {
-        Sha256::hash(&v.to_be_bytes())
+        Sha256::hash(&v.to_le_bytes())
     }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);
@@ -863,13 +863,13 @@ mod tests {
 
         // First element transitions Clean -> Dirty explicitly
         let mut dirty_mmr = journaled_mmr.into_dirty();
-        hasher.inner().update(&0u64.to_be_bytes());
+        hasher.inner().update(&0u64.to_le_bytes());
         let element = hasher.inner().finalize();
         dirty_mmr.add(&mut hasher, &element).await.unwrap();
 
         // Subsequent elements keep it Dirty
         for i in 1u64..199 {
-            hasher.inner().update(&i.to_be_bytes());
+            hasher.inner().update(&i.to_le_bytes());
             let element = hasher.inner().finalize();
             dirty_mmr.add(&mut hasher, &element).await.unwrap();
         }
@@ -977,7 +977,7 @@ mod tests {
 
             let mut c_hasher = Sha256::new();
             for i in 0u64..199 {
-                c_hasher.update(&i.to_be_bytes());
+                c_hasher.update(&i.to_le_bytes());
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
             }
@@ -997,7 +997,7 @@ mod tests {
             // Repeat the test though sync part of the way to tip to test crossing the boundary from
             // cached to uncached leaves, and pop 2 at a time instead of just 1.
             for i in 0u64..199 {
-                c_hasher.update(&i.to_be_bytes());
+                c_hasher.update(&i.to_le_bytes());
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
                 if i == 101 {
@@ -1016,7 +1016,7 @@ mod tests {
 
             // Repeat one more time only after pruning the MMR first.
             for i in 0u64..199 {
-                c_hasher.update(&i.to_be_bytes());
+                c_hasher.update(&i.to_le_bytes());
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
                 if i == 101 {
@@ -1139,7 +1139,7 @@ mod tests {
             // the last blob by a single byte.
             let partition: String = "journal_partition".into();
             let (blob, len) = context
-                .open(&partition, &71u64.to_be_bytes())
+                .open(&partition, &71u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             // A full page w/ CRC should have been written on sync.

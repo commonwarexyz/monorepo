@@ -502,7 +502,7 @@ impl Runner {
 
                 // Record task for auditing
                 executor.auditor.event(b"process_task", |hasher| {
-                    hasher.update(task.id.to_be_bytes());
+                    hasher.update(task.id.to_le_bytes());
                     hasher.update(task.label.name().as_bytes());
                 });
                 executor.metrics.task_polls.get_or_create(&task.label).inc();
@@ -1036,7 +1036,7 @@ impl crate::Spawner for Context {
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
         let executor = self.executor();
         executor.auditor.event(b"stop", |hasher| {
-            hasher.update(value.to_be_bytes());
+            hasher.update(value.to_le_bytes());
         });
         let stop_resolved = {
             let mut shutdown = executor.shutdown.lock().unwrap();

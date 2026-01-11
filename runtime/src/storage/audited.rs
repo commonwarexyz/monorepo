@@ -32,8 +32,8 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         self.auditor.event(b"open", |hasher| {
             hasher.update(partition.as_bytes());
             hasher.update(name);
-            hasher.update(&versions.start().to_be_bytes());
-            hasher.update(&versions.end().to_be_bytes());
+            hasher.update(&versions.start().to_le_bytes());
+            hasher.update(&versions.end().to_le_bytes());
         });
         self.inner
             .open_versioned(partition, name, versions)
@@ -85,7 +85,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
             hasher.update(buf.as_ref());
-            hasher.update(&offset.to_be_bytes());
+            hasher.update(&offset.to_le_bytes());
         });
         self.inner.read_at(buf, offset).await
     }
@@ -96,7 +96,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
             hasher.update(buf.as_ref());
-            hasher.update(&offset.to_be_bytes());
+            hasher.update(&offset.to_le_bytes());
         });
         self.inner.write_at(buf, offset).await
     }
@@ -105,7 +105,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.auditor.event(b"resize", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&len.to_be_bytes());
+            hasher.update(&len.to_le_bytes());
         });
         self.inner.resize(len).await
     }

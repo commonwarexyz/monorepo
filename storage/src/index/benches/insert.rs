@@ -71,7 +71,7 @@ fn bench_insert(c: &mut Criterion) {
         let mut rng = StdRng::seed_from_u64(0);
         let mut kvs = Vec::with_capacity(items);
         for i in 0..items {
-            kvs.push((Sha256::hash(&i.to_be_bytes()), i as u64));
+            kvs.push((Sha256::hash(&i.to_le_bytes()), i as u64));
         }
         // Shuffle items and setup Index
         kvs.shuffle(&mut rng);

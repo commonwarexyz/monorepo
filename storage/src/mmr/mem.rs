@@ -402,7 +402,7 @@ impl<D: Digest> CleanMmr<D> {
 
     /// Returns the root that would be produced by calling `root` on an empty MMR.
     pub fn empty_mmr_root(hasher: &mut impl commonware_cryptography::Hasher<Digest = D>) -> D {
-        hasher.update(&0u64.to_be_bytes());
+        hasher.update(&0u64.to_le_bytes());
         hasher.finalize()
     }
 
@@ -815,7 +815,7 @@ mod tests {
     fn build_and_check_test_roots_mmr(mmr: &mut CleanMmr<sha256::Digest>) {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0u64..199 {
-            hasher.inner().update(&i.to_be_bytes());
+            hasher.inner().update(&i.to_le_bytes());
             let element = hasher.inner().finalize();
             let root = *mmr.root();
             let expected_root = ROOTS[i as usize];
@@ -832,7 +832,7 @@ mod tests {
     ) {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0u64..199 {
-            hasher.inner().update(&i.to_be_bytes());
+            hasher.inner().update(&i.to_le_bytes());
             let element = hasher.inner().finalize();
             mmr.add(&mut hasher, &element);
         }
@@ -1099,7 +1099,7 @@ mod tests {
                 let root = *mmr.root();
                 let expected_root = ROOTS[i as usize];
                 assert_eq!(hex(&root), expected_root, "at: {i}");
-                hasher.inner().update(&i.to_be_bytes());
+                hasher.inner().update(&i.to_le_bytes());
                 let element = hasher.inner().finalize();
                 mmr.add(&mut hasher, &element);
                 mmr.prune_all();
@@ -1115,7 +1115,7 @@ mod tests {
         let mut leaves = Vec::new();
         let mut c_hasher = Sha256::default();
         for i in 0u64..199 {
-            c_hasher.update(&i.to_be_bytes());
+            c_hasher.update(&i.to_le_bytes());
             let element = c_hasher.finalize();
             let leaf_pos = mmr.size();
             mmr.add(hasher, &element);
@@ -1150,7 +1150,7 @@ mod tests {
 
             // Test that we can pop all elements up to and including the oldest retained leaf.
             for i in 0u64..199 {
-                hasher.inner().update(&i.to_be_bytes());
+                hasher.inner().update(&i.to_le_bytes());
                 let element = hasher.inner().finalize();
                 mmr.add(&mut hasher, &element);
             }
@@ -1187,7 +1187,7 @@ mod tests {
                 assert!(root != updated_root);
 
                 // Restore the leaf to its original value, ensure the root is as before.
-                hasher.inner().update(&leaf.to_be_bytes());
+                hasher.inner().update(&leaf.to_le_bytes());
                 let element = hasher.inner().finalize();
                 mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
                 let restored_root = *mmr.root();
@@ -1288,14 +1288,14 @@ mod tests {
         let mmr = dirty_mmr.merkleize(hasher, None);
         let updated_root = *mmr.root();
         assert_eq!(
-            "0a3c782c7eefb98c4198b096d22fe41d125badbfc3e87748ee7f4ce40e6d64b9",
+            "6a1ff47a8c6eb907c21e5a323d317d824786d60140eb494f2af41961a1ae320d",
             hex(&updated_root)
         );
 
         // Batch-restore the changed leaves to their original values.
         let mut updates = Vec::new();
         for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
-            hasher.inner().update(&leaf.to_be_bytes());
+            hasher.inner().update(&leaf.to_le_bytes());
             let element = hasher.inner().finalize();
             let leaf_loc =
                 Location::try_from(leaves[leaf]).expect("leaf position should map to location");
@@ -1351,7 +1351,7 @@ mod tests {
             // Build a small MMR to get valid pinned nodes
             let mut mmr = CleanMmr::new(&mut hasher);
             for i in 0u64..50 {
-                mmr.add(&mut hasher, &i.to_be_bytes());
+                mmr.add(&mut hasher, &i.to_le_bytes());
             }
             let pinned_nodes = mmr.node_digests_to_pin(Position::new(50));
             let config = Config {
@@ -1404,7 +1404,7 @@ mod tests {
             // Build a real MMR to get the correct structure
             let mut mmr = CleanMmr::new(&mut hasher);
             for i in 0u64..64 {
-                mmr.add(&mut hasher, &i.to_be_bytes());
+                mmr.add(&mut hasher, &i.to_le_bytes());
             }
             assert_eq!(mmr.size(), 127); // Verify we have the expected size
             let nodes: Vec<_> = (0..127)
@@ -1422,7 +1422,7 @@ mod tests {
             // Build a small MMR (11 leaves -> 19 nodes), prune it, then init from that state
             let mut mmr = CleanMmr::new(&mut hasher);
             for i in 0u64..11 {
-                mmr.add(&mut hasher, &i.to_be_bytes());
+                mmr.add(&mut hasher, &i.to_le_bytes());
             }
             assert_eq!(mmr.size(), 19); // 11 leaves = 19 total nodes
 

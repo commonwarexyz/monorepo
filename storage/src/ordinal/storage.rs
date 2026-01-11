@@ -125,7 +125,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         for name in stored_blobs {
             let (blob, mut len) = context.open(&config.partition, &name).await?;
             let index = match name.try_into() {
-                Ok(index) => u64::from_be_bytes(index),
+                Ok(index) => u64::from_le_bytes(index),
                 Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
             };
 
@@ -260,7 +260,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         if let Entry::Vacant(entry) = self.blobs.entry(section) {
             let (blob, len) = self
                 .context
-                .open(&self.config.partition, &section.to_be_bytes())
+                .open(&self.config.partition, &section.to_le_bytes())
                 .await?;
             entry.insert(Write::new(blob, len, self.config.write_buffer));
             debug!(section, "created blob");
@@ -360,7 +360,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             if let Some(blob) = self.blobs.remove(&section) {
                 drop(blob);
                 self.context
-                    .remove(&self.config.partition, Some(&section.to_be_bytes()))
+                    .remove(&self.config.partition, Some(&section.to_le_bytes()))
                     .await?;
 
                 // Remove the corresponding index range from intervals
@@ -402,7 +402,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         for (i, blob) in self.blobs.into_iter() {
             drop(blob);
             self.context
-                .remove(&self.config.partition, Some(&i.to_be_bytes()))
+                .remove(&self.config.partition, Some(&i.to_le_bytes()))
                 .await?;
             debug!(section = i, "destroyed blob");
         }

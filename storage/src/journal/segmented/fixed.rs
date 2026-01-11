@@ -291,7 +291,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
 
     fn test_digest(value: u64) -> Digest {
-        Sha256::hash(&value.to_be_bytes())
+        Sha256::hash(&value.to_le_bytes())
     }
 
     fn test_cfg() -> Config {
@@ -615,7 +615,7 @@ mod tests {
             drop(journal);
 
             let (blob, size) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
+                .open(&cfg.partition, &1u64.to_le_bytes())
                 .await
                 .expect("failed to open blob");
             blob.resize(size - 1).await.expect("failed to truncate");

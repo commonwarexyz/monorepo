@@ -1052,7 +1052,7 @@ mod tests {
 
             // Manually create a blob with incomplete size data
             let section = 1u64;
-            let blob_name = section.to_be_bytes();
+            let blob_name = section.to_le_bytes();
             let (blob, _) = context
                 .open(&cfg.partition, &blob_name)
                 .await
@@ -1107,7 +1107,7 @@ mod tests {
 
             // Manually create a blob with missing item data
             let section = 1u64;
-            let blob_name = section.to_be_bytes();
+            let blob_name = section.to_le_bytes();
             let (blob, _) = context
                 .open(&cfg.partition, &blob_name)
                 .await
@@ -1164,7 +1164,7 @@ mod tests {
 
             // Manually create a blob with missing checksum
             let section = 1u64;
-            let blob_name = section.to_be_bytes();
+            let blob_name = section.to_le_bytes();
             let (blob, _) = context
                 .open(&cfg.partition, &blob_name)
                 .await
@@ -1226,7 +1226,7 @@ mod tests {
 
             // Manually create a blob with incorrect checksum
             let section = 1u64;
-            let blob_name = section.to_be_bytes();
+            let blob_name = section.to_le_bytes();
             let (blob, _) = context
                 .open(&cfg.partition, &blob_name)
                 .await
@@ -1273,7 +1273,7 @@ mod tests {
 
             // Confirm blob is expected length
             let (_, blob_size) = context
-                .open(&cfg.partition, &section.to_be_bytes())
+                .open(&cfg.partition, &section.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             assert_eq!(blob_size, 0);
@@ -1320,7 +1320,7 @@ mod tests {
 
             // Manually corrupt the end of the second blob
             let (blob, blob_size) = context
-                .open(&cfg.partition, &2u64.to_be_bytes())
+                .open(&cfg.partition, &2u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(blob_size - 4)
@@ -1357,7 +1357,7 @@ mod tests {
 
             // Confirm second blob was truncated.
             let (_, blob_size) = context
-                .open(&cfg.partition, &2u64.to_be_bytes())
+                .open(&cfg.partition, &2u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             assert_eq!(blob_size, 0);
@@ -1469,7 +1469,7 @@ mod tests {
 
             // Manually add extra data to the end of the second blob
             let (blob, blob_size) = context
-                .open(&cfg.partition, &2u64.to_be_bytes())
+                .open(&cfg.partition, &2u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.write_at(vec![0u8; 16], blob_size)

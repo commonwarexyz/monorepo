@@ -162,7 +162,7 @@ pub(super) mod test {
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
-            let k = Sha256::hash(&UPDATES.to_be_bytes());
+            let k = Sha256::hash(&UPDATES.to_le_bytes());
             for i in 0u64..UPDATES {
                 let v = to_bytes(i);
                 db.update(k, v).await.unwrap();
@@ -207,7 +207,7 @@ pub(super) mod test {
             let mut db = db.into_mutable();
 
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -220,7 +220,7 @@ pub(super) mod test {
             // re-apply the updates and commit them this time.
             let mut db = db.into_mutable();
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -233,7 +233,7 @@ pub(super) mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -249,7 +249,7 @@ pub(super) mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -262,7 +262,7 @@ pub(super) mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 db.delete(k).await.unwrap();
             }
 
@@ -277,7 +277,7 @@ pub(super) mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 db.delete(k).await.unwrap();
             }
             let mut db = db.commit(None).await.unwrap().0.into_merkleized();

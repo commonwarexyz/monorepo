@@ -928,8 +928,8 @@ pub mod test {
 
             // Add one key.
             let mut db = db.into_mutable();
-            let k1 = Sha256::hash(&0u64.to_be_bytes());
-            let v1 = Sha256::hash(&10u64.to_be_bytes());
+            let k1 = Sha256::hash(&0u64.to_le_bytes());
+            let v1 = Sha256::hash(&10u64.to_le_bytes());
             assert!(db.create(k1, v1).await.unwrap());
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             let (db, range) = db.commit(None).await.unwrap();
@@ -952,7 +952,7 @@ pub mod test {
 
             // Delete that one key.
             assert!(db.delete(k1).await.unwrap());
-            let metadata = Sha256::hash(&1u64.to_be_bytes());
+            let metadata = Sha256::hash(&1u64.to_le_bytes());
             let (db, range) = db.commit(Some(metadata)).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             assert_eq!(*range.start, 4);
@@ -1012,8 +1012,8 @@ pub mod test {
 
             let mut map = HashMap::<Digest, Digest>::default();
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = Sha256::hash(&(i * 1000).to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
+                let v = Sha256::hash(&(i * 1000).to_le_bytes());
                 db.update(k, v).await.unwrap();
                 map.insert(k, v);
             }
@@ -1023,8 +1023,8 @@ pub mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
+                let v = Sha256::hash(&((i + 1) * 10000).to_le_bytes());
                 db.update(k, v).await.unwrap();
                 map.insert(k, v);
             }
@@ -1034,7 +1034,7 @@ pub mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 db.delete(k).await.unwrap();
                 map.remove(&k);
             }
@@ -1065,7 +1065,7 @@ pub mod test {
 
             // Confirm the db's state matches that of the separate map we computed independently.
             for i in 0u64..1000 {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 if let Some(map_value) = map.get(&k) {
                     let Some(db_value) = db.get(&k).await.unwrap() else {
                         panic!("key not found in db: {k}");
@@ -1254,20 +1254,20 @@ pub mod test {
         let mut rng = StdRng::seed_from_u64(rng_seed);
 
         for i in 0u64..num_elements {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+            let k = Sha256::hash(&i.to_le_bytes());
+            let v = Sha256::hash(&rng.next_u32().to_le_bytes());
             db.update(k, v).await.unwrap();
         }
 
         // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
         // frequency.
         for _ in 0u64..num_elements * 10 {
-            let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+            let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_le_bytes());
             if rng.next_u32() % 7 == 0 {
                 db.delete(rand_key).await.unwrap();
                 continue;
             }
-            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+            let v = Sha256::hash(&rng.next_u32().to_le_bytes());
             db.update(rand_key, v).await.unwrap();
             if commit_changes && rng.next_u32() % 20 == 0 {
                 // Commit every ~20 updates.
@@ -1608,8 +1608,8 @@ pub mod test {
             // Apply identical operations to both databases, but only prune one.
             const NUM_OPERATIONS: u64 = 1000;
             for i in 0..NUM_OPERATIONS {
-                let key = Sha256::hash(&i.to_be_bytes());
-                let value = Sha256::hash(&(i * 1000).to_be_bytes());
+                let key = Sha256::hash(&i.to_le_bytes());
+                let value = Sha256::hash(&(i * 1000).to_le_bytes());
 
                 db_no_pruning.update(key, value).await.unwrap();
                 db_pruning.update(key, value).await.unwrap();

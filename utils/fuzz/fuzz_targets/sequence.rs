@@ -87,7 +87,7 @@ fn fuzz(input: FuzzInput) {
             let decoded = U32::decode(encoded).unwrap();
             assert_eq!(original, decoded);
 
-            let bytes_array = value.to_be_bytes();
+            let bytes_array = value.to_le_bytes();
             let from_array: U32 = bytes_array.into();
             assert_eq!(from_array, value.into());
 
@@ -122,7 +122,7 @@ fn fuzz(input: FuzzInput) {
             let as_ref: &[u8] = prefixed.as_ref();
             assert_eq!(as_ref.len(), 9);
             assert_eq!(as_ref[0], prefix);
-            assert_eq!(&as_ref[1..], &value.to_be_bytes());
+            assert_eq!(&as_ref[1..], &value.to_le_bytes());
 
             let encoded: [u8; PrefixedU64::SIZE] = prefixed.encode_fixed();
             assert_eq!(encoded.len(), PrefixedU64::SIZE);
@@ -158,7 +158,7 @@ fn fuzz(input: FuzzInput) {
 
             assert_eq!(prefixed.len(), 9);
             assert_eq!(prefixed[0], prefix);
-            assert_eq!(prefixed[1], value.to_be_bytes()[0]);
+            assert_eq!(prefixed[1], value.to_le_bytes()[0]);
 
             assert_eq!(prefixed.as_ref(), &*prefixed);
         }

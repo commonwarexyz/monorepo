@@ -114,14 +114,14 @@ where
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
     for i in 0u64..num_elements {
-        let k = Sha256::hash(&i.to_be_bytes());
+        let k = Sha256::hash(&i.to_le_bytes());
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
         assert!(db.update(k, v).await.is_ok());
     }
 
     // Randomly update / delete them + randomly commit.
     for _ in 0u64..num_operations {
-        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_le_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
             assert!(db.delete(rand_key).await.is_ok());
             continue;
@@ -151,7 +151,7 @@ where
     let mut batch = db.start_batch();
 
     for i in 0u64..num_elements {
-        let k = Sha256::hash(&i.to_be_bytes());
+        let k = Sha256::hash(&i.to_le_bytes());
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
         assert!(batch.update(k, v).await.is_ok());
     }
@@ -160,7 +160,7 @@ where
     batch = db.start_batch();
 
     for _ in 0u64..num_operations {
-        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_le_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
             assert!(batch.delete(rand_key).await.is_ok());
             continue;

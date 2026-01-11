@@ -27,7 +27,7 @@ struct FuzzInput {
 }
 
 fn bytes_u64(k: u64) -> [u8; 8] {
-    k.to_be_bytes()
+    k.to_le_bytes()
 }
 
 fn fuzz(input: FuzzInput) {
@@ -81,7 +81,7 @@ fn fuzz(input: FuzzInput) {
                                 true
                             }
                         })
-                        .map(|k| u64::from_be_bytes(k.as_ref().try_into().unwrap()))
+                        .map(|k| u64::from_le_bytes(k.as_ref().try_into().unwrap()))
                         .collect();
                     let mut b: Vec<u64> = model
                         .iter()
@@ -116,7 +116,7 @@ fn fuzz(input: FuzzInput) {
 
         let mut a: Vec<u64> = metadata
             .keys()
-            .map(|k| u64::from_be_bytes(k.as_ref().try_into().unwrap()))
+            .map(|k| u64::from_le_bytes(k.as_ref().try_into().unwrap()))
             .collect();
         let mut b: Vec<u64> = model.keys().copied().collect();
         a.sort();
