@@ -24,7 +24,7 @@ use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use bytes::Buf;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
-use commonware_runtime::{buffer::pool::PoolRef, Blob, Metrics, Storage};
+use commonware_runtime::{buffer::pool::PoolRef, Metrics, Storage};
 use futures::{
     stream::{self, Stream},
     StreamExt,
@@ -57,7 +57,7 @@ pub struct Config {
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
 /// the first invalid data read will be considered the new end of the journal (and the
-/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
+/// underlying [commonware_runtime::Blob] will be truncated to the last valid item). Repair occurs during
 /// init by checking each blob's size.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     manager: Manager<E, AppendFactory>,
@@ -148,8 +148,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return Err(Error::ItemOutOfRange(position));
         }
 
-        let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        A::decode(buf.as_ref()).map_err(Error::Codec)
+        let buf = blob.read_buf(offset, Self::CHUNK_SIZE).await?;
+        A::decode(buf).map_err(Error::Codec)
     }
 
     /// Read the last item in a section, if any.
@@ -166,8 +166,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         let last_position = (size / Self::CHUNK_SIZE_U64) - 1;
         let offset = last_position * Self::CHUNK_SIZE_U64;
-        let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        A::decode(buf.as_ref()).map_err(Error::Codec).map(Some)
+        let buf = blob.read_buf(offset, Self::CHUNK_SIZE).await?;
+        A::decode(buf).map_err(Error::Codec).map(Some)
     }
 
     /// Returns a stream of all items starting from the given section.
@@ -311,7 +311,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Blob, Runner};
     use commonware_utils::{NZUsize, NZU16};
     use core::num::NonZeroU16;
     use futures::{pin_mut, StreamExt};

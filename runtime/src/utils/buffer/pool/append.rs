@@ -493,93 +493,6 @@ impl<B: Blob> Append<B> {
         buffer.size()
     }
 
-    /// Reads up to `buf.len()` bytes starting at `logical_offset`, but only as many as are
-    /// available.
-    ///
-    /// This is useful for reading variable-length prefixes (like varints) where you want to read
-    /// up to a maximum number of bytes but the actual data might be shorter.
-    ///
-    /// Returns the number of bytes actually read into the buffer. Returns an error if no bytes
-    /// are available at the given offset.
-    pub async fn read_up_to(
-        &self,
-        buf: impl Into<StableBuf> + Send,
-        logical_offset: u64,
-    ) -> Result<(StableBuf, usize), Error> {
-        let mut buf = buf.into();
-        if buf.is_empty() {
-            return Ok((buf, 0));
-        }
-        let blob_size = self.size().await;
-        let available = (blob_size.saturating_sub(logical_offset) as usize).min(buf.len());
-        if available == 0 {
-            return Err(Error::BlobInsufficientLength);
-        }
-        if buf.len() > available {
-            buf.truncate(available);
-        }
-        self.read_into(buf.as_mut(), logical_offset).await?;
-
-        Ok((buf, available))
-    }
-
-    /// Reads bytes starting at `logical_offset` into `buf`.
-    ///
-    /// This method allows reading directly into a mutable slice without taking ownership of the
-    /// buffer or requiring a specific buffer type.
-    pub async fn read_into(&self, buf: &mut [u8], logical_offset: u64) -> Result<(), Error> {
-        // Ensure the read doesn't overflow.
-        let end_offset = logical_offset
-            .checked_add(buf.len() as u64)
-            .ok_or(Error::OffsetOverflow)?;
-
-        // Acquire a read lock on the buffer.
-        let buffer = self.buffer.read().await;
-
-        // If the data required is beyond the size of the blob, return an error.
-        if end_offset > buffer.size() {
-            return Err(Error::BlobInsufficientLength);
-        }
-
-        // Extract any bytes from the buffer that overlap with the requested range.
-        let remaining = buffer.extract(buf.as_mut(), logical_offset);
-
-        // Release buffer lock before potential I/O.
-        drop(buffer);
-
-        if remaining == 0 {
-            return Ok(());
-        }
-
-        // Fast path: try to read *only* from pool cache without acquiring blob lock. This allows
-        // concurrent reads even while a flush is in progress.
-        let cached = self
-            .pool_ref
-            .read_cached(self.id, &mut buf[..remaining], logical_offset)
-            .await;
-
-        if cached == remaining {
-            // All bytes found in cache.
-            return Ok(());
-        }
-
-        // Slow path: cache miss (partial or full), acquire blob read lock to ensure any in-flight
-        // write completes before we read from the blob.
-        let blob_guard = self.blob_state.read().await;
-
-        // Read remaining bytes that were not already obtained from the earlier cache read.
-        let uncached_offset = logical_offset + cached as u64;
-        let uncached_len = remaining - cached;
-        self.pool_ref
-            .read(
-                &blob_guard.blob,
-                self.id,
-                &mut buf[cached..cached + uncached_len],
-                uncached_offset,
-            )
-            .await
-    }
-
     /// Returns a `CachedBuf` for zero-copy reading at the given offset.
     ///
     /// This provides a `Buf` implementation that reads directly from cached pages
@@ -908,7 +821,58 @@ impl<B: Blob> Blob for Append<B> {
         logical_offset: u64,
     ) -> Result<StableBuf, Error> {
         let mut buf = buf.into();
-        self.read_into(buf.as_mut(), logical_offset).await?;
+
+        // Ensure the read doesn't overflow.
+        let end_offset = logical_offset
+            .checked_add(buf.len() as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
+        // Acquire a read lock on the buffer.
+        let buffer = self.buffer.read().await;
+
+        // If the data required is beyond the size of the blob, return an error.
+        if end_offset > buffer.size() {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        // Extract any bytes from the buffer that overlap with the requested range.
+        let remaining = buffer.extract(buf.as_mut(), logical_offset);
+
+        // Release buffer lock before potential I/O.
+        drop(buffer);
+
+        if remaining == 0 {
+            return Ok(buf);
+        }
+
+        // Fast path: try to read *only* from pool cache without acquiring blob lock. This allows
+        // concurrent reads even while a flush is in progress.
+        let cached = self
+            .pool_ref
+            .read_cached(self.id, &mut buf.as_mut()[..remaining], logical_offset)
+            .await;
+
+        if cached == remaining {
+            // All bytes found in cache.
+            return Ok(buf);
+        }
+
+        // Slow path: cache miss (partial or full), acquire blob read lock to ensure any in-flight
+        // write completes before we read from the blob.
+        let blob_guard = self.blob_state.read().await;
+
+        // Read remaining bytes that were not already obtained from the earlier cache read.
+        let uncached_offset = logical_offset + cached as u64;
+        let uncached_len = remaining - cached;
+        self.pool_ref
+            .read(
+                &blob_guard.blob,
+                self.id,
+                &mut buf.as_mut()[cached..cached + uncached_len],
+                uncached_offset,
+            )
+            .await?;
+
         Ok(buf)
     }
 

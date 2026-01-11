@@ -434,16 +434,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             self.blobs.get(&blob_index).ok_or(Error::ItemPruned(pos))?
         };
 
-        let read = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        Self::decode_buf(read.as_ref())
+        let buf = blob.read_buf(offset, Self::CHUNK_SIZE).await?;
+        Self::decode_buf(buf)
     }
 
     /// Decode the array from `buf`, returning:
     /// - Error::Codec if the array could not be decoded.
     ///
     ///  Error::Codec likely indicates a logic error rather than a corruption issue.
-    fn decode_buf(buf: &[u8]) -> Result<A, Error> {
-        A::decode(&buf[..A::SIZE]).map_err(Error::Codec)
+    fn decode_buf(buf: impl Buf) -> Result<A, Error> {
+        A::decode(buf).map_err(Error::Codec)
     }
 
     /// Returns an ordered stream of all items in the journal with position >= `start_pos`.
