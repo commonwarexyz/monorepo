@@ -174,7 +174,7 @@ struct ReplayBuf {
 
 impl ReplayBuf {
     /// Creates a new empty ReplayBuf.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             pages: VecDeque::new(),
             offset: 0,
@@ -229,7 +229,7 @@ pub struct Replay<B: Blob> {
 
 impl<B: Blob> Replay<B> {
     /// Creates a new Replay from a PageReader.
-    pub(super) fn new(reader: PageReader<B>) -> Self {
+    pub(super) const fn new(reader: PageReader<B>) -> Self {
         Self {
             reader,
             buf: ReplayBuf::new(),
@@ -238,7 +238,7 @@ impl<B: Blob> Replay<B> {
     }
 
     /// Returns the logical size of the underlying blob.
-    pub fn blob_size(&self) -> u64 {
+    pub const fn blob_size(&self) -> u64 {
         self.reader.blob_size()
     }
 
@@ -246,7 +246,7 @@ impl<B: Blob> Replay<B> {
     ///
     /// When exhausted, the buffer may still contain data that hasn't been consumed.
     /// Callers should check `remaining()` to see if there's data left to process.
-    pub fn is_exhausted(&self) -> bool {
+    pub const fn is_exhausted(&self) -> bool {
         self.exhausted
     }
 
