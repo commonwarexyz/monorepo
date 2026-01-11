@@ -101,18 +101,21 @@
 //! ## `ec2 create`
 //!
 //! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
-//! 2. Creates VPCs, subnets, internet gateways, route tables, and security groups per region.
-//! 3. Establishes VPC peering between the monitoring region and binary regions.
-//! 4. Launches the monitoring instance, uploads service files, and installs Prometheus, Grafana, Loki, Pyroscope, and Tempo.
-//! 5. Launches binary instances, uploads binaries, configurations, and hosts.yaml, and installs Promtail and the binary.
-//! 6. Configures BBR on all instances and updates the monitoring security group for Loki traffic.
-//! 7. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
+//! 2. Ensures the shared S3 bucket exists and caches observability tools (Prometheus, Grafana, Loki, etc.) if not already present.
+//! 3. Uploads deployment-specific files (binaries, configs, service files) to S3.
+//! 4. Creates VPCs, subnets, internet gateways, route tables, and security groups per region.
+//! 5. Establishes VPC peering between the monitoring region and binary regions.
+//! 6. Launches the monitoring instance, which downloads tools from S3 via pre-signed URLs.
+//! 7. Launches binary instances, which download binaries and configs from S3 via pre-signed URLs.
+//! 8. Configures BBR on all instances and updates the monitoring security group for Loki traffic.
+//! 9. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
 //!
 //! ## `ec2 update`
 //!
-//! 1. Stops the `binary` service on each binary instance.
-//! 2. Uploads the latest binary and configuration from the YAML config.
-//! 3. Restarts the `binary` service, ensuring minimal downtime.
+//! 1. Uploads the latest binary and configuration to S3.
+//! 2. Stops the `binary` service on each binary instance.
+//! 3. Instances download the updated files from S3 via pre-signed URLs.
+//! 4. Restarts the `binary` service, ensuring minimal downtime.
 //!
 //! ## `ec2 authorize`
 //!
@@ -123,12 +126,21 @@
 //!
 //! 1. Terminates all instances across regions.
 //! 2. Deletes security groups, subnets, route tables, VPC peering connections, internet gateways, key pairs, and VPCs in dependency order.
-//! 3. Marks destruction with `$HOME/.commonware_deployer/{tag}/destroyed`, retaining the directory to prevent tag reuse.
+//! 3. Deletes deployment-specific data from S3 (cached tools remain for future deployments).
+//! 4. Marks destruction with `$HOME/.commonware_deployer/{tag}/destroyed`, retaining the directory to prevent tag reuse.
+//!
+//! ## `ec2 clean`
+//!
+//! 1. Deletes the shared S3 bucket and all its contents (cached tools and any remaining deployment data).
+//! 2. Use this to fully clean up when you no longer need the deployer cache.
 //!
 //! # Persistence
 //!
-//! * A directory `$HOME/.commonware_deployer/{tag}` stores the SSH private key, service files, and status files (`created`, `destroyed`).
+//! * A directory `$HOME/.commonware_deployer/{tag}` stores the SSH private key and status files (`created`, `destroyed`).
 //! * The deployment state is tracked via these files, ensuring operations respect prior create/destroy actions.
+//! * A shared S3 bucket (`commonware-deployer-cache`) stores:
+//!   * `tools/` - Cached observability tools (shared across all deployments)
+//!   * `deployments/{tag}/` - Deployment-specific binaries, configs, and service files
 //!
 //! # Example Configuration
 //!
