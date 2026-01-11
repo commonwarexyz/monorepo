@@ -247,6 +247,7 @@ cfg_if::cfg_if! {
 
         /// Errors that can occur when deploying infrastructure on AWS
         #[derive(Error, Debug)]
+        #[allow(clippy::large_enum_variant)]
         pub enum Error {
             #[error("AWS EC2 error: {0}")]
             AwsEc2(#[from] aws_sdk_ec2::Error),
@@ -291,7 +292,7 @@ cfg_if::cfg_if! {
             #[error("S3 presigning failed: {0}")]
             S3PresigningFailed(#[from] aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>),
             #[error("S3 builder error: {0}")]
-            S3BuilderError(#[from] aws_sdk_s3::error::BuildError),
+            S3Builder(#[from] aws_sdk_s3::error::BuildError),
         }
     }
 }

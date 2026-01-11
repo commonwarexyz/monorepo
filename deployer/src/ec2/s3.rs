@@ -101,7 +101,7 @@ pub async fn upload_file(
 ) -> Result<(), Error> {
     let body = ByteStream::from_path(path)
         .await
-        .map_err(|e| std::io::Error::other(e))?;
+        .map_err(std::io::Error::other)?;
 
     client
         .put_object()
