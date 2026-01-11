@@ -40,33 +40,6 @@ pub async fn get_public_ip() -> Result<String, Error> {
     Ok(result)
 }
 
-/// Copies a local file to a remote instance via rsync with retries
-pub async fn rsync_file(
-    key_file: &str,
-    local_path: &str,
-    ip: &str,
-    remote_path: &str,
-) -> Result<(), Error> {
-    for _ in 0..MAX_SSH_ATTEMPTS {
-        let output = Command::new("rsync")
-            .arg("-az")
-            .arg("-e")
-            .arg(format!(
-                "ssh -i {key_file} -o IdentitiesOnly=yes -o ServerAliveInterval=600 -o StrictHostKeyChecking=no"
-            ))
-            .arg(local_path)
-            .arg(format!("ubuntu@{ip}:{remote_path}"))
-            .output()
-            .await?;
-        if output.status.success() {
-            return Ok(());
-        }
-        warn!(error = ?String::from_utf8_lossy(&output.stderr), "SCP failed");
-        sleep(RETRY_INTERVAL).await;
-    }
-    Err(Error::ScpFailed)
-}
-
 /// Executes a command on a remote instance via SSH with retries
 pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), Error> {
     for _ in 0..MAX_SSH_ATTEMPTS {
@@ -154,15 +127,10 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
     Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
 }
 
-/// Enables BBR on a remote instance by copying and applying sysctl settings.
-pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_local_path: &str) -> Result<(), Error> {
-    rsync_file(
-        key_file,
-        bbr_conf_local_path,
-        ip,
-        "/home/ubuntu/99-bbr.conf",
-    )
-    .await?;
+/// Enables BBR on a remote instance by downloading config from S3 and applying sysctl settings.
+pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_url: &str) -> Result<(), Error> {
+    let download_cmd = format!("wget -q -O /home/ubuntu/99-bbr.conf '{}'", bbr_conf_url);
+    ssh_execute(key_file, ip, &download_cmd).await?;
     ssh_execute(
         key_file,
         ip,

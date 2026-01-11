@@ -254,8 +254,6 @@ cfg_if::cfg_if! {
             InvalidInstanceName(String),
             #[error("reqwest error: {0}")]
             Reqwest(#[from] reqwest::Error),
-            #[error("SCP failed")]
-            ScpFailed,
             #[error("SSH failed")]
             SshFailed,
             #[error("keygen failed")]

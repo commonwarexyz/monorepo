@@ -103,6 +103,11 @@ pub fn instance_static_s3_key(tag: &str, filename: &str) -> String {
     format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/static/{filename}")
 }
 
+/// Returns the S3 key for the BBR config file
+pub fn bbr_s3_key(tag: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/static/99-bbr.conf")
+}
+
 /// Returns the download URL for Prometheus from GitHub
 pub fn prometheus_download_url(version: &str) -> String {
     format!("https://github.com/prometheus/prometheus/releases/download/v{version}/prometheus-{version}.linux-arm64.tar.gz")
@@ -478,7 +483,7 @@ sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.ser
 }
 
 /// Continuation of monitoring install command (services startup)
-pub fn start_monitoring_services_cmd() -> &'static str {
+pub const fn start_monitoring_services_cmd() -> &'static str {
     r#"
 sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
 

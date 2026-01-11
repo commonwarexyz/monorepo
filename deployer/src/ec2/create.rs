@@ -563,9 +563,17 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let logrotate_conf_path = tag_directory.join("logrotate.conf");
     std::fs::write(&logrotate_conf_path, LOGROTATE_CONF)?;
 
-    // Add BBR configuration file
+    // Add BBR configuration file and upload to S3
     let bbr_conf_path = tag_directory.join("99-bbr.conf");
     std::fs::write(&bbr_conf_path, BBR_CONF)?;
+    upload_file(&s3_client, S3_BUCKET_NAME, &bbr_s3_key(tag), &bbr_conf_path).await?;
+    let bbr_conf_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &bbr_s3_key(tag),
+        presign_duration,
+    )
+    .await?;
 
     // Configure monitoring instance
     info!("configuring monitoring instance");
@@ -781,7 +789,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     info!("uploaded monitoring config files to S3");
 
     // Install and configure monitoring services
-    enable_bbr(private_key, &monitoring_ip, bbr_conf_path.to_str().unwrap()).await?;
+    enable_bbr(private_key, &monitoring_ip, &bbr_conf_url).await?;
     let monitoring_urls = MonitoringUrls {
         prometheus_bin: prometheus_url,
         grafana_bin: grafana_url,
@@ -1021,10 +1029,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         )
         .await?;
         let ip = deployment.ip.clone();
-        let bbr_conf_path = bbr_conf_path.clone();
+        let bbr_url = bbr_conf_url.clone();
         let urls = instance_urls_map.remove(&instance.name).unwrap();
         let future = async move {
-            enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;
+            enable_bbr(private_key, &ip, &bbr_url).await?;
             ssh_execute(
                 private_key,
                 &ip,
