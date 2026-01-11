@@ -180,8 +180,8 @@ cfg_if::cfg_if! {
         pub use authorize::authorize;
         mod destroy;
         pub use destroy::destroy;
-        mod destroy_cache;
-        pub use destroy_cache::destroy_cache;
+        mod clean;
+        pub use clean::clean;
         pub mod utils;
         pub mod s3;
 
@@ -224,8 +224,8 @@ cfg_if::cfg_if! {
         /// Destroy subcommand name
         pub const DESTROY_CMD: &str = "destroy";
 
-        /// Destroy cache subcommand name
-        pub const DESTROY_CACHE_CMD: &str = "destroy-cache";
+        /// Clean subcommand name
+        pub const CLEAN_CMD: &str = "clean";
 
         /// Directory where deployer files are stored
         fn deployer_directory(tag: &str) -> PathBuf {

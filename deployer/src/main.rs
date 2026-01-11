@@ -81,7 +81,7 @@ async fn main() -> std::process::ExitCode {
                         ),
                 )
                 .subcommand(
-                    Command::new(ec2::DESTROY_CACHE_CMD)
+                    Command::new(ec2::CLEAN_CMD)
                         .about("Delete the shared S3 cache bucket and all its contents."),
                 ),
         )
@@ -131,9 +131,9 @@ async fn main() -> std::process::ExitCode {
                     return std::process::ExitCode::SUCCESS;
                 }
             }
-            Some((ec2::DESTROY_CACHE_CMD, _)) => {
-                if let Err(e) = ec2::destroy_cache().await {
-                    error!(error=?e, "failed to destroy S3 cache");
+            Some((ec2::CLEAN_CMD, _)) => {
+                if let Err(e) = ec2::clean().await {
+                    error!(error=?e, "failed to clean S3 cache");
                 } else {
                     return std::process::ExitCode::SUCCESS;
                 }
