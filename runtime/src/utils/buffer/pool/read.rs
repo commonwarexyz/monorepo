@@ -1,6 +1,6 @@
 use super::Checksum;
 use crate::{Blob, Error};
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
@@ -12,7 +12,7 @@ use tracing::error;
 /// `Bytes` slices per page.
 pub(super) struct BufferState {
     /// The raw physical buffer containing pages with interleaved CRCs.
-    buffer: Bytes,
+    buffer: Vec<u8>,
     /// Number of pages in this buffer.
     num_pages: usize,
     /// Logical length of the last page (may be partial).
@@ -109,7 +109,6 @@ impl<B: Blob> PageReader<B> {
             .read_at(vec![0u8; bytes_to_read], start_offset)
             .await?
             .into();
-        let physical_buf = Bytes::from(physical_buf);
 
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
