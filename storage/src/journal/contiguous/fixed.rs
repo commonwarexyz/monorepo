@@ -62,7 +62,7 @@ use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _};
 use bytes::Buf;
 use commonware_codec::ReadExt as _;
 use commonware_runtime::{
-    buffer::pool::{Append, PoolRef, ReplayBuf},
+    buffer::pool::{Append, PoolRef, Replay},
     telemetry::metrics::status::GaugeExt,
     Blob, Error as RError, Metrics, Storage,
 };
@@ -497,8 +497,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             let skip_bytes = initial_item_idx * Self::CHUNK_SIZE_U64;
 
             stream::unfold(
-                (reader, ReplayBuf::new(), initial_item_idx, skip_bytes, false),
-                move |(mut reader, mut buf, mut item_idx, mut skip_bytes, mut done)| async move {
+                (Replay::new(reader), initial_item_idx, skip_bytes, false),
+                move |(mut replay, mut item_idx, mut skip_bytes, mut done)| async move {
                     if done {
                         return None;
                     }
@@ -506,48 +506,37 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                     let mut batch: Vec<Result<(u64, A), Error>> = Vec::new();
 
                     loop {
-                        // Fill buffer if we need more data
-                        while buf.remaining() < Self::CHUNK_SIZE {
-                            match reader.fill().await {
-                                Ok(0) => {
-                                    // No more pages - we're done with this blob
-                                    done = true;
-                                    if batch.is_empty() {
-                                        return None;
-                                    }
-                                    return Some((
-                                        batch,
-                                        (reader, buf, item_idx, skip_bytes, done),
-                                    ));
-                                }
-                                Ok(_) => {
-                                    while let Some(page) = reader.next_page() {
-                                        buf.push(page);
-                                    }
-                                }
-                                Err(err) => {
-                                    batch.push(Err(Error::Runtime(err)));
-                                    done = true;
-                                    return Some((
-                                        batch,
-                                        (reader, buf, item_idx, skip_bytes, done),
-                                    ));
-                                }
+                        // Ensure we have enough data for one item
+                        match replay.ensure(Self::CHUNK_SIZE).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                // Reader exhausted - we're done with this blob
+                                done = true;
+                                return if batch.is_empty() {
+                                    None
+                                } else {
+                                    Some((batch, (replay, item_idx, skip_bytes, done)))
+                                };
+                            }
+                            Err(err) => {
+                                batch.push(Err(Error::Runtime(err)));
+                                done = true;
+                                return Some((batch, (replay, item_idx, skip_bytes, done)));
                             }
                         }
 
                         // Skip bytes if needed (for start_pos within first blob)
                         if skip_bytes > 0 {
-                            let to_skip = skip_bytes.min(buf.remaining() as u64) as usize;
-                            buf.advance(to_skip);
+                            let to_skip = skip_bytes.min(replay.remaining() as u64) as usize;
+                            replay.advance(to_skip);
                             skip_bytes -= to_skip as u64;
                             continue;
                         }
 
                         // Decode items from buffer
-                        while buf.remaining() >= Self::CHUNK_SIZE {
+                        while replay.remaining() >= Self::CHUNK_SIZE {
                             let item_pos = items_per_blob * blob_index + item_idx;
-                            match A::read(&mut buf) {
+                            match A::read(&mut replay) {
                                 Ok(item) => {
                                     batch.push(Ok((item_pos, item)));
                                     item_idx += 1;
@@ -555,17 +544,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                                 Err(err) => {
                                     batch.push(Err(Error::Codec(err)));
                                     done = true;
-                                    return Some((
-                                        batch,
-                                        (reader, buf, item_idx, skip_bytes, done),
-                                    ));
+                                    return Some((batch, (replay, item_idx, skip_bytes, done)));
                                 }
                             }
                         }
 
                         // Return batch if we have items
                         if !batch.is_empty() {
-                            return Some((batch, (reader, buf, item_idx, skip_bytes, done)));
+                            return Some((batch, (replay, item_idx, skip_bytes, done)));
                         }
                     }
                 },

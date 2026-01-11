@@ -225,6 +225,82 @@ impl Buf for ReplayBuf {
     }
 }
 
+/// Combines PageReader and ReplayBuf for convenient replay operations.
+///
+/// This helper encapsulates the common pattern of filling a buffer from a page reader
+/// and provides a `Buf` interface for decoding. It tracks whether the reader has been
+/// exhausted to help callers handle end-of-data scenarios.
+pub struct Replay<B: Blob> {
+    reader: PageReader<B>,
+    buf: ReplayBuf,
+    exhausted: bool,
+}
+
+impl<B: Blob> Replay<B> {
+    /// Creates a new Replay from a PageReader.
+    pub fn new(reader: PageReader<B>) -> Self {
+        Self {
+            reader,
+            buf: ReplayBuf::new(),
+            exhausted: false,
+        }
+    }
+
+    /// Returns the logical size of the underlying blob.
+    pub fn blob_size(&self) -> u64 {
+        self.reader.blob_size()
+    }
+
+    /// Returns true if the reader has been exhausted (no more pages to read).
+    ///
+    /// When exhausted, the buffer may still contain data that hasn't been consumed.
+    /// Callers should check `remaining()` to see if there's data left to process.
+    pub fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    /// Ensures at least `n` bytes are available in the buffer.
+    ///
+    /// This method fills the buffer from the page reader until either:
+    /// - At least `n` bytes are available (returns `Ok(true)`)
+    /// - The reader is exhausted with fewer than `n` bytes (returns `Ok(false)`)
+    /// - A read error occurs (returns `Err`)
+    ///
+    /// When `Ok(false)` is returned, callers should still attempt to process
+    /// the remaining bytes in the buffer (check `remaining()`), as they may
+    /// contain valid data that doesn't require the full `n` bytes.
+    pub async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
+        while self.buf.remaining() < n && !self.exhausted {
+            match self.reader.fill().await {
+                Ok(0) => {
+                    self.exhausted = true;
+                }
+                Ok(_) => {
+                    while let Some(page) = self.reader.next_page() {
+                        self.buf.push(page);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(self.buf.remaining() >= n)
+    }
+}
+
+impl<B: Blob> Buf for Replay<B> {
+    fn remaining(&self) -> usize {
+        self.buf.remaining()
+    }
+
+    fn chunk(&self) -> &[u8] {
+        self.buf.chunk()
+    }
+
+    fn advance(&mut self, cnt: usize) {
+        self.buf.advance(cnt);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

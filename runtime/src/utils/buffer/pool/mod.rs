@@ -35,7 +35,7 @@ mod read;
 
 pub use append::Append;
 pub use page_cache::PoolRef;
-pub use read::{PageReader, ReplayBuf};
+pub use read::{PageReader, Replay, ReplayBuf};
 use tracing::{debug, error};
 
 // A checksum record contains two u16 lengths and two CRCs (each 4 bytes).

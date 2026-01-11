@@ -25,7 +25,7 @@ use crate::journal::Error;
 use bytes::Buf;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::pool::{PoolRef, ReplayBuf},
+    buffer::pool::{PoolRef, Replay},
     Blob, Metrics, Storage,
 };
 use futures::{
@@ -193,8 +193,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // flattened into individual stream elements.
         Ok(stream::iter(blob_info).flat_map(move |(section, reader)| {
             stream::unfold(
-                (section, reader, ReplayBuf::new(), 0u64, false),
-                move |(section, mut reader, mut buf, mut position, mut done)| async move {
+                (section, Replay::new(reader), 0u64, false),
+                move |(section, mut replay, mut position, mut done)| async move {
                     if done {
                         return None;
                     }
@@ -202,33 +202,28 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                     let mut batch: Vec<Result<(u64, u64, A), Error>> = Vec::new();
 
                     loop {
-                        // Fill buffer if we need more data
-                        while buf.remaining() < Self::CHUNK_SIZE {
-                            match reader.fill().await {
-                                Ok(0) => {
-                                    // No more pages - we're done with this blob
-                                    done = true;
-                                    if batch.is_empty() {
-                                        return None;
-                                    }
-                                    return Some((batch, (section, reader, buf, position, done)));
-                                }
-                                Ok(_) => {
-                                    while let Some(page) = reader.next_page() {
-                                        buf.push(page);
-                                    }
-                                }
-                                Err(err) => {
-                                    batch.push(Err(Error::Runtime(err)));
-                                    done = true;
-                                    return Some((batch, (section, reader, buf, position, done)));
-                                }
+                        // Ensure we have enough data for one item
+                        match replay.ensure(Self::CHUNK_SIZE).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                // Reader exhausted - we're done with this blob
+                                done = true;
+                                return if batch.is_empty() {
+                                    None
+                                } else {
+                                    Some((batch, (section, replay, position, done)))
+                                };
+                            }
+                            Err(err) => {
+                                batch.push(Err(Error::Runtime(err)));
+                                done = true;
+                                return Some((batch, (section, replay, position, done)));
                             }
                         }
 
                         // Decode items from buffer
-                        while buf.remaining() >= Self::CHUNK_SIZE {
-                            match A::read(&mut buf) {
+                        while replay.remaining() >= Self::CHUNK_SIZE {
+                            match A::read(&mut replay) {
                                 Ok(item) => {
                                     batch.push(Ok((section, position, item)));
                                     position += 1;
@@ -236,14 +231,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                                 Err(err) => {
                                     batch.push(Err(Error::Codec(err)));
                                     done = true;
-                                    return Some((batch, (section, reader, buf, position, done)));
+                                    return Some((batch, (section, replay, position, done)));
                                 }
                             }
                         }
 
                         // Return batch if we have items
                         if !batch.is_empty() {
-                            return Some((batch, (section, reader, buf, position, done)));
+                            return Some((batch, (section, replay, position, done)));
                         }
                     }
                 },
