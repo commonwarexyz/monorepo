@@ -112,49 +112,18 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     // Cache observability tools (if not already cached) and generate pre-signed URLs concurrently
     info!("checking, caching, and generating pre-signed URLs for observability tools");
     let presign_duration = Duration::from_secs(6 * 60 * 60);
-    let tools_to_cache = [
-        (
-            prometheus_s3_key(PROMETHEUS_VERSION),
-            prometheus_download_url(PROMETHEUS_VERSION),
-        ),
-        (
-            grafana_s3_key(GRAFANA_VERSION),
-            grafana_download_url(GRAFANA_VERSION),
-        ),
-        (loki_s3_key(LOKI_VERSION), loki_download_url(LOKI_VERSION)),
-        (
-            pyroscope_s3_key(PYROSCOPE_VERSION),
-            pyroscope_download_url(PYROSCOPE_VERSION),
-        ),
-        (
-            tempo_s3_key(TEMPO_VERSION),
-            tempo_download_url(TEMPO_VERSION),
-        ),
-        (
-            node_exporter_s3_key(NODE_EXPORTER_VERSION),
-            node_exporter_download_url(NODE_EXPORTER_VERSION),
-        ),
-        (
-            promtail_s3_key(PROMTAIL_VERSION),
-            promtail_download_url(PROMTAIL_VERSION),
-        ),
-    ];
-
-    let tool_urls = try_join_all(tools_to_cache.iter().map(|(s3_key, download_url)| {
+    let cache_tool = |s3_key: String, download_url: String| {
         let tag_directory = tag_directory.clone();
         let s3_client = s3_client.clone();
         async move {
-            if !object_exists(&s3_client, S3_BUCKET_NAME, s3_key).await? {
-                info!(
-                    key = s3_key.as_str(),
-                    "tool not cached, downloading and uploading"
-                );
+            if !object_exists(&s3_client, S3_BUCKET_NAME, &s3_key).await? {
+                info!(key = s3_key.as_str(), "tool not cached, downloading and uploading");
                 let temp_path = tag_directory.join(s3_key.replace('/', "_"));
-                download_file(download_url, &temp_path).await?;
+                download_file(&download_url, &temp_path).await?;
                 let url = upload_and_presign(
                     &s3_client,
                     S3_BUCKET_NAME,
-                    s3_key,
+                    &s3_key,
                     &temp_path,
                     presign_duration,
                 )
@@ -163,18 +132,23 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 Ok::<_, Error>(url)
             } else {
                 info!(key = s3_key.as_str(), "tool already cached");
-                presign_url(&s3_client, S3_BUCKET_NAME, s3_key, presign_duration).await
+                presign_url(&s3_client, S3_BUCKET_NAME, &s3_key, presign_duration).await
             }
         }
-    }))
-    .await?;
-    let prometheus_url = tool_urls[0].clone();
-    let grafana_url = tool_urls[1].clone();
-    let loki_url = tool_urls[2].clone();
-    let pyroscope_url = tool_urls[3].clone();
-    let tempo_url = tool_urls[4].clone();
-    let node_exporter_url = tool_urls[5].clone();
-    let promtail_url = tool_urls[6].clone();
+    };
+    let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url]: [String; 7] =
+        try_join_all([
+            cache_tool(prometheus_s3_key(PROMETHEUS_VERSION), prometheus_download_url(PROMETHEUS_VERSION)),
+            cache_tool(grafana_s3_key(GRAFANA_VERSION), grafana_download_url(GRAFANA_VERSION)),
+            cache_tool(loki_s3_key(LOKI_VERSION), loki_download_url(LOKI_VERSION)),
+            cache_tool(pyroscope_s3_key(PYROSCOPE_VERSION), pyroscope_download_url(PYROSCOPE_VERSION)),
+            cache_tool(tempo_s3_key(TEMPO_VERSION), tempo_download_url(TEMPO_VERSION)),
+            cache_tool(node_exporter_s3_key(NODE_EXPORTER_VERSION), node_exporter_download_url(NODE_EXPORTER_VERSION)),
+            cache_tool(promtail_s3_key(PROMTAIL_VERSION), promtail_download_url(PROMTAIL_VERSION)),
+        ])
+        .await?
+        .try_into()
+        .unwrap();
     info!("observability tools ready");
 
     // Upload instance binaries and configs to S3 concurrently
