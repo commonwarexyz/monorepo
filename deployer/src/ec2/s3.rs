@@ -128,6 +128,29 @@ pub async fn upload_and_presign(
     presign_url(client, bucket, key, expires_in).await
 }
 
+/// Caches content to S3 if it doesn't exist, then returns a pre-signed URL
+pub async fn cache_content_and_presign(
+    client: &S3Client,
+    bucket: &str,
+    key: &str,
+    content: &'static [u8],
+    expires_in: Duration,
+) -> Result<String, Error> {
+    if !object_exists(client, bucket, key).await? {
+        info!(key = key, "static content not cached, uploading");
+        let body = ByteStream::from_static(content);
+        client
+            .put_object()
+            .bucket(bucket)
+            .key(key)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+    }
+    presign_url(client, bucket, key, expires_in).await
+}
+
 /// Generates a pre-signed URL for downloading an object from S3
 pub async fn presign_url(
     client: &S3Client,

@@ -58,6 +58,11 @@ pub fn promtail_s3_key(version: &str) -> String {
     format!("{S3_TOOLS_PREFIX}/promtail-{version}-linux-arm64.zip")
 }
 
+/// Returns the S3 key for a static config file (cached globally)
+pub fn static_config_s3_key(filename: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/static/{filename}")
+}
+
 /// Returns the S3 key for an instance's binary
 pub fn binary_s3_key(tag: &str, instance_name: &str) -> String {
     format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/instances/{instance_name}/binary")
@@ -91,21 +96,6 @@ pub fn prometheus_config_s3_key(tag: &str) -> String {
 /// Returns the S3 key for monitoring dashboard
 pub fn dashboard_s3_key(tag: &str) -> String {
     format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/monitoring/dashboard.json")
-}
-
-/// Returns the S3 key for static monitoring files
-pub fn monitoring_static_s3_key(tag: &str, filename: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/monitoring/{filename}")
-}
-
-/// Returns the S3 key for static binary instance files
-pub fn instance_static_s3_key(tag: &str, filename: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/static/{filename}")
-}
-
-/// Returns the S3 key for the BBR config file
-pub fn bbr_s3_key(tag: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/static/99-bbr.conf")
 }
 
 /// Returns the download URL for Prometheus from GitHub
