@@ -101,7 +101,7 @@ pub async fn upload_file(
 ) -> Result<(), Error> {
     let body = ByteStream::from_path(path)
         .await
-        .map_err(|e| Error::S3OperationFailed(format!("failed to read file: {e}")))?;
+        .map_err(|e| std::io::Error::other(e))?;
 
     client
         .put_object()
@@ -135,16 +135,14 @@ pub async fn presign_url(
     key: &str,
     expires_in: Duration,
 ) -> Result<String, Error> {
-    let presigning_config = PresigningConfig::expires_in(expires_in)
-        .map_err(|e| Error::S3OperationFailed(format!("invalid presign duration: {e}")))?;
+    let presigning_config = PresigningConfig::expires_in(expires_in)?;
 
     let presigned_request = client
         .get_object()
         .bucket(bucket)
         .key(key)
         .presigned(presigning_config)
-        .await
-        .map_err(|e| Error::S3OperationFailed(format!("failed to presign URL: {e}")))?;
+        .await?;
 
     Ok(presigned_request.uri().to_string())
 }
@@ -172,19 +170,11 @@ pub async fn delete_prefix(client: &S3Client, bucket: &str, prefix: &str) -> Res
                 .into_iter()
                 .filter_map(|obj| obj.key)
                 .map(|key| ObjectIdentifier::builder().key(key).build())
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    Error::S3OperationFailed(format!("failed to build object identifier: {e}"))
-                })?;
+                .collect::<Result<Vec<_>, _>>()?;
 
             if !identifiers.is_empty() {
                 let count = identifiers.len();
-                let delete = Delete::builder()
-                    .set_objects(Some(identifiers))
-                    .build()
-                    .map_err(|e| {
-                        Error::S3OperationFailed(format!("failed to build delete request: {e}"))
-                    })?;
+                let delete = Delete::builder().set_objects(Some(identifiers)).build()?;
 
                 client
                     .delete_objects()

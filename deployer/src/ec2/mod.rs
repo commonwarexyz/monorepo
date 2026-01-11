@@ -284,8 +284,12 @@ cfg_if::cfg_if! {
             InvalidIpAddress(String),
             #[error("download failed: {0}")]
             DownloadFailed(String),
-            #[error("S3 operation failed: {0}")]
-            S3OperationFailed(String),
+            #[error("S3 presigning config error: {0}")]
+            S3PresigningConfig(#[from] aws_sdk_s3::presigning::PresigningConfigError),
+            #[error("S3 presigning failed: {0}")]
+            S3PresigningFailed(#[from] aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>),
+            #[error("S3 builder error: {0}")]
+            S3BuilderError(#[from] aws_sdk_s3::error::BuildError),
         }
     }
 }
