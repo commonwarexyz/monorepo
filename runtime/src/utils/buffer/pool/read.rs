@@ -168,6 +168,8 @@ struct ReplayBuf {
     pages: VecDeque<Bytes>,
     /// Current offset within the first page.
     offset: usize,
+    /// Total remaining bytes across all pages (cached for O(1) remaining()).
+    total: usize,
 }
 
 impl ReplayBuf {
@@ -176,24 +178,20 @@ impl ReplayBuf {
         Self {
             pages: VecDeque::new(),
             offset: 0,
+            total: 0,
         }
     }
 
     /// Adds a page to the buffer (zero-copy, just moves Bytes into VecDeque).
     fn push(&mut self, page: Bytes) {
+        self.total += page.len();
         self.pages.push_back(page);
     }
 }
 
 impl Buf for ReplayBuf {
     fn remaining(&self) -> usize {
-        let first = self
-            .pages
-            .front()
-            .map(|p| p.len().saturating_sub(self.offset))
-            .unwrap_or(0);
-        let rest: usize = self.pages.iter().skip(1).map(|p| p.len()).sum();
-        first + rest
+        self.total
     }
 
     fn chunk(&self) -> &[u8] {
@@ -201,6 +199,7 @@ impl Buf for ReplayBuf {
     }
 
     fn advance(&mut self, mut cnt: usize) {
+        self.total = self.total.saturating_sub(cnt);
         while cnt > 0 {
             let Some(first) = self.pages.front() else {
                 break;
