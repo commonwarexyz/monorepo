@@ -8,9 +8,9 @@
 use bytes::BytesMut;
 use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
 use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
-use std::hint::black_box;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use std::hint::black_box;
 
 /// Benchmark encoding a single value of type T.
 fn bench_encode_single<T>(c: &mut Criterion, name: &str, value: T)
@@ -84,16 +84,20 @@ where
     let mut group = c.benchmark_group(format!("decode_array/{}", name));
     group.throughput(Throughput::Bytes((count * T::SIZE) as u64));
 
-    group.bench_with_input(BenchmarkId::from_parameter(count), &encoded, |b, encoded| {
-        b.iter(|| {
-            let mut slice = encoded.clone();
-            let mut decoded = Vec::with_capacity(count);
-            for _ in 0..count {
-                decoded.push(T::read(&mut slice).unwrap());
-            }
-            black_box(decoded)
-        })
-    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter(count),
+        &encoded,
+        |b, encoded| {
+            b.iter(|| {
+                let mut slice = encoded.clone();
+                let mut decoded = Vec::with_capacity(count);
+                for _ in 0..count {
+                    decoded.push(T::read(&mut slice).unwrap());
+                }
+                black_box(decoded)
+            })
+        },
+    );
 
     group.finish();
 }
